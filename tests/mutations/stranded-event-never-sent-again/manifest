@@ -1,0 +1,4 @@
+about: resuming after a fault leaves the live event the failure stranded unsent, so the runtime waits for it for good
+test: cargo test -p funfern-protocol --release --locked
+expect: an_event_stranded_by_a_fault_settles_once_the_run_resumes \.\.\. FAILED
+needs: cpu

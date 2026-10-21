@@ -4468,6 +4468,11 @@ pub struct CanonicalGpuRequest {
     handoff: Option<CanonicalGpuHandoffHandles>,
     handoff_outcome: CanonicalGpuHandoffOutcome,
     live_event: Option<CanonicalGpuLiveEventHandles>,
+    /// For host tests: the live event in flight when the run failed, which a
+    /// stopped device never processes until the failure is cleared and it is
+    /// encoded again.
+    #[cfg(test)]
+    stranded_event: bool,
     /// What the main world's pacing decided this frame, for the drawn
     /// pacing trace.
     pacing_note: PacingNote,
@@ -4498,6 +4503,8 @@ impl Default for CanonicalGpuRequest {
             handoff: None,
             handoff_outcome: CanonicalGpuHandoffOutcome::None,
             live_event: None,
+            #[cfg(test)]
+            stranded_event: false,
             pacing_note: PacingNote::default(),
             gpu_frames: GpuFrameReadings::default(),
         }
@@ -4710,6 +4717,10 @@ impl CanonicalGpuRequest {
         self.withdraw_handoff(assets, commands);
         if let Some(event) = self.live_event.take() {
             assets.remove(event.upload.id());
+        }
+        #[cfg(test)]
+        {
+            self.stranded_event = false;
         }
         if let Some(handles) = self.buffers.take() {
             for handle in handles.owned() {
@@ -4965,6 +4976,9 @@ impl CanonicalGpuRequest {
     /// rejection, zero for one taken, and the settle system releases it.
     #[cfg(test)]
     fn settle_live_event(&mut self, assets: &mut Assets<ShaderBuffer>, failure: u32) {
+        if self.stranded_event {
+            return;
+        }
         let Some(event) = self.live_event.take() else {
             return;
         };
@@ -5077,6 +5091,7 @@ impl CanonicalGpuRequest {
     #[cfg(test)]
     pub fn fail(&mut self, failure: u32) {
         if self.buffers.is_some() {
+            self.stranded_event = self.live_event.is_some();
             self.stats.failure.store(failure, Ordering::Relaxed);
             self.stats
                 .status
@@ -5369,6 +5384,10 @@ impl CanonicalGpuRequest {
             .retired_steps
             .store(self.stats.completed_steps(), Ordering::Relaxed);
         self.cleared_failures = self.cleared_failures.wrapping_add(1);
+        #[cfg(test)]
+        {
+            self.stranded_event = false;
+        }
         self.stats.failure.store(0, Ordering::Relaxed);
         self.stats.status.store(0, Ordering::Relaxed);
         self.replace_status(assets, commands, GpuCanonicalStatus::default());
@@ -7123,7 +7142,11 @@ fn prepare_canonical_bind_group(
     );
     // A revision within one generation carries the encoded clock across, since
     // steps are in flight. A cleared failure does not: what was encoded after
-    // the failure never committed.
+    // the failure never committed. That includes a live event, which the
+    // stopped device never processed: it is encoded again from the serial
+    // processed. Carried forward as sent, it never was, and the host waited
+    // for it for good, a source patch holding every edit and Reset behind it
+    // (RT-3 of the 2026-10-20 review).
     let (encoded_steps, encoded_local_step, encoded_event, encoded_live_event) = existing
         .as_ref()
         .filter(|group| group.generation == request.generation)
@@ -7140,7 +7163,7 @@ fn prepare_canonical_bind_group(
                     request.stats.completed_steps(),
                     request.stats.local_step(),
                     group.encoded_event,
-                    group.encoded_live_event,
+                    request.stats.processed_event(),
                 )
             }
         })
@@ -7406,9 +7429,14 @@ fn prepare_canonical_handoff_bind_groups(
             old_boundary.buffer.as_entire_buffer_binding(),
         )),
     );
+    // Rebuilt within one handoff, by a revision bump, the groups take over
+    // whether its transfer was encoded: the transfer runs once. Rebuilt as
+    // not encoded, it ran again against a map whose header the first run had
+    // overwritten with its receipt, and the target latched a layout failure
+    // or refused the handoff (RT-4 of the 2026-10-20 review).
     commands.insert_resource(CanonicalHandoffBindGroups {
         revision: request.revision,
-        encoded: false,
+        encoded: handoff.stats.submitted.load(Ordering::Acquire) != 0,
         map,
         runtime,
         energy,

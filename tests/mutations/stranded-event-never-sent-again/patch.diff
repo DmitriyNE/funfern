@@ -1,0 +1,14 @@
+diff --git a/crates/funfern-protocol/src/lib.rs b/crates/funfern-protocol/src/lib.rs
+index dcd0267..7456faa 100644
+--- a/crates/funfern-protocol/src/lib.rs
++++ b/crates/funfern-protocol/src/lib.rs
+@@ -497,9 +497,6 @@ impl Protocol {
+                     device.ready = false;
+                     device.caught_up = true;
+                     self.fault = false;
+-                    // Clearing the failure sends the event it stranded again
+-                    // (RT-3 of the 2026-10-20 review).
+-                    self.stranded = false;
+                 }
+             }
+             Supervision::Hold => {}

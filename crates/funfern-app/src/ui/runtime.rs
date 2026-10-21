@@ -21,7 +21,7 @@ use funfern_protocol::Acceptance;
 use funfern_protocol::decisions::{
     FaultSeen, LiveEventFallback, RequestSeen, Route, Settlement, Supervision, Update, UploadSeen,
     carry, live_event_fallback, request_due, settle_upload, standing, steps_withheld,
-    supervise_fault,
+    supervise_fault, upload_may_begin,
 };
 use std::sync::{
     Arc, Mutex,
@@ -574,31 +574,48 @@ impl Playground {
                 }
             }
         }
-        if self.coordinator.uploading.is_none()
+        let packed_waits = self.coordinator.uploading.is_none()
             && request.caught_up()
             && self
                 .coordinator
                 .gpu_upload_preparation
                 .as_ref()
-                .is_some_and(|job| job.result.is_some())
-        {
+                .is_some_and(|job| job.result.is_some());
+        if packed_waits {
+            let token = self
+                .coordinator
+                .gpu_upload_preparation
+                .as_ref()
+                .map(|job| job.token);
+            if self
+                .runtime
+                .ready()
+                .is_none_or(|candidate| Some(candidate.bundle.token) != token)
+            {
+                self.coordinator.gpu_upload_preparation = None;
+                return;
+            }
+            // A corrective edit on a paused, failed run hands off from the
+            // accepted state, which the failure never touched; the latched
+            // status would otherwise reject the new generation as its own.
+            // Cleared first, the failure sends again the live event it
+            // stranded, which the upload then waits for.
+            if request.failed() && request.clear_failure(assets, commands).is_ok() {
+                self.coordinator.solver_fault = None;
+            }
+        }
+        // A handoff and a live event share the target's bind groups and its
+        // clock: the upload begins with no live event in flight.
+        if packed_waits && upload_may_begin(true, request.live_event_pending()) {
             let mut job = self.coordinator.gpu_upload_preparation.take().unwrap();
             let token = job.token;
             let dt = job.time_step;
-            let Some(candidate) = self
+            let candidate = self
                 .runtime
                 .ready()
                 .filter(|candidate| candidate.bundle.token == token)
                 .cloned()
-            else {
-                return;
-            };
-            // A corrective edit on a paused, failed run hands off from the
-            // accepted state, which the failure never touched; the latched
-            // status would otherwise reject the new generation as its own.
-            if request.failed() && request.clear_failure(assets, commands).is_ok() {
-                self.coordinator.solver_fault = None;
-            }
+                .expect("the candidate checked ready above");
             let mut handed_off = false;
             let mut installed_origin = 0.0;
             let upload = job.result.take().unwrap().and_then(|prepared| {

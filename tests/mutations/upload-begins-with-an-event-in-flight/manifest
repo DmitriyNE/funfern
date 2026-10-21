@@ -1,0 +1,4 @@
+about: a packed candidate's upload begins with a live event still in flight, which on the device ran the transfer twice or sent the event again onto the target
+test: cargo test -p funfern-protocol --release --locked
+expect: a_handoff_never_begins_with_a_live_event_in_flight \.\.\. FAILED
+needs: cpu

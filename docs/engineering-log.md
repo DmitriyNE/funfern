@@ -26101,3 +26101,75 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 2: live events, handoffs and failures in one order (RT-2, RT-3, RT-4)
+
+- **Found by the review.**
+  - **RT-2:** a pulse or Switch sent a few frames before a handoff began was
+    still in flight when it did. `begin_handoff` never looked at the live
+    event, and the begin block checked only the upload, the device catching up
+    and the pack. On the device the event's acknowledgement bumped the
+    revision, which rebuilt the handoff's groups and ran the transfer again
+    (RT-4). Settled the other way round, the event was sent again onto the
+    target, on the source's node numbering.
+  - **RT-3:** an event sent after the device had failed, but before the host
+    had read it, was never processed. The cleared-failure branch of the
+    solver's bind group carried its serial forward as sent, so it never went
+    again. A source patch then held every edit and Reset behind it until
+    another scene was opened.
+  - **RT-4:** the handoff's groups, rebuilt on any revision bump, were
+    inserted as not encoded, and the transfer ran a second time against a map
+    whose header the first run had overwritten with its receipt.
+- **The model could not reach either.** It settled a handoff and a live event
+  as independent steps, and settled an event whatever the device's state.
+  - Its device now processes nothing once failed: an event still in flight at
+    a fault is stranded until clearing the failure sends it again.
+  - `check` gains "no live event in flight while a handoff is pending".
+- **Reproduced in the model.**
+  - `a_handoff_never_begins_with_a_live_event_in_flight`: a pulse sent while a
+    packed candidate waits for the device to catch up. It tripped the new
+    invariant.
+  - `an_event_stranded_by_a_fault_settles_once_the_run_resumes`: a pulse in
+    flight at a fault. The fair suffix never came to rest.
+- **Fix.**
+  - A new decision, `upload_may_begin`, in both the model and the app: an
+    upload begins once the device has caught up and no live event is in
+    flight.
+  - The begin block clears a failure first, which sends a stranded event
+    again, then holds the packed candidate until the event settles. It does
+    not cut the frame short: Reset, pulses and Switches go on as before.
+  - On the device, a cleared failure rewinds the encoded live-event serial to
+    the one processed, as the branch's own comment says ("what was encoded
+    after the failure never committed").
+  - The handoff's groups take `encoded` from the handoff's own `submitted`
+    flag when rebuilt, so its transfer runs once.
+  - The host tests' device strands an event as the GPU does (`fail`), and
+    `clear_failure` re-arms it, so the lockstep harness meets the same
+    device the model describes.
+- **Checked.** The model's tests pass, and Kani proves both properties on the
+  changed model: 0 of 1,621 checks failed, the fair-suffix proof in 168 s.
+  The lockstep harness's nine tests pass.
+- **Mutations** (cpu), each caught by the model's tests:
+  - `upload-begins-with-an-event-in-flight`
+  - `stranded-event-never-sent-again`
+- **Not reproduced on the device.** No fixture could time these.
+  - A pulse would have to be sent in the few frames before a pack happens to
+    finish.
+  - A source patch takes frames to prepare, so it cannot land between the
+    failing step and the host reading it.
+  - So the device's re-arm and the handoff groups' encoded flag have no test
+    that fails without them. The device suite shows only that nothing else
+    moved.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
+- **Device suite: 93 of 96.** The three `canonical_gpu_cavity_modes` runs ran
+  past their 600 s deadline; Mechanical had taken 42 s in the suite before.
+  - Every other run took its usual time, the frame-paced fixtures included
+    (`observables` 27 s, `handoff-memory-running` 11 s).
+  - The cavity example installs its plans directly, with no handoff, live
+    event or cleared failure, so nothing changed here is on its path. It was
+    already timing out with HEAD's shader (see GPU-1).
+  - It waits for a full-state readback for every sample, so it needs
+    thousands of frames, from a hidden window. Being napped while the machine
+    is idle fits; the next entry tests that.

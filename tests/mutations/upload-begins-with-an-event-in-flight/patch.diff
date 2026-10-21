@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-protocol/src/decisions.rs b/crates/funfern-protocol/src/decisions.rs
+index dfeef83..4941bd0 100644
+--- a/crates/funfern-protocol/src/decisions.rs
++++ b/crates/funfern-protocol/src/decisions.rs
+@@ -82,7 +82,7 @@ pub const fn steps_withheld(packed_waiting: bool, fresh_upload: bool) -> bool {
+ /// numbering (RT-2 of the 2026-10-20 review). An install drops the event with
+ /// its generation, but one rule for both costs a frame or two.
+ pub const fn upload_may_begin(caught_up: bool, event_in_flight: bool) -> bool {
+-    caught_up && !event_in_flight
++    caught_up && (event_in_flight || !event_in_flight)
+ }
+ 
+ /// What the host sees of the upload in flight, in a frame.

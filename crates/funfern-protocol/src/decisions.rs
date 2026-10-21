@@ -73,6 +73,18 @@ pub const fn steps_withheld(packed_waiting: bool, fresh_upload: bool) -> bool {
     packed_waiting || fresh_upload
 }
 
+/// Whether a packed candidate's upload begins: once the device has caught up,
+/// and with no live event in flight. A handoff and a live event share the
+/// target's bind groups and its clock. An event acknowledged after the
+/// transfer began made the device run the transfer again, on a map whose
+/// header the first run had already overwritten with its receipt; one
+/// settled after it was sent again onto the target, on the source's node
+/// numbering (RT-2 of the 2026-10-20 review). An install drops the event with
+/// its generation, but one rule for both costs a frame or two.
+pub const fn upload_may_begin(caught_up: bool, event_in_flight: bool) -> bool {
+    caught_up && !event_in_flight
+}
+
 /// What the host sees of the upload in flight, in a frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UploadSeen {

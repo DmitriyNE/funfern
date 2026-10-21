@@ -31,7 +31,7 @@ pub mod decisions;
 use decisions::{
     FaultSeen, LiveEventFallback, RequestSeen, Route, Settlement, Supervision, Update, UploadSeen,
     carry, live_event_fallback, request_due, settle_upload, standing, starts_from_zero,
-    steps_withheld, supervise_fault,
+    steps_withheld, supervise_fault, upload_may_begin,
 };
 
 /// A candidate, named by the order of its request.
@@ -252,6 +252,9 @@ pub struct Protocol {
     /// The last handoff was refused.
     pub refused: bool,
     pub event: Option<Event>,
+    /// The event in flight was encoded on a device that had stopped, which
+    /// processes nothing: it settles only once sent again.
+    pub stranded: bool,
     /// How the device settled the source patch in flight, until the host
     /// reads it.
     pub patched: Option<bool>,
@@ -298,6 +301,7 @@ impl Default for Protocol {
             handoff: None,
             refused: false,
             event: None,
+            stranded: false,
             patched: None,
             display: 0,
         }
@@ -340,6 +344,11 @@ impl Protocol {
                 }
             }
             Step::Settle { take } => {
+                // A stopped device processes no event; one it was sent after it
+                // stopped waits until it is sent again.
+                if self.stranded {
+                    return;
+                }
                 if let Some(Event::Patch(_)) = self.event {
                     self.patched = Some(take);
                 }
@@ -349,6 +358,10 @@ impl Protocol {
                 if let Some(device) = &mut self.device {
                     device.failed = true;
                     device.ready = false;
+                    // An event not yet processed is one the device now never
+                    // processes: it is encoded after the failing step, which
+                    // the host does not know of for frames.
+                    self.stranded = self.event.is_some();
                 }
             }
             Step::Validate { inputs } => self.validate(inputs),
@@ -438,6 +451,7 @@ impl Protocol {
             self.handoff = None;
             self.refused = false;
             self.event = None;
+            self.stranded = false;
             self.patched = None;
             self.active = None;
             self.preparing = None;
@@ -483,6 +497,9 @@ impl Protocol {
                     device.ready = false;
                     device.caught_up = true;
                     self.fault = false;
+                    // Clearing the failure sends the event it stranded again
+                    // (RT-3 of the 2026-10-20 review).
+                    self.stranded = false;
                 }
             }
             Supervision::Hold => {}
@@ -547,13 +564,16 @@ impl Protocol {
                 Route::Pack => self.packed = Some(token),
             }
         }
-        // A packed candidate begins its upload once the device has caught up.
+        // A packed candidate begins its upload once the device has caught up
+        // and has no live event in flight. A failed device is cleared first:
+        // a corrective edit hands off from the accepted state, and the event
+        // the failure stranded is sent again, which the upload then waits for.
         if self.uploading.is_none()
             && !self.behind()
             && let Some(token) = self.packed
         {
-            self.packed = None;
             if self.ready != Some(token) {
+                self.packed = None;
                 return;
             }
             if let Some(device) = &mut self.device
@@ -563,37 +583,42 @@ impl Protocol {
                 device.ready = false;
                 device.caught_up = true;
                 self.fault = false;
+                self.stranded = false;
             }
-            let install = self.fresh_tokens[token as usize % TOKENS]
-                || self.active.is_none()
-                || frame.install;
-            if !frame.begun {
-                self.reject(token);
-            } else if install {
-                self.generation = self.generation.wrapping_add(1).max(1);
-                self.device = Some(Running {
-                    token,
-                    step: token,
-                    ready: false,
-                    failed: false,
-                    caught_up: true,
-                });
-                self.handoff = None;
-                self.refused = false;
-                self.event = None;
-                self.patched = None;
-                self.uploaded = Some(token);
-                self.uploading = Some(Upload {
-                    token,
-                    generation: self.generation,
-                });
-            } else {
-                self.handoff = Some(token);
-                self.refused = false;
-                self.uploading = Some(Upload {
-                    token,
-                    generation: self.generation.wrapping_add(1).max(1),
-                });
+            if upload_may_begin(true, self.event.is_some()) {
+                self.packed = None;
+                let install = self.fresh_tokens[token as usize % TOKENS]
+                    || self.active.is_none()
+                    || frame.install;
+                if !frame.begun {
+                    self.reject(token);
+                } else if install {
+                    self.generation = self.generation.wrapping_add(1).max(1);
+                    self.device = Some(Running {
+                        token,
+                        step: token,
+                        ready: false,
+                        failed: false,
+                        caught_up: true,
+                    });
+                    self.handoff = None;
+                    self.refused = false;
+                    self.event = None;
+                    self.stranded = false;
+                    self.patched = None;
+                    self.uploaded = Some(token);
+                    self.uploading = Some(Upload {
+                        token,
+                        generation: self.generation,
+                    });
+                } else {
+                    self.handoff = Some(token);
+                    self.refused = false;
+                    self.uploading = Some(Upload {
+                        token,
+                        generation: self.generation.wrapping_add(1).max(1),
+                    });
+                }
             }
         }
         // An upload settles.
@@ -648,6 +673,7 @@ impl Protocol {
             self.handoff = None;
             self.refused = false;
             self.event = None;
+            self.stranded = false;
             self.patched = None;
             self.reset = false;
             self.uploaded = Some(active);
@@ -802,6 +828,19 @@ impl Protocol {
             self.event.is_none() || self.device.is_some(),
             "a live event with nothing running"
         );
+        // A handoff and a live event share the target's bind groups and its
+        // clock: an event acknowledged after the transfer began made the
+        // device run the transfer again, and one settled after it was sent
+        // again onto the target, on the source's node numbering (RT-2 of the
+        // 2026-10-20 review).
+        assert!(
+            self.handoff.is_none() || self.event.is_none(),
+            "a live event in flight across a handoff"
+        );
+        assert!(
+            !self.stranded || self.event.is_some(),
+            "a stranding with no event"
+        );
         assert!(
             self.packed.is_none() || self.uploading.is_none(),
             "a candidate packed while another uploads"
@@ -926,6 +965,75 @@ mod tests {
             assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
             assert!(protocol.active.is_some());
         }
+    }
+
+    /// A frame the device keeps up with, the candidate ready and carried
+    /// whole, and nothing else of note.
+    fn frame(behind: bool) -> Frame {
+        Frame {
+            validated: true,
+            inputs: 1,
+            prepared: Prepared::Done,
+            carried: Carried::WHOLE,
+            install: false,
+            begun: true,
+            pulse: true,
+            switch: true,
+            behind,
+            retime: false,
+        }
+    }
+
+    /// RT-2 of the 2026-10-20 review: a pulse sent while a packed candidate
+    /// waits for the device to catch up is still in flight when the handoff
+    /// begins. On the device its acknowledgement then made the transfer run
+    /// again, or the event was sent again onto the target.
+    #[test]
+    fn a_handoff_never_begins_with_a_live_event_in_flight() {
+        let mut protocol = Protocol::default();
+        assert!(protocol.settle(8, Carried::WHOLE));
+        for step in [
+            // The run asks for steps the device has not done.
+            Step::Frame(Frame {
+                prepared: Prepared::NotYet,
+                ..frame(true)
+            }),
+            Step::Edit {
+                inputs: 1,
+                valid: true,
+            },
+            Step::Pulse,
+            // Prepared and packed; the device behind, so the upload waits,
+            // and the pulse goes.
+            Step::Frame(frame(true)),
+            Step::Readbacks { caught_up: true },
+            // The device has caught up: the upload may begin.
+            Step::Frame(frame(false)),
+            Step::Handoff { admit: true },
+            Step::Settle { take: true },
+            Step::Frame(frame(false)),
+        ] {
+            protocol.step(step);
+            protocol.check();
+        }
+        assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
+    }
+
+    /// RT-3 of the 2026-10-20 review: a pulse in flight when the run fails is
+    /// one the stopped device never processes, and the host, which learns of
+    /// the failure frames later, had recorded it as sent. Nothing sent it
+    /// again once the failure was cleared, and every later event waited
+    /// behind it, as a source patch did, which held Reset too.
+    #[test]
+    fn an_event_stranded_by_a_fault_settles_once_the_run_resumes() {
+        let mut protocol = Protocol::default();
+        assert!(protocol.settle(8, Carried::WHOLE));
+        for step in [Step::Pulse, Step::Frame(frame(false)), Step::Fault] {
+            protocol.step(step);
+            protocol.check();
+        }
+        assert!(protocol.stranded, "the fault strands the pulse in flight");
+        assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
     }
 
     /// An edit, a Reset and a fault on the way all come to rest.
