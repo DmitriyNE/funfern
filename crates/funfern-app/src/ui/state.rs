@@ -332,6 +332,8 @@ pub struct Playground {
     /// An error was logged since the diagnostics were last open. Keeps the
     /// status marker lit for an error that clears itself a frame later.
     pub(super) unseen_error: bool,
+    /// A recorder's failed pipeline has been reported, once.
+    pub(super) recorder_failure_reported: bool,
     pub(super) frame_history: VecDeque<f32>,
     pub(super) handoff_requested: Option<Instant>,
     pub(super) handoff_ready: Option<Instant>,
@@ -529,6 +531,7 @@ impl Default for Playground {
             logged_adaptation: None,
             pending_repairs: vec![],
             unseen_error: false,
+            recorder_failure_reported: false,
             frame_history: VecDeque::with_capacity(FRAME_HISTORY),
             handoff_requested: None,
             handoff_ready: None,

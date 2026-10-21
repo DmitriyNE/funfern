@@ -272,6 +272,19 @@ impl Playground {
         );
     }
 
+    /// A recorder whose pipeline failed for good records nothing, and the
+    /// steps go on without it; only a defect fails a shader the suite builds,
+    /// so it lights the diagnostics warning, once (PR-11 of the 2026-10-20
+    /// review: waited for, it held the solver at step 0 with nothing said).
+    pub(super) fn report_recorder_failure(&mut self, failed: bool) {
+        if failed && !self.recorder_failure_reported {
+            self.recorder_failure_reported = true;
+            self.message =
+                "A probe or far-field recorder's shader failed to build: it records nothing".into();
+            self.unseen_error = true;
+        }
+    }
+
     pub(super) fn begin_handoff_timeline(&mut self) {
         self.handoff_requested = Some(Instant::now());
         self.handoff_ready = None;
@@ -830,6 +843,7 @@ impl Playground {
                 .and_then(|active| Some((active, RecorderSource::of(active, request)?))),
             request.generation(),
         );
+        self.report_recorder_failure(request.stats().recorder_pipeline_failed());
         if self.coordinator.uploading.is_none()
             && let Some(active) = self.runtime.active().cloned()
             && probes_need_upload(self.probe_upload, active.bundle.token, request.generation())
@@ -1339,6 +1353,22 @@ pub(super) fn pulse_increment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A recorder failed for good is a defect's failure: it lights the
+    /// diagnostics warning, and says so once rather than every frame.
+    #[test]
+    fn a_failed_recorder_pipeline_is_reported_once() {
+        let mut state = Playground::default();
+        state.report_recorder_failure(false);
+        assert!(!state.unseen_error && state.message.is_empty());
+        state.report_recorder_failure(true);
+        assert!(state.unseen_error, "the warning is lit");
+        assert!(state.message.contains("recorder"), "{}", state.message);
+        state.message.clear();
+        state.unseen_error = false;
+        state.report_recorder_failure(true);
+        assert!(!state.unseen_error && state.message.is_empty(), "said once");
+    }
     use crate::canonical_gpu::CANONICAL_FAILURE_NON_FINITE;
 
     /// Handover generations preserve the accepted-step total. Their first

@@ -4242,9 +4242,18 @@ pub struct CanonicalGpuStats {
     failure: AtomicU32,
     processed_event: AtomicU32,
     event_rejection: AtomicU32,
+    /// A probe or far-field recorder's pipeline failed for good, for the
+    /// host to report; set by the render world.
+    recorder_pipeline_failed: AtomicBool,
 }
 
 impl CanonicalGpuStats {
+    /// Whether a recorder's pipeline has failed for good, so that it records
+    /// nothing.
+    pub fn recorder_pipeline_failed(&self) -> bool {
+        self.recorder_pipeline_failed.load(Ordering::Relaxed)
+    }
+
     pub fn completed_steps(&self) -> u64 {
         self.completed_steps.load(Ordering::Relaxed)
     }
@@ -7608,7 +7617,48 @@ struct RecorderReadiness {
     configured: bool,
     group: Option<(u64, u64)>,
     revision: u64,
-    compiled: bool,
+    pipelines: PipelineReadiness,
+}
+
+/// What a recorder's pipelines come to for the steps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PipelineReadiness {
+    Compiled,
+    /// Queued, being created, or waiting on a shader Bevy has yet to load,
+    /// which it retries.
+    Compiling,
+    /// Failed for good: a shader that does not process or a module the device
+    /// refuses. Waited for, it held every step forever, the solver at 0
+    /// steps/s with nothing said (PR-11 of the 2026-10-20 review).
+    Failed,
+}
+
+impl PipelineReadiness {
+    fn of(state: &CachedPipelineState) -> Self {
+        use bevy::shader::ShaderCacheError;
+        match state {
+            CachedPipelineState::Ok(_) => Self::Compiled,
+            CachedPipelineState::Queued
+            | CachedPipelineState::Creating(_)
+            | CachedPipelineState::Err(
+                ShaderCacheError::ShaderNotLoaded(_)
+                | ShaderCacheError::ShaderImportNotYetAvailable,
+            ) => Self::Compiling,
+            CachedPipelineState::Err(_) => Self::Failed,
+        }
+    }
+
+    /// What several pipelines that run together come to: failed if any is,
+    /// compiling if any still is.
+    fn all(readiness: impl IntoIterator<Item = Self>) -> Self {
+        readiness
+            .into_iter()
+            .fold(Self::Compiled, |all, one| match (all, one) {
+                (Self::Failed, _) | (_, Self::Failed) => Self::Failed,
+                (Self::Compiling, _) | (_, Self::Compiling) => Self::Compiling,
+                _ => Self::Compiled,
+            })
+    }
 }
 
 /// Whether this frame's steps wait for a recorder. One set up and bound for
@@ -7619,12 +7669,22 @@ struct RecorderReadiness {
 /// nothing said. A recorder whose group is of another revision does not hold
 /// them: a dragged probe makes a revision a frame, and as the app's pass and
 /// the asset events are not ordered, its group can come a frame later.
+/// A recorder whose pipelines failed for good does not hold them either: it
+/// records nothing, the steps go on without it, and the failure is reported
+/// (`recorders_failed`).
 fn steps_wait_for_recorders(generation: u64, recorders: &[RecorderReadiness]) -> bool {
     recorders.iter().any(|recorder| {
         recorder.configured
             && recorder.group == Some((generation, recorder.revision))
-            && !recorder.compiled
+            && recorder.pipelines == PipelineReadiness::Compiling
     })
+}
+
+/// Whether a recorder set up has pipelines that failed for good.
+fn recorders_failed(recorders: &[RecorderReadiness]) -> bool {
+    recorders
+        .iter()
+        .any(|recorder| recorder.configured && recorder.pipelines == PipelineReadiness::Failed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7736,26 +7796,22 @@ fn compute_canonical_wave(
         .map(|id| pipeline_cache.get_compute_pipeline(*id))
         .collect::<Option<Vec<_>>>();
     let Some(pipelines) = pipelines else { return };
-    let recorders_compiling = recorders
-        .as_ref()
-        .zip(consumer_pipeline.as_ref())
-        .is_some_and(|(recorders, consumer)| {
-            let compiled = |ids: &[CachedComputePipelineId]| {
-                ids.iter().all(|id| {
-                    matches!(
-                        pipeline_cache.get_compute_pipeline_state(*id),
-                        CachedPipelineState::Ok(_)
-                    )
-                })
-            };
-            steps_wait_for_recorders(
-                request.generation,
-                &[
+    let readiness =
+        recorders
+            .as_ref()
+            .zip(consumer_pipeline.as_ref())
+            .map(|(recorders, consumer)| {
+                let compiled = |ids: &[CachedComputePipelineId]| {
+                    PipelineReadiness::all(ids.iter().map(|id| {
+                        PipelineReadiness::of(pipeline_cache.get_compute_pipeline_state(*id))
+                    }))
+                };
+                [
                     RecorderReadiness {
                         configured: recorders.probes.is_some(),
                         group: probe_group.as_ref().map(|g| (g.generation, g.revision)),
                         revision: recorders.probe_revision,
-                        compiled: compiled(&[consumer.canonical_probe]),
+                        pipelines: compiled(&[consumer.canonical_probe]),
                     },
                     RecorderReadiness {
                         configured: recorders.curve_probes.is_some(),
@@ -7763,7 +7819,7 @@ fn compute_canonical_wave(
                             .as_ref()
                             .map(|g| (g.generation, g.revision)),
                         revision: recorders.curve_probe_revision,
-                        compiled: compiled(&[consumer.canonical_curve_probe]),
+                        pipelines: compiled(&[consumer.canonical_curve_probe]),
                     },
                     RecorderReadiness {
                         configured: recorders.area_probes.is_some(),
@@ -7771,7 +7827,7 @@ fn compute_canonical_wave(
                             .as_ref()
                             .map(|g| (g.generation, g.revision)),
                         revision: recorders.area_probe_revision,
-                        compiled: compiled(&[
+                        pipelines: compiled(&[
                             consumer.canonical_area_probe_elements,
                             consumer.canonical_area_probe_reduce,
                         ]),
@@ -7780,16 +7836,27 @@ fn compute_canonical_wave(
                         configured: recorders.far_field.is_some(),
                         group: far_field_group.as_ref().map(|g| (g.generation, g.revision)),
                         revision: recorders.far_field_revision,
-                        compiled: compiled(&[
+                        pipelines: compiled(&[
                             consumer.canonical_far_field_decide,
                             consumer.canonical_far_field_sample,
                             consumer.canonical_far_field_project,
                             consumer.canonical_far_field_advance,
                         ]),
                     },
-                ],
-            )
-        });
+                ]
+            });
+    let recorders_compiling = readiness
+        .as_ref()
+        .is_some_and(|readiness| steps_wait_for_recorders(request.generation, readiness));
+    if readiness
+        .as_ref()
+        .is_some_and(|readiness| recorders_failed(readiness))
+    {
+        request
+            .stats
+            .recorder_pipeline_failed
+            .store(true, Ordering::Relaxed);
+    }
     let encoded_lead = group
         .encoded_steps
         .saturating_sub(request.stats.retired_steps());
@@ -8758,7 +8825,11 @@ mod tests {
             configured: true,
             group,
             revision: 4,
-            compiled,
+            pipelines: if compiled {
+                PipelineReadiness::Compiled
+            } else {
+                PipelineReadiness::Compiling
+            },
         };
         assert!(steps_wait_for_recorders(
             1,
@@ -8788,6 +8859,48 @@ mod tests {
         };
         assert!(!steps_wait_for_recorders(1, &[unset]));
         assert!(!steps_wait_for_recorders(1, &[]));
+    }
+
+    /// PR-11 of the 2026-10-20 review: a recorder pipeline that failed for
+    /// good was waited for as one still compiling, and held every step
+    /// forever. Bevy keeps a permanent failure in `Err`, beside the two it
+    /// retries; a recorder failed for good holds nothing and is reported.
+    #[test]
+    fn a_recorder_failed_for_good_holds_no_step_and_is_reported() {
+        use bevy::shader::ShaderCacheError;
+        assert_eq!(
+            PipelineReadiness::of(&CachedPipelineState::Queued),
+            PipelineReadiness::Compiling
+        );
+        assert_eq!(
+            PipelineReadiness::of(&CachedPipelineState::Err(
+                ShaderCacheError::ShaderImportNotYetAvailable
+            )),
+            PipelineReadiness::Compiling
+        );
+        assert_eq!(
+            PipelineReadiness::of(&CachedPipelineState::Err(
+                ShaderCacheError::CreateShaderModule("refused".into())
+            )),
+            PipelineReadiness::Failed
+        );
+        use PipelineReadiness::{Compiled, Compiling, Failed};
+        assert_eq!(PipelineReadiness::all([Compiled, Compiled]), Compiled);
+        assert_eq!(PipelineReadiness::all([Compiled, Compiling]), Compiling);
+        assert_eq!(PipelineReadiness::all([Compiling, Failed]), Failed);
+
+        let failed = RecorderReadiness {
+            configured: true,
+            group: Some((1, 4)),
+            revision: 4,
+            pipelines: Failed,
+        };
+        assert!(!steps_wait_for_recorders(1, &[failed]));
+        assert!(recorders_failed(&[failed]));
+        assert!(!recorders_failed(&[RecorderReadiness {
+            configured: false,
+            ..failed
+        }]));
     }
 
     /// Reported: a delayed diagnostic snapshot rewound the painted field. A

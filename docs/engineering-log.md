@@ -26188,3 +26188,30 @@ Measured again first, then made quadratic in the trace.
   analysis, likely woken by what builds and suites write under `target/`. The
   cavity example, which needs thousands of frames, was the run long enough to
   feel it.
+
+## 2026-10-21 — Step 3: a recorder failed for good holds no step (PR-11)
+
+- **Found by the review (PR-11), in my own 569e56b.** The recorder hold
+  waited for any pipeline state other than `Ok`. Bevy keeps a permanent
+  failure in `Err`, beside the two transient states it retries
+  (`ShaderNotLoaded`, `ShaderImportNotYetAvailable`). So a recorder shader
+  that failed to process, or a module the device refused, would have held the
+  solver at step 0 for good, with nothing said.
+- **Reproduced by reading only.** No shader the suite builds fails, so
+  nothing could make one fail on the device; the test pins the
+  classification instead.
+- **Fix.**
+  - A recorder's pipelines are now `Compiled`, `Compiling` or `Failed`
+    (`PipelineReadiness`, with Bevy's two transient errors counted as
+    compiling). The steps wait only for one compiling.
+  - A recorder failed for good records nothing (Bevy hands out no pipeline
+    for it), and the render world flags it in the stats it shares with the
+    host. The host reports it once, on the status line, with the diagnostics
+    warning lit.
+  - Tests: `a_recorder_failed_for_good_holds_no_step_and_is_reported`,
+    `a_failed_recorder_pipeline_is_reported_once`.
+- **Checked on Metal:** `observables` and `far-field` read as before. The full
+  device suite runs once before this area's commits are pushed.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
