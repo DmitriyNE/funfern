@@ -26173,3 +26173,18 @@ Measured again first, then made quadratic in the trace.
   - It waits for a full-state readback for every sample, so it needs
     thousands of frames, from a hidden window. Being napped while the machine
     is idle fits; the next entry tests that.
+
+## 2026-10-21 — The cavity-mode timeouts were the machine's load
+
+- **App Nap ruled out.** Run alone at b503e56, the Mechanical cavity modes
+  took 106.6 s with the example's window hidden and 65.5 s with it visible.
+  A hidden window costs something, but nothing like the ten-fold slowdowns
+  the suites met.
+- **All three pass at HEAD** with the deadline raised. Mechanical took 255 s
+  under a load average near 30; TM 46.1 s and TE 27.3 s as it fell to 20.
+  Their convergence ratios read 4.001.
+- **The cause.** The suites that timed out ran under a load average of 25 to
+  70, from Spotlight's indexing (`mds`, `mdworker_shared`) and media
+  analysis, likely woken by what builds and suites write under `target/`. The
+  cavity example, which needs thousands of frames, was the run long enough to
+  feel it.
