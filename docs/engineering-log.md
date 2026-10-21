@@ -26566,3 +26566,34 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: the far field weighs how much of the source its contour leaves outside (PR-8)
+
+- **Found by the review (PR-8).** The far-field compile checked the point
+  source against the contour at its centre alone, with a margin of a quarter
+  tolerance. A source 0.06 wide at (−0.85, 0), with the contour at
+  |x| = 0.88, was accepted with about 31% of its Gaussian outside. The pattern
+  missed that share, came out too weak and with the wrong directivity, and
+  nothing said so.
+- **Reproduced.** `a_far_field_refuses_a_source_reaching_past_its_contour`
+  compiles the review's source. It was accepted.
+- **Not the review's fix as written.** The review asked for the source's
+  reach to lie inside the contour. Its reach is the 9 widths it is cut at,
+  and two first tries failed the gate's scenes:
+  - At 9 widths, or at the 5.8 where the Gaussian falls under 2^-24 of its
+    peak, the line-source scene of PH-18's far-field twin is refused. Its
+    source sits 4.7 widths inside the contour and leaves about 1.5e-6 of
+    itself outside.
+  - The double slit's source is 2.8 widths from the contour, behind the
+    box's back wall, which the solver does not drive through.
+- **Fix.** The compile weighs the source's drive as the solver does: the
+  lumped-mass-weighted Gaussian over the nodes of its region that it sees
+  (`point_source_squared_distances`), walls shadowing.
+  - It refuses a source whose share outside the contour exceeds 1e-3, an
+    order under what the projection reads against exact patterns on the
+    gallery's meshes (2e-2, PH-18).
+  - A centre outside the contour is still refused outright.
+- **Checked on Metal:** the `far-field` and `far-field-late` fixtures pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

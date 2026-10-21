@@ -146,6 +146,12 @@ pub struct BoundaryStencilTarget {
     pub region: RegionId,
 }
 
+/// The share of a point source's drive a far-field contour may leave outside
+/// itself: an order under what the projection reads against exact patterns
+/// on the gallery's meshes, 2e-2 (PH-18). A line-source scene with its source
+/// 4.7 widths inside the contour leaves 1.5e-6 outside.
+const FAR_FIELD_SOURCE_SHARE_OUTSIDE: f64 = 1.0e-3;
+
 /// Where a boundary target's parameter may sit: itself, and on a closed curve
 /// a period either way, where the seam puts it.
 fn wrapped(parameter: f64, period: Option<f64>) -> impl Iterator<Item = f64> {
@@ -1165,8 +1171,44 @@ impl QuadraticFarFieldStencil {
         }) {
             return Err(FarFieldCompileError::GeometryOutsideContour);
         }
-        if point_source.is_some_and(|source| source.enabled && !enclosed(source.position)) {
-            return Err(FarFieldCompileError::DrivenExterior);
+        // A source drives the nodes of its region that it sees, and the
+        // projection must find it inside the contour. Checked at its centre
+        // alone, one 0.06 wide and 0.03 inside left 31% of its drive outside,
+        // and the pattern came out weak and skewed with nothing said (PR-8 of
+        // the 2026-10-20 review). The share outside is weighed as the solver
+        // drives it, walls shadowing as they do there.
+        if let Some(source) = point_source.filter(|source| source.enabled) {
+            if !enclosed(source.position) {
+                return Err(FarFieldCompileError::DrivenExterior);
+            }
+            let elements = mesh
+                .triangles
+                .iter()
+                .map(|triangle| triangle.region == source.region)
+                .collect::<Vec<_>>();
+            let variance = source.width * source.width;
+            let (mut total, mut outside) = (0.0, 0.0);
+            for ((point, squared), mass) in operator
+                .node_points()
+                .iter()
+                .zip(crate::source_reach::point_source_squared_distances(
+                    operator.node_points(),
+                    operator.element_nodes(),
+                    &elements,
+                    source.position,
+                    source.width,
+                ))
+                .zip(operator.lumped_mass())
+            {
+                let drive = mass * (-0.5 * squared / variance).exp();
+                total += drive;
+                if !enclosed(*point) {
+                    outside += drive;
+                }
+            }
+            if outside > FAR_FIELD_SOURCE_SHARE_OUTSIDE * total {
+                return Err(FarFieldCompileError::DrivenExterior);
+            }
         }
 
         if !plan
@@ -2000,6 +2042,45 @@ mod tests {
         assert_eq!(traces[0].stencil.region, regions[0]);
         assert_eq!(traces[1].stencil.region, regions[1]);
         assert!(traces[0].outward_normal.dot(traces[1].outward_normal) < -0.99);
+    }
+
+    /// PR-8 of the 2026-10-20 review: the contour was checked against the
+    /// point source's centre alone. A source 0.06 wide, centred 0.03 inside
+    /// the contour, left 31% of its Gaussian outside it, and the pattern came
+    /// out weak and skewed with nothing said. A source the projection cannot
+    /// find whole inside the contour is refused.
+    #[test]
+    fn a_far_field_refuses_a_source_reaching_past_its_contour() {
+        let (plan, mesh, scene, operator) = topology_fixture(topology_baffle());
+        let compile = |position: Point2, width: f64| {
+            QuadraticFarFieldStencil::build_topology(
+                &mesh,
+                &operator,
+                &plan,
+                TopologyWaveModel::from_scene(&scene),
+                FarFieldCompileOptions {
+                    inset: 0.12,
+                    sample_count: 64,
+                    point_source: Some(PointSource {
+                        enabled: true,
+                        position,
+                        width,
+                        ..PointSource::default()
+                    }),
+                    volume_sources: &[],
+                },
+            )
+        };
+        // The contour runs at |x| = 0.88.
+        assert!(matches!(
+            compile(Point2::new(-0.85, 0.0), 0.06),
+            Err(FarFieldCompileError::DrivenExterior)
+        ));
+        assert!(
+            compile(Point2::new(-0.85, 0.0), 0.004).is_ok(),
+            "a narrow source there lies whole inside"
+        );
+        assert!(compile(Point2::new(-0.45, 0.0), 0.06).is_ok());
     }
 
     #[test]
