@@ -26512,3 +26512,33 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: an aborted browser worker and a failed vector overlay light the diagnostics warning (RT-15, UI-32)
+
+- **Found by the review (RT-15).** In the threaded web build, a pool worker
+  that panics or runs out of memory is gone for good. Its flag,
+  `browser_background_failure()`, was read only by `status()` and
+  `refresh_amr`, and `refresh_amr` did not set `amr_error`. The status line
+  showed the failure styled as idle, the marker never lit and the log stayed
+  empty, while every later edit waited forever.
+- **Found by the review (UI-32).** A vector overlay that could not be
+  uploaded was reported only on the status line. Its layout was cleared, so
+  every frame built and failed the same lattice again.
+- **Reproduced.**
+  - The browser flag cannot be raised on native, so RT-15 was reproduced by
+    reading. `an_aborted_background_worker_is_logged_once_and_keeps_the_marker_lit`
+    pins the new behaviour through `note_background_failure`, which
+    `record_events` feeds the flag to.
+  - `a_failed_vector_overlay_is_reported_and_not_built_again` refreshes the
+    overlay against another mesh's operator. The upload failed and the
+    warning stayed dark.
+- **Fix.**
+  - An aborted worker is logged once under a new `worker` source, which
+    counts as an error. Its flag keeps the diagnostics warning lit, since the
+    worker never comes back.
+  - A failed overlay upload lights the warning. The failed lattice's key is
+    kept, so the same lattice is not built again; another view, mesh or
+    generation tries afresh.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

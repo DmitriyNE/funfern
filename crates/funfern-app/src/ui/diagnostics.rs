@@ -77,7 +77,10 @@ pub(super) struct StatusFit {
 
 impl Playground {
     pub(super) fn diagnostics_warning(&self) -> bool {
-        self.runtime.last_error().is_some() || self.amr_error.is_some() || self.unseen_error
+        self.runtime.last_error().is_some()
+            || self.amr_error.is_some()
+            || self.unseen_error
+            || self.background_failed
     }
     /// Appends what each transient channel says, the moment it changes. Every
     /// one of them is overwritten by whatever happens next - a status line by
@@ -109,6 +112,21 @@ impl Playground {
         }
         for text in std::mem::take(&mut self.pending_repairs) {
             self.push_event(now, EventSource::Repair, text);
+        }
+        self.note_background_failure(now, browser_background_failure());
+    }
+
+    /// A browser background worker that aborted is gone for good: the pool
+    /// does not replace it, and only a defect or the page's memory stops
+    /// one. It is logged once and keeps the diagnostics warning lit, where
+    /// the status line alone showed it as idle (RT-15 of the 2026-10-20
+    /// review).
+    pub(super) fn note_background_failure(&mut self, now: f64, failure: Option<&'static str>) {
+        if let Some(text) = failure
+            && !self.background_failed
+        {
+            self.background_failed = true;
+            self.push_event(now, EventSource::Worker, text.into());
         }
     }
     pub(super) fn push_event(&mut self, now: f64, source: EventSource, text: String) {
@@ -815,9 +833,9 @@ impl Playground {
                         for entry in self.events.iter().rev() {
                             let line = event_line(entry);
                             match entry.source {
-                                EventSource::Preparation | EventSource::Adaptation => {
-                                    ui.colored_label(RED, line)
-                                }
+                                EventSource::Preparation
+                                | EventSource::Adaptation
+                                | EventSource::Worker => ui.colored_label(RED, line),
                                 EventSource::Repair => ui.colored_label(GOLD, line),
                                 EventSource::Status => ui.small(line),
                             };
@@ -1387,6 +1405,25 @@ mod tests {
             state.events
         );
         assert!(state.unseen_error);
+    }
+
+    /// RT-15 of the 2026-10-20 review: a browser worker that aborted showed
+    /// only on the status line, styled as idle, with the marker dark and the
+    /// log empty while every later edit waited for good. It is logged once,
+    /// and the marker stays lit, since the worker never comes back.
+    #[test]
+    fn an_aborted_background_worker_is_logged_once_and_keeps_the_marker_lit() {
+        let mut state = Playground::default();
+        state.note_background_failure(1.0, None);
+        assert!(state.events.is_empty() && !state.diagnostics_warning());
+        let failure = "A background worker ran out of memory";
+        state.note_background_failure(2.0, Some(failure));
+        state.note_background_failure(3.0, Some(failure));
+        assert_eq!(state.events.len(), 1);
+        assert_eq!(state.events[0].source, EventSource::Worker);
+        assert_eq!(state.events[0].repeats, 1, "logged once");
+        state.unseen_error = false;
+        assert!(state.diagnostics_warning(), "the marker stays lit");
     }
 
     /// Every channel the log watches overwrites itself, so a change is the only

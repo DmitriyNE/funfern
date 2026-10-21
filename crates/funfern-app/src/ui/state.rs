@@ -256,6 +256,10 @@ pub struct Playground {
     /// remains drawable while a camera/remesh replacement is in flight, so
     /// arrows reproject with the view instead of blinking out.
     pub(super) vector_overlay_previous_layout: Option<VectorOverlayLayout>,
+    /// The lattice whose upload failed, not built again.
+    pub(super) vector_overlay_failed: Option<VectorOverlayLayoutKey>,
+    /// A browser background worker aborted, and the log has it.
+    pub(super) background_failed: bool,
     /// Presentation-only per-arrow filter state: the complementary field's
     /// DC blocker or the energy flow's low-pass, whichever is drawn. It never
     /// feeds the canonical solver or physical consumers.
@@ -490,6 +494,8 @@ impl Default for Playground {
             viewport_rect: Rect::NOTHING,
             vector_overlay_layout: None,
             vector_overlay_previous_layout: None,
+            vector_overlay_failed: None,
+            background_failed: false,
             vector_overlay_filter_state: BTreeMap::new(),
             vector_overlay_filter_owner: None,
             vector_overlay_filter_step: u64::MAX,

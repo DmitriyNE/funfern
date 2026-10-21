@@ -12,6 +12,8 @@ pub(super) enum EventSource {
     Repair,
     Preparation,
     Adaptation,
+    /// A browser background worker aborted.
+    Worker,
 }
 
 impl EventSource {
@@ -21,13 +23,14 @@ impl EventSource {
             Self::Repair => "repair",
             Self::Preparation => "preparation",
             Self::Adaptation => "adaptation",
+            Self::Worker => "worker",
         }
     }
     /// Whether an entry from here lights the status marker until the
     /// diagnostics are opened. A repair fallback explains a rebuild that
     /// succeeded, so it is worth keeping but not worth interrupting for.
     pub(super) const fn error(self) -> bool {
-        matches!(self, Self::Preparation | Self::Adaptation)
+        matches!(self, Self::Preparation | Self::Adaptation | Self::Worker)
     }
 }
 

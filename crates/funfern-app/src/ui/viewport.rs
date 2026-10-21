@@ -268,6 +268,11 @@ impl Playground {
             world_spacing,
             visible_bins,
         };
+        // A lattice that could not be uploaded is not built again every
+        // frame; another view, mesh or generation tries afresh.
+        if self.vector_overlay_failed.as_ref() == Some(&key) {
+            return;
+        }
         // Keep at most one GPU lattice replacement in flight. Replacing its
         // readback every camera frame can otherwise starve the overlay until
         // pan/zoom stops. The last completed world-space lattice is still
@@ -316,6 +321,7 @@ impl Playground {
         let stencils = points.iter().map(|point| point.stencil).collect::<Vec<_>>();
         match source.vector_overlay(recorders, assets, commands, &stencils) {
             Ok(()) => {
+                self.vector_overlay_failed = None;
                 if points.is_empty() {
                     self.vector_overlay_previous_layout = None;
                 }
@@ -326,11 +332,16 @@ impl Playground {
                     submitted_at: Instant::now(),
                 });
             }
+            // Only a defect fails the upload: it lights the diagnostics
+            // warning, and the lattice is not built again every frame (UI-32
+            // of the 2026-10-20 review).
             Err(error) => {
                 recorders.clear_vector_overlay(assets, commands);
                 self.vector_overlay_layout = None;
                 self.vector_overlay_previous_layout = None;
-                self.message = error;
+                self.vector_overlay_failed = Some(key);
+                self.message = format!("The vector overlay could not be built: {error}");
+                self.unseen_error = true;
             }
         }
     }
@@ -340,6 +351,44 @@ impl Playground {
 mod tests {
     use super::*;
     use crate::topology_editor::ClosedCurvePurpose;
+
+    /// UI-32 of the 2026-10-20 review: an overlay that cannot be uploaded,
+    /// which only a defect makes, was reported on the status line alone and
+    /// built again every frame. It lights the diagnostics warning, and the
+    /// same lattice is not built again.
+    #[test]
+    fn a_failed_vector_overlay_is_reported_and_not_built_again() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut recorders = WaveGpuRequest::default();
+        let display = VectorOverlayDisplay::default();
+        let mut state = crate::ui::test_support::with_baffles(&[]);
+        let active = crate::ui::test_support::activate(&mut state);
+        // Another mesh's operator: the stencils name nodes it does not have.
+        let mut coarse = crate::ui::test_support::with_baffles(&[]);
+        let other = crate::ui::test_support::activate_at(&mut coarse, 0.4);
+        state.editor.document.presentation.vector_overlay = VectorOverlay::RelativeEnergyFlow;
+        state.viewport_rect = crate::ui::test_support::viewport();
+        let mut refresh = |state: &mut Playground| {
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_vector_overlay(
+                    &mut recorders,
+                    &display,
+                    &mut assets,
+                    &mut commands,
+                    Some((&active, RecorderSource::Fixed(&other.canonical_operator))),
+                    1,
+                );
+            });
+        };
+        refresh(&mut state);
+        assert!(state.diagnostics_warning(), "{}", state.message);
+        state.message = "read".into();
+        refresh(&mut state);
+        assert_eq!(state.message, "read", "the same lattice is not built again");
+    }
 
     /// Both axes step upwards from the lower bound. The vertical one used to
     /// start at the top of the view and test against the bottom, so the grid
