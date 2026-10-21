@@ -26745,3 +26745,20 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: a waterfall's rows lie at their frames' times (PR-14)
+
+- **Found by the review (PR-14).** Both waterfalls, the line probe's and the
+  far field's, gave every frame an equal row by its index. Their axis labels
+  and their drag read the axis as linear in time, so a handoff that changed
+  the recording stride, or a dropped readback, bent space-time tracks, and a
+  wave speed read off the diagram was wrong on one side.
+- **Reproduced.** The rows' placement moved into `waterfall_rows`,
+  unchanged. `waterfall_rows_lie_at_their_frames_times` places frames 0.1
+  apart, one dropped, then 0.05 apart. The rows came out equal.
+- **Fix.** Each row runs from the frame before it to its own time, the first
+  from one spacing before it, on the window's linear time axis. The newest
+  row still ends at the top while the view is live.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

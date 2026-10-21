@@ -594,20 +594,19 @@ impl Playground {
             .fold(0.0, f32::max)
             .max(1.0e-12)
             / view.readout.waterfall_gain;
-        for (row, frame) in visible.iter().enumerate() {
+        let rows = waterfall_rows(
+            &visible.iter().map(|frame| frame.time).collect::<Vec<_>>(),
+            minimum_time,
+            maximum_time,
+        );
+        for (frame, (low, high)) in visible.iter().zip(rows) {
             let samples = Self::curve_probe_values(frame, quantity);
             let count = samples.len();
             if count == 0 {
                 continue;
             }
-            let top = egui::lerp(
-                rect.bottom()..=rect.top(),
-                (row + 1) as f32 / visible.len() as f32,
-            );
-            let bottom = egui::lerp(
-                rect.bottom()..=rect.top(),
-                row as f32 / visible.len() as f32,
-            );
+            let top = egui::lerp(rect.bottom()..=rect.top(), high);
+            let bottom = egui::lerp(rect.bottom()..=rect.top(), low);
             for (column, value) in samples.iter().copied().enumerate() {
                 if !value.is_finite() {
                     continue;
@@ -705,19 +704,18 @@ impl Playground {
             .fold(0.0, f32::max)
             .max(1.0e-12)
             / view.readout.waterfall_gain;
-        for (row, frame) in visible.iter().enumerate() {
+        let rows = waterfall_rows(
+            &visible.iter().map(|frame| frame.time).collect::<Vec<_>>(),
+            minimum_time,
+            maximum_time,
+        );
+        for (frame, (low, high)) in visible.iter().zip(rows) {
             let count = frame.amplitude.len();
             if count == 0 {
                 continue;
             }
-            let top = egui::lerp(
-                rect.bottom()..=rect.top(),
-                (row + 1) as f32 / visible.len() as f32,
-            );
-            let bottom = egui::lerp(
-                rect.bottom()..=rect.top(),
-                row as f32 / visible.len() as f32,
-            );
+            let top = egui::lerp(rect.bottom()..=rect.top(), high);
+            let bottom = egui::lerp(rect.bottom()..=rect.top(), low);
             for (column, value) in frame.amplitude.iter().copied().enumerate() {
                 if !value.is_finite() {
                     continue;
@@ -1780,6 +1778,31 @@ fn spectrum_ceiling_text(value: f64) -> String {
     }
 }
 
+/// Where each of a waterfall's rows lies, as fractions of its height from the
+/// bottom, for frames recorded at `times` in a window from `minimum` to
+/// `maximum`: from the frame before it to its own time, the first from one
+/// spacing before it, on the axis linear in time its labels and its drag
+/// read. Rows by frame index bent the axis wherever the recording stride
+/// changed or a readback was dropped (PR-14 of the 2026-10-20 review).
+fn waterfall_rows(times: &[f64], minimum: f64, maximum: f64) -> Vec<(f32, f32)> {
+    let span = maximum - minimum;
+    if !span.is_finite() || span <= 0.0 {
+        return vec![(0.0, 1.0); times.len()];
+    }
+    let at = |time: f64| ((time - minimum) / span).clamp(0.0, 1.0) as f32;
+    times
+        .iter()
+        .enumerate()
+        .map(|(row, &time)| {
+            let before = match row {
+                0 => times.get(1).map_or(minimum, |next| time - (next - time)),
+                _ => times[row - 1],
+            };
+            (at(before), at(time))
+        })
+        .collect()
+}
+
 /// What `spectrum_ceiling_text` writes, read back, with or without its unit.
 fn parse_spectrum_ceiling(text: &str) -> Option<f64> {
     let number = text.trim().trim_end_matches("Hz").trim();
@@ -1794,6 +1817,29 @@ fn parse_spectrum_ceiling(text: &str) -> Option<f64> {
 mod tests {
     use super::*;
     use crate::wave_gpu::CurveProbeRecord;
+
+    /// PR-14 of the 2026-10-20 review: a waterfall gave every frame an equal
+    /// row, while its labels and its drag read the axis as linear in time,
+    /// so a handoff that changed the recording stride, or a dropped
+    /// readback, bent a space-time track and the wave speed read off it.
+    /// Each row runs from the frame before it to its own time.
+    #[test]
+    fn waterfall_rows_lie_at_their_frames_times() {
+        // Frames 0.1 apart, one dropped, then 0.05 apart. The first lies at
+        // the window's start, so its row has no height.
+        let times = [1.0, 1.1, 1.2, 1.4, 1.45];
+        let at = |time: f64| ((time - 1.0) / 0.45) as f32;
+        let expected = [(1.0, 1.0), (1.0, 1.1), (1.1, 1.2), (1.2, 1.4), (1.4, 1.45)];
+        for ((low, high), (from, to)) in waterfall_rows(&times, 1.0, 1.45).into_iter().zip(expected)
+        {
+            assert!(
+                (low - at(from)).abs() < 1.0e-6 && (high - at(to)).abs() < 1.0e-6,
+                "row {low}..{high}, not {}..{}",
+                at(from),
+                at(to)
+            );
+        }
+    }
 
     /// Early in a run a readout shows its span and mean window clamped to what
     /// has been recorded. Those clamps are the display's: only what the user
