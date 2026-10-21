@@ -26358,3 +26358,27 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: the display cadence counts what a frame asked for (RT-10)
+
+- **Found by the review (RT-10).** `DisplayCadence` times the display from
+  quiet frames, those carrying at most one step. The runtime recorded the
+  count backpressure admitted, which is 0 or 1 exactly when 63 or 64 steps
+  are still outstanding.
+  - On an overloaded scene (edge 0.04 at 2× under GPU contention, in the
+    review's example), the 60-frame window filled with frames slowed by the
+    solver.
+  - The late-frame test then stopped firing, the StepBudget fit roughly
+    doubled, and the queue stayed saturated: the "60 fps of a 120 Hz
+    display" failure the cadence exists to prevent.
+  - The review did not measure the runtime effect, and neither did this
+    entry.
+- **Reproduced.** `a_frame_backpressure_clamps_is_not_quiet` runs the
+  lockstep harness at a fixed 40-step batch with nothing read back. The
+  third frame admitted none and recorded 0.
+- **Fix.** The cadence records the batch the frame asked for. The exception
+  is a fixture's endpoint, which stops the steps outright, so those frames
+  stay quiet.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

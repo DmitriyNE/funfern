@@ -1025,15 +1025,15 @@ impl Playground {
                         steps,
                         ceiling_bound: false,
                     });
-                    let admitted = steps_with_gpu_backpressure(
+                    let backpressured = steps_with_gpu_backpressure(
                         request.stats().retired_steps(),
                         request.requested_steps(),
                         batch.steps,
                     );
                     // An end-to-end fixture's endpoint: the steps asked for
                     // stop there.
-                    let admitted = self.e2e_steps.limit.map_or(admitted, |limit| {
-                        admitted.min(limit.saturating_sub(request.requested_steps()))
+                    let admitted = self.e2e_steps.limit.map_or(backpressured, |limit| {
+                        backpressured.min(limit.saturating_sub(request.requested_steps()))
                     });
                     if admitted > 0 {
                         request.request_steps(admitted);
@@ -1044,7 +1044,18 @@ impl Playground {
                         steps: admitted,
                         ceiling_bound: batch.ceiling_bound,
                     };
-                    self.display_cadence.record_batch(admitted);
+                    // The cadence reads what the frame asked for, not what
+                    // the queue let in: a frame backpressure clamped ran with
+                    // a full queue behind it, and its timing is the solver's
+                    // however few steps it added (RT-10 of the 2026-10-20
+                    // review). A fixture's endpoint stops the steps outright,
+                    // and those frames are quiet.
+                    self.display_cadence
+                        .record_batch(if admitted < backpressured {
+                            admitted
+                        } else {
+                            batch.steps
+                        });
                 } else if self.wave_step {
                     request.request_steps(1);
                     self.display_cadence.record_batch(1);

@@ -1201,6 +1201,27 @@ fn reset_drops_a_pack_made_against_the_run_it_clears() {
     session.quiesce();
 }
 
+/// RT-10 of the 2026-10-20 review: the display cadence read a frame that
+/// backpressure clamped to no step as a quiet one, though the queue behind
+/// it was full; on an overloaded scene those frames filled its window with
+/// the solver's slowness. A frame counts what it asked for.
+#[test]
+fn a_frame_backpressure_clamps_is_not_quiet() {
+    let mut session = Session::start();
+    session.quiesce();
+    session.state.e2e_steps.batch = Some(40);
+    // Nothing read back: the queue fills, and the third frame admits none.
+    for _ in 0..3 {
+        session.step(&Act::Frame(None));
+    }
+    assert_eq!(
+        session.request.requested_steps() - session.request.stats().retired_steps(),
+        MAX_STEPS_PER_FRAME,
+        "the queue is full"
+    );
+    assert_eq!(session.state.display_cadence.pending_batch(), 40);
+}
+
 /// Found by the runtime sequences: a scene whose draft an edit made invalid
 /// before its first validation never ran, since nothing was prepared while
 /// the draft was invalid, and neither did one opened with an invalid draft.

@@ -459,6 +459,12 @@ impl DisplayCadence {
     pub(super) fn seconds(&self) -> f64 {
         self.seconds
     }
+
+    /// What the frame in progress asked the solver for, as recorded.
+    #[cfg(test)]
+    pub(super) fn pending_batch(&self) -> u64 {
+        self.pending_batch
+    }
 }
 
 /// The batch ceiling for the next frame, given what this one cost.
