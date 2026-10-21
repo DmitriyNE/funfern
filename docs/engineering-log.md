@@ -26791,3 +26791,55 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3: a handoff takes the probe traces back to its snapshot (PR-5, point, line and area)
+
+- **Found by the review (PR-5).**
+  - A point probe records at 120 Hz while the user disables a source.
+    Admission takes about 80 ms, and through it the source keeps stepping and
+    its recorders keep writing.
+  - The target restarts at the snapshot step and writes into the kept ring,
+    but ingestion keeps only records later than the trace's last time. The
+    unedited source's samples of that window were ingested and the target's
+    dropped. The trace showed pre-edit physics and then a jump, and spectra
+    and transfer estimates built from it were biased. Line and area traces
+    behave the same.
+- **More than the review's fix.** It asked for the traces to be trimmed back
+  to the snapshot time when the handoff publishes. That alone does not hold:
+  - until the target has caught up, the kept ring still holds the source's
+    samples in the frames ahead of it, on the same time grid, so the next
+    readback brought them back;
+  - a readback copied before admission arrives after it, tagged with the
+    source generation, which ingestion accepts.
+  - You chose to mark the frames on the device.
+- **Reproduced.** `a_handoff_takes_the_traces_back_to_its_snapshot` ingests a
+  source's samples past a snapshot at 1.85 and publishes the handoff. They
+  stayed, and the target's were refused.
+- **Fix.**
+  - At admission the request keeps the generation, the snapshot step and the
+    recorders' strides as the source ran them (`HandedOver`; the app sets the
+    recorders up for the target only after it).
+  - A render-world system, `mark_handed_over_ring_frames`, runs before
+    `prepare_canonical_bind_group` replaces the source's group, while that
+    group still holds the source's last encoded step. It writes NaN over
+    each kept ring's frames for the steps after the snapshot through that
+    one: point and area frames whole, a line frame by each probe's points
+    (`stale_frames`, `stale_ring_ranges`). A NaN stamp is a sample the host
+    leaves out. The target rewrites those frames as it reaches them.
+  - At publish, `take_traces_back_to` trims every trace back to the
+    snapshot's time. Readbacks of the source generation still on their way
+    bring nothing past it (`readback_cut`). The slack is 1e-4 s, over an f32
+    stamp's 3e-5 and under the fastest recorder's 2e-3 between samples.
+  - The far field's ring is keyed by time with its own write pointer, and is
+    the next entry's.
+  - Tests: the case above, and
+    `a_handoff_marks_the_ring_frames_past_its_snapshot`, which covers the
+    frames past a snapshot, round the ring and across the device's wrap, and
+    their byte ranges.
+- **Checked on Metal:** all 18 fixtures, `canonical_gpu_filter_boundary` and
+  `canonical_gpu_temporal_consumer` pass. None of them hands off while a
+  probe records with a backlog, so the marking itself is checked by the
+  tests alone.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

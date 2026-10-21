@@ -244,6 +244,61 @@ impl WaveGpuRequest {
         self.generation
     }
 
+    /// The strides the recorders run at, which their rings' frames follow.
+    pub(crate) fn recorder_strides(&self) -> RecorderStrides {
+        RecorderStrides {
+            point: self.probes.as_ref().map(|handles| handles.sample_stride),
+            curves: self
+                .curve_probes
+                .as_ref()
+                .map_or_else(Vec::new, |handles| handles.sample_strides.to_vec()),
+            area: self
+                .area_probes
+                .as_ref()
+                .map(|handles| handles.sample_stride),
+        }
+    }
+
+    /// Where the rings kept here hold what a source generation, at `strides`,
+    /// recorded for the steps after `snapshot` through `last`: each a buffer,
+    /// an offset and a length in bytes. A kept line ring has the source's
+    /// descriptors, its keeping asks for that.
+    pub(crate) fn stale_ring_ranges(
+        &self,
+        snapshot: u64,
+        last: u64,
+        strides: &RecorderStrides,
+    ) -> Vec<(Handle<ShaderBuffer>, u64, u64)> {
+        let mut ranges = Vec::new();
+        if let (Some(handles), Some(stride)) = (&self.probes, strides.point) {
+            let block = (MAX_POINT_PROBES * size_of::<GpuCanonicalPointProbeSample>()) as u64;
+            for frame in stale_frames(snapshot, last, stride, PROBE_RING_FRAMES) {
+                ranges.push((handles.output.clone(), frame as u64 * block, block));
+            }
+        }
+        if let Some(handles) = &self.curve_probes {
+            let size = size_of::<GpuCurveProbeSample>() as u64;
+            for (descriptor, stride) in handles.descriptors.iter().zip(&strides.curves) {
+                for frame in stale_frames(snapshot, last, *stride, CURVE_PROBE_RING_FRAMES) {
+                    let first =
+                        (frame * MAX_CURVE_PROBE_POINTS) as u64 + u64::from(descriptor.offset);
+                    ranges.push((
+                        handles.output.clone(),
+                        first * size,
+                        u64::from(descriptor.count) * size,
+                    ));
+                }
+            }
+        }
+        if let (Some(handles), Some(stride)) = (&self.area_probes, strides.area) {
+            let block = (MAX_POINT_PROBES * size_of::<GpuAreaProbeSample>()) as u64;
+            for frame in stale_frames(snapshot, last, stride, AREA_PROBE_RING_FRAMES) {
+                ranges.push((handles.output.clone(), frame as u64 * block, block));
+            }
+        }
+        ranges
+    }
+
     /// Stage-6 recorder ownership follows the accepted canonical generation.
     /// Rings deliberately survive; the configure paths decide whether their
     /// observable and contour remain compatible.
@@ -1825,6 +1880,37 @@ const fn probe_physics_flag(physics: PhysicsModel) -> f32 {
     }
 }
 
+/// The recorders' strides as a source generation had them when its handoff
+/// was admitted: what its kept rings' frames were written at.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RecorderStrides {
+    point: Option<u64>,
+    /// One per line probe, in its descriptors' order.
+    curves: Vec<u64>,
+    area: Option<u64>,
+}
+
+/// The ring frames a recorder of `stride` wrote for the steps after
+/// `snapshot` through `last`: the frame `(w / stride) % frames` of each step
+/// `w` it was scheduled at, on the device's count, and every frame once the
+/// steps go round the ring.
+pub(crate) fn stale_frames(snapshot: u64, last: u64, stride: u64, frames: usize) -> Vec<usize> {
+    if stride == 0 || last <= snapshot {
+        return Vec::new();
+    }
+    if last - snapshot >= stride.saturating_mul(frames as u64) {
+        return (0..frames).collect();
+    }
+    let mut stale = (snapshot + 1..=last)
+        .map(device_step)
+        .filter(|step| probe_sample_due(*step, stride))
+        .map(|step| ((step / stride) % frames as u64) as usize)
+        .collect::<Vec<_>>();
+    stale.sort_unstable();
+    stale.dedup();
+    stale
+}
+
 /// The step the recorders are scheduled at: the device's own count, a u32
 /// the host's u64 one wraps onto. The line recorder tests each probe's stride
 /// on it again, and on the host's count, past 2^32 steps, no step chosen
@@ -3333,6 +3419,78 @@ mod tests {
     /// it chose for a stride of 36 passed the shader's test: the probe
     /// stopped recording, with nothing said. Every step the host chooses is
     /// one the shader records.
+    /// PR-5 of the 2026-10-20 review: the frames of a kept ring the source
+    /// wrote past a handoff's snapshot, which the target writes again only
+    /// as it gets there.
+    #[test]
+    fn a_handoff_marks_the_ring_frames_past_its_snapshot() {
+        // Steps 104, 112, 120 and 128 of a stride of 8: not the snapshot's.
+        assert_eq!(stale_frames(100, 130, 8, 2048), vec![13, 14, 15, 16]);
+        assert_eq!(stale_frames(104, 104, 8, 2048), Vec::<usize>::new());
+        // Round the ring: every frame.
+        assert_eq!(stale_frames(0, 8 * 64, 8, 64).len(), 64);
+        // Across the device's wrap, as it schedules there: 2^32 - 4 before
+        // it, in frame 7, and 0 and 36 after.
+        let wrap = 1_u64 << 32;
+        assert_eq!(stale_frames(wrap - 40, wrap + 40, 36, 64), vec![0, 1, 7]);
+
+        let operator = canonical_operator();
+        let world = World::new();
+        let mut assets = Assets::<ShaderBuffer>::default();
+        let mut request = WaveGpuRequest::default();
+        let mut queue = CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, &world);
+        let context = RecorderContext {
+            time_step: 1.0 / 960.0,
+            physics: PhysicsModel::Mechanical,
+            history: RecorderHistory::Keep,
+        };
+        request
+            .update_canonical_point_probes(
+                &mut assets,
+                &mut commands,
+                &operator,
+                &[(1, None)],
+                120.0,
+                context,
+            )
+            .unwrap();
+        request
+            .update_canonical_curve_probes(
+                &mut assets,
+                &mut commands,
+                &operator,
+                &[CurveProbeInput {
+                    id: 1,
+                    sample_rate: 60.0,
+                    samples: vec![None; 3],
+                }],
+                context,
+            )
+            .unwrap();
+        let strides = request.recorder_strides();
+        assert_eq!(strides.point, Some(8));
+        assert_eq!(strides.curves, vec![16]);
+        let ranges = request
+            .stale_ring_ranges(100, 130, &strides)
+            .into_iter()
+            .map(|(_, offset, length)| (offset, length))
+            .collect::<Vec<_>>();
+        let point = 16 * 48;
+        assert_eq!(
+            ranges,
+            vec![
+                (13 * point, point),
+                (14 * point, point),
+                (15 * point, point),
+                (16 * point, point),
+                // Steps 112 and 128 of the line probe's 16: its three points.
+                (7 * 512 * 32, 3 * 32),
+                (8 * 512 * 32, 3 * 32),
+            ]
+        );
+    }
+
     #[test]
     fn the_host_chooses_recorder_steps_on_the_devices_count() {
         let wrap = 1_u64 << 32;

@@ -565,6 +565,61 @@ impl Playground {
             far_field_revision: request.far_field_revision(),
         });
     }
+    /// A handoff from the source generation `source` published, its snapshot
+    /// taken at `time`. The source stepped on while the handoff waited for
+    /// admission, and what its recorders took past the snapshot is of the
+    /// trajectory the target discards: ingested, the target's own samples of
+    /// the same times were refused as not newer, and the traces showed the
+    /// discarded physics and then a jump (PR-5 of the 2026-10-20 review).
+    /// Each trace goes back to the snapshot, and the source's readbacks still
+    /// on their way bring nothing past it; the target restarts there and
+    /// records those times again, its kept rings' frames past the snapshot
+    /// marked unrecorded on the device (`mark_handed_over_ring_frames`).
+    pub(super) fn take_traces_back_to(&mut self, source: u64, time: f64) {
+        let cut = time + HANDOFF_CUT_SLACK;
+        let back = |last_time: &mut f64, newest: Option<f64>| {
+            if *last_time > cut {
+                *last_time = newest.unwrap_or(cut).min(cut);
+            }
+        };
+        for trace in self.probe_traces.values_mut() {
+            trace.samples.retain(|sample| sample.time <= cut);
+            back(
+                &mut trace.last_time,
+                trace.samples.back().map(|sample| sample.time),
+            );
+        }
+        for trace in self.curve_probe_traces.values_mut() {
+            trace.records.retain(|record| record.time <= cut);
+            back(
+                &mut trace.last_time,
+                trace.records.back().map(|record| record.time),
+            );
+        }
+        for trace in self.area_probe_traces.values_mut() {
+            trace.records.retain(|record| record.time <= cut);
+            back(
+                &mut trace.last_time,
+                trace.records.back().map(|record| record.time),
+            );
+        }
+        let far = &mut self.far_field_trace;
+        far.records.retain(|record| record.time <= cut);
+        back(
+            &mut far.last_time,
+            far.records.back().map(|record| record.time),
+        );
+        self.handoff_cut = Some((source, cut));
+    }
+
+    /// The latest time a readback of `generation` may bring, past which its
+    /// records are a handed-over source's discarded trajectory.
+    fn readback_cut(&self, generation: u64) -> f64 {
+        self.handoff_cut
+            .filter(|(source, _)| *source == generation)
+            .map_or(f64::INFINITY, |(_, cut)| cut)
+    }
+
     /// The simulation clock is starting over at zero. Ingestion only takes a
     /// record newer than the trace's last one, so a trace carried across the
     /// restart would refuse the entire new run — which is what made a reset
@@ -588,6 +643,7 @@ impl Playground {
         }
         self.probe_clock_restarted = true;
         self.probe_upload_previous = None;
+        self.handoff_cut = None;
     }
     /// The step the GPU is actually running at.
     /// Whether the resident grid filter actually runs: asked for, and admitted
@@ -668,12 +724,17 @@ impl Playground {
     /// seconds out until the new generation's first readback: behind, then a
     /// jump ahead, at every refinement.
     pub(super) fn simulated_time(&self) -> f64 {
+        self.simulated_time_at(self.completed_steps)
+    }
+    /// The simulated time at accepted step `steps`, on the clock
+    /// `simulated_time` reads.
+    pub(super) fn simulated_time_at(&self, steps: u64) -> f64 {
         let step = if self.sim_time_step > 0.0 {
             self.sim_time_step
         } else {
             self.solver_time_step()
         };
-        self.sim_time_offset + self.completed_steps as f64 * step
+        self.sim_time_offset + steps as f64 * step
     }
     /// Takes a readback of the device's clock as the one `simulated_time`
     /// carries on.
@@ -728,7 +789,8 @@ impl Playground {
             return;
         }
         self.probe_readback = display.readbacks;
-        for record in &display.records {
+        let cut = self.readback_cut(display.generation);
+        for record in display.records.iter().filter(|record| record.time <= cut) {
             let trace = self
                 .probe_traces
                 .entry(ProbeId(record.probe_id))
@@ -761,7 +823,8 @@ impl Playground {
                 .find(|(revision, _)| *revision == curves.revision)
                 .map(|(_, lengths)| lengths.clone())
                 .unwrap_or_default();
-            for record in &curves.records {
+            let cut = self.readback_cut(curves.generation);
+            for record in curves.records.iter().filter(|record| record.time <= cut) {
                 let trace = self
                     .curve_probe_traces
                     .entry(ProbeId(record.probe_id))
@@ -783,7 +846,8 @@ impl Playground {
             })
         {
             self.area_probe_readback = areas.readbacks;
-            for record in &areas.records {
+            let cut = self.readback_cut(areas.generation);
+            for record in areas.records.iter().filter(|record| record.time <= cut) {
                 let trace = self
                     .area_probe_traces
                     .entry(ProbeId(record.probe_id))
@@ -804,7 +868,8 @@ impl Playground {
             })
         {
             self.far_field_readback = far.readbacks;
-            for record in &far.records {
+            let cut = self.readback_cut(far.generation);
+            for record in far.records.iter().filter(|record| record.time <= cut) {
                 // Stamped on the app's clock by the recorder, which has to hold
                 // one across the mesh swaps its ring survives.
                 let record = record.clone();
@@ -819,6 +884,11 @@ impl Playground {
         }
     }
 }
+
+/// How far past a handoff's snapshot a record may stand and still be of it:
+/// over the 3e-5 s an f32 stamp's fine part resolves, under the 2e-3 s
+/// between the fastest recorder's samples.
+const HANDOFF_CUT_SLACK: f64 = 1.0e-4;
 
 /// Each line probe's arclength in `active`: a segment's between its ends, a
 /// boundary's along the points its stencils sample.
@@ -1684,6 +1754,61 @@ mod tests {
         assert_eq!(times(&state), Vec::<f64>::new(), "the ring is left out");
         ingest(&mut state, &[4.5, 5.0, 5.25]);
         assert_eq!(times(&state), vec![5.25]);
+    }
+
+    /// PR-5 of the 2026-10-20 review: while a handoff waits for admission the
+    /// source steps on, and the samples its recorders took of the trajectory
+    /// the target discards were ingested; the target's own for the same times
+    /// were then refused as not newer, and the trace showed the discarded
+    /// physics and then a jump. At the handoff the traces go back to the
+    /// snapshot, and what the source's last readbacks bring past it is left
+    /// out.
+    #[test]
+    fn a_handoff_takes_the_traces_back_to_its_snapshot() {
+        let mut state = Playground::default();
+        let token = TopologyToken {
+            document_revision: 1,
+            topology_revision: 1,
+            mesh_generation: 1,
+        };
+        let samples = |state: &Playground| -> Vec<f64> {
+            state.probe_traces[&ProbeId(1)]
+                .samples
+                .iter()
+                .map(|sample| sample.time)
+                .collect()
+        };
+        let mut readbacks = 0;
+        let mut ingest = |state: &mut Playground, generation: u64, times: &[f64]| {
+            readbacks += 1;
+            state.ingest_probes(&ProbeDisplay {
+                generation,
+                revision: generation,
+                records: times
+                    .iter()
+                    .map(|time| PointProbeRecord {
+                        probe_id: 1,
+                        time: *time,
+                        ..PointProbeRecord::default()
+                    })
+                    .collect(),
+                readbacks,
+            });
+        };
+        state.probe_upload = Some(probe_upload(token, 1, 1));
+        ingest(&mut state, 1, &[1.8, 1.9, 2.0]);
+        // The handoff publishes, its snapshot at 1.85.
+        state.take_traces_back_to(1, 1.85);
+        assert_eq!(samples(&state), vec![1.8]);
+        // The source's last readback, still on its way: past the snapshot,
+        // left out.
+        ingest(&mut state, 1, &[1.8, 1.9, 2.0]);
+        assert_eq!(samples(&state), vec![1.8]);
+        // The target's, from the snapshot on.
+        state.probe_upload_previous = state.probe_upload;
+        state.probe_upload = Some(probe_upload(token, 2, 2));
+        ingest(&mut state, 2, &[1.8, 1.9, 2.0]);
+        assert_eq!(samples(&state), vec![1.8, 1.9, 2.0]);
     }
 
     #[test]

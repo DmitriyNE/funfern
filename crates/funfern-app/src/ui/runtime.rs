@@ -782,6 +782,11 @@ impl Playground {
                             self.wave_energy = None;
                             self.nonlinear_strength.clear();
                             self.amr_energy_peak = 0.0;
+                        } else if let Some(snapshot) = request.handed_over_at() {
+                            // The recorders are set up for the target later
+                            // this frame, so the upload still names the source.
+                            let source = self.probe_upload.map_or(0, |upload| upload.generation);
+                            self.take_traces_back_to(source, self.simulated_time_at(snapshot));
                         }
                         self.restart_exposures_after_handoff(upload.fresh);
                         self.amr_adaptation_state = if active.adapted {

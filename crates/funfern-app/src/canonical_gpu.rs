@@ -51,8 +51,8 @@ use crate::paced_readback::{PacedReadback, PacedReadbackComplete, PacedReadbackP
 use crate::picture_playout::{PictureCopy, PicturePlayout};
 use crate::wave_gpu::{
     AreaProbeBindGroup, CurveProbeBindGroup, FAR_FIELD_CONTOUR_POINTS, FAR_FIELD_DIRECTIONS,
-    FarFieldBindGroup, ProbeBindGroup, VectorOverlayBindGroup, WaveGpuRequest, WavePipeline,
-    device_step, differencing_sample_due, probe_sample_due,
+    FarFieldBindGroup, ProbeBindGroup, RecorderStrides, VectorOverlayBindGroup, WaveGpuRequest,
+    WavePipeline, device_step, differencing_sample_due, probe_sample_due,
 };
 
 // `ShaderBuffer::from(T)` serializes into an owned byte vector and then copies
@@ -4473,6 +4473,9 @@ pub struct CanonicalGpuRequest {
     /// Counts cleared failures, so the render world knows to rewind what it
     /// has encoded to the accepted clock rather than carry it across.
     cleared_failures: u32,
+    /// The generation a handoff admitted, the snapshot step it starts from,
+    /// and the recorders' strides as the source had them.
+    handed_over: Option<HandedOver>,
     grid_scale_filter: bool,
     handoff: Option<CanonicalGpuHandoffHandles>,
     handoff_outcome: CanonicalGpuHandoffOutcome,
@@ -4511,6 +4514,7 @@ impl Default for CanonicalGpuRequest {
             grid_scale_filter: false,
             handoff: None,
             handoff_outcome: CanonicalGpuHandoffOutcome::None,
+            handed_over: None,
             live_event: None,
             #[cfg(test)]
             stranded_event: false,
@@ -4819,6 +4823,15 @@ impl CanonicalGpuRequest {
                 .is_some_and(|handles| !handles.grid_filter_admitted)
     }
 
+    /// The snapshot step the running generation was handed over at, if a
+    /// handoff admitted it.
+    pub fn handed_over_at(&self) -> Option<u64> {
+        self.handed_over
+            .as_ref()
+            .filter(|handed_over| handed_over.generation == self.generation)
+            .map(|handed_over| handed_over.snapshot_step)
+    }
+
     pub fn caught_up(&self) -> bool {
         self.stats.completed_steps() >= self.desired_steps || self.stats.failure() != 0
     }
@@ -5083,6 +5096,11 @@ impl CanonicalGpuRequest {
         display.raw_primary_step = completed_steps;
         refresh_canonical_display(display);
         display.readbacks = display.readbacks.saturating_add(1);
+        self.handed_over = Some(HandedOver {
+            generation,
+            snapshot_step: completed_steps,
+            strides: RecorderStrides::default(),
+        });
         self.generation = generation;
         self.revision = self.revision.wrapping_add(1).max(1);
         self.desired_steps = self.desired_steps.max(completed_steps);
@@ -6452,11 +6470,21 @@ fn receive_canonical_handoff_receipt(
     tag.stats.completed.store(1, Ordering::Release);
 }
 
+/// A handoff admitted: the generation, the snapshot step it starts from, and
+/// the recorders' strides as the source generation ran them.
+#[derive(Clone, Debug)]
+struct HandedOver {
+    generation: u64,
+    snapshot_step: u64,
+    strides: RecorderStrides,
+}
+
 fn settle_canonical_handoff(
     mut commands: Commands,
     mut assets: ResMut<Assets<ShaderBuffer>>,
     mut request: ResMut<CanonicalGpuRequest>,
     mut display: ResMut<CanonicalGpuDisplay>,
+    recorders: Option<Res<WaveGpuRequest>>,
 ) {
     let completed = request
         .handoff
@@ -6532,6 +6560,15 @@ fn settle_canonical_handoff(
             },
         ))
         .id();
+    // The recorders are still the source's here: the app sets them up for the
+    // target after this, in its own pass.
+    request.handed_over = Some(HandedOver {
+        generation,
+        snapshot_step: completed_steps,
+        strides: recorders.map_or_else(RecorderStrides::default, |recorders| {
+            recorders.recorder_strides()
+        }),
+    });
     request.generation = generation;
     request.revision = request.revision.wrapping_add(1).max(1);
     // Requests published while the GPU validated the transfer belong to the
@@ -6636,6 +6673,7 @@ impl Plugin for CanonicalWaveGpuPlugin {
             .add_systems(
                 Render,
                 (
+                    mark_handed_over_ring_frames.before(prepare_canonical_bind_group),
                     prepare_canonical_bind_group,
                     prepare_canonical_handoff_bind_groups,
                     prepare_canonical_live_event_bind_group,
@@ -7744,6 +7782,56 @@ fn recorders_failed(recorders: &[RecorderReadiness]) -> bool {
     recorders
         .iter()
         .any(|recorder| recorder.configured && recorder.pipelines == PipelineReadiness::Failed)
+}
+
+/// The rings a handoff keeps hold, in the frames of the steps the source ran
+/// past the snapshot while the handoff waited for admission, samples of the
+/// trajectory the target discards. The target restarts at the snapshot and
+/// writes those frames again only as it gets there, and in between the host
+/// read them as the target's (PR-5 of the 2026-10-20 review). Before the
+/// target's first step, while the source's group still says how far it ran,
+/// they are marked unrecorded: a sample with a NaN stamp is one the host
+/// leaves out. Written again on a frame the target's group is not ready yet,
+/// they are still the source's.
+fn mark_handed_over_ring_frames(
+    request: Option<Res<CanonicalGpuRequest>>,
+    group: Option<Res<CanonicalBindGroup>>,
+    recorders: Option<Res<WaveGpuRequest>>,
+    gpu_buffers: Res<RenderAssets<GpuShaderBuffer>>,
+    queue: Res<RenderQueue>,
+) {
+    let (Some(request), Some(group), Some(recorders)) = (request, group, recorders) else {
+        return;
+    };
+    let Some(handed_over) = request
+        .handed_over
+        .as_ref()
+        .filter(|handed_over| handed_over.generation == request.generation)
+    else {
+        return;
+    };
+    // The target's group in place: its steps may have begun, and the frames
+    // are its own.
+    if group.generation == request.generation {
+        return;
+    }
+    let nan = f32::NAN.to_le_bytes();
+    for (buffer, offset, length) in recorders.stale_ring_ranges(
+        handed_over.snapshot_step,
+        group.encoded_steps,
+        &handed_over.strides,
+    ) {
+        let Some(buffer) = gpu_buffers.get(&buffer) else {
+            continue;
+        };
+        let bytes = nan
+            .iter()
+            .copied()
+            .cycle()
+            .take(length as usize)
+            .collect::<Vec<_>>();
+        queue.write_buffer(&buffer.buffer, offset, &bytes);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

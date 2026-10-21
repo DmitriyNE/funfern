@@ -241,6 +241,9 @@ pub struct Playground {
     pub(super) far_field_recording_from: Option<f64>,
     /// Why the far-field recorder refused the active contour, if it did.
     pub(super) far_field_refused: Option<String>,
+    /// The source generation of the last handoff and its snapshot's time:
+    /// that generation's readbacks bring nothing past it.
+    pub(super) handoff_cut: Option<(u64, f64)>,
     pub(super) frame_ms: f32,
     pub(super) wave_energy: Option<f64>,
     /// Each field-dependent material's peak response at the last full
@@ -492,6 +495,7 @@ impl Default for Playground {
             probe_history_physics: None,
             far_field_recording_from: None,
             far_field_refused: None,
+            handoff_cut: None,
             frame_ms: 16.0,
             wave_energy: None,
             nonlinear_strength: Vec::new(),
