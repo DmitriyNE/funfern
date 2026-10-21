@@ -280,14 +280,33 @@ impl WaveGpuRequest {
         sample_rate: f64,
         context: RecorderContext,
     ) -> Result<(), String> {
-        self.update_point_probes_from(
+        let result = self.update_point_probes_from(
             assets,
             commands,
             CanonicalStencilSource::Fixed(operator),
             probes,
             sample_rate,
             context,
-        )
+        );
+        self.cleared_on_error(result, Self::clear_probe_buffers, assets, commands)
+    }
+
+    /// A rejection clears the recorder, whatever rejected it. The validation
+    /// rejections always did, but a stencil that could not be built returned
+    /// with the previous mesh's stencils still bound, and they sampled
+    /// unrelated nodes of the new generation for as long as it ran (PR-4 of
+    /// the 2026-10-20 review).
+    fn cleared_on_error(
+        &mut self,
+        result: Result<(), String>,
+        clear: fn(&mut Self, &mut Assets<ShaderBuffer>, &mut Commands),
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+    ) -> Result<(), String> {
+        if result.is_err() {
+            clear(self, assets, commands);
+        }
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -301,18 +320,20 @@ impl WaveGpuRequest {
         sample_rate: f64,
         context: RecorderContext,
     ) -> Result<(), String> {
-        let index = TemporalTableIndex::build(operator, manifest)?;
-        self.update_point_probes_from(
-            assets,
-            commands,
-            CanonicalStencilSource::Temporal {
-                operator,
-                index: &index,
-            },
-            probes,
-            sample_rate,
-            context,
-        )
+        let result = TemporalTableIndex::build(operator, manifest).and_then(|index| {
+            self.update_point_probes_from(
+                assets,
+                commands,
+                CanonicalStencilSource::Temporal {
+                    operator,
+                    index: &index,
+                },
+                probes,
+                sample_rate,
+                context,
+            )
+        });
+        self.cleared_on_error(result, Self::clear_probe_buffers, assets, commands)
     }
 
     fn update_point_probes_from(
@@ -581,13 +602,14 @@ impl WaveGpuRequest {
         probes: &[CurveProbeInput],
         context: RecorderContext,
     ) -> Result<(), String> {
-        self.update_curve_probes_from(
+        let result = self.update_curve_probes_from(
             assets,
             commands,
             CanonicalStencilSource::Fixed(operator),
             probes,
             context,
-        )
+        );
+        self.cleared_on_error(result, Self::clear_curve_probe_buffers, assets, commands)
     }
 
     /// Line probes over a time-driven generation. Each sample reconstructs
@@ -602,17 +624,19 @@ impl WaveGpuRequest {
         probes: &[CurveProbeInput],
         context: RecorderContext,
     ) -> Result<(), String> {
-        let index = TemporalTableIndex::build(operator, manifest)?;
-        self.update_curve_probes_from(
-            assets,
-            commands,
-            CanonicalStencilSource::Temporal {
-                operator,
-                index: &index,
-            },
-            probes,
-            context,
-        )
+        let result = TemporalTableIndex::build(operator, manifest).and_then(|index| {
+            self.update_curve_probes_from(
+                assets,
+                commands,
+                CanonicalStencilSource::Temporal {
+                    operator,
+                    index: &index,
+                },
+                probes,
+                context,
+            )
+        });
+        self.cleared_on_error(result, Self::clear_curve_probe_buffers, assets, commands)
     }
 
     fn update_curve_probes_from(
@@ -771,7 +795,7 @@ impl WaveGpuRequest {
         sample_rate: f64,
         context: RecorderContext,
     ) -> Result<(), String> {
-        self.update_area_probes_from(
+        let result = self.update_area_probes_from(
             assets,
             commands,
             operator,
@@ -779,7 +803,8 @@ impl WaveGpuRequest {
             probes,
             sample_rate,
             context,
-        )
+        );
+        self.cleared_on_error(result, Self::clear_area_probe_buffers, assets, commands)
     }
 
     /// Area probes over a time-driven generation. Each contribution addresses
@@ -796,16 +821,18 @@ impl WaveGpuRequest {
         sample_rate: f64,
         context: RecorderContext,
     ) -> Result<(), String> {
-        let index = TemporalTableIndex::build(operator, manifest)?;
-        self.update_area_probes_from(
-            assets,
-            commands,
-            operator.base(),
-            Some((operator, &index)),
-            probes,
-            sample_rate,
-            context,
-        )
+        let result = TemporalTableIndex::build(operator, manifest).and_then(|index| {
+            self.update_area_probes_from(
+                assets,
+                commands,
+                operator.base(),
+                Some((operator, &index)),
+                probes,
+                sample_rate,
+                context,
+            )
+        });
+        self.cleared_on_error(result, Self::clear_area_probe_buffers, assets, commands)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3222,6 +3249,68 @@ mod tests {
     /// adaptation. They survive in the ring now, and the host takes records by
     /// time rather than by slot, so where the new stencils resume writing does
     /// not matter.
+    /// PR-4 of the 2026-10-20 review: a recorder whose stencils could not be
+    /// built for a new generation kept the old mesh's, and sampled unrelated
+    /// nodes of the new one for the whole generation. The validation
+    /// rejections cleared it; the reconstructions returned through `?`. Every
+    /// rejection clears the recorder.
+    #[test]
+    fn a_stencil_that_cannot_be_built_clears_its_recorder() {
+        let operator = canonical_operator();
+        let mut world = World::new();
+        let mut assets = Assets::<ShaderBuffer>::default();
+        let mut request = WaveGpuRequest::default();
+        let context = RecorderContext {
+            time_step: 1.0e-3,
+            physics: PhysicsModel::Mechanical,
+            history: RecorderHistory::Keep,
+        };
+        // An element the operator does not have.
+        let foreign = QuadraticPointStencil {
+            element: u32::MAX,
+            barycentric: [1.0 / 3.0; 3],
+            nodes: [0; 7],
+            value_weights: [0.0; 7],
+            gradient_weights: [Point2::default(); 7],
+            region: funfern_core::BACKGROUND_REGION,
+            mass_density: 1.0,
+            stiffness: funfern_core::SymmetricTensor2::isotropic(1.0),
+        };
+        let mut queue = CommandQueue::default();
+        {
+            let mut commands = Commands::new(&mut queue, &world);
+            for stencil in [None, Some(foreign)] {
+                let points = request.update_canonical_point_probes(
+                    &mut assets,
+                    &mut commands,
+                    &operator,
+                    &[(1, stencil)],
+                    120.0,
+                    context,
+                );
+                let curves = request.update_canonical_curve_probes(
+                    &mut assets,
+                    &mut commands,
+                    &operator,
+                    &[CurveProbeInput {
+                        id: 1,
+                        sample_rate: 60.0,
+                        samples: vec![stencil.map(|stencil| (stencil, Point2::new(1.0, 0.0))); 2],
+                    }],
+                    context,
+                );
+                assert_eq!(points.is_ok(), stencil.is_none());
+                assert_eq!(curves.is_ok(), stencil.is_none());
+            }
+        }
+        queue.apply(&mut world);
+        assert!(request.probes.is_none(), "the point recorder is cleared");
+        assert!(
+            request.curve_probes.is_none(),
+            "the line recorder is cleared"
+        );
+    }
+
     #[test]
     fn a_new_mesh_over_the_same_probes_inherits_their_rings() {
         let operator = canonical_operator();

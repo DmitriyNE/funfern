@@ -26462,3 +26462,38 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 3: every recorder is set up on its own and cleared when it fails (PR-3, PR-4)
+
+- **Found by the review (PR-3, PR-4).**
+  - `configure_probes` chained the point, line and area recorders with
+    `and_then` and reported only through the status line.
+  - A point recorder that failed, as on an adaptation handoff to a driven
+    generation in the review's example, skipped the other two. Their bind
+    group was rebuilt from the old mesh's stencils, and the stored upload
+    tag let their readbacks pass as current. The line recorder wrote samples
+    of unrelated nodes, stamped with correct times, into the ring it kept.
+  - On the recorder side, every validation rejection cleared the recorder,
+    but the reconstructions returned through `?` with the old stencils still
+    in place: `source.build`, `gpu_canonical_area_contribution` and
+    `TemporalTableIndex::build`. The rule that "each rejection clears
+    explicitly" was written on 2026-09-16, before those fallible builds
+    existed.
+- **Reproduced.**
+  - `a_stencil_that_cannot_be_built_clears_its_recorder` installs point and
+    line recorders, then updates them with a stencil naming an element the
+    operator does not have. Both kept their buffers.
+  - `a_recorder_that_fails_leaves_none_on_old_stencils` configures a point
+    and a line probe, then configures them again against another mesh's
+    operator. The line recorder stayed on the old stencils.
+- **Fix.**
+  - Each of the six recorder updates (point, line and area, each fixed and
+    temporal) clears its recorder on any error (`cleared_on_error`).
+  - `configure_probes` sets up each recorder on its own. Only a defect fails
+    one, so a failure lights the diagnostics warning, with every recorder's
+    error on the status line.
+- **Checked on Metal:** the `observables`, `far-field` and
+  `handoff-memory-running` fixtures pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

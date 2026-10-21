@@ -467,12 +467,25 @@ impl Playground {
             physics,
             history,
         };
-        let result = source
-            .point_probes(request, assets, commands, &points, 120.0, context)
-            .and_then(|()| source.curve_probes(request, assets, commands, &curves, context))
-            .and_then(|()| source.area_probes(request, assets, commands, &areas, 60.0, context));
-        if let Err(error) = result {
-            self.message = error;
+        // Each recorder on its own: chained, a failed point recorder left the
+        // line and area recorders on the previous mesh's stencils, their
+        // readbacks still counting as current (PR-3 of the 2026-10-20
+        // review). A recorder that fails is cleared, and only a defect fails
+        // one, so it lights the diagnostics warning.
+        let failures = [
+            source.point_probes(request, assets, commands, &points, 120.0, context),
+            source.curve_probes(request, assets, commands, &curves, context),
+            source.area_probes(request, assets, commands, &areas, 60.0, context),
+        ]
+        .into_iter()
+        .filter_map(Result::err)
+        .collect::<Vec<_>>();
+        if !failures.is_empty() {
+            self.message = format!(
+                "A probe recorder could not be set up: {}",
+                failures.join("; ")
+            );
+            self.unseen_error = true;
         }
         let far = active
             .far_field
@@ -1033,6 +1046,69 @@ mod tests {
         state.redo();
         settle(&mut state.editor);
         assert_eq!(name(&state), "Receiver renamed", "Redo is still there");
+    }
+
+    /// PR-3 of the 2026-10-20 review: the recorders were set up in a chain,
+    /// so a point recorder that failed left the line recorder on the
+    /// previous mesh's stencils, its readbacks still counting as current,
+    /// with the status line alone saying so. Each is set up on its own, one
+    /// that fails is cleared, and the diagnostics warning lights.
+    #[test]
+    fn a_recorder_that_fails_leaves_none_on_old_stencils() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut recorders = WaveGpuRequest::default();
+        let mut state = Playground::default();
+        state
+            .editor
+            .create_probe(
+                "Point".into(),
+                [1, 2, 3],
+                TopologyProbeTarget::Point(Point2::new(0.2, 0.1)),
+            )
+            .unwrap();
+        state
+            .editor
+            .create_probe(
+                "Line".into(),
+                [1, 2, 3],
+                TopologyProbeTarget::Segment {
+                    start: Point2::new(-0.5, 0.7),
+                    end: Point2::new(0.5, 0.7),
+                    preset: ProbeSamplingPreset::Low,
+                },
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        // Another mesh's operator: no stencil of this one can be built on it.
+        let mut coarse = Playground::default();
+        let other = activate_at(&mut coarse, 0.4);
+        let mut configure =
+            |state: &mut Playground, recorders: &mut WaveGpuRequest, source: RecorderSource<'_>| {
+                world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                    let mut queue = bevy::ecs::world::CommandQueue::default();
+                    let mut commands = Commands::new(&mut queue, world);
+                    state.configure_probes(recorders, &mut assets, &mut commands, &active, source);
+                });
+            };
+        configure(
+            &mut state,
+            &mut recorders,
+            RecorderSource::Fixed(&active.canonical_operator),
+        );
+        assert!(recorders.probes.is_some() && recorders.curve_probes.is_some());
+        assert!(!state.diagnostics_warning());
+        configure(
+            &mut state,
+            &mut recorders,
+            RecorderSource::Fixed(&other.canonical_operator),
+        );
+        assert!(
+            recorders.curve_probes.is_none(),
+            "the line recorder is not left on the old stencils"
+        );
+        assert!(state.diagnostics_warning(), "{}", state.message);
     }
 
     #[test]
