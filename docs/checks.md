@@ -1207,7 +1207,15 @@ transferred field with status 6 and the source keeps stepping. Each accepted
 handoff holds `Q`, `b` and `r` to `3e-5` over 60 steps after it.
 `FAILURE_LAW=phi4` runs `canonical_gpu_nonlinear_failure` on a kicked φ⁴ wall:
 the device refuses the reference's step with status 6 and a retry leaves every
-stored bit, `r` included, unchanged.
+stored bit, `r` included, unchanged. `FAILURE_FILTER=1` runs either law with the
+grid filter on, as the app runs by default, the oracle filtering on the
+device's cadence. The device runs up to 64 steps ahead of what the host has
+seen, so the steps encoded after the failure cross a filter commit, and the
+device must stay at the refused step. Until 2026-10-21 the filter took the
+failed step's code for a filter not taken and cleared it, and the steps after
+committed with nothing computed: on Kerr the device read its failure 24 steps
+past the refusal (`failure-cleared-by-the-filter`). φ⁴'s status 6 is not a code
+the filter takes that way, and it held either way.
 
 `canonical_gpu_temporal_work` stamps a material Switch mid-run and requires
 the runtime decoded from the state snapshot, and the bulk energy split and

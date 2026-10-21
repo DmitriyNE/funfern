@@ -26056,3 +26056,48 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 2: a latched failure holds the steps after it (GPU-1)
+
+- **Found by the review (GPU-1).** On a field-law or restoring generation,
+  `resident_filter_commit` takes a pending timestep or inverse code for a
+  filter not taken, and clears it. A filter encoded after a latched failure
+  never ran: its stages return on `stopped()`, and the code it saw was the
+  failed step's.
+  - Once the code was cleared, every later step's `commit_step` read a clear
+    candidate and committed with nothing computed. Each flipped the lane,
+    advanced the clock and republished the snapshot, alternating the
+    accepted lane between the last good state and the failed step's
+    half-written candidate.
+  - The device runs up to 64 steps ahead of what the host has seen, so the
+    steps encoded after a failure cross a filter commit whenever the filter
+    is on, which is the app's default.
+  - `rejection` never crossed one in that window.
+- **Reproduced.** `canonical_gpu_nonlinear_failure` gains `FAILURE_FILTER=1`:
+  the grid filter on, the oracle filtering on the device's cadence, and the
+  steps asked for running two cadences past the refusal. On Kerr the oracle
+  refuses step 330, and the device read its failure after 354 steps: 24
+  phantom steps.
+- **Fix.** `resident_filter_commit` returns at once if the latch is set, and
+  `commit_step` commits nothing while it is.
+  - The device now refuses step 330, its accepted state 1.8e-6 off the
+    oracle's step 329, and the retry leaves every stored bit.
+  - φ⁴ with the filter, and both laws without it, read as before. φ⁴'s status
+    6 is not a code the filter takes that way, so it held even mutated.
+- **Mutation** `failure-cleared-by-the-filter` (device), caught by the Kerr
+  filter mode. The device suite gains both filter modes.
+- **Device suite: 95 of 96.** `canonical_gpu_cavity_modes --physics te` ran
+  past its 600 s deadline, where it took 428 s the day before. It ran
+  overnight under a load average of 25 to 70 (Spotlight indexing and a
+  process that is not the app's), and a display went away during it.
+  - TM took 583 s in the same suite, against 205 s the day before, while
+    Mechanical took 42 s.
+  - The latch is raised only by failures, which a linear cavity has none of,
+    so the new check cannot stall it.
+  - Timed A/B, the deadline raised: HEAD's shader gave no result after 19
+    minutes, when a monitor was removed and its window closed; the fixed
+    shader finished all nine runs, correct, in 905 s.
+  - The next suite, run in the day with the RT changes, is to settle it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

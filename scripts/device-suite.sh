@@ -91,6 +91,8 @@ RUNS=(
   'canonical_gpu_long_run'
   'canonical_gpu_nonlinear'
   'canonical_gpu_nonlinear_failure'
+  'FAILURE_FILTER=1 canonical_gpu_nonlinear_failure'
+  'FAILURE_FILTER=1 FAILURE_LAW=phi4 canonical_gpu_nonlinear_failure'
   'canonical_gpu_oscillator'
   'canonical_gpu_oscillator_handoff'
   'canonical_gpu_pulse'

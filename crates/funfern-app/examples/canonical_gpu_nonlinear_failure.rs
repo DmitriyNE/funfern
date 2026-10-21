@@ -13,6 +13,15 @@
 //! a kicked domain wall whose integrated field passes the law's declared
 //! bound, refused with the restoring-domain status. The retry's bit check
 //! covers `r`, which is part of the accepted auxiliary lanes.
+//!
+//! `FAILURE_FILTER=1` runs it with the grid filter on, as the app runs by
+//! default, the oracle filtering on the device's cadence. The device runs up to
+//! 64 steps ahead of what the host has seen, so steps encoded after the
+//! failure cross a filter commit before the host stops encoding: the device
+//! must stay at the refused step, its accepted state untouched. The resident
+//! filter took the failed step's code for a filter not taken and cleared it,
+//! and every step after committed with nothing computed (GPU-1 of the
+//! 2026-10-20 review).
 
 #[path = "support/check.rs"]
 mod check;
@@ -26,8 +35,9 @@ use funfern_app::canonical_gpu::{
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::{
-    CanonicalForcing, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw,
-    FieldLaw, MeshingOptions, OuterBoundaryCondition, Point2, QuadraticWaveOperator, RestoringLaw,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalTemporalWaveOperator,
+    CanonicalTemporalWaveState, CoefficientLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE,
+    MeshingOptions, OuterBoundaryCondition, Point2, QuadraticWaveOperator, RestoringLaw,
     ScalarField, Scene, mesh_scene,
 };
 
@@ -42,6 +52,7 @@ enum Phase {
 struct Pending {
     plan: Option<CanonicalGpuPlan>,
     requested: u64,
+    filtered: bool,
 }
 
 #[derive(Resource)]
@@ -62,6 +73,7 @@ struct Expected {
 
 fn main() -> AppExit {
     let phi4 = std::env::var("FAILURE_LAW").is_ok_and(|value| value == "phi4");
+    let filtered = std::env::var("FAILURE_FILTER").is_ok_and(|value| value == "1");
     let mut scene = Scene::default();
     if phi4 {
         scene.materials[0].restoring = RestoringLaw::Phi4 {
@@ -145,10 +157,24 @@ fn main() -> AppExit {
         let mut history = Vec::new();
         for step in 0..400_u64 {
             match oracle.step_with_forcing(&operator, &forcing) {
-                Ok(_) => history.push((
-                    oracle.primary_flux().to_vec(),
-                    oracle.complementary_flux().to_vec(),
-                )),
+                Ok(_) => {
+                    // The device's filter commits after each cadence's last
+                    // step; one that would raise the energy, or leave the
+                    // map's domain, is not taken.
+                    if filtered && (step + 1).is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
+                        let before = oracle.clone();
+                        if oracle
+                            .apply_grid_filter(&operator, CANONICAL_GRID_FILTER_STRENGTH)
+                            .is_err()
+                        {
+                            oracle = before;
+                        }
+                    }
+                    history.push((
+                        oracle.primary_flux().to_vec(),
+                        oracle.complementary_flux().to_vec(),
+                    ));
+                }
                 Err(error) => {
                     if step >= 20 {
                         chosen = Some((state.clone(), history, step, error.to_string()));
@@ -164,8 +190,9 @@ fn main() -> AppExit {
     let (state, history, refused_step, reason) =
         chosen.expect("an amplitude that crosses the bound mid-run");
     println!(
-        "{} failure gate: {} Q; the oracle refuses step {} ({reason})",
+        "{} failure gate{}: {} Q; the oracle refuses step {} ({reason})",
         if phi4 { "φ⁴" } else { "nonlinear" },
+        if filtered { ", grid filter on" } else { "" },
         base.degrees_of_freedom(),
         refused_step + 1
     );
@@ -188,7 +215,10 @@ fn main() -> AppExit {
     .add_plugins(CanonicalWaveGpuPlugin)
     .insert_resource(Pending {
         plan: Some(plan),
-        requested: refused_step + 20,
+        // Past the refusal by more than a cadence, so a filter commit falls
+        // among the steps encoded after it.
+        requested: refused_step + 2 * GRID_SCALE_FILTER_CADENCE,
+        filtered,
     })
     .insert_resource(Expected {
         history,
@@ -222,6 +252,7 @@ fn install(
         &mut commands,
         pending.plan.take().expect("one plan"),
     );
+    canonical.set_grid_scale_filter(pending.filtered);
     canonical.request_steps(requested);
     commands.spawn(Camera2d);
 }

@@ -1,0 +1,4 @@
+about: the resident filter takes a failed step's code for a filter not taken and clears it, and the steps after commit with nothing computed
+test: FAILURE_FILTER=1 scripts/e2e-fixture.sh --example canonical_gpu_nonlinear_failure
+expect: device failed with status [0-9]+ after [0-9]+ steps; the oracle refused step
+needs: device

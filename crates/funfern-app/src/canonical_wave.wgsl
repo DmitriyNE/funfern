@@ -2170,6 +2170,13 @@ fn commit_event() {
 
 @compute @workgroup_size(1)
 fn resident_filter_commit() {
+    // A filter encoded after a latched failure did not run - its stages
+    // return on `stopped()` - and the code it would judge is the failed
+    // step's. Taken for a filter not taken, it was cleared, and every step
+    // after committed with nothing computed (GPU-1 of the 2026-10-20 review).
+    if atomicLoad(&status.latch) != 0u {
+        return;
+    }
     let failure = atomicLoad(&status.candidate);
     // On a field-dependent medium the tangent polynomial is dissipative only
     // to first order, and so is the total-force correction on a nonlinear
@@ -4518,7 +4525,9 @@ fn commit_step(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
     if i != 0u { return; }
     let failure = atomicLoad(&status.candidate);
-    if failure != 0u {
+    // A latched failure holds every later step, whatever the candidate reads:
+    // their stages returned on `stopped()` and computed nothing.
+    if failure != 0u || atomicLoad(&status.latch) != 0u {
         atomicMax(&status.latch, failure);
         return;
     }
