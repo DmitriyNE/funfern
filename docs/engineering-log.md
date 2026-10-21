@@ -26642,3 +26642,33 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 3: a generation's steps wait for its recorders' groups (PR-9)
+
+- **Found by the review (PR-9).**
+  - A generation that has just taken over has new stencil assets for its
+    recorders, which reach the render world only when their asset events run.
+    Those are not ordered against the egui pass that creates the assets, so
+    the groups can come a frame late.
+  - `steps_wait_for_recorders` held steps only while a group for the running
+    generation was compiling, not while one was missing. With a 120 Hz probe
+    and AMR on, a handoff admitted with a backlog let the target's first 48
+    steps run unrecorded: some 2 samples lost an adaptation, with nothing
+    said.
+  - The PH-18 log had accepted that lag only for a probe being dragged.
+- **Reproduced.** `the_steps_wait_for_a_bound_recorder_still_compiling` had
+  pinned the old rule: a group of the previous generation, or none, held
+  nothing. Asked instead for the steps to wait, it failed.
+- **Fix.** A configured recorder with no group for the running generation
+  holds the steps until it has one, unless its pipelines failed for good
+  (PR-11). A group one revision behind within the generation, a dragged
+  probe's, still holds nothing. Every place that configures recorders also
+  adopts the canonical generation each frame (the app and the three
+  examples), so a group arrives within about a frame.
+- **Checked on Metal:** all 18 fixtures and the recorder examples
+  (`canonical_gpu_filter_boundary`, `canonical_gpu_temporal_consumer` and
+  `canonical_gpu_timing` in its eleven modes) pass. None of them measures
+  the first steps after a handoff directly.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

@@ -7716,17 +7716,26 @@ impl PipelineReadiness {
 /// for its pipelines as they wait for their own: Bevy compiles them in the
 /// background, and on lavapipe the first steps ran while the point
 /// recorder's was still compiling, its trace starting at step 8 or 14 with
-/// nothing said. A recorder whose group is of another revision does not hold
-/// them: a dragged probe makes a revision a frame, and as the app's pass and
-/// the asset events are not ordered, its group can come a frame later.
-/// A recorder whose pipelines failed for good does not hold them either: it
+/// nothing said. A recorder with no group for the running generation holds
+/// them until it has one: the app's pass and the asset events are not
+/// ordered, so the stencils of a generation that has just taken over reach
+/// the render world a frame late, and its first steps, 48 at 120 Hz behind a
+/// backlog, ran unrecorded (PR-9 of the 2026-10-20 review). A recorder whose
+/// group is of another revision of this generation does not hold them: a
+/// dragged probe makes a revision a frame, and its group comes a frame later.
+/// A recorder whose pipelines failed for good holds nothing either: it
 /// records nothing, the steps go on without it, and the failure is reported
 /// (`recorders_failed`).
 fn steps_wait_for_recorders(generation: u64, recorders: &[RecorderReadiness]) -> bool {
     recorders.iter().any(|recorder| {
         recorder.configured
-            && recorder.group == Some((generation, recorder.revision))
-            && recorder.pipelines == PipelineReadiness::Compiling
+            && match recorder.group {
+                Some((bound, revision)) if bound == generation => {
+                    revision == recorder.revision
+                        && recorder.pipelines == PipelineReadiness::Compiling
+                }
+                _ => recorder.pipelines != PipelineReadiness::Failed,
+            }
     })
 }
 
@@ -8868,8 +8877,9 @@ mod tests {
     /// Reported by the observables fixture on lavapipe: the point recorder's
     /// pipeline was still compiling when the first seven steps ran, and its
     /// trace started at step 8. A recorder bound to the running generation
-    /// holds the steps until its pipelines have compiled; one whose group is
-    /// of another revision or generation, or one not set up, does not.
+    /// holds the steps until its pipelines have compiled, and one with no
+    /// group for it yet until it has one; one whose group is of another
+    /// revision, or one not set up, does not.
     #[test]
     fn the_steps_wait_for_a_bound_recorder_still_compiling() {
         let recorder = |group: Option<(u64, u64)>, compiled: bool| RecorderReadiness {
@@ -8899,11 +8909,12 @@ mod tests {
             1,
             &[recorder(Some((1, 3)), false)]
         ));
-        assert!(!steps_wait_for_recorders(
-            2,
-            &[recorder(Some((1, 4)), false)]
-        ));
-        assert!(!steps_wait_for_recorders(1, &[recorder(None, false)]));
+        // PR-9 of the 2026-10-20 review: a generation that has just taken
+        // over has its recorders' groups built a frame later, the stencils
+        // their asset events bring, and its first steps, 48 at 120 Hz behind
+        // a backlog, ran unrecorded. They wait for a group of its own.
+        assert!(steps_wait_for_recorders(2, &[recorder(Some((1, 4)), true)]));
+        assert!(steps_wait_for_recorders(1, &[recorder(None, true)]));
         let unset = RecorderReadiness {
             configured: false,
             ..recorder(Some((1, 4)), false)
