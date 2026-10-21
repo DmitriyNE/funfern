@@ -145,9 +145,13 @@ impl Coordinator {
     /// The reset medium starts at its authored laws, wherever a Switch had
     /// sent it, and a pulse or a Switch press still waiting was meant for the
     /// run Reset discarded: sent on, it went into the cleared field in the
-    /// frame Reset installed it.
+    /// frame Reset installed it. So was a pack still waiting for the device:
+    /// made against that run's clock, its handoff carried the discarded
+    /// run's time into the reset one (RT-9 of the 2026-10-20 review). The
+    /// candidate is packed again against the reset run.
     pub(super) fn reset_installed(&mut self, time_step: f64) {
         self.reset_requested = false;
+        self.gpu_upload_preparation = None;
         self.uploaded_time_step = time_step;
         self.canonical_event_serial = 0;
         self.canonical_event_observed = 0;

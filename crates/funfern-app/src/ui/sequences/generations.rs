@@ -1171,6 +1171,36 @@ fn a_fault_while_a_handoff_waits_withdraws_it() {
     session.quiesce();
 }
 
+/// RT-9 of the 2026-10-20 review: Reset while an edit's pack waited for the
+/// device kept the pack, made against the run Reset discarded, and its
+/// handoff carried that run's clock origin into the reset one, so every
+/// drive, pulse, gate and Switch carried through it stood that far off.
+/// Reset drops the pack, and the candidate is packed again against the reset
+/// run.
+#[test]
+fn reset_drops_a_pack_made_against_the_run_it_clears() {
+    let mut session = Session::start();
+    session.quiesce();
+    for act in [Act::Nudge(2), Act::Validate, Act::Frame(None)] {
+        session.step(&act);
+    }
+    assert!(
+        session.state.coordinator.gpu_upload_preparation.is_some(),
+        "the pack waits for the device"
+    );
+    session.step(&Act::Reset);
+    session.step(&Act::Frame(Some(0)));
+    assert!(
+        !session.state.coordinator.reset_requested,
+        "Reset installed"
+    );
+    assert!(
+        session.state.coordinator.gpu_upload_preparation.is_none(),
+        "the pack made against the cleared run is dropped"
+    );
+    session.quiesce();
+}
+
 /// Found by the runtime sequences: a scene whose draft an edit made invalid
 /// before its first validation never ran, since nothing was prepared while
 /// the draft was invalid, and neither did one opened with an invalid draft.

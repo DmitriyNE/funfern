@@ -26336,3 +26336,25 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: Reset drops a pack made against the run it clears (RT-9)
+
+- **Found by the review (RT-9).** `dispatch_pack` packs a candidate at the
+  running time it captures. Reset checks only `uploading` and
+  `source_commit`, so a pack still waiting for the device survived it.
+  - The finished pack then handed off with the discarded run's clock origin.
+    The review's example: a scene run for 60 s, an edit packing, Reset. The
+    device's preparation delta came out near −60 s, shifting the anchors of
+    the drives, pulses, gates and Switches carried through the handoff.
+  - The review's skeptics agreed on the stale origin but not on which values
+    end up wrong, so the impact may be narrower than first described.
+- **Reproduced.** `reset_drops_a_pack_made_against_the_run_it_clears` runs
+  the lockstep harness: an edit packed while the device was behind, then
+  Reset. Reset installed and the pack stayed.
+- **Fix.** Reset drops a waiting pack (`Coordinator::reset_installed`), and
+  the protocol model's Reset drops `packed` alike. The next frame packs the
+  candidate again against the reset run, at its clock and its runtime
+  serials.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

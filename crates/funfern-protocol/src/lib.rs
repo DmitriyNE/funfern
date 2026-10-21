@@ -675,6 +675,9 @@ impl Protocol {
             self.event = None;
             self.stranded = false;
             self.patched = None;
+            // A pack waiting for the device was made against the run Reset
+            // clears; the candidate is packed again.
+            self.packed = None;
             self.reset = false;
             self.uploaded = Some(active);
             self.pulses = 0;
