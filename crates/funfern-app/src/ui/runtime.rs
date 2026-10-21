@@ -237,7 +237,16 @@ impl Playground {
                 );
                 self.begin_handoff_timeline();
             }
-            Err(error) => self.message = error,
+            // The runtime holds the failure for this revision, which lights
+            // the diagnostics warning and accounts for the revision.
+            Err(error) => {
+                self.coordinator.request_failed(
+                    self.editor.revision,
+                    PreparedInputs::of(&self.editor.document),
+                    self.editor.document.presentation.mesh_edge,
+                );
+                self.message = error;
+            }
         }
     }
     /// Packs `candidate` for the device off the frame, and in tests that ask
@@ -1405,6 +1414,51 @@ mod tests {
         assert!(!state.coordinator.reset_requested, "Reset is let go");
         assert!(state.unseen_error, "the diagnostics warning is lit");
         assert!(state.message.contains("Reset failed"), "{}", state.message);
+    }
+
+    /// RT-7 of the 2026-10-20 review: a request whose job cannot be created
+    /// lights the diagnostics warning, and its revision is not built again
+    /// every frame, rewriting the status line each time.
+    #[test]
+    fn a_job_that_cannot_be_created_is_reported_and_not_built_again() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame = |state: &mut Playground| {
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    &mut request,
+                    &display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+            });
+        };
+        // Only a defect makes one: here a compiled scene of other geometry.
+        let mut state = with_baffles(&[]);
+        state.editor.compiled_accepted =
+            with_baffles(&[[Point2::new(0.3, -0.4), Point2::new(0.3, 0.4)]])
+                .editor
+                .compiled_accepted
+                .clone();
+        frame(&mut state);
+        assert!(
+            state.message.contains("does not match"),
+            "{}",
+            state.message
+        );
+        assert!(state.diagnostics_warning());
+        state.message = "read".into();
+        frame(&mut state);
+        assert_eq!(state.message, "read", "the revision is not built again");
     }
 
     /// A recorder failed for good is a defect's failure: it lights the

@@ -26272,3 +26272,34 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: a preparation job that cannot be created fails its revision (RT-7)
+
+- **Found by the review (RT-7).** `request_with_handoff` returned the error of
+  `TopologyPreparationJob::new` with `?` before recording anything. Only a
+  defect fails there: a plan that cannot be coarsened, face assignments that
+  do not resolve, or "Compiled topology does not match its authored scene".
+  When one did:
+  - the caller only set the status line, and the diagnostics warning stayed
+    dark;
+  - `request_due` found the revision unaccounted for, so every frame cloned
+    the compiled scene and built the job again, and the edit never prepared.
+    That is the retried-every-frame defect the guard was added to close;
+  - a rebuild asked for in that frame was spent.
+- **Reproduced.**
+  - `a_request_whose_job_cannot_be_created_fails_its_revision` requests with a
+    compiled scene from before an edit. No failure was recorded.
+  - `a_job_that_cannot_be_created_is_reported_and_not_built_again` runs frames
+    with a compiled scene of other geometry. The warning stayed dark.
+- **Fix.**
+  - The runtime records a job that cannot be created as a failed request for
+    its revision, as a failed preparation is. It supersedes what was
+    preparing, as any request does. The failure lights the diagnostics
+    warning, and `request_due` finds the revision accounted for.
+  - A rebuild asked for is taken only when the job is created, so it waits
+    for the next request.
+  - The coordinator's `request_failed` accounts for the revision but leaves a
+    Reset or a scene replacement's fresh start to the next request.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

@@ -1448,7 +1448,8 @@ impl TopologyRuntime {
         require_solver_handoff: bool,
     ) -> Result<TopologyToken, String> {
         let mesh_revision = self.reserve_mesh_revision();
-        let job = TopologyPreparationJob::new(
+        let topology_revision = compiled.topology.revision;
+        let job = match TopologyPreparationJob::new(
             document_revision,
             document,
             compiled,
@@ -1457,11 +1458,36 @@ impl TopologyRuntime {
             options,
             PreparationIntent {
                 fresh,
-                force_rebuild: std::mem::take(&mut self.force_rebuild),
+                force_rebuild: self.force_rebuild,
                 preserve_adaptation: self.preserve_adaptation,
                 require_solver_handoff,
             },
-        )?;
+        ) {
+            Ok(job) => job,
+            // Only a defect fails here. The request still stands for its
+            // revision, failed as a preparation fails, so that the frame loop
+            // does not build the job again every frame and the diagnostics
+            // warning lights; a rebuild asked for waits for the next request
+            // (RT-7 of the 2026-10-20 review).
+            Err(message) => {
+                let token = TopologyToken {
+                    document_revision,
+                    topology_revision,
+                    mesh_generation: mesh_revision,
+                };
+                self.preparing = None;
+                self.ready = None;
+                self.requested = Some(token);
+                self.requested_adaptation = false;
+                self.last_error = Some(TopologyPreparationError {
+                    token,
+                    phase: TopologyPreparationPhase::Failed,
+                    message: message.clone(),
+                });
+                return Err(message);
+            }
+        };
+        self.force_rebuild = false;
         let token = job.token();
         self.preparing = Some(job);
         self.ready = None;
@@ -5172,6 +5198,48 @@ mod tests {
                 sample.point
             );
         }
+    }
+
+    /// RT-7 of the 2026-10-20 review: a request whose job cannot be created,
+    /// which only a defect does, is a failed request for its revision, as a
+    /// failed preparation is. Returned before anything was recorded, the
+    /// frame loop found the revision unaccounted for and built the job again
+    /// every frame, and a rebuild asked for with it was spent.
+    #[test]
+    fn a_request_whose_job_cannot_be_created_fails_its_revision() {
+        let (mut editor, curve, mut runtime) = hole_runtime();
+        let stale = editor.compiled_accepted.clone();
+        nudge(&mut editor, curve);
+        runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                false,
+            )
+            .unwrap();
+        runtime.request_full_rebuild();
+        let error = runtime
+            .request(
+                editor.revision + 1,
+                &editor.document,
+                stale,
+                options(),
+                false,
+            )
+            .unwrap_err();
+        let failure = runtime.last_error().expect("the failure is recorded");
+        assert_eq!(failure.token.document_revision, editor.revision + 1);
+        assert_eq!(failure.message, error);
+        assert!(
+            runtime.preparing.is_none(),
+            "it supersedes the request before it"
+        );
+        assert!(
+            runtime.force_rebuild,
+            "the rebuild asked for waits for the next request"
+        );
     }
 
     #[test]

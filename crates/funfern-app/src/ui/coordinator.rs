@@ -109,6 +109,15 @@ impl Coordinator {
         self.fresh_requested = false;
     }
 
+    /// A request for the document at `revision` failed before its job was
+    /// created. It stands for that revision all the same, and a Reset or a
+    /// replacement that asked to start from zero is left to the next one.
+    pub(super) fn request_failed(&mut self, revision: u64, inputs: PreparedInputs, edge: f64) {
+        self.requested_revision = Some(revision);
+        self.requested_inputs = Some(inputs);
+        self.requested_edge = edge;
+    }
+
     /// A whole scene came in: its first request starts from zero, and the
     /// outgoing scene's generation is dropped at the next runtime update.
     pub(super) fn scene_replaced(&mut self, fresh: bool) {
