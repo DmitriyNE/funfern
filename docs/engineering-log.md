@@ -26729,3 +26729,19 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: the line recorder takes its normals from the generation (PR-16)
+
+- **Found by the review (PR-16).** `configure_probes` took each probe's
+  definition from the editor's document, but its stencils from the active
+  generation. Swap ends pressed while an upload was in flight recorded flux
+  with its sign turned against the sample order, and those frames stayed in
+  the trace.
+- **Reproduced.** The recorders' inputs moved into `recorder_inputs`,
+  unchanged. `a_line_recorder_reads_its_normals_from_the_generation` swaps a
+  segment's ends in the document alone. Every normal turned.
+- **Fix.** The inputs read the generation's own definitions,
+  `active.probe_definitions`, as its stencils do.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

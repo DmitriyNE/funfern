@@ -400,23 +400,26 @@ impl Playground {
             self.clear_probe_trace(id);
         }
     }
-    pub(super) fn configure_probes(
+    /// The point, line and area recorders' inputs for `active`'s probes.
+    #[allow(clippy::type_complexity)]
+    fn recorder_inputs(
         &mut self,
-        request: &mut WaveGpuRequest,
-        assets: &mut Assets<ShaderBuffer>,
-        commands: &mut Commands,
-        active: &Arc<PreparedTopology>,
-        source: RecorderSource<'_>,
+        active: &PreparedTopology,
+    ) -> (
+        Vec<(u64, Option<QuadraticPointStencil>)>,
+        Vec<CurveProbeInput>,
+        Vec<AreaProbeInput>,
     ) {
         let mut points = vec![];
         let mut curves = vec![];
         let mut areas = vec![];
         for compiled in active.probes.iter() {
-            let definition = self
-                .editor
-                .document
-                .model
-                .probes
+            // The generation's own definitions, as its stencils are: from the
+            // document, an end swapped while an upload was in flight turned a
+            // line's normals against its samples (PR-16 of the 2026-10-20
+            // review).
+            let definition = active
+                .probe_definitions
                 .iter()
                 .find(|probe| probe.id == compiled.id);
             let Some(definition) = definition else {
@@ -441,6 +444,18 @@ impl Playground {
                 }
             }
         }
+        (points, curves, areas)
+    }
+
+    pub(super) fn configure_probes(
+        &mut self,
+        request: &mut WaveGpuRequest,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        active: &Arc<PreparedTopology>,
+        source: RecorderSource<'_>,
+    ) {
+        let (points, curves, areas) = self.recorder_inputs(active);
         let dt = self.solver_time_step();
         let physics = active.bundle.authored.physics;
         if self
@@ -1222,6 +1237,50 @@ mod tests {
             );
         });
         assert_eq!(state.far_field_recording_from, Some(0.0));
+    }
+
+    /// PR-16 of the 2026-10-20 review: the line recorder took its probes'
+    /// normals from the document but their stencils from the active
+    /// generation, so Swap ends pressed while an upload was in flight
+    /// recorded flux with its sign turned against the sample order, and those
+    /// frames stayed in the trace. Both come from the generation.
+    #[test]
+    fn a_line_recorder_reads_its_normals_from_the_generation() {
+        let mut state = Playground::default();
+        let start = Point2::new(-0.5, 0.7);
+        let end = Point2::new(0.5, 0.7);
+        let segment = |start, end| TopologyProbeTarget::Segment {
+            start,
+            end,
+            preset: ProbeSamplingPreset::Low,
+        };
+        let line = state
+            .editor
+            .create_probe("Line".into(), [1, 2, 3], segment(start, end))
+            .unwrap();
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        let normals = |state: &mut Playground| -> Vec<Point2> {
+            let (_, curves, _) = state.recorder_inputs(&active);
+            curves[0]
+                .samples
+                .iter()
+                .flatten()
+                .map(|(_, normal)| *normal)
+                .collect()
+        };
+        let before = normals(&mut state);
+        // Swap ends, and nothing prepared yet.
+        let probe = state
+            .editor
+            .document
+            .model
+            .probes
+            .iter_mut()
+            .find(|probe| probe.id == line)
+            .unwrap();
+        probe.target = segment(end, start);
+        assert_eq!(normals(&mut state), before);
     }
 
     #[test]
