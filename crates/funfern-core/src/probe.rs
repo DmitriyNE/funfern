@@ -1233,6 +1233,11 @@ impl QuadraticFarFieldStencil {
         if !authored.time_invariant() {
             return Err(FarFieldCompileError::TimeVaryingExterior);
         }
+        // A named loss channel is a law, which `uniform` refuses, so it read
+        // as a non-uniform exterior (PR-17 of the 2026-10-20 review).
+        if authored.electric_loss.is_some() || authored.magnetic_loss.is_some() {
+            return Err(FarFieldCompileError::LossyExterior);
+        }
         let material =
             crate::Material::uniform(authored).ok_or(FarFieldCompileError::NonUniformExterior)?;
         validate_far_field_material(material, volume_sources, exterior_region)?;
@@ -2276,6 +2281,26 @@ mod tests {
             compile(&anisotropic, &[]),
             Err(FarFieldCompileError::AnisotropicExterior)
         );
+
+        // A named loss channel is a law, so the exterior read as non-uniform,
+        // which sent the user after the wrong property (PR-17 of the
+        // 2026-10-20 review). It is lossy, and refused as that.
+        for magnetic in [false, true] {
+            let mut lossy = scene.clone();
+            let channel = Some(crate::LossChannel {
+                base_rate: ScalarField::constant(0.3),
+                law: crate::DampingLaw::constant(),
+            });
+            if magnetic {
+                lossy.materials[0].magnetic_loss = channel;
+            } else {
+                lossy.materials[0].electric_loss = channel;
+            }
+            assert_eq!(
+                compile(&lossy, &[]),
+                Err(FarFieldCompileError::LossyExterior)
+            );
+        }
 
         // The retarded projection has no Green's function for a driven
         // exterior, so each way of making one time-dependent is refused by

@@ -26597,3 +26597,20 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 3: an exterior with a named loss channel is refused as lossy (PR-17)
+
+- **Found by the review (PR-17).** A constant electric loss on the ambient
+  medium was refused as "far-field projection requires a uniform exterior
+  medium", which sent the user after the wrong property.
+  `Material::uniform` returns `None` for any material with laws, and a named
+  loss channel is one. The lossy check after it read only the legacy damping.
+- **Reproduced.** `topology_far_field_rejects_nonuniform_driven_or_partitioned_exteriors`
+  gains an exterior with an electric, then a magnetic, loss channel. It read
+  `NonUniformExterior`.
+- **Fix.** A named loss channel on the exterior is refused as
+  `LossyExterior` before the uniformity check. A driven loss is still
+  refused first as time-varying.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.
