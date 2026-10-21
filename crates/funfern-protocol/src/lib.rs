@@ -165,6 +165,8 @@ pub enum Step {
         valid: bool,
     },
     Reset,
+    /// The simulation speed set: it may ask for another step.
+    Speed,
     Run(bool),
     /// One step, as Step does while paused.
     StepOnce,
@@ -229,6 +231,9 @@ pub struct Protocol {
     pub last_error: Option<Token>,
     /// The token whose step the host paces.
     pub uploaded: Option<Token>,
+    /// The step a retime was asked from, named as `uploaded` names it: not
+    /// asked again from it until the speed changes.
+    pub retimed: Option<Token>,
     pub reset: bool,
     /// A rebuild asked for and not yet requested.
     pub remesh: bool,
@@ -285,6 +290,7 @@ impl Default for Protocol {
             active: None,
             last_error: None,
             uploaded: None,
+            retimed: None,
             reset: false,
             remesh: false,
             drop: true,
@@ -388,6 +394,7 @@ impl Protocol {
                 self.drop = true;
             }
             Step::Reset => self.reset = true,
+            Step::Speed => self.retimed = None,
             Step::Run(on) => self.running = on,
             Step::StepOnce => self.stepping = true,
             Step::Pulse => {
@@ -462,6 +469,7 @@ impl Protocol {
             self.source_commit = None;
             self.packed = None;
             self.uploaded = None;
+            self.retimed = None;
             self.fault = false;
             self.pulses = 0;
             self.switches = 0;
@@ -506,13 +514,16 @@ impl Protocol {
         }
         if self.uploading.is_none() && self.source_commit.is_none() && self.packed.is_none() {
             // `retime_for_speed`: a running step the speed no longer asks for
-            // is requested again.
+            // is requested again, once from that step (RT-11 of the
+            // 2026-10-20 review).
             if self.uploaded.is_some()
                 && self.preparing.is_none()
                 && self.ready.is_none()
                 && self.active.is_some()
                 && frame.retime
+                && self.retimed != self.uploaded
             {
+                self.retimed = self.uploaded;
                 self.requested_revision = None;
             }
             self.request();
@@ -1037,6 +1048,36 @@ mod tests {
         }
         assert!(protocol.stranded, "the fault strands the pulse in flight");
         assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
+    }
+
+    /// RT-11 of the 2026-10-20 review: a retimed candidate refused leaves the
+    /// step where it was while the speed still asks for another, and the
+    /// retime was asked again, every frame. It is asked once from a step,
+    /// until the speed changes.
+    #[test]
+    fn a_refused_retime_is_not_asked_again() {
+        let mut protocol = Protocol::default();
+        assert!(protocol.settle(8, Carried::WHOLE));
+        let requests = protocol.next;
+        let refused = Frame {
+            retime: true,
+            begun: false,
+            ..frame(false)
+        };
+        for _ in 0..4 {
+            for step in [
+                Step::Frame(refused),
+                Step::Readbacks { caught_up: true },
+                Step::Frame(refused),
+            ] {
+                protocol.step(step);
+                protocol.check();
+            }
+        }
+        assert_eq!(protocol.next, requests + 1, "asked once");
+        protocol.step(Step::Speed);
+        protocol.step(Step::Frame(refused));
+        assert_eq!(protocol.next, requests + 2, "a speed changed asks again");
     }
 
     /// An edit, a Reset and a fault on the way all come to rest.

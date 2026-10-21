@@ -21,6 +21,10 @@ pub(super) struct Coordinator {
     pub(super) remesh_requested: bool,
     pub(super) requested_edge: f64,
     pub(super) requested_revision: Option<u64>,
+    /// The step and the speed a retime was asked at: not asked again from
+    /// them until the speed is met, so that a retimed candidate that fails
+    /// is not prepared again every frame.
+    pub(super) retimed: Option<(f64, f64)>,
     /// What the latest request read, which accounts for it while the draft
     /// is invalid and its revision moves with every edit.
     pub(super) requested_inputs: Option<PreparedInputs>,
@@ -79,6 +83,7 @@ impl Default for Coordinator {
             remesh_requested: false,
             requested_edge: f64::NAN,
             requested_revision: None,
+            retimed: None,
             requested_inputs: None,
             reset_requested: false,
             fresh_requested: false,
@@ -130,6 +135,7 @@ impl Coordinator {
     /// waiting for the device, no step running, and the event serials and the
     /// fault latch back where launch has them.
     pub(super) fn dropped(&mut self) {
+        self.retimed = None;
         self.uploading = None;
         self.source_commit = None;
         self.gpu_upload_preparation = None;

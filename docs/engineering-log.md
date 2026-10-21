@@ -26382,3 +26382,31 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: a refused retime is asked once until the speed is met (RT-11)
+
+- **Found by the review (RT-11).** `retime_for_speed` clears the requested
+  revision whenever the uploaded step is more than 10% off the speed's, and
+  never looked at what became of its last attempt.
+  - A refused handoff keeps the old step, so the condition held again on
+    the next frame. A retimed candidate that failed in a way that repeats
+    was prepared, packed and refused every frame, without end, each error
+    replacing the last.
+  - The model mirrored the code, but its fair suffix pins `retime` to false,
+    so the proofs never met the loop.
+- **Reproduced.** `a_refused_retime_is_not_asked_again`, in the lockstep
+  harness: speed 0.25×, then four rounds of the device refusing the retimed
+  handoff. Four requests were made where one was due.
+- **Fix.**
+  - The coordinator keeps the step and the speed a retime was asked at, and
+    does not ask again from them. A frame where the speed is met (another
+    step taken, or another speed set) forgets them, so 0.25× → 1× → 0.25×
+    asks again.
+  - The model expresses a refused retime. A retime is asked once from the
+    step `uploaded` names (`retimed`), and a new `Step::Speed`, which the
+    harness maps `Act::Speed` to, lets it ask again.
+    `a_refused_retime_is_not_asked_again` in the model holds it to one
+    request until the speed changes.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs, now over `Step::Speed` too. Host-only.

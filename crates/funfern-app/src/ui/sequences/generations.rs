@@ -440,8 +440,9 @@ impl Session {
                 let edge = self.edge_name();
                 model::Step::Edge { edge }
             }
-            // The speed reaches the model through the frames that retime.
-            Act::Speed(_) => return None,
+            // The speed reaches the model through the frames that retime,
+            // and asks for a retime again.
+            Act::Speed(_) => model::Step::Speed,
             Act::Material { .. }
             | Act::Nudge(_)
             | Act::Source { .. }
@@ -1220,6 +1221,44 @@ fn a_frame_backpressure_clamps_is_not_quiet() {
         "the queue is full"
     );
     assert_eq!(session.state.display_cadence.pending_batch(), 40);
+}
+
+/// RT-11 of the 2026-10-20 review: a retimed candidate refused leaves the
+/// step where it was while the speed still asks for another, and the speed
+/// ceiling asked again: every frame prepared, packed and was refused, and
+/// each error replaced the last before it could be read. A retime is asked
+/// once from a step, until the speed is met.
+#[test]
+fn a_refused_retime_is_not_asked_again() {
+    let mut session = Session::start();
+    session.quiesce();
+    let before = session.model.next;
+    session.step(&Act::Speed(0));
+    for _ in 0..4 {
+        for act in [
+            Act::Frame(None),
+            Act::Readbacks(u64::MAX),
+            Act::Frame(None),
+            Act::Handoff(false),
+            Act::Frame(None),
+        ] {
+            session.step(&act);
+        }
+    }
+    assert_eq!(
+        session.model.next,
+        before + 1,
+        "the refused retime is asked once"
+    );
+    // The speed met again, at 1x, and left again: the retime is asked anew.
+    session.step(&Act::Speed(1));
+    session.quiesce();
+    session.step(&Act::Speed(0));
+    session.quiesce();
+    assert!(
+        session.model.next > before + 1,
+        "a speed met and left asks again"
+    );
 }
 
 /// Found by the runtime sequences: a scene whose draft an edit made invalid

@@ -590,9 +590,24 @@ impl Playground {
             self.editor.document.presentation.simulation_speed,
         );
         if (wanted / self.coordinator.uploaded_time_step - 1.0).abs() > TIME_STEP_HYSTERESIS {
+            // Asked once from a step at a speed. A retimed candidate that
+            // fails leaves the step where it was, and asking again prepared,
+            // packed and failed every frame, each error replacing the last
+            // (RT-11 of the 2026-10-20 review). Once the speed is met, by
+            // another step or another speed, it may ask again.
+            let asked = (
+                self.coordinator.uploaded_time_step,
+                self.editor.document.presentation.simulation_speed,
+            );
+            if self.coordinator.retimed == Some(asked) {
+                return;
+            }
+            self.coordinator.retimed = Some(asked);
             #[cfg(test)]
             self.protocol_log.push(ProtocolNote::Retimed);
             self.coordinator.requested_revision = None;
+        } else {
+            self.coordinator.retimed = None;
         }
     }
 
