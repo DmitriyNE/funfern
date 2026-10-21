@@ -46,6 +46,10 @@ pub struct Playground {
     /// thread, for tests that decide when the device sees it.
     #[cfg(test)]
     pub(super) pack_inline: bool,
+    /// Makes Reset's zero-state plan fail, for the test of what follows: no
+    /// plan the suite builds fails, so only a defect makes one.
+    #[cfg(test)]
+    pub(super) reset_plan_fails: bool,
     /// What the runtime decided, for the tests that run the protocol model
     /// beside it.
     #[cfg(test)]
@@ -358,6 +362,8 @@ impl Default for Playground {
             preparation_grant: None,
             #[cfg(test)]
             pack_inline: false,
+            #[cfg(test)]
+            reset_plan_fails: false,
             #[cfg(test)]
             protocol_log: Vec::new(),
             e2e_steps: e2e::E2eSteps::default(),

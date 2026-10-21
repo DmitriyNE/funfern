@@ -26252,3 +26252,23 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 3: a Reset that cannot be compiled is reported and let go (RT-6)
+
+- **Found by the review (RT-6).** Reset installs its zero-state plan only
+  `if let Ok(plan)`, with nothing on an error. Only a defect fails that
+  compile, and when it did:
+  - Reset did nothing, and nothing was reported.
+  - `reset_requested` stayed set, so every frame compiled the whole plan
+    again.
+  - The latch also feeds `starts_from_zero`, so the next, unrelated edit was
+    prepared fresh and zeroed the field.
+- **Reproduced.** No plan the suite builds fails, so a test-only switch,
+  `reset_plan_fails`, makes Reset's plan fail.
+  `a_reset_that_cannot_be_compiled_is_reported_and_let_go` failed on
+  "Reset is let go".
+- **Fix.** On an error, Reset is let go and the failure is reported on the
+  status line, with the diagnostics warning lit.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

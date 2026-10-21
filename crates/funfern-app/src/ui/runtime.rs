@@ -809,22 +809,40 @@ impl Playground {
                                 .map_err(|error| format!("{error:?}"))
                             }),
                     });
-                if let Ok(plan) = reset {
-                    request.install(assets, commands, plan);
-                    self.coordinator.reset_installed(dt);
-                    self.sim_time_offset = 0.0;
-                    self.sim_time_step = dt;
-                    // Adaptation starts the run again too: an estimate or a
-                    // mesh still computing is of the field Reset discarded,
-                    // and the last step estimated and the energy peak belong
-                    // to a step counter that now starts at zero. The mesh and
-                    // its adaptation history stay; Reset did not change them.
-                    self.stop_adaptation_work();
-                    self.amr_last_analyzed_step = None;
-                    self.amr_last_started = None;
-                    self.amr_energy_peak = 0.0;
-                    self.restart_probe_traces();
-                    self.restart_exposures_after_handoff(true);
+                #[cfg(test)]
+                let reset = if self.reset_plan_fails {
+                    Err("the reset plan was made to fail".to_owned())
+                } else {
+                    reset
+                };
+                match reset {
+                    Ok(plan) => {
+                        request.install(assets, commands, plan);
+                        self.coordinator.reset_installed(dt);
+                        self.sim_time_offset = 0.0;
+                        self.sim_time_step = dt;
+                        // Adaptation starts the run again too: an estimate or a
+                        // mesh still computing is of the field Reset discarded,
+                        // and the last step estimated and the energy peak belong
+                        // to a step counter that now starts at zero. The mesh and
+                        // its adaptation history stay; Reset did not change them.
+                        self.stop_adaptation_work();
+                        self.amr_last_analyzed_step = None;
+                        self.amr_last_started = None;
+                        self.amr_energy_peak = 0.0;
+                        self.restart_probe_traces();
+                        self.restart_exposures_after_handoff(true);
+                    }
+                    // A zero state the running generation cannot be compiled
+                    // for is a defect's failure. Unreported, Reset did nothing,
+                    // stayed latched and recompiled the plan every frame, and
+                    // the latch zeroed the field at the next, unrelated edit
+                    // (RT-6 of the 2026-10-20 review).
+                    Err(error) => {
+                        self.coordinator.reset_requested = false;
+                        self.message = format!("Reset failed: {error}");
+                        self.unseen_error = true;
+                    }
                 }
             }
         }
@@ -1353,6 +1371,41 @@ pub(super) fn pulse_increment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RT-6 of the 2026-10-20 review: a Reset whose zero-state plan fails is
+    /// reported, and is not left latched to recompile every frame and zero
+    /// the field at the next edit.
+    #[test]
+    fn a_reset_that_cannot_be_compiled_is_reported_and_let_go() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut state = Playground::default();
+        activate(&mut state);
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
+        state.reset_plan_fails = true;
+        world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            state.refresh_runtime(
+                &mut request,
+                &display,
+                &mut recorders,
+                &vector,
+                &mut assets,
+                &mut commands,
+                1.0 / 60.0,
+            );
+        });
+        assert!(!state.coordinator.reset_requested, "Reset is let go");
+        assert!(state.unseen_error, "the diagnostics warning is lit");
+        assert!(state.message.contains("Reset failed"), "{}", state.message);
+    }
 
     /// A recorder failed for good is a defect's failure: it lights the
     /// diagnostics warning, and says so once rather than every frame.
