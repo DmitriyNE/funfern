@@ -148,19 +148,25 @@ impl Playground {
             }
         )
     }
-    /// One draggable window over the whole transaction: the frame it costs, the
-    /// log of what the transient channels said, and then the topology and mesh
-    /// it produced, the handoff waits and the running solver. A preparation or
-    /// adaptation error lights the status marker and keeps it lit until this
-    /// is opened, rather than opening it; an ordinary rebuild does neither.
-    pub(super) fn diagnostics_window(&mut self, ctx: &egui::Context) {
-        self.record_events(ctx.input(|input| input.time));
+    /// What the diagnostics window shows, kept every frame: a recording or a
+    /// snapshot hides the window, not the log (UI-8 of the 2026-10-20
+    /// review).
+    pub(super) fn keep_diagnostics(&mut self, now: f64) {
+        self.record_events(now);
         if self.frame_ms.is_finite() && self.frame_ms > 0.0 {
             if self.frame_history.len() == FRAME_HISTORY {
                 self.frame_history.pop_front();
             }
             self.frame_history.push_back(self.frame_ms);
         }
+    }
+
+    /// One draggable window over the whole transaction: the frame it costs, the
+    /// log of what the transient channels said, and then the topology and mesh
+    /// it produced, the handoff waits and the running solver. A preparation or
+    /// adaptation error lights the status marker and keeps it lit until this
+    /// is opened, rather than opening it; an ordinary rebuild does neither.
+    pub(super) fn diagnostics_window(&mut self, ctx: &egui::Context) {
         if !self.diagnostics_open {
             return;
         }
@@ -1350,6 +1356,37 @@ mod tests {
                 "`{retired}` parses, so the reference should be listing it"
             );
         }
+    }
+
+    /// UI-8 of the 2026-10-20 review: the log is kept while a recording or a
+    /// snapshot hides the windows. Only the diagnostics window recorded it,
+    /// and capturing skips the window, so an error that came and went during
+    /// a recording left no entry and no marker.
+    #[test]
+    fn the_log_is_kept_while_capturing() {
+        let mut state = Playground {
+            snapshot_state: SnapshotState::Armed,
+            amr_error: Some("Invalid adaptation source".into()),
+            ..Playground::default()
+        };
+        assert!(state.capturing());
+        let context = egui::Context::default();
+        let _ = context.run_ui(egui::RawInput::default(), |ui| {
+            state.show(
+                ui,
+                &WaveDisplay::default(),
+                &VectorOverlayDisplay::default(),
+            );
+        });
+        assert!(
+            state
+                .events
+                .iter()
+                .any(|event| event.source == EventSource::Adaptation),
+            "{:?}",
+            state.events
+        );
+        assert!(state.unseen_error);
     }
 
     /// Every channel the log watches overwrites itself, so a change is the only

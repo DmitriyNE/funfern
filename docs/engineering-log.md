@@ -26497,3 +26497,18 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 3: the diagnostics log is kept while a capture hides the windows (UI-8)
+
+- **Found by the review (UI-8).** `record_events`, which catches each
+  transient channel the moment it changes, ran only inside
+  `diagnostics_window`, and a recording or a snapshot skips the windows. An
+  adaptation error that appeared and cleared during a recording left no log
+  entry and no marker. The frame-time history stopped there too.
+- **Reproduced.** `the_log_is_kept_while_capturing` runs one whole UI frame
+  with a snapshot armed and an adaptation error set. The log stayed empty.
+- **Fix.** `keep_diagnostics` records the events and the frame time on every
+  frame, ahead of the capture check. Capturing hides only the window.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

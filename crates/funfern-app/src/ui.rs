@@ -956,6 +956,7 @@ impl Playground {
             .show(root, |ui| {
                 viewport = self.viewport(ui, display, vector_display);
             });
+        self.keep_diagnostics(root.ctx().input(|input| input.time));
         if !self.capturing() {
             self.probe_windows(root.ctx());
             self.pulse_shape_window(root.ctx());
