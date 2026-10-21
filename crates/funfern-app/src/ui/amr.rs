@@ -28,6 +28,13 @@ impl Playground {
                 BackgroundAmrEvent::Finished { .. } => {
                     crate::set_browser_amr_job_status("finished");
                 }
+                BackgroundAmrEvent::Stopped => {
+                    crate::set_browser_amr_worker_status("stopped");
+                }
+            }
+            if matches!(event, BackgroundAmrEvent::Stopped) {
+                self.replace_stopped_amr_worker();
+                continue;
             }
             if let BackgroundAmrEvent::Finished { result, .. } = event {
                 match *result {
@@ -40,6 +47,29 @@ impl Playground {
                 }
             }
         }
+    }
+
+    /// An AMR worker that stopped, which only a defect does, fails the
+    /// estimate or adaptation it held and is replaced, with the diagnostics
+    /// warning lit. Adaptation goes on with the new worker.
+    fn replace_stopped_amr_worker(&mut self) {
+        let Some(worker) = self.background_amr.take() else {
+            return;
+        };
+        match worker.kind {
+            Some(BackgroundAmrKind::Indicator) => {
+                self.amr_indicator_source = None;
+                self.amr_status = "estimate failed".into();
+            }
+            Some(BackgroundAmrKind::Adaptation) => {
+                self.amr_adaptation_source = None;
+                self.amr_status = "adaptation failed".into();
+            }
+            None => {}
+        }
+        self.amr_error = Some("the adaptation worker stopped and was restarted".into());
+        self.unseen_error = true;
+        self.background_amr = BackgroundAmrWorker::spawn();
     }
 
     /// Cancels every estimate and adaptation in flight, here and on the

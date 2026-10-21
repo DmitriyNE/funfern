@@ -26303,3 +26303,36 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: a stopped background worker fails its job and is replaced (RT-8)
+
+- **Found by the review (RT-8).** The preparation and AMR workers drained
+  their channels with `try_recv().ok()`, which reads a disconnected channel as
+  an empty one. A native job that panics unwinds its worker thread, so the
+  channel disconnects, and nothing noticed:
+  - the job's phase stayed set for good, so `preparation_in_progress()` stayed
+    true, or AMR kept "Adapting mesh" or answered "geometry has priority";
+  - nothing was reported;
+  - only an edit, whose job then fell back to the main thread, moved things
+    on.
+  - The GPU pack path already handled the disconnection; these two did not.
+- **Reproduced.** Two tests hand each worker a job and drop its end of the
+  channel, as a panic does:
+  - `a_stopped_preparation_worker_fails_its_job_and_is_replaced` failed on
+    "the job is not left preparing";
+  - `a_stopped_amr_worker_fails_its_adaptation_and_is_replaced` failed on
+    "the adaptation is not left running".
+- **Fix.**
+  - Both `drain`s turn a disconnection into a `Stopped` event, which the
+    worker itself never sends.
+  - A stopped preparation worker fails the job it held as a preparation
+    failure for its token, which lights the diagnostics warning, and says so
+    on the status line.
+  - A stopped AMR worker fails the estimate or adaptation it held through
+    `amr_error`, with the warning lit.
+  - Either worker is then spawned again, and the next job runs on the new
+    one. In the threaded browser build the worker's status reads "stopped"
+    in between.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

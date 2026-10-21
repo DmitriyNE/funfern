@@ -9,8 +9,8 @@ use crate::drawn_pacing::PacingNote;
 use crate::gpu_frame_timer::GpuFrameReading;
 use crate::topology_editor::TopologyAcceptance;
 use crate::topology_runtime::{
-    PreparedSolverUpdate, PreparedTopology, TopologyPreparationPhase, TopologyPreparationTiming,
-    TopologyToken,
+    PreparedSolverUpdate, PreparedTopology, TopologyPreparationError, TopologyPreparationPhase,
+    TopologyPreparationTiming, TopologyToken,
 };
 use crate::wave_gpu::{VectorOverlayDisplay, WaveGpuRequest};
 use bevy::platform::time::Instant;
@@ -86,6 +86,28 @@ impl Playground {
         self.preparation_phase().is_some()
     }
 
+    /// A preparation worker that stopped, which only a defect does, fails the
+    /// job it held and is replaced, with the diagnostics warning lit. The
+    /// next job runs on the new worker.
+    fn replace_stopped_preparation_worker(&mut self) {
+        let Some(worker) = self.background_preparation.take() else {
+            return;
+        };
+        #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
+        crate::set_browser_preparation_worker_status("stopped");
+        if let (Some(token), Some(phase)) = (worker.token, worker.phase) {
+            self.runtime
+                .finish_external_preparation(Err(TopologyPreparationError {
+                    token,
+                    phase,
+                    message: "the preparation worker stopped".into(),
+                }));
+        }
+        self.message = "The preparation worker stopped and was restarted".into();
+        self.unseen_error = true;
+        self.background_preparation = BackgroundPreparationWorker::spawn();
+    }
+
     /// Advances candidate assembly without making its execution placement part
     /// of the topology transaction. Native and cross-origin-isolated browser
     /// builds hand the immutable job to one long-lived worker; failed worker
@@ -116,6 +138,10 @@ impl Playground {
             #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
             if matches!(event, BackgroundPreparationEvent::WorkerStarted) {
                 crate::set_browser_preparation_worker_status("active");
+            }
+            if matches!(event, BackgroundPreparationEvent::Stopped) {
+                self.replace_stopped_preparation_worker();
+                continue;
             }
             if let Some(worker) = &mut self.background_preparation {
                 worker.observe(&event);

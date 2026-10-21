@@ -41,6 +41,9 @@ pub(super) enum BackgroundPreparationEvent {
         token: TopologyToken,
         result: Box<Result<PreparedTopology, TopologyPreparationError>>,
     },
+    /// The worker's end of the channel is gone: it stopped, as a panic in a
+    /// native job stops it. `drain` reports it; the worker never sends it.
+    Stopped,
 }
 
 /// One long-lived worker owns CPU candidate preparation. New jobs queue through
@@ -94,7 +97,19 @@ impl BackgroundPreparationWorker {
 
     pub(super) fn drain(&self) -> Vec<BackgroundPreparationEvent> {
         let receiver = self.receiver.lock().unwrap();
-        std::iter::from_fn(|| receiver.try_recv().ok()).collect()
+        let mut events = Vec::new();
+        loop {
+            match receiver.try_recv() {
+                Ok(event) => events.push(event),
+                Err(mpsc::TryRecvError::Empty) => return events,
+                // Not an empty queue: the job the worker held will never
+                // finish (RT-8 of the 2026-10-20 review).
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    events.push(BackgroundPreparationEvent::Stopped);
+                    return events;
+                }
+            }
+        }
     }
 
     pub(super) fn observe(&mut self, event: &BackgroundPreparationEvent) {
@@ -390,12 +405,15 @@ pub(super) enum BackgroundAmrEvent {
         serial: u64,
         result: Box<BackgroundAmrResult>,
     },
+    /// The worker's end of the channel is gone: it stopped, as a panic in a
+    /// native job stops it. `drain` reports it; the worker never sends it.
+    Stopped,
 }
 
 impl BackgroundAmrEvent {
     pub(super) fn serial(&self) -> Option<u64> {
         match self {
-            Self::WorkerStarted => None,
+            Self::WorkerStarted | Self::Stopped => None,
             Self::Progress { serial, .. } | Self::Finished { serial, .. } => Some(*serial),
         }
     }
@@ -474,7 +492,20 @@ impl BackgroundAmrWorker {
     pub(super) fn drain(&mut self) -> Vec<BackgroundAmrEvent> {
         let events = {
             let receiver = self.receiver.lock().unwrap();
-            std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>()
+            let mut events = Vec::new();
+            loop {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    // Not an empty queue: the job the worker held will never
+                    // finish (RT-8 of the 2026-10-20 review).
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        events.push(BackgroundAmrEvent::Stopped);
+                        break;
+                    }
+                }
+            }
+            events
         };
         let mut current = Vec::new();
         for event in events {
@@ -486,7 +517,9 @@ impl BackgroundAmrWorker {
                 continue;
             }
             match &event {
-                BackgroundAmrEvent::WorkerStarted => unreachable!("handled above"),
+                BackgroundAmrEvent::WorkerStarted | BackgroundAmrEvent::Stopped => {
+                    unreachable!("handled above")
+                }
                 BackgroundAmrEvent::Progress { kind, phase, .. } => {
                     self.kind = Some(*kind);
                     self.phase = Some(*phase);
@@ -1058,6 +1091,87 @@ mod tests {
             "native preparation timed out"
         );
         assert!(state.handoff_ready.is_some());
+    }
+
+    /// RT-8 of the 2026-10-20 review: a worker that stopped, as a panic in a
+    /// native job stops it, read as one with nothing to say yet, so the job
+    /// it held stood preparing for good and nothing was reported. It fails
+    /// that job, is reported, and is replaced.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_stopped_preparation_worker_fails_its_job_and_is_replaced() {
+        let mut state = Playground::default();
+        settle(&mut state.editor);
+        state.request_runtime();
+        let job = state
+            .runtime
+            .take_preparing_job()
+            .expect("a job to hand out");
+        let token = job.token();
+        // The worker took the job and stopped: its end of the channel is gone.
+        let (sender, _jobs) = mpsc::channel();
+        let (_, events) = mpsc::channel();
+        state.background_preparation = Some(BackgroundPreparationWorker {
+            sender,
+            receiver: Mutex::new(events),
+            token: Some(token),
+            phase: Some(job.phase()),
+            detail: Some(job.detail()),
+            timing: Some(job.timing()),
+        });
+        assert!(state.preparation_in_progress());
+        state.advance_runtime_preparation();
+        assert!(
+            !state.preparation_in_progress(),
+            "the job is not left preparing"
+        );
+        assert!(
+            state
+                .runtime
+                .last_error()
+                .is_some_and(|failure| failure.token == token)
+        );
+        assert!(state.diagnostics_warning());
+        assert!(
+            state
+                .background_preparation
+                .as_ref()
+                .is_some_and(|worker| worker.token.is_none()),
+            "a fresh worker takes the next job"
+        );
+    }
+
+    /// RT-8 of the 2026-10-20 review, for the AMR worker: an adaptation it
+    /// held stood running for good.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_stopped_amr_worker_fails_its_adaptation_and_is_replaced() {
+        let mut state = Playground::default();
+        let (sender, _jobs) = mpsc::channel();
+        let (_, events) = mpsc::channel();
+        state.background_amr = Some(BackgroundAmrWorker {
+            sender,
+            receiver: Mutex::new(events),
+            next_serial: 1,
+            active_serial: Some(1),
+            kind: Some(BackgroundAmrKind::Adaptation),
+            phase: Some("Adapting mesh"),
+        });
+        state.amr_adaptation_source = Some(1);
+        assert!(state.adaptation_in_flight());
+        state.drain_background_amr();
+        assert!(
+            !state.adaptation_in_flight(),
+            "the adaptation is not left running"
+        );
+        assert!(state.amr_error.is_some() && state.diagnostics_warning());
+        assert!(
+            state
+                .background_amr
+                .as_ref()
+                .is_some_and(|worker| worker.kind.is_none()),
+            "a fresh worker takes the next job"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
