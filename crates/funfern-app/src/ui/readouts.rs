@@ -1509,6 +1509,17 @@ impl Playground {
         }
         self.far_field_readout_window(ctx);
     }
+    /// The far-field readout's Clear: the trace from now on. Each readback
+    /// carries the whole ring, and a trace emptied back to its start took all
+    /// 512 frames again at the next one (PR-12 of the 2026-10-20 review), as
+    /// `clear_probe_trace` resumes a probe's from now.
+    pub(super) fn clear_far_field_trace(&mut self) {
+        self.far_field_trace = FarFieldTrace {
+            records: Default::default(),
+            last_time: self.simulated_time(),
+        };
+    }
+
     /// Why the far field records nothing, for the window to say in red: the
     /// compile's refusal, or the recorder's, as a delay window longer than
     /// its ring holds (PR-6 of the 2026-10-20 review).
@@ -1681,7 +1692,7 @@ impl Playground {
                 );
             });
         if clear {
-            self.far_field_trace = FarFieldTrace::default();
+            self.clear_far_field_trace();
         }
         if let Some(edited) = edited_readout(stored, shown, self.far_field_view.readout) {
             self.editor.document.readouts.far_field = edited;

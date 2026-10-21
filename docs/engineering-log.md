@@ -26698,3 +26698,17 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: the far-field readout's Clear takes the trace from now on (PR-12)
+
+- **Found by the review (PR-12).** Clear reset the far-field trace's last
+  time to −1, and every readback carries the whole ring, so the next one
+  brought all 512 frames back. Commit dcf0b32 fixed the same for the point,
+  line and area probes but missed the far field.
+- **Reproduced.** `clear_keeps_the_far_fields_recorded_frames_out` ingests
+  two frames, clears, and ingests the same ring again. Both came back.
+- **Fix.** `clear_far_field_trace` resumes the trace from the simulated time
+  now, as `clear_probe_trace` does a probe's.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

@@ -825,7 +825,7 @@ fn line_probe_input(
 mod tests {
     use super::*;
     use crate::topology_editor::ClosedCurvePurpose;
-    use crate::wave_gpu::PointProbeRecord;
+    use crate::wave_gpu::{FarFieldRecord, PointProbeRecord};
 
     fn probe_upload(token: TopologyToken, generation: u64, revision: u64) -> ProbeUpload {
         ProbeUpload {
@@ -1417,6 +1417,59 @@ mod tests {
     /// carries again is left out, a newer sample comes in, and a trace
     /// stranded ahead of a clock that went back takes the clock's samples
     /// again.
+    /// PR-12 of the 2026-10-20 review: the far-field readout's Clear emptied
+    /// its plots for a frame, and the next readback, which carries the whole
+    /// ring, brought all 512 frames back. Clear takes it from now on, as it
+    /// does a probe's (dcf0b32).
+    #[test]
+    fn clear_keeps_the_far_fields_recorded_frames_out() {
+        let mut state = Playground::default();
+        let token = TopologyToken {
+            document_revision: 1,
+            topology_revision: 1,
+            mesh_generation: 1,
+        };
+        state.probe_upload = Some(probe_upload(token, 1, 1));
+        let mut readbacks = 0;
+        let mut ingest = |state: &mut Playground, times: &[f64]| {
+            readbacks += 1;
+            let far = FarFieldDisplay {
+                generation: 1,
+                revision: 1,
+                records: times
+                    .iter()
+                    .map(|time| FarFieldRecord {
+                        time: *time,
+                        amplitude: vec![],
+                        intensity: vec![],
+                    })
+                    .collect(),
+                readbacks,
+            };
+            state.ingest_spatial_probes(
+                &CurveProbeDisplay::default(),
+                &AreaProbeDisplay::default(),
+                &far,
+            );
+        };
+        let times = |state: &Playground| -> Vec<f64> {
+            state
+                .far_field_trace
+                .records
+                .iter()
+                .map(|record| record.time)
+                .collect()
+        };
+        ingest(&mut state, &[4.5, 5.0]);
+        assert_eq!(times(&state), vec![4.5, 5.0]);
+        state.sim_time_offset = 5.0;
+        state.clear_far_field_trace();
+        ingest(&mut state, &[4.5, 5.0]);
+        assert_eq!(times(&state), Vec::<f64>::new(), "the ring is left out");
+        ingest(&mut state, &[4.5, 5.0, 5.25]);
+        assert_eq!(times(&state), vec![5.25]);
+    }
+
     #[test]
     fn clear_keeps_what_was_recorded_out() {
         let sample = |time: f64| PointProbeRecord {
