@@ -775,7 +775,7 @@ fn validate(
         request.request_steps(expected.settlement_steps);
     }
     match expected.phase {
-        Phase::Warmup if clock.is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS as u32) => {
+        Phase::Warmup if clock.is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS) => {
             expected.rollback_snapshot = Some(display.accepted_storage_bits());
             expected.source_generation = display.generation;
             let upload_pack_started = Instant::now();
@@ -826,7 +826,7 @@ fn validate(
                     && display.generation == expected.source_generation
                     && display.accepted_storage_bits()
                         == *expected.rollback_snapshot.as_ref().unwrap()
-                    && clock.is_some_and(|clock| clock.accepted_steps == WARMUP_STEPS as u32)
+                    && clock.is_some_and(|clock| clock.accepted_steps == WARMUP_STEPS)
                 {
                     println!(
                         "injected handoff rejected in {:.2} ms with byte-exact source rollback",
@@ -843,10 +843,10 @@ fn validate(
         Phase::Evolution
             if clock.is_some_and(|clock| {
                 clock.accepted_steps
-                    >= (WARMUP_STEPS
+                    >= WARMUP_STEPS
                         + expected.handoff_steps
                         + expected.settlement_steps
-                        + expected.measured_steps) as u32
+                        + expected.measured_steps
             }) && display.primary_flux.len() == expected.primary.len() =>
         {
             let clock = clock.expect("evolution guard checked the display clock");

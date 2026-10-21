@@ -532,7 +532,7 @@ fn validate(
         Phase::Warmup
             if display
                 .clock
-                .is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS as u32) =>
+                .is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS) =>
         {
             // The integrated-field view's own stream of `r`, as the app runs
             // it while that view is shown.
@@ -602,7 +602,7 @@ fn validate(
         Phase::Survived => {
             if display
                 .clock
-                .is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS as u32 + 8)
+                .is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS + 8)
             {
                 println!("the source kept stepping after the rejection");
                 expected.phase = Phase::Done;
@@ -620,7 +620,7 @@ fn validate(
                 || display.integrated_field().len() != expected.integrated.len()
                 || display
                     .clock
-                    .is_none_or(|clock| clock.accepted_steps < (WARMUP_STEPS + TARGET_STEPS) as u32)
+                    .is_none_or(|clock| clock.accepted_steps < WARMUP_STEPS + TARGET_STEPS)
             {
                 return;
             }

@@ -770,7 +770,7 @@ fn drive(
         Phase::Settled => {
             if display
                 .clock
-                .is_none_or(|clock| (clock.accepted_steps as u64) < SETTLE_STEPS)
+                .is_none_or(|clock| clock.accepted_steps < SETTLE_STEPS)
             {
                 return;
             }

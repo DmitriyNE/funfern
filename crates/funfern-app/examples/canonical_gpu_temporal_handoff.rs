@@ -61,7 +61,7 @@ enum Phase {
     Handoff,
     Evolution,
     /// After a rejected handoff: the source must keep stepping.
-    Continue(u32),
+    Continue(u64),
     Done,
 }
 
@@ -431,7 +431,7 @@ fn validate(
         Phase::Warmup
             if display
                 .clock
-                .is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS as u32) =>
+                .is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS) =>
         {
             request
                 .begin_handoff(
@@ -476,9 +476,10 @@ fn validate(
             _ => {}
         },
         Phase::Evolution
-            if display.clock.is_some_and(|clock| {
-                clock.accepted_steps >= (WARMUP_STEPS + TARGET_STEPS) as u32
-            }) && display.full_snapshot_completed_steps() >= WARMUP_STEPS + TARGET_STEPS =>
+            if display
+                .clock
+                .is_some_and(|clock| clock.accepted_steps >= WARMUP_STEPS + TARGET_STEPS)
+                && display.full_snapshot_completed_steps() >= WARMUP_STEPS + TARGET_STEPS =>
         {
             if expected.settle_after.is_none() {
                 expected.settle_after = Some(display.readbacks + 2);

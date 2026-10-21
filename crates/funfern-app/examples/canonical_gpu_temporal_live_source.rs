@@ -331,7 +331,7 @@ fn validate(
     }
     let Some(clock) = display.clock else { return };
     match expected.phase {
-        Phase::Warmup if clock.accepted_steps >= WARMUP_STEPS as u32 => {
+        Phase::Warmup if clock.accepted_steps >= WARMUP_STEPS => {
             expected.phase = Phase::Event;
         }
         Phase::Event => {
@@ -339,7 +339,7 @@ fn validate(
             if processed > expected.last_observed_serial {
                 if processed != expected.last_observed_serial + 1
                     || request.stats().event_rejection() != 0
-                    || clock.accepted_steps != WARMUP_STEPS as u32
+                    || clock.accepted_steps != WARMUP_STEPS
                     || !within(
                         (clock.absolute_seconds - expected.paused_time).abs(),
                         2.0e-5,
@@ -385,7 +385,7 @@ fn validate(
             request.request_steps(MEASURED_STEPS);
             expected.phase = Phase::Evolution;
         }
-        Phase::Evolution if clock.accepted_steps >= (WARMUP_STEPS + MEASURED_STEPS) as u32 => {
+        Phase::Evolution if clock.accepted_steps >= WARMUP_STEPS + MEASURED_STEPS => {
             if expected.settle_after.is_none() {
                 expected.settle_after = Some(display.readbacks + 2);
                 return;

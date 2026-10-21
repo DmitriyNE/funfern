@@ -26410,3 +26410,55 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs, now over `Step::Speed` too. Host-only.
+
+## 2026-10-21 — Step 3: the host unwraps the device's 32-bit step count (RT-12)
+
+- **Found by the review (RT-12).** The device counts accepted steps in
+  `clock_u32.w`, a u32 incremented without carry and carried across
+  handoffs. The host stored it as-is in its u64 completed count, while its
+  desired, encoded and retired counts are u64. After 2^32 accepted steps
+  without a Reset (some 6.5 days at full speed; AMR handoffs carry the
+  count) Reset recovered, but until then:
+  - `caught_up()` turned false for good, so the first edit packed a
+    candidate and then withheld every step;
+  - AMR sat at "monitoring solution";
+  - `fire_times` scheduled live events about 4.29e9·dt ahead;
+  - a snapshot was held for good.
+- **Mapped first.** An agent listed every host site where a device step
+  count is read, stored, compared or mixed with a u64 one. It enters on four
+  paths: the control clock, the snapshot metadata word, the handoff receipt
+  and the vector overlay's stamp.
+- **Reproduced.** The control readback's decode moved into
+  `read_canonical_control`, unchanged, so a test can feed it.
+  `the_step_count_carries_on_past_the_devices_u32` reads a count 2 short of
+  2^32 and then a device count of 3. The host took 3, and `caught_up` failed.
+- **Fix.**
+  - `unwrap_steps` gives the u64 count nearest the one the host knew with
+    the device's low 32 bits. A device count is within a readback's lag of
+    the host's, far inside half the range.
+  - The control clock unwraps against the generation's count, and
+    `CanonicalGpuDisplayClock::accepted_steps` is u64.
+  - A snapshot's step unwraps against the request's count wherever it is
+    read, and the snapshot hold compares it in the clock's count.
+  - A handoff's receipt unwraps against the source generation's count.
+  - The consumers compare in u64: `accepted_material_runtime`, which had
+    truncated with `u32::try_from`; `full_snapshot_seconds`;
+    `simulated_time`'s offset; and the AMR snapshot time.
+  - The device examples compare the clock in u64.
+- **Left as they are.**
+  - The vector overlay's stamp stays wrapped. It is compared only with
+    counts taken from the same stamp, so it is consistent, and at the wrap
+    its filter restarts once.
+  - The host decides recorder dispatches by `step % stride` in u64, where
+    the shader uses the u32. They disagree past 2^32 unless the stride
+    divides it. That is PR-10's, with the probes in area 2.
+- **Checked on Metal:** 37 device runs pass. They cover the twelve changed
+  examples (`canonical_gpu_handoff` and its modes, `_live_events`,
+  `_oscillator_handoff`, `_pulse` and `--long`, `_temporal`, `_temporal_amr`
+  modes, `_temporal_gate`, `_temporal_handoff`, `_temporal_live_source`,
+  `_temporal_rollback`, `_temporal_work`, `_timing` and its modes) and the
+  `switch`, `handoff`, `handoff-driven`, `observables` and `far-field`
+  fixtures.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

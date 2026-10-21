@@ -284,7 +284,7 @@ fn validate(
 
     match expected.phase {
         Phase::Warmup
-            if clock.accepted_steps >= WARMUP_STEPS as u32
+            if clock.accepted_steps >= WARMUP_STEPS
                 && display.full_snapshot_completed_steps() >= WARMUP_STEPS =>
         {
             expected.rollback_state = Some(display.accepted_storage_bits());
@@ -310,7 +310,7 @@ fn validate(
                 && display.readbacks >= expected.rollback_readbacks + 2 =>
         {
             if request.stats().event_rejection() != CANONICAL_FAILURE_NON_FINITE
-                || clock.accepted_steps != WARMUP_STEPS as u32
+                || clock.accepted_steps != WARMUP_STEPS
                 || clock.event_serial != 0
                 || display.runtime_serials[1] != expected.material_serial_before
                 || display.accepted_storage_bits()
@@ -328,7 +328,7 @@ fn validate(
             expected.phase = Phase::OldLawStep;
         }
         Phase::OldLawStep
-            if clock.accepted_steps >= (WARMUP_STEPS + 1) as u32
+            if clock.accepted_steps > WARMUP_STEPS
                 && display.full_snapshot_completed_steps() > WARMUP_STEPS =>
         {
             request
@@ -346,7 +346,7 @@ fn validate(
             if request.stats().processed_event() >= 2 && !request.live_event_pending() =>
         {
             if request.stats().event_rejection() != 0
-                || clock.accepted_steps != (WARMUP_STEPS + 1) as u32
+                || clock.accepted_steps != WARMUP_STEPS + 1
                 || clock.event_serial != 2
                 || display.runtime_serials[1] != 2
             {
@@ -359,7 +359,7 @@ fn validate(
             expected.phase = Phase::Evolution;
         }
         Phase::Evolution
-            if clock.accepted_steps >= (WARMUP_STEPS + 1 + TARGET_STEPS) as u32
+            if clock.accepted_steps >= WARMUP_STEPS + 1 + TARGET_STEPS
                 && display.full_snapshot_completed_steps() >= WARMUP_STEPS + 1 + TARGET_STEPS =>
         {
             if expected.settle_after.is_none() {

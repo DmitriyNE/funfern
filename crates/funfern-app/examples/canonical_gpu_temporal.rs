@@ -395,7 +395,7 @@ fn finish_when_ready(
     let switch_boundary = expected.initial_step + expected.switch_steps;
     if !expected.switch_queued {
         let Some(clock) = display.clock else { return };
-        if (clock.accepted_steps as u64) < switch_boundary {
+        if clock.accepted_steps < switch_boundary {
             return;
         }
         let event = expected
@@ -413,7 +413,7 @@ fn finish_when_ready(
     let law_boundary = expected.initial_step + expected.law_steps;
     if !expected.law_queued {
         let Some(clock) = display.clock else { return };
-        if (clock.accepted_steps as u64) < law_boundary
+        if clock.accepted_steps < law_boundary
             || display.runtime_serials[1] != 1
             || request.live_event_pending()
         {
@@ -436,7 +436,7 @@ fn finish_when_ready(
     let filter_boundary = expected.initial_step + expected.filter_steps;
     if !expected.filter_queued {
         let Some(clock) = display.clock else { return };
-        if (clock.accepted_steps as u64) < filter_boundary
+        if clock.accepted_steps < filter_boundary
             || clock.event_serial != 2
             || display.runtime_serials[1] != 2
             || request.live_event_pending()
@@ -457,7 +457,7 @@ fn finish_when_ready(
 
     let target = expected.initial_step + expected.steps;
     let Some(clock) = display.clock else { return };
-    if (clock.accepted_steps as u64) < target
+    if clock.accepted_steps < target
         || display.full_snapshot_completed_steps() < target
         || clock.event_serial != if expected.resident_filter { 2 } else { 3 }
         || display.runtime_serials[1] != 2

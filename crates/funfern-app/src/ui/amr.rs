@@ -594,7 +594,7 @@ pub(super) fn indicator_snapshots(
     }
     let time = canonical.clock.map_or(simulated_time, |clock| {
         clock.absolute_seconds
-            + (step as f64 - f64::from(clock.accepted_steps)) * f64::from(clock.time_step)
+            + (step as f64 - clock.accepted_steps as f64) * f64::from(clock.time_step)
     });
     let canonical_snapshot = CanonicalIndicatorSnapshot {
         mesh_revision: active.mesh.mesh_revision,

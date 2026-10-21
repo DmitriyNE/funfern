@@ -231,7 +231,7 @@ fn drive(
 
     if !expected.queued {
         let Some(clock) = display.clock else { return };
-        if (clock.accepted_steps as u64) < WARMUP_STEPS || request.live_event_pending() {
+        if clock.accepted_steps < WARMUP_STEPS || request.live_event_pending() {
             return;
         }
         let event = pending.switch_event.take().expect("one Switch event");

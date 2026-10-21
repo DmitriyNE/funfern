@@ -604,7 +604,7 @@ fn finish_when_ready(
         let accounting = display.accounting.map(f32::to_bits);
         if display.accepted_storage_bits() != snapshot.state
             || accounting != snapshot.accounting
-            || clock.accepted_steps != (expected.initial_step + expected.warmup_steps) as u32
+            || clock.accepted_steps != expected.initial_step + expected.warmup_steps
         {
             eprintln!("failed GPU transaction changed accepted state, accounting, or clock");
             exit.write(AppExit::error());
@@ -624,7 +624,7 @@ fn finish_when_ready(
         return;
     }
     if expected.started.is_none() {
-        if clock.accepted_steps >= (expected.initial_step + expected.warmup_steps) as u32
+        if clock.accepted_steps >= expected.initial_step + expected.warmup_steps
             && clock.event_serial == expected.event_serial
         {
             if expected.failure_test {
@@ -650,8 +650,7 @@ fn finish_when_ready(
         }
         return;
     }
-    if clock.accepted_steps
-        < (expected.initial_step + expected.steps + expected.warmup_steps) as u32
+    if clock.accepted_steps < expected.initial_step + expected.steps + expected.warmup_steps
         || display.primary_flux.len() != expected.primary.len()
     {
         return;

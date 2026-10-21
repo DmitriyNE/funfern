@@ -318,7 +318,7 @@ fn finish_when_ready(
     }
     let target = expected.initial_step + expected.steps;
     let Some(clock) = display.clock else { return };
-    if (clock.accepted_steps as u64) < target
+    if clock.accepted_steps < target
         || display.full_snapshot_completed_steps() < target
         || display.primary_flux.len() != expected.primary.len()
         || display.complementary_flux.len() != expected.complementary.len()

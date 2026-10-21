@@ -629,7 +629,7 @@ impl Playground {
     pub(super) fn read_device_clock(&mut self, clock: CanonicalGpuDisplayClock) {
         self.sim_time_step = f64::from(clock.time_step);
         self.sim_time_offset =
-            clock.absolute_seconds - f64::from(clock.accepted_steps) * self.sim_time_step;
+            clock.absolute_seconds - clock.accepted_steps as f64 * self.sim_time_step;
     }
     /// How much of the delay window the far-field recorder holds, once it is
     /// running and has not filled it yet. Nothing can be projected before it is

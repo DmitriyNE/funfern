@@ -352,7 +352,7 @@ fn validate(
     }
     let Some(clock) = display.clock else { return };
     match expected.phase {
-        Phase::Warmup if clock.accepted_steps >= expected.warmup_steps as u32 => {
+        Phase::Warmup if clock.accepted_steps >= expected.warmup_steps => {
             expected.phase = Phase::Event;
         }
         Phase::Event => {
@@ -377,7 +377,7 @@ fn validate(
                 return;
             }
             if request.stats().event_rejection() != 0
-                || clock.accepted_steps != expected.warmup_steps as u32
+                || clock.accepted_steps != expected.warmup_steps
             {
                 eprintln!(
                     "the live pulse edit was rejected ({}) or moved the clock",
@@ -391,7 +391,7 @@ fn validate(
             expected.phase = Phase::Evolution;
         }
         Phase::Evolution
-            if clock.accepted_steps >= (expected.warmup_steps + expected.measured_steps) as u32 =>
+            if clock.accepted_steps >= expected.warmup_steps + expected.measured_steps =>
         {
             if expected.settle_after.is_none() {
                 expected.settle_after = Some(display.readbacks + 2);

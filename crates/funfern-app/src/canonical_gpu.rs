@@ -5448,13 +5448,16 @@ impl CanonicalGpuDisplay {
         authored: &CanonicalMaterialRuntimeState,
     ) -> Option<CanonicalMaterialRuntimeState> {
         let clock = self.clock?;
-        let snapshot = u32::try_from(self.raw_state_completed_steps).ok()?;
-        let behind = clock.accepted_steps.checked_sub(snapshot)?;
+        let behind = clock
+            .accepted_steps
+            .checked_sub(self.raw_state_completed_steps)?;
         // The snapshot names its own epoch. Its step alone cannot: a rebase is
         // encoded with the step after it, so a snapshot on an epoch's last step
         // is the old epoch's while its step reads as the new one's first, as an
         // install's first step does (RT-5 of the 2026-10-20 review).
-        if clock.step_in_epoch < behind || self.raw_state_epoch != snapshot_epoch(clock.epoch) {
+        if u64::from(clock.step_in_epoch) < behind
+            || self.raw_state_epoch != snapshot_epoch(clock.epoch)
+        {
             return None;
         }
         self.material_runtime(authored, clock.epoch_origin_seconds)
@@ -5559,7 +5562,7 @@ impl CanonicalGpuDisplay {
             epoch_origin_seconds: 0.0,
             absolute_seconds: seconds,
             step_in_epoch: step,
-            accepted_steps: step,
+            accepted_steps: u64::from(step),
             local_seconds: seconds as f32,
             time_step,
             event_serial: 0,
@@ -5725,7 +5728,7 @@ impl CanonicalGpuDisplay {
     pub fn full_snapshot_seconds(&self) -> Option<f64> {
         self.clock.map(|clock| {
             clock.absolute_seconds
-                + (self.raw_state_completed_steps as f64 - f64::from(clock.accepted_steps))
+                + (self.raw_state_completed_steps as f64 - clock.accepted_steps as f64)
                     * f64::from(clock.time_step)
         })
     }
@@ -5770,7 +5773,8 @@ pub struct CanonicalGpuDisplayClock {
     pub epoch_origin_seconds: f64,
     pub absolute_seconds: f64,
     pub step_in_epoch: u32,
-    pub accepted_steps: u32,
+    /// Unwrapped from the device's u32 count; see [`unwrap_steps`].
+    pub accepted_steps: u64,
     pub local_seconds: f32,
     pub time_step: f32,
     pub event_serial: u32,
@@ -5985,9 +5989,9 @@ fn receive_canonical_snapshot(
         CanonicalSnapshotResult::Ready(data) => {
             let tag = snapshot.tag;
             if snapshot_step(&tag, &data).is_some_and(|step| {
-                display
-                    .clock
-                    .is_none_or(|clock| clock.accepted_steps < step)
+                display.clock.is_none_or(|clock| {
+                    clock.accepted_steps < unwrap_steps(clock.accepted_steps, step)
+                })
             }) {
                 *snapshot.result.lock().unwrap() = CanonicalSnapshotResult::Ready(data);
                 return;
@@ -6037,6 +6041,7 @@ fn receive_canonical_integrated(
     let Some((slot, step, _)) = words.pop().and_then(snapshot_metadata) else {
         return;
     };
+    let step = unwrap_steps(request.stats.completed_steps(), step);
     set_live_integrated(&mut display, &words, slot, step);
 }
 
@@ -6096,7 +6101,7 @@ fn snapshot_step(tag: &CanonicalStateReadback, data: &[u8]) -> Option<u32> {
 /// The accepted lane, completed steps and epoch a metadata word carries,
 /// `None` when the word is not one. Its second lane holds the lane and twice
 /// the epoch's low 16 bits, exact in an f32.
-fn snapshot_metadata(word: GpuCanonicalStateWord) -> Option<(u32, u64, u32)> {
+fn snapshot_metadata(word: GpuCanonicalStateWord) -> Option<(u32, u32, u32)> {
     let metadata = word.values.to_array();
     if metadata[0] != SNAPSHOT_METADATA_MAGIC
         || !(0.0..=131_071.0).contains(&metadata[1])
@@ -6111,9 +6116,19 @@ fn snapshot_metadata(word: GpuCanonicalStateWord) -> Option<(u32, u64, u32)> {
     let slot_and_epoch = metadata[1] as u32;
     Some((
         slot_and_epoch & 1,
-        u64::from(metadata[2] as u32 | (metadata[3] as u32) << 16),
+        metadata[2] as u32 | (metadata[3] as u32) << 16,
         slot_and_epoch >> 1,
     ))
+}
+
+/// The count of accepted steps nearest `known` whose low 32 bits are `low`.
+/// The device counts them in a u32, which wraps after 2^32 steps, some 6.5
+/// days at full speed; the host's counts are u64 and carry on (RT-12 of the
+/// 2026-10-20 review). A count the device reports is within a readback's
+/// lag of the host's, far inside half the range either way.
+fn unwrap_steps(known: u64, low: u32) -> u64 {
+    let delta = i64::from(low.wrapping_sub(known as u32) as i32);
+    known.checked_add_signed(delta).unwrap_or(u64::from(low))
 }
 
 /// The low 16 bits of an epoch, as a snapshot's metadata carries it.
@@ -6178,6 +6193,7 @@ fn apply_canonical_state(
         let Some((slot, step, epoch)) = words.pop().and_then(snapshot_metadata) else {
             return;
         };
+        let step = unwrap_steps(request.stats.completed_steps(), step);
         display.raw_material_runtime = runtime;
         display.raw_state_slot = slot;
         display.raw_state_completed_steps = step;
@@ -6193,6 +6209,7 @@ fn apply_canonical_state(
         let Some((slot, step, _)) = words.pop().and_then(snapshot_metadata) else {
             return;
         };
+        let step = unwrap_steps(request.stats.completed_steps(), step);
         display.raw_primary_slot = slot;
         display.raw_primary_step = step;
         display.raw_primary = words;
@@ -6255,21 +6272,33 @@ fn receive_canonical_control(
     }
     let values: Vec<GpuCanonicalControl> = event.to_shader_type();
     let Some(value) = values.first() else { return };
+    read_canonical_control(&tag.stats, &mut display, tag.generation, value);
+}
+
+/// What a control readback says, into the generation's stats and the
+/// display's clock.
+fn read_canonical_control(
+    stats: &CanonicalGpuStats,
+    display: &mut CanonicalGpuDisplay,
+    generation: u64,
+    value: &GpuCanonicalControl,
+) {
     let step = value.clock_u32.z;
-    tag.stats
+    let accepted_steps = unwrap_steps(stats.completed_steps(), value.clock_u32.w);
+    stats
         .completed_steps
-        .store(value.clock_u32.w as u64, Ordering::Relaxed);
-    tag.stats.local_step.store(step, Ordering::Relaxed);
-    tag.stats
+        .store(accepted_steps, Ordering::Relaxed);
+    stats.local_step.store(step, Ordering::Relaxed);
+    stats
         .processed_event
         .store(value.event_result.z, Ordering::Relaxed);
-    tag.stats
+    stats
         .event_rejection
         .store(value.event_result.w, Ordering::Relaxed);
-    if tag.stats.failure() == 0 {
-        tag.stats.status.store(GPU_STATUS_READY, Ordering::Relaxed);
+    if stats.failure() == 0 {
+        stats.status.store(GPU_STATUS_READY, Ordering::Relaxed);
     }
-    begin_canonical_display_generation(&mut display, tag.generation);
+    begin_canonical_display_generation(display, generation);
     display.clock = Some(CanonicalGpuDisplayClock {
         epoch: value.clock_u32.x as u64 | ((value.clock_u32.y as u64) << 32),
         epoch_origin_seconds: value.clock_origin.x as f64 + value.clock_origin.y as f64,
@@ -6277,7 +6306,7 @@ fn receive_canonical_control(
             + value.clock_origin.y as f64
             + value.clock_f32.y as f64,
         step_in_epoch: step,
-        accepted_steps: value.clock_u32.w,
+        accepted_steps,
         local_seconds: value.clock_f32.y,
         time_step: value.clock_f32.x,
         event_serial: value.event.x,
@@ -6287,7 +6316,7 @@ fn receive_canonical_control(
     display.active_gain = value.accepted_accounting_c.x;
     display.runtime_serials = value.runtime_serials.to_array();
     display.event_result = value.event_result.to_array();
-    refresh_canonical_display(&mut display);
+    refresh_canonical_display(display);
 }
 
 fn refresh_canonical_display(display: &mut CanonicalGpuDisplay) {
@@ -6458,7 +6487,10 @@ fn settle_canonical_handoff(
         commands.entity(entity).despawn();
     }
     let generation = request.generation.wrapping_add(1).max(1);
-    let completed_steps = handoff.stats.snapshot_step.load(Ordering::Relaxed) as u64;
+    let completed_steps = unwrap_steps(
+        request.stats.completed_steps(),
+        handoff.stats.snapshot_step.load(Ordering::Relaxed),
+    );
     let local_step = handoff.stats.snapshot_local_step.load(Ordering::Relaxed);
     let receipt = handoff
         .stats
@@ -9104,6 +9136,37 @@ mod tests {
     /// The bank comes with the state snapshot and the epoch origin with the
     /// control readback, so a decode is trusted only when no clock rebase can
     /// lie between the two readbacks.
+    /// RT-12 of the 2026-10-20 review: the device counts accepted steps in a
+    /// u32, and past 2^32 of them, some 6.5 days at full speed, the host took
+    /// the wrapped count for its own u64 one. `caught_up` never held again,
+    /// so an edit's upload waited for good; a live event was scheduled some
+    /// 4.29e9 steps ahead; and a snapshot was held for good.
+    #[test]
+    fn the_step_count_carries_on_past_the_devices_u32() {
+        let wrap = 1_u64 << 32;
+        let mut request = CanonicalGpuRequest::default();
+        let mut display = CanonicalGpuDisplay::default();
+        request
+            .stats
+            .completed_steps
+            .store(wrap - 2, Ordering::Relaxed);
+        request.desired_steps = wrap + 3;
+        let control = |accepted: u32| GpuCanonicalControl {
+            clock_u32: UVec4::new(0, 0, 7, accepted),
+            ..Default::default()
+        };
+        read_canonical_control(&request.stats, &mut display, 1, &control(3));
+        assert_eq!(request.stats.completed_steps(), wrap + 3);
+        assert!(request.caught_up());
+        assert_eq!(display.clock.unwrap().accepted_steps, wrap + 3);
+        // A snapshot or a receipt from just before the wrap reads before it,
+        // and the start of a run reads as itself.
+        assert_eq!(unwrap_steps(wrap + 3, u32::MAX), wrap - 1);
+        assert_eq!(unwrap_steps(wrap - 1, 2), wrap + 2);
+        assert_eq!(unwrap_steps(0, 5), 5);
+        assert_eq!(unwrap_steps(5, u32::MAX), u64::from(u32::MAX));
+    }
+
     #[test]
     fn the_accepted_runtime_waits_for_readbacks_that_share_an_epoch() {
         let (_, _, _, operator, _, _) = temporal_plan();
@@ -9117,7 +9180,7 @@ mod tests {
             raw_state_epoch: 3,
             ..Default::default()
         };
-        let clock = |accepted_steps: u32, step_in_epoch: u32| CanonicalGpuDisplayClock {
+        let clock = |accepted_steps: u64, step_in_epoch: u32| CanonicalGpuDisplayClock {
             epoch: 3,
             epoch_origin_seconds: 12.5,
             absolute_seconds: 12.5,
