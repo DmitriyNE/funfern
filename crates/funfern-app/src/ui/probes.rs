@@ -500,14 +500,21 @@ impl Playground {
         // The far field records at fixed world points rather than at a probe,
         // so a contour that moved starts its delay window again even when the
         // clock did not.
-        match request.update_canonical_far_field(assets, commands, far.as_ref(), dt, history) {
+        let handoff =
+            request.update_canonical_far_field(assets, commands, far.as_ref(), dt, history);
+        self.far_field_refused = handoff.as_ref().err().cloned();
+        match handoff {
             Ok(FarFieldHandoff::Restarted) => {
                 self.far_field_trace = FarFieldTrace::default();
                 self.far_field_recording_from = Some(self.simulated_time());
             }
             Ok(FarFieldHandoff::Off) => self.far_field_recording_from = None,
             Ok(FarFieldHandoff::Kept) => {}
+            // A refusal records nothing: the window says why in red, and the
+            // pattern of the contour before it goes rather than standing
+            // frozen at its last time (PR-6 of the 2026-10-20 review).
             Err(error) => {
+                self.far_field_trace = FarFieldTrace::default();
                 self.far_field_recording_from = None;
                 self.message = error;
             }
@@ -1109,6 +1116,66 @@ mod tests {
             "the line recorder is not left on the old stencils"
         );
         assert!(state.diagnostics_warning(), "{}", state.message);
+    }
+
+    /// PR-6 of the 2026-10-20 review: a delay window longer than the
+    /// far-field recorder's ring holds was refused, but only the status line
+    /// said so, once a handoff, while the readout drew the old pattern frozen
+    /// at its last time and the compile's status read fine. The refusal is
+    /// the window's red status, and the old pattern goes.
+    #[test]
+    fn a_delay_window_past_the_ring_is_the_far_fields_status() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut recorders = WaveGpuRequest::default();
+        let mut state = Playground::default();
+        state
+            .editor
+            .set_far_field(crate::document::FarFieldSettings {
+                enabled: true,
+                inset: crate::document::DEFAULT_FAR_FIELD_INSET,
+            })
+            .unwrap();
+        // The domain's right edge dragged from x = 1 to 5: the delay window
+        // grows to some 10 s, where the ring holds 8.5.
+        state
+            .editor
+            .set_domain(DomainRect {
+                min_x: -1.0,
+                max_x: 5.0,
+                min_y: -1.0,
+                max_y: 1.0,
+            })
+            .unwrap();
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        assert!(
+            active.far_field.as_ref().is_some_and(Result::is_ok),
+            "the compile takes it"
+        );
+        state.far_field_trace.last_time = 3.0;
+        world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            state.configure_probes(
+                &mut recorders,
+                &mut assets,
+                &mut commands,
+                &active,
+                RecorderSource::Fixed(&active.canonical_operator),
+            );
+        });
+        assert!(
+            state
+                .far_field_status()
+                .is_some_and(|status| status.contains("delay window")),
+            "{:?}",
+            state.far_field_status()
+        );
+        assert_eq!(
+            state.far_field_trace.last_time, -1.0,
+            "the old pattern goes"
+        );
     }
 
     #[test]

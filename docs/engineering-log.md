@@ -26667,8 +26667,34 @@ Measured again first, then made quadratic in the trace.
   examples), so a group arrives within about a frame.
 - **Checked on Metal:** all 18 fixtures and the recorder examples
   (`canonical_gpu_filter_boundary`, `canonical_gpu_temporal_consumer` and
-  `canonical_gpu_timing` in its eleven modes) pass. None of them measures
+  `canonical_gpu_timing` in its ten modes) pass. None of them measures
   the first steps after a handoff directly.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 3: the far-field window says why its recorder refused, and drops the old pattern (PR-6)
+
+- **Found by the review (PR-6).**
+  - With a vacuum exterior, dragging the domain's right edge from x = 1 to 5
+    grows the far field's delay window to about 10 s, past the 8.5 s its
+    ring holds. `update_canonical_far_field` refuses it, but neither the
+    core compile nor `set_far_field` checks that limit.
+  - The error branch cleared only the recording start, and the window's red
+    status read the compile's result, which was fine. The readout kept
+    drawing the old contour's pattern frozen at its last time, and the
+    status line flashed the error once a handoff.
+  - The architecture asks for an explicit error in place of truncated
+    output.
+- **Reproduced.** `a_delay_window_past_the_ring_is_the_far_fields_status`
+  widens the domain so, and configures the recorders. The window's status
+  read nothing. (A first try slowed the exterior instead, which lengthens
+  the step and the ring's span with it, so nothing was refused.)
+- **Fix.** The recorder's refusal is kept (`far_field_refused`), and the
+  window's status (`far_field_status`) shows it in red after the compile's
+  own. A refusal also drops the trace, so the old pattern goes.
+- **Also:** PR-9's entry counted eleven modes of `canonical_gpu_timing`; the
+  suite runs ten.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

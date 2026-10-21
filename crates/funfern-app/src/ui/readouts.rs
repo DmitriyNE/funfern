@@ -1509,6 +1509,17 @@ impl Playground {
         }
         self.far_field_readout_window(ctx);
     }
+    /// Why the far field records nothing, for the window to say in red: the
+    /// compile's refusal, or the recorder's, as a delay window longer than
+    /// its ring holds (PR-6 of the 2026-10-20 review).
+    pub(super) fn far_field_status(&self) -> Option<String> {
+        self.runtime
+            .active()
+            .and_then(|active| active.far_field.as_ref())
+            .and_then(|result| result.as_ref().err().cloned())
+            .or_else(|| self.far_field_refused.clone())
+    }
+
     pub(super) fn far_field_readout_window(&mut self, ctx: &egui::Context) {
         if !self.far_field_window {
             return;
@@ -1551,11 +1562,7 @@ impl Playground {
         }
         self.far_field_view.readout.span = self.far_field_view.readout.span.clamp(0.02, history);
         let shown = self.far_field_view.readout;
-        let status = self
-            .runtime
-            .active()
-            .and_then(|active| active.far_field.as_ref())
-            .and_then(|result| result.as_ref().err().cloned());
+        let status = self.far_field_status();
         let recording = self.far_field_recording();
         let mut open = true;
         let mut clear = false;

@@ -236,6 +236,8 @@ pub struct Playground {
     /// Simulated time the far-field ring started recording from, or `None` when
     /// no recorder is running.
     pub(super) far_field_recording_from: Option<f64>,
+    /// Why the far-field recorder refused the active contour, if it did.
+    pub(super) far_field_refused: Option<String>,
     pub(super) frame_ms: f32,
     pub(super) wave_energy: Option<f64>,
     /// Each field-dependent material's peak response at the last full
@@ -485,6 +487,7 @@ impl Default for Playground {
             probe_clock_restarted: true,
             probe_history_physics: None,
             far_field_recording_from: None,
+            far_field_refused: None,
             frame_ms: 16.0,
             wave_energy: None,
             nonlinear_strength: Vec::new(),
