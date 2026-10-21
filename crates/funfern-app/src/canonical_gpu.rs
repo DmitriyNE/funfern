@@ -7988,6 +7988,7 @@ fn compute_canonical_wave(
                             consumer.canonical_far_field_sample,
                             consumer.canonical_far_field_project,
                             consumer.canonical_far_field_advance,
+                            consumer.canonical_far_field_rewind,
                         ]),
                     },
                 ]
@@ -8207,6 +8208,8 @@ fn compute_canonical_wave(
                         .get_compute_pipeline(consumer_pipeline.canonical_far_field_project),
                     pipeline_cache
                         .get_compute_pipeline(consumer_pipeline.canonical_far_field_advance),
+                    pipeline_cache
+                        .get_compute_pipeline(consumer_pipeline.canonical_far_field_rewind),
                 )
             })
     });
@@ -8226,6 +8229,17 @@ fn compute_canonical_wave(
     let resident_filter = request.grid_scale_filter && handles.grid_filter_admitted;
     let mut rebases = 0_u64;
     let mut resident_filters = 0_u64;
+    // A handed-over generation's far-field ring holds, newest, the frames the
+    // source recorded past the snapshot; before the first step the ring gives
+    // them up (PR-5 of the 2026-10-20 review).
+    if request.handed_over_at() == Some(group.encoded_steps)
+        && let Some((_, bind_group, .., Some(rewind))) = far_recorder
+    {
+        pass.set_bind_group(0, &bind_group.bind_group, &[]);
+        pass.set_pipeline(rewind);
+        pass.dispatch_workgroups(1, 1, 1);
+        pass.set_bind_group(0, &group.bind_group, &[]);
+    }
     for offset in 0..pending {
         if group.encoded_local_step.saturating_add(1) >= handles.rebase_step_limit {
             pass.set_pipeline(pipelines[22]);
@@ -8459,8 +8473,15 @@ fn compute_canonical_wave(
             pass.dispatch_workgroups(1, 1, 1);
             pass.set_bind_group(0, &group.bind_group, &[]);
         }
-        if let Some((handles, bind_group, Some(decide), Some(sample), Some(project), Some(advance))) =
-            far_recorder
+        if let Some((
+            handles,
+            bind_group,
+            Some(decide),
+            Some(sample),
+            Some(project),
+            Some(advance),
+            _,
+        )) = far_recorder
             && differencing_sample_due(recorder_step, handles.sample_stride, resident_filter)
         {
             // Four dispatches, so that every thread of the middle two reads

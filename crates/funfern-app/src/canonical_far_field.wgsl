@@ -272,6 +272,36 @@ fn project_directions(@builtin(global_invocation_id) invocation: vec3<u32>) {
     directional_history[slot].values = vec4<f32>(amplitude, far, select(0.0, 1.0, valid));
 }
 
+// A handed-over generation starts at its snapshot's step, behind the frames
+// the source recorded while the handoff waited for admission, which are of a
+// trajectory the target discards and stand newest in the ring: the target
+// recorded nothing until it passed them, and its projections read across
+// them. Before its first pass the ring gives up every frame stamped after
+// the target's clock, newest first, and their directions read invalid (PR-5
+// of the 2026-10-20 review). Dispatched only at the snapshot's step, where
+// the clock is the snapshot's; again there, it finds nothing to give up.
+@compute @workgroup_size(1)
+fn rewind_frames() {
+    let frames = u32(far_control.sampling.y);
+    let directions = u32(far_control.sampling.w);
+    let now = vec2<f32>(control.clock_origin.x, control.clock_origin.y + control.clock_f32.y);
+    var next = next_slot();
+    var held = frames_held();
+    loop {
+        if held == 0u { break; }
+        let newest = (next + frames - 1u) % frames;
+        if stamp_difference(contour_history[header_index(newest)].values.xy, now) <= 0.0 {
+            break;
+        }
+        for (var direction = 0u; direction < directions; direction += 1u) {
+            directional_history[newest * directions + direction].values.w = 0.0;
+        }
+        next = newest;
+        held -= 1u;
+    }
+    contour_history[ring_state_index()].values = vec4<f32>(f32(next), f32(held), 0.0, 0.0);
+}
+
 // After the projection: a recorded frame moves the ring on a slot.
 @compute @workgroup_size(1)
 fn advance_frame() {

@@ -26811,7 +26811,7 @@ Measured again first, then made quadratic in the trace.
     readback brought them back;
   - a readback copied before admission arrives after it, tagged with the
     source generation, which ingestion accepts.
-  - You chose to mark the frames on the device.
+  - The user chose to mark the frames on the device.
 - **Reproduced.** `a_handoff_takes_the_traces_back_to_its_snapshot` ingests a
   source's samples past a snapshot at 1.85 and publishes the handoff. They
   stayed, and the target's were refused.
@@ -26840,6 +26840,34 @@ Measured again first, then made quadratic in the trace.
   `canonical_gpu_temporal_consumer` pass. None of them hands off while a
   probe records with a backlog, so the marking itself is checked by the
   tests alone.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
+
+## 2026-10-22 — Step 3: a handed-over far field gives up the frames past its snapshot (PR-5, far field)
+
+- **The far field's half of PR-5.** Its ring is keyed by time, with its own
+  write pointer, and records a frame once its centred stamp stands a period
+  past the newest frame's. After a handoff the source's frames past the
+  snapshot stood newest in the ring:
+  - the target, restarting behind them, recorded nothing until it passed
+    them;
+  - its projections read across them, a trajectory the target discards;
+  - and the host, which reads only the directional rows, took the source's.
+  The previous entry trims the host's trace and cuts the source's late
+  readbacks.
+- **Fix.** A one-thread entry point, `rewind_frames`, runs before the
+  target's first step, where its clock is the snapshot's. It gives up every
+  frame stamped after that clock, newest first, and marks its directions
+  invalid. Dispatched again at that step, as when the steps wait, it finds
+  nothing to give up. Its pipeline is part of the far-field recorder's
+  readiness.
+- **Reproduced by reading only:** no fixture hands off while the far field
+  records with a backlog, so neither the stale frames nor their rewind are
+  measured on the device. The shader suite validates it, and the far-field
+  fixtures would fail on a recorder whose pipeline did not build.
+- **Also:** the previous entry's "You chose" reads "The user chose".
+- **Checked on Metal:** all 18 fixtures pass.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.

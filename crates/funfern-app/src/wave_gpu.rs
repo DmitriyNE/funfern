@@ -2253,6 +2253,7 @@ pub(crate) struct WavePipeline {
     pub(crate) canonical_far_field_sample: CachedComputePipelineId,
     pub(crate) canonical_far_field_project: CachedComputePipelineId,
     pub(crate) canonical_far_field_advance: CachedComputePipelineId,
+    pub(crate) canonical_far_field_rewind: CachedComputePipelineId,
     pub(crate) canonical_vector_overlay: CachedComputePipelineId,
 }
 
@@ -2436,6 +2437,10 @@ fn init_pipeline(
     let canonical_far_field_project = pipeline_cache.queue_compute_pipeline(
         canonical_far_pipeline("canonical far-field projector", "project_directions"),
     );
+    let canonical_far_field_rewind = pipeline_cache.queue_compute_pipeline(canonical_far_pipeline(
+        "canonical far-field ring rewind",
+        "rewind_frames",
+    ));
     let canonical_far_field_advance = pipeline_cache.queue_compute_pipeline(
         canonical_far_pipeline("canonical far-field ring advance", "advance_frame"),
     );
@@ -2454,6 +2459,7 @@ fn init_pipeline(
         canonical_far_field_sample,
         canonical_far_field_project,
         canonical_far_field_advance,
+        canonical_far_field_rewind,
         canonical_vector_overlay,
     });
 }
