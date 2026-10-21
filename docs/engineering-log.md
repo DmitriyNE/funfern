@@ -26712,3 +26712,20 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: a Reset far field records from the installed clock (PR-15)
+
+- **Found by the review (PR-15).** After a 60 s run and a Reset, the far
+  field's "Recording the delay window" read 0% for about 60 s while its plots
+  already drew. `configure_probes` runs before the frame reads the new run's
+  step count, and the recording start, `simulated_time()`, took the old
+  run's.
+- **Reproduced.** `a_reset_far_field_records_from_the_installed_clock`
+  configures the recorders after a Reset, with the old run's 7,200 steps
+  still read. The recording started at 39.1 s.
+- **Fix.** A restarted clock records from where the installed clock starts,
+  `sim_time_offset`. A contour that moved under a running clock still
+  records from now.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.

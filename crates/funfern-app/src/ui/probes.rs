@@ -506,7 +506,15 @@ impl Playground {
         match handoff {
             Ok(FarFieldHandoff::Restarted) => {
                 self.far_field_trace = FarFieldTrace::default();
-                self.far_field_recording_from = Some(self.simulated_time());
+                // A restarted clock starts where the installed one does: the
+                // frame reads the new run's steps after this, and the old
+                // run's put the start some 60 s ahead after a 60 s run
+                // (PR-15 of the 2026-10-20 review).
+                self.far_field_recording_from = Some(if restarted {
+                    self.sim_time_offset
+                } else {
+                    self.simulated_time()
+                });
             }
             Ok(FarFieldHandoff::Off) => self.far_field_recording_from = None,
             Ok(FarFieldHandoff::Kept) => {}
@@ -1176,6 +1184,44 @@ mod tests {
             state.far_field_trace.last_time, -1.0,
             "the old pattern goes"
         );
+    }
+
+    /// PR-15 of the 2026-10-20 review: after a 60 s run and a Reset, the far
+    /// field's "Recording the delay window" read 0% for some 60 s while its
+    /// plots already drew. The recorders are set up before the frame reads
+    /// the new run's step count, and the recording start took the old run's.
+    /// A restarted clock records from where the installed clock starts.
+    #[test]
+    fn a_reset_far_field_records_from_the_installed_clock() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut recorders = WaveGpuRequest::default();
+        let mut state = Playground::default();
+        state
+            .editor
+            .set_far_field(crate::document::FarFieldSettings {
+                enabled: true,
+                inset: crate::document::DEFAULT_FAR_FIELD_INSET,
+            })
+            .unwrap();
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        // Reset installed a run at zero; the frame has not read its steps.
+        state.completed_steps = 7_200;
+        state.sim_time_offset = 0.0;
+        state.probe_clock_restarted = true;
+        world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            state.configure_probes(
+                &mut recorders,
+                &mut assets,
+                &mut commands,
+                &active,
+                RecorderSource::Fixed(&active.canonical_operator),
+            );
+        });
+        assert_eq!(state.far_field_recording_from, Some(0.0));
     }
 
     #[test]
