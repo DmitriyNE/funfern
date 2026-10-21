@@ -2251,7 +2251,7 @@ impl CanonicalGpuPlan {
         state_words.push(GpuCanonicalStateWord {
             values: Vec4::new(
                 SNAPSHOT_METADATA_MAGIC,
-                0.0,
+                (2 * (control.clock_u32.x & 0xffff)) as f32,
                 (control.clock_u32.w & 0xffff) as f32,
                 (control.clock_u32.w >> 16) as f32,
             ),
@@ -5440,9 +5440,9 @@ impl CanonicalGpuDisplay {
     /// control readback, and the two can describe different steps. The origin
     /// moves only at a clock rebase, so the pair is trusted only when the
     /// snapshot is no later than the clock and inside the clock's current
-    /// epoch - no rebase can lie between them. Otherwise this returns `None`
-    /// and a caller waits a readback rather than decoding against the wrong
-    /// origin.
+    /// epoch - no rebase can lie between them - which the snapshot's own epoch
+    /// says. Otherwise this returns `None` and a caller waits a readback
+    /// rather than decoding against the wrong origin.
     pub fn accepted_material_runtime(
         &self,
         authored: &CanonicalMaterialRuntimeState,
@@ -5450,7 +5450,11 @@ impl CanonicalGpuDisplay {
         let clock = self.clock?;
         let snapshot = u32::try_from(self.raw_state_completed_steps).ok()?;
         let behind = clock.accepted_steps.checked_sub(snapshot)?;
-        if clock.step_in_epoch < behind {
+        // The snapshot names its own epoch. Its step alone cannot: a rebase is
+        // encoded with the step after it, so a snapshot on an epoch's last step
+        // is the old epoch's while its step reads as the new one's first, as an
+        // install's first step does (RT-5 of the 2026-10-20 review).
+        if clock.step_in_epoch < behind || self.raw_state_epoch != snapshot_epoch(clock.epoch) {
             return None;
         }
         self.material_runtime(authored, clock.epoch_origin_seconds)
@@ -5642,6 +5646,9 @@ pub struct CanonicalGpuDisplay {
     /// Absolute accepted step captured inside the state buffer itself. Unlike
     /// the continuously read control buffer, it describes this exact snapshot.
     raw_state_completed_steps: u64,
+    /// The low 16 bits of the epoch the snapshot was taken in, which the same
+    /// word carries.
+    raw_state_epoch: u32,
     /// The accepted lane and step of `raw_primary`, from the metadata word
     /// of the copy it came in.
     raw_primary_slot: u32,
@@ -6027,7 +6034,7 @@ fn receive_canonical_integrated(
         return;
     }
     // Read in the lane its own copy names, as the primary stream is.
-    let Some((slot, step)) = words.pop().and_then(snapshot_metadata) else {
+    let Some((slot, step, _)) = words.pop().and_then(snapshot_metadata) else {
         return;
     };
     set_live_integrated(&mut display, &words, slot, step);
@@ -6086,23 +6093,32 @@ fn snapshot_step(tag: &CanonicalStateReadback, data: &[u8]) -> Option<u32> {
     (lane(0) == SNAPSHOT_METADATA_MAGIC).then(|| lane(2) as u32 | (lane(3) as u32) << 16)
 }
 
-/// The accepted lane and completed steps a metadata word carries, `None`
-/// when the word is not one.
-fn snapshot_metadata(word: GpuCanonicalStateWord) -> Option<(u32, u64)> {
+/// The accepted lane, completed steps and epoch a metadata word carries,
+/// `None` when the word is not one. Its second lane holds the lane and twice
+/// the epoch's low 16 bits, exact in an f32.
+fn snapshot_metadata(word: GpuCanonicalStateWord) -> Option<(u32, u64, u32)> {
     let metadata = word.values.to_array();
     if metadata[0] != SNAPSHOT_METADATA_MAGIC
-        || (metadata[1] != 0.0 && metadata[1] != 1.0)
+        || !(0.0..=131_071.0).contains(&metadata[1])
         || !(0.0..=65_535.0).contains(&metadata[2])
         || !(0.0..=65_535.0).contains(&metadata[3])
+        || metadata[1].fract() != 0.0
         || metadata[2].fract() != 0.0
         || metadata[3].fract() != 0.0
     {
         return None;
     }
+    let slot_and_epoch = metadata[1] as u32;
     Some((
-        metadata[1] as u32,
+        slot_and_epoch & 1,
         u64::from(metadata[2] as u32 | (metadata[3] as u32) << 16),
+        slot_and_epoch >> 1,
     ))
+}
+
+/// The low 16 bits of an epoch, as a snapshot's metadata carries it.
+fn snapshot_epoch(epoch: u64) -> u32 {
+    (epoch & 0xffff) as u32
 }
 
 fn receive_canonical_state(
@@ -6159,12 +6175,13 @@ fn apply_canonical_state(
             return;
         }
         let runtime = words.split_off(words.len() - runtime_words);
-        let Some((slot, step)) = words.pop().and_then(snapshot_metadata) else {
+        let Some((slot, step, epoch)) = words.pop().and_then(snapshot_metadata) else {
             return;
         };
         display.raw_material_runtime = runtime;
         display.raw_state_slot = slot;
         display.raw_state_completed_steps = step;
+        display.raw_state_epoch = epoch;
         display.raw_primary_slot = slot;
         display.raw_primary_step = step;
         display.raw_primary.clear();
@@ -6173,7 +6190,7 @@ fn apply_canonical_state(
             .extend(words.iter().take(tag.node_count as usize).copied());
         display.raw_state = words;
     } else {
-        let Some((slot, step)) = words.pop().and_then(snapshot_metadata) else {
+        let Some((slot, step, _)) = words.pop().and_then(snapshot_metadata) else {
             return;
         };
         display.raw_primary_slot = slot;
@@ -6215,6 +6232,7 @@ fn begin_canonical_display_generation(display: &mut CanonicalGpuDisplay, generat
     display.raw_material_runtime.clear();
     display.raw_state_slot = 0;
     display.raw_state_completed_steps = 0;
+    display.raw_state_epoch = 0;
     display.raw_primary_slot = 0;
     display.raw_primary_step = 0;
     display.full_readback_at = u64::MAX;
@@ -9096,6 +9114,7 @@ mod tests {
                 authored.records().len() * TEMPORAL_RUNTIME_WORDS_PER_SLOT
             ],
             raw_state_completed_steps: 90,
+            raw_state_epoch: 3,
             ..Default::default()
         };
         let clock = |accepted_steps: u32, step_in_epoch: u32| CanonicalGpuDisplayClock {
@@ -9134,6 +9153,44 @@ mod tests {
             display.accepted_material_runtime(&authored).is_none(),
             "the clock's epoch began after the snapshot was taken"
         );
+        // A snapshot at the epoch's first step, as an install or a handoff
+        // leaves one, is the epoch's own.
+        display.clock = Some(clock(100, 10));
+        assert!(display.accepted_material_runtime(&authored).is_some());
+        // RT-5 of the 2026-10-20 review: a rebase is encoded with the step
+        // after it, so a snapshot on an epoch's last step is the old epoch's
+        // while its step reads as the new epoch's first, the same as above.
+        // Decoded against the new origin, its carriers stood ω(L - 1)dt off
+        // and its Switch about 256 s early. Only the epoch it carries tells.
+        display.raw_state_epoch = 2;
+        assert!(
+            display.accepted_material_runtime(&authored).is_none(),
+            "a snapshot taken in the epoch before is not decoded against this one's origin"
+        );
+        // The metadata carries the epoch's low 16 bits.
+        display.raw_state_epoch = 3;
+        display.clock = Some(CanonicalGpuDisplayClock {
+            epoch: 0x1_0003,
+            ..clock(100, 10)
+        });
+        assert!(display.accepted_material_runtime(&authored).is_some());
+    }
+
+    /// The metadata word's second lane carries the accepted lane and the
+    /// epoch's low 16 bits, as the shader and the packer write it.
+    #[test]
+    fn a_snapshot_metadata_word_carries_its_lane_step_and_epoch() {
+        let word = |slot_and_epoch: f32| GpuCanonicalStateWord {
+            values: Vec4::new(SNAPSHOT_METADATA_MAGIC, slot_and_epoch, 7.0, 2.0),
+        };
+        let step = 7 + (2 << 16);
+        assert_eq!(snapshot_metadata(word(0.0)), Some((0, step, 0)));
+        assert_eq!(snapshot_metadata(word(1.0)), Some((1, step, 0)));
+        assert_eq!(snapshot_metadata(word(7.0)), Some((1, step, 3)));
+        assert_eq!(snapshot_metadata(word(131_071.0)), Some((1, step, 0xffff)));
+        assert_eq!(snapshot_metadata(word(131_072.0)), None);
+        assert_eq!(snapshot_metadata(word(-1.0)), None);
+        assert_eq!(snapshot_metadata(word(2.5)), None);
     }
 
     /// Cleared with steps still outstanding, as a scene replacement drops a

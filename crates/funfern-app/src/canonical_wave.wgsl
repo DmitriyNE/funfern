@@ -259,9 +259,12 @@ const TEMPORAL_RUNTIME_WORDS_PER_MATERIAL: u32 = 10u;
 // them from the same copy as the fields they explain; a separately arriving
 // runtime copy would be status, not snapshot identity.
 fn publish_snapshot_metadata() {
+    // The accepted lane and the epoch's low 16 bits share a lane, exact in an
+    // f32: a snapshot names its own epoch, which its step alone cannot at an
+    // epoch's boundary (RT-5 of the 2026-10-20 review).
     state[control.counts_a.w].values = vec4<f32>(
         SNAPSHOT_METADATA_MAGIC,
-        f32(accepted_slot()),
+        f32(accepted_slot() + 2u * (control.clock_u32.x & 0xffffu)),
         f32(control.clock_u32.w & 0xffffu),
         f32(control.clock_u32.w >> 16u));
     if !temporal_enabled() { return; }

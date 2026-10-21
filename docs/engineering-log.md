@@ -26215,3 +26215,40 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-21 — Step 3: a boundary snapshot is decoded in its own epoch (RT-5)
+
+- **Found by the review (RT-5).** `accepted_material_runtime` trusts a full
+  snapshot only inside the clock's current epoch. It judged that by
+  `step_in_epoch >= behind`.
+  - A rebase is encoded with the step after it, so a snapshot on an epoch's
+    last step belongs to the old epoch. With the clock `behind` steps into the
+    new one, its step reads as the new epoch's first, and the check passed.
+  - Decoded against the new origin, drive phases stood ω(L - 1)dt off and a
+    Switch's start about 256 s early. That lasted until the next snapshot, and
+    stored energy, the AMR indicators and the Switch readers read it.
+- **Reproduced.** `the_accepted_runtime_waits_for_readbacks_that_share_an_epoch`
+  gains the case: a snapshot at step 90, the clock at 100 and 10 steps into
+  its epoch. It decoded.
+- **No rule on the steps alone.** A first try refused a snapshot exactly
+  `behind` steps into the clock's epoch. The gate caught it:
+  `a_snapshot_field_is_read_at_the_snapshots_step` holds a snapshot at an
+  install's first step with the clock 400 steps on, which is legitimate and
+  reads the same.
+- **Fix.** The snapshot names its epoch.
+  - The metadata word's second lane carried the accepted lane, 0 or 1. It now
+    carries the lane plus twice the epoch's low 16 bits, exact in an f32, from
+    the shader and from the packer's first word alike. The buffer layout is
+    unchanged.
+  - The host keeps the snapshot's epoch beside its step, and
+    `accepted_material_runtime` decodes it only against a clock in the same
+    epoch. Its callers already wait on `None`.
+  - Tests: the case above, now with the snapshot's epoch one behind the
+    clock's, refused; the same steps in one epoch, decoded; and
+    `a_snapshot_metadata_word_carries_its_lane_step_and_epoch`.
+- **Checked on Metal:** `canonical_gpu_temporal_consumer`,
+  `canonical_gpu_temporal_handoff` and the `switch`, `handoff-driven`,
+  `observables` and `handoff-memory-running-late` fixtures pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
