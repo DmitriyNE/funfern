@@ -54,14 +54,13 @@ impl ProbeModel<'_> {
         self,
         label: BoundaryLabel,
         parameter: f64,
-        period: f64,
+        period: Option<f64>,
         region: RegionId,
     ) -> bool {
         let Self::Topology { plan, .. } = self else {
             return true;
         };
-        (-1..=1).any(|shift| {
-            let parameter = parameter + shift as f64 * period;
+        wrapped(parameter, period).any(|parameter| {
             plan.boundaries.iter().any(|boundary| {
                 let [a, b] = boundary.parameter;
                 let contains = parameter >= a.min(b) - BOUNDARY_TOLERANCE
@@ -139,8 +138,22 @@ pub struct QuadraticBoundaryStencil {
 pub struct BoundaryStencilTarget {
     pub label: BoundaryLabel,
     pub parameter: f64,
-    pub period: f64,
+    /// A closed curve's period, which the parameter wraps by at its seam.
+    /// `None` on an open curve: its tips are its parameter's ends, and on a
+    /// single span they share a label, so a wrap put an end sample on the
+    /// other tip (PR-7 of the 2026-10-20 review).
+    pub period: Option<f64>,
     pub region: RegionId,
+}
+
+/// Where a boundary target's parameter may sit: itself, and on a closed curve
+/// a period either way, where the seam puts it.
+fn wrapped(parameter: f64, period: Option<f64>) -> impl Iterator<Item = f64> {
+    let (shifts, period) = match period {
+        Some(period) => (-1..=1, period),
+        None => (0..=0, 0.0),
+    };
+    shifts.map(move |shift| parameter + f64::from(shift) * period)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -891,7 +904,7 @@ impl QuadraticBoundaryStencil {
             label,
             None,
             parameter,
-            period,
+            Some(period),
             region,
         )
     }
@@ -961,12 +974,11 @@ impl QuadraticBoundaryStencil {
         label: BoundaryLabel,
         side: Option<crate::CurveTraceSide>,
         parameter: f64,
-        period: f64,
+        period: Option<f64>,
         region: RegionId,
     ) -> Result<Self, PointProbeError> {
         if !parameter.is_finite()
-            || !period.is_finite()
-            || period <= 0.0
+            || !period.is_none_or(|period| period.is_finite() && period > 0.0)
             || !model.valid()
             || !model.contains_region(region)
             || !model.contains_boundary_target(label, parameter, period, region)
@@ -985,8 +997,7 @@ impl QuadraticBoundaryStencil {
             if denominator.abs() <= f64::EPSILON {
                 continue;
             }
-            for shift in -1..=1 {
-                let shifted = parameter + shift as f64 * period;
+            for shifted in wrapped(parameter, period) {
                 let fraction = (shifted - edge.parameters[0]) / denominator;
                 if !(-1.0e-9..=1.0 + 1.0e-9).contains(&fraction) {
                     continue;
@@ -1867,7 +1878,7 @@ mod tests {
             BoundaryStencilTarget {
                 label: left_edge.label,
                 parameter,
-                period: 1.0,
+                period: None,
                 region: BACKGROUND_REGION,
             },
         )
@@ -1880,7 +1891,7 @@ mod tests {
             BoundaryStencilTarget {
                 label: right_edge.label,
                 parameter,
-                period: 1.0,
+                period: None,
                 region: BACKGROUND_REGION,
             },
         )
@@ -1980,7 +1991,7 @@ mod tests {
                         separated: false,
                     },
                     parameter,
-                    period: 1.0,
+                    period: None,
                     region,
                 },
             )

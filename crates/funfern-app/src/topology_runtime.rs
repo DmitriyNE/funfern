@@ -1887,6 +1887,9 @@ fn compile_boundary_probe(
         .map(|bounds| bounds[1])
         .filter(|period| period.is_finite() && *period > 0.0)
         .ok_or("Boundary probe curve has an invalid period")?;
+    // Only a closed curve's parameter wraps, at its seam (PR-7 of the
+    // 2026-10-20 review).
+    let period = matches!(curve.spline, CurveSpline::Closed(_)).then_some(period);
     let count = target.preset.spatial_points();
     (0..count)
         .map(|index| {
@@ -4947,104 +4950,109 @@ mod tests {
     /// along a straight 1.6, its length summed 2.4 times over and every
     /// integral with it. Along a baffle, which has both traces, the two sides
     /// must sample the same points in the same order, evenly along the curve.
+    /// So on a baffle of one span, whose two ends share one label: the period
+    /// wrap put an end sample on the other tip there, so the profile's end
+    /// and the integral read the wrong place (PR-7 of the same review).
     #[test]
     fn a_right_boundary_probe_samples_its_curve_in_order() {
-        let mut editor = TopologyEditor::default();
-        let baffle = editor
-            .create_open_curve(
-                // Two spans: on one, the period wrap puts an end sample on the
-                // other tip (PR-7), which is not what this reads.
-                OpenCubicSpline::polyline(vec![
-                    Point2::new(-0.8, 0.1),
-                    Point2::new(0.0, 0.1),
-                    Point2::new(0.8, 0.1),
-                ])
-                .unwrap(),
-                OpenCurvePurpose::BoundaryBaffle,
-                None,
-                None,
-            )
-            .unwrap()
-            .curve;
-        settle(&mut editor);
-        let spans = editor
-            .document
-            .model
-            .draft
-            .geometry
-            .curve(baffle)
-            .unwrap()
-            .spans
-            .iter()
-            .map(|span| span.id)
-            .collect::<Vec<_>>();
-        let mut probes = Vec::new();
-        for (name, side) in [
-            ("Left", CurveTraceSide::Left),
-            ("Right", CurveTraceSide::Right),
+        for vertices in [
+            vec![
+                Point2::new(-0.8, 0.1),
+                Point2::new(0.0, 0.1),
+                Point2::new(0.8, 0.1),
+            ],
+            vec![Point2::new(-0.8, 0.1), Point2::new(0.8, 0.1)],
         ] {
-            probes.push(
-                editor
-                    .create_probe(
-                        name.into(),
-                        [200, 160, 90],
-                        TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
-                            curve: baffle,
-                            spans: spans.clone(),
-                            side,
-                            reversed: false,
-                            preset: crate::document::ProbeSamplingPreset::default(),
-                        }),
-                    )
-                    .unwrap(),
-            );
+            let mut editor = TopologyEditor::default();
+            let baffle = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vertices).unwrap(),
+                    OpenCurvePurpose::BoundaryBaffle,
+                    None,
+                    None,
+                )
+                .unwrap()
+                .curve;
             settle(&mut editor);
-        }
-        let mut runtime = TopologyRuntime::default();
-        let token = runtime
-            .request(
-                editor.revision,
-                &editor.document,
-                editor.compiled_accepted.clone(),
-                options(),
-                true,
-            )
-            .unwrap();
-        assert_eq!(prepare(&mut runtime).unwrap(), token);
-        let active = runtime.commit_ready(token).unwrap();
-        let points = |probe| {
-            let compiled = active
-                .probes
+            let spans = editor
+                .document
+                .model
+                .draft
+                .geometry
+                .curve(baffle)
+                .unwrap()
+                .spans
                 .iter()
-                .find(|compiled| compiled.id == probe)
-                .expect("the probe compiled");
-            let TopologyProbeCompilation::Ready(stencil) = &compiled.result else {
-                panic!("the probe did not compile: {:?}", compiled.result);
+                .map(|span| span.id)
+                .collect::<Vec<_>>();
+            let mut probes = Vec::new();
+            for (name, side) in [
+                ("Left", CurveTraceSide::Left),
+                ("Right", CurveTraceSide::Right),
+            ] {
+                probes.push(
+                    editor
+                        .create_probe(
+                            name.into(),
+                            [200, 160, 90],
+                            TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                                curve: baffle,
+                                spans: spans.clone(),
+                                side,
+                                reversed: false,
+                                preset: crate::document::ProbeSamplingPreset::default(),
+                            }),
+                        )
+                        .unwrap(),
+                );
+                settle(&mut editor);
+            }
+            let mut runtime = TopologyRuntime::default();
+            let token = runtime
+                .request(
+                    editor.revision,
+                    &editor.document,
+                    editor.compiled_accepted.clone(),
+                    options(),
+                    true,
+                )
+                .unwrap();
+            assert_eq!(prepare(&mut runtime).unwrap(), token);
+            let active = runtime.commit_ready(token).unwrap();
+            let points = |probe| {
+                let compiled = active
+                    .probes
+                    .iter()
+                    .find(|compiled| compiled.id == probe)
+                    .expect("the probe compiled");
+                let TopologyProbeCompilation::Ready(stencil) = &compiled.result else {
+                    panic!("the probe did not compile: {:?}", compiled.result);
+                };
+                let TopologyProbeStencil::Boundary(stencils) = stencil.as_ref() else {
+                    panic!("a boundary probe compiled to another kind");
+                };
+                stencils
+                    .iter()
+                    .map(|stencil| stencil.point)
+                    .collect::<Vec<_>>()
             };
-            let TopologyProbeStencil::Boundary(stencils) = stencil.as_ref() else {
-                panic!("a boundary probe compiled to another kind");
-            };
-            stencils
-                .iter()
-                .map(|stencil| stencil.point)
-                .collect::<Vec<_>>()
-        };
-        let (left, right) = (points(probes[0]), points(probes[1]));
-        let spacing = 1.6 / (left.len() - 1) as f64;
-        for (side, samples) in [("left", &left), ("right", &right)] {
-            for (index, pair) in samples.windows(2).enumerate() {
-                let step = pair[1].x - pair[0].x;
+            let (left, right) = (points(probes[0]), points(probes[1]));
+            let spacing = 1.6 / (left.len() - 1) as f64;
+            for (side, samples) in [("left", &left), ("right", &right)] {
+                for (index, pair) in samples.windows(2).enumerate() {
+                    let step = pair[1].x - pair[0].x;
+                    assert!(
+                        (step - spacing).abs() < 1.0e-9,
+                        "the {side} probe's sample {index} steps {step} along the baffle, not {spacing}"
+                    );
+                }
+            }
+            for (index, (left, right)) in left.iter().zip(&right).enumerate() {
                 assert!(
-                    (step - spacing).abs() < 1.0e-9,
-                    "the {side} probe's sample {index} steps {step} along the baffle, not {spacing}"
+                    (*left - *right).norm() < 1.0e-12,
+                    "sample {index}: left {left:?}, right {right:?}"
                 );
             }
-        }
-        for (index, (left, right)) in left.iter().zip(&right).enumerate() {
-            assert!(
-                (*left - *right).norm() < 1.0e-12,
-                "sample {index}: left {left:?}, right {right:?}"
-            );
         }
     }
 

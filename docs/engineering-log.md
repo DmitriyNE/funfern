@@ -26542,3 +26542,27 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. Host-only.
+
+## 2026-10-21 — Step 3: only a closed curve's boundary probe wraps at the seam (PR-7)
+
+- **Area 2 of step 3 begins:** the probes and recorders. The plan covers the
+  six medium findings, PR-5 to PR-10, and the six lows, PR-12 to PR-17. It
+  takes them one commit each, with a test first.
+- **Found by the review (PR-7).** `build_with_model` tries a boundary
+  sample's parameter, and that parameter a period either way, and takes the
+  first edge that fits. `compile_boundary_probe` passed every curve's total
+  parameter length as its period, an open curve's included. On a single-span
+  open curve the first and last edges share one label, so a sample at one
+  tip could land on the other. A boundary probe on a baffle drawn with two
+  clicks read its end sample at the opposite tip: the plotted profile's end
+  point and the integral were wrong, right where the gradient is singular.
+- **Reproduced.** PR-1's `a_right_boundary_probe_samples_its_curve_in_order`
+  now runs on a single-span baffle too. Its last sample stepped −1.57 along a
+  baffle of length 1.6, back to the start tip.
+- **Fix.** `BoundaryStencilTarget::period` is an `Option`, `None` on an open
+  curve, and only a closed curve's parameter wraps (`wrapped`), as
+  `node_vertex_at` already did. The core tests' open-curve targets pass
+  `None`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. Host-only.
