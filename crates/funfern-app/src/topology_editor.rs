@@ -334,10 +334,12 @@ impl Default for TopologyEditor {
 
 impl TopologyEditor {
     pub fn from_document(document: TopologyDocument) -> Result<Self, String> {
+        // As the file holds it, a rule added since it was written aside: the
+        // draft, validated as it is edited, names the rule until it is mended.
         let compiled_accepted = document
             .model
             .accepted
-            .compile(0)
+            .compile_structure(0)
             .map_err(|issue| format!("Accepted topology is invalid: {issue}"))?;
         let next_curve = next_id(
             document
@@ -482,7 +484,11 @@ impl TopologyEditor {
     /// invalid draft's place.
     fn follow_accepted(&mut self, left: &TopologyScene) {
         if self.document.model.accepted != *left
-            && let Ok(compiled) = self.document.model.accepted.compile(self.revision)
+            && let Ok(compiled) = self
+                .document
+                .model
+                .accepted
+                .compile_structure(self.revision)
         {
             self.compiled_accepted = compiled;
         }

@@ -11,8 +11,18 @@ fn directory() -> PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scenes-v22")
 }
 
+/// Version 22 scenes written before a rule they break; see the folder's
+/// README.
+fn before_rules_directory() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scenes-v22-before-rules")
+}
+
 fn frozen_scenes() -> Vec<(String, Vec<u8>)> {
-    let mut scenes: Vec<_> = std::fs::read_dir(directory())
+    scenes_in(directory())
+}
+
+fn scenes_in(directory: PathBuf) -> Vec<(String, Vec<u8>)> {
+    let mut scenes: Vec<_> = std::fs::read_dir(directory)
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| {
@@ -57,8 +67,22 @@ fn every_frozen_scene_is_there() {
 
 #[test]
 fn every_frozen_version_22_scene_opens_with_what_it_held() {
+    opens_with_what_it_held(frozen_scenes());
+}
+
+/// PER-2 of the 2026-10-20 review: a scene written before a rule it breaks
+/// opens, its accepted scene as written; it was refused, an autosave of it
+/// replaced by an example and then overwritten, a link to it lost.
+#[test]
+fn a_version_22_scene_written_before_a_rule_opens_with_what_it_held() {
+    let scenes = scenes_in(before_rules_directory());
+    assert_eq!(scenes.len(), 1);
+    opens_with_what_it_held(scenes);
+}
+
+fn opens_with_what_it_held(scenes: Vec<(String, Vec<u8>)>) {
     let mut failures = Vec::new();
-    for (name, bytes) in frozen_scenes() {
+    for (name, bytes) in scenes {
         let document = match topology_persistence::parse_document(&bytes) {
             Ok(document) => document,
             Err(error) => {

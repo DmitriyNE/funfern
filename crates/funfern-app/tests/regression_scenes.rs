@@ -296,6 +296,37 @@ fn check(scene: &Scene) -> Result<String, String> {
     ))
 }
 
+/// PER-2 of the 2026-10-20 review: a version 22 scene written before a rule
+/// it breaks opens in the editor with its draft invalid, naming the rule, and
+/// its accepted scene as written, which the run refuses as it did before the
+/// rule: the scene is there to be mended, not lost.
+#[test]
+fn a_scene_written_before_a_rule_opens_with_its_draft_invalid() {
+    let bytes = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/scenes-v22-before-rules/driven-span-meeting-a-pinned-one.json"),
+    )
+    .unwrap();
+    let document = topology_persistence::parse_document(&bytes).expect("the scene opens");
+    let mut editor = TopologyEditor::from_document(document.clone()).expect("the editor opens it");
+    settle(&mut editor);
+    match &editor.acceptance {
+        TopologyAcceptance::Invalid(issue) => assert!(
+            issue.to_string().contains("Dirichlet"),
+            "the draft names another issue: {issue}"
+        ),
+        other => panic!("the draft is not invalid: {other:?}"),
+    }
+    assert!(
+        editor.document.model.accepted == document.model.accepted,
+        "the accepted scene is kept as written"
+    );
+    let refused = prepare(&editor)
+        .err()
+        .expect("the run refuses the accepted scene");
+    assert!(refused.contains("Dirichlet"), "{refused}");
+}
+
 #[test]
 fn every_regression_frozen_and_gallery_scene_prepares_at_its_own_edge() {
     let scenes = scenes();

@@ -745,6 +745,9 @@ settings. Version 22 is a deliberate hard cut and older schemas are rejected; th
 built-in examples are authored directly in the new model. It is also the last cut:
 later versions open version 22 files, links and autosaves, which
 `crates/funfern-app/tests/fixtures/scenes-v22` holds frozen and the tests open.
+A file whose accepted scene breaks a rule added since it was written opens as
+written, its draft marked invalid with the rule named until it is edited; the
+run refuses its scene meanwhile (`scenes-v22-before-rules`).
 JSON files, autosaves and unpacked links are capped at 16 MiB, checked on saving as
 well as opening (a scene at the topology limits writes about 3 MiB), and require
 finite coordinates. The editor

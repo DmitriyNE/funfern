@@ -1228,10 +1228,13 @@ fn decode_probe(stored: StoredTopologyProbe) -> Result<TopologyProbeDefinition, 
 
 fn validate_document(document: &TopologyDocument) -> Result<(), String> {
     validate_scene_structure(&document.model.draft)?;
+    // As a file holds it: a rule added since it was written shows in the
+    // draft the editor validates, and does not refuse the file, its autosave
+    // or a link to it (PER-2 of the 2026-10-20 review).
     document
         .model
         .accepted
-        .compile(0)
+        .compile_structure(0)
         .map_err(|issue| format!("Accepted topology is invalid: {issue}"))?;
     // The source's region is not checked: preparation places the source by
     // its position, and a file can name a region that has since gone.

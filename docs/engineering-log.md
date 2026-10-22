@@ -27366,3 +27366,44 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. No device run: only the editor's history
   changes.
+
+## 2026-10-22 — Step 3, area 4: a scene written before a rule it breaks opens with its draft invalid (PER-2)
+
+- **The defect.** Loading compiled the accepted scene under today's rules,
+  with no fallback. A version 22 file written before e6ffc06 (2026-10-12)
+  can hold a driven Dirichlet face meeting a pinned one, which acceptance
+  has refused since then. The file was refused. An autosave of it was
+  replaced by an example and then overwritten, and a link to it did not
+  open. Saving ran the same check, so such a document could not have been
+  written back either.
+- **The user's choice: option B.** The file's accepted scene is kept as
+  written and checked for its structure only. The draft, which the editor
+  validates with every rule, shows the scene invalid, naming the rule, until
+  it is edited. The run refuses the accepted scene meanwhile, as assembly
+  did before e6ffc06, and the refusal is shown in diagnostics. A save writes
+  the file back as it was.
+- **A frozen scene.** `tests/fixtures/scenes-v22-before-rules/` holds
+  version 22 scenes that a later rule refuses, with a README.
+  `driven-span-meeting-a-pinned-one.json` is `scenes-v22/drum-modes.json`
+  with its curve's first span driven by a 1.5 Hz harmonic, in draft and
+  accepted, where the other spans pin the membrane. The format has not
+  changed, so it is what a build before the rule wrote. The 45 gallery
+  scenes stay as they were.
+- **Test first.**
+  - `a_version_22_scene_written_before_a_rule_opens_with_what_it_held`
+    (`tests/frozen_scenes.rs`) opens it and reads back every value it held.
+  - `a_scene_written_before_a_rule_opens_with_its_draft_invalid`
+    (`tests/regression_scenes.rs`) opens it in the editor, expects its draft
+    invalid with a Dirichlet issue and its accepted scene kept, and expects
+    the app's preparation to refuse it with a Dirichlet error.
+  Before the fix the first failed: "Accepted topology is invalid: two
+  Dirichlet conditions with different signals meet on one node".
+- **Fix.** `TopologyScene::compile_structure` compiles the structure,
+  topology, faces and plan without the rules acceptance adds; `compile` is
+  it followed by those rules. The document's check on load and save, the
+  editor's compilation of the accepted scene on opening, and its compilation
+  after an undo use it. Acceptance of a draft keeps every rule.
+- **Docs:** the user guide says how such a file opens.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

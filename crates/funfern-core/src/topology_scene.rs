@@ -401,13 +401,26 @@ impl TopologyScene {
     }
 
     pub fn compile(&self, revision: u64) -> Result<CompiledTopologyScene, TopologySceneIssue> {
+        let compiled = self.compile_structure(revision)?;
+        self.validate_dirichlet_traces(&compiled.plan)?;
+        Ok(compiled)
+    }
+
+    /// The scene compiled as a file holds it: its structure, topology, faces
+    /// and plan, without the rules acceptance adds to them. A file written
+    /// before a rule keeps its accepted scene, and opens with its draft
+    /// invalid, naming the rule, where it was refused (PER-2 of the 2026-10-20
+    /// review).
+    pub fn compile_structure(
+        &self,
+        revision: u64,
+    ) -> Result<CompiledTopologyScene, TopologySceneIssue> {
         self.validate_structure()?;
         let topology =
             compile_topology(&self.geometry, revision).map_err(TopologySceneIssue::Topology)?;
         let assignments = self.resolve_face_assignments(&topology)?;
         let plan =
             TopologyMeshPlan::new(&topology, &assignments).map_err(TopologySceneIssue::Plan)?;
-        self.validate_dirichlet_traces(&plan)?;
         Ok(CompiledTopologyScene {
             geometry: self.geometry.clone(),
             topology,
