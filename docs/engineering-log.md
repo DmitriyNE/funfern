@@ -27307,3 +27307,32 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. No device run: nothing but the panel's
   parsing changes.
+
+## 2026-10-22 — Step 3, area 4: Save… in the browser is a download (PER-5)
+
+- **The defect.** On the web, Save… went through rfd's save dialog. rfd
+  0.17.2 answers at once with a writable handle and shows an overlay of its
+  own, "click here to download your file", Ok and Cancel, whose `write`
+  returns Ok whatever is pressed. Ok and Cancel alike left the status
+  "Scene saved" with nothing downloaded. The snapshot already downloaded
+  directly. The review's SVG export has no caller, so it never reached this
+  path.
+- **Reproduced on the live site** (528c851, the deployed build) with
+  Playwright in Chrome: File → Save… showed rfd's overlay; Cancel left
+  "Scene saved" in the status bar, and no download came.
+- **Fix.** Every save in the browser is a download: the snapshot's Blob and
+  link, which the browser keeps or discards in its own way. The status says
+  so: "Scene downloaded", "Snapshot downloaded". Native saves are unchanged.
+- **Checked in Chrome** on a scratch release build of this tree, the same
+  script: File → Save… downloaded `funfern-scene.json`, with no overlay, and
+  the status read "Scene downloaded". No test is committed: egui draws on a
+  canvas, and the script finds the File menu by its pixels.
+- **PER-6 in the browser, which its entry left unmeasured.** With clicks
+  working, the same session ran its check: on the live site, File → New
+  followed by a reload at once restored the example the New had replaced,
+  and on this build the new scene, its autosave written by `pagehide`. The
+  page's `onpagehide` and `onvisibilitychange` read `function` on this
+  build, against nothing on the live one.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

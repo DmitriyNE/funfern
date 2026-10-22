@@ -48,11 +48,23 @@ impl SaveKind {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn success(self) -> &'static str {
         match self {
             Self::Scene => "Scene saved",
             Self::SceneSvg => "Scene SVG exported",
             Self::SnapshotPng => "Snapshot exported",
+        }
+    }
+
+    /// What the browser was handed: a download, which the user keeps or
+    /// discards in the browser's own way.
+    #[cfg(target_arch = "wasm32")]
+    fn downloaded(self) -> &'static str {
+        match self {
+            Self::Scene => "Scene downloaded",
+            Self::SceneSvg => "Scene SVG downloaded",
+            Self::SnapshotPng => "Snapshot downloaded",
         }
     }
 }
@@ -115,32 +127,18 @@ pub fn load(sender: Sender<FileEvent>) {
         let _ = sender.send(result);
     });
 }
+/// Every save in the browser is a download, as the snapshot's always was.
+/// rfd's save dialog answers at once with a handle whose write cannot fail
+/// and shows an overlay of its own, whose Ok and Cancel alike left "Scene
+/// saved" with nothing downloaded (PER-5 of the 2026-10-20 review).
 #[cfg(target_arch = "wasm32")]
 pub fn save(sender: Sender<FileEvent>, bytes: Vec<u8>, kind: SaveKind) {
-    if matches!(kind, SaveKind::SnapshotPng) {
-        let result = download(&bytes, kind.file_name())
-            .map(|()| FileEvent::Saved(kind.success()))
-            .unwrap_or_else(|error| {
-                FileEvent::Error(kind.failure(), format!("Could not download: {error:?}"))
-            });
-        let _ = sender.send(result);
-        return;
-    }
-    wasm_bindgen_futures::spawn_local(async move {
-        let result = if let Some(file) = rfd::AsyncFileDialog::new()
-            .set_file_name(kind.file_name())
-            .save_file()
-            .await
-        {
-            match file.write(&bytes).await {
-                Ok(()) => FileEvent::Saved(kind.success()),
-                Err(e) => FileEvent::Error(kind.failure(), e.to_string()),
-            }
-        } else {
-            FileEvent::Cancelled
-        };
-        let _ = sender.send(result);
-    });
+    let result = download(&bytes, kind.file_name())
+        .map(|()| FileEvent::Saved(kind.downloaded()))
+        .unwrap_or_else(|error| {
+            FileEvent::Error(kind.failure(), format!("Could not download: {error:?}"))
+        });
+    let _ = sender.send(result);
 }
 
 /// Writes `text` to the clipboard and reports how that went. The browser can
