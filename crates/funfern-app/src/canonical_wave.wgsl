@@ -2272,18 +2272,14 @@ fn handoff_finalize(@builtin(global_invocation_id) id: vec3<u32>) {
         var exchange = 0.0;
         let nonlinear = temporal_enabled() && node_is_nonlinear(i);
         if nodes[i].boundary.z != 0u {
-            if nonlinear {
-                next = temporal_primary_flux_of_field(
-                    i, prescribed_value(i, 0.0), 0.0);
-                exchange = temporal_primary_energy(i, next, 0.0)
-                    - temporal_primary_energy(i, before, 0.0);
-            } else {
-                next = nodes[i].mass_loss.x * prescribed_value(i, 0.0);
-                // Valued as `handoff_target_energy` values the node, so the
-                // edit the handoff books is the store's change before the pin.
-                exchange = stage_primary_energy(i, next, 0.0)
-                    - stage_primary_energy(i, before, 0.0);
-            }
+            // Through the map in force at the handoff, as the steps pin: on a
+            // driven generation a linear node's mass is not the authored one
+            // (GPU-3 of the 2026-10-20 review). Valued as
+            // `handoff_target_energy` values the node, so the edit the
+            // handoff books is the store's change before the pin.
+            next = pinned_trace_flux(i, 0.0);
+            exchange = stage_primary_energy(i, next, 0.0)
+                - stage_primary_energy(i, before, 0.0);
             set_candidate_q(i, next);
         }
         // A generation whose map follows its field admits the transferred

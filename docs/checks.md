@@ -73,6 +73,13 @@ had reached, and the reference carries its state by the core's driven
 handoff, the pump's runtime with it. Q reads `8.5e-7` and b `1.0e-6`, the run
 without the edit `1.6` off. Until 2026-10-20 the app refused every driven
 handoff once a run had advanced, and the fixture timed out waiting for it.
+`handoff-driven-pins` makes the cavity's whole medium the parametric pump and
+drives its top side, so the pinned nodes lie on a medium whose mass at the
+handoff is not the authored one, and reads the handed state at the handoff's
+own step, pins included: the core's driven handoff pins them at the mass in
+force there. Q reads `4.3e-7` off the pins and `1.6e-7` on them at the
+handoff, and `6.8e-7` after 256 steps; until 2026-10-22 the device pinned them
+at the authored mass, `1.2e-1` off (GPU-3 of the 2026-10-20 review).
 `remesh` sets the target edge finer at step 128,
 nothing else changed: the field is interpolated from 11,121 nodes onto 15,349 of
 the same geometry. Q reads `7.7e-7`, and a reference that drops the component

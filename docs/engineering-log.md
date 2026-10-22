@@ -26892,3 +26892,33 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: a driven handoff pins at the mass in force (GPU-3)
+
+- **The defect.** A handoff pins the target's prescribed nodes as it takes
+  the field. On a driven generation the nonlinear nodes were pinned through
+  the map in force at the handoff, but the linear ones at the authored mass,
+  `mass_loss.x`, where the reference pins at `primary_mass_at(t)`. On a
+  pumped or switched medium the handed pins stood off by the factor in
+  force: shown so while paused, booked so in the prescribed exchange, and,
+  with a loss stage, charged so on the first step. The steps pin through
+  the map in force, so the field ran on right after the first one.
+- **Why no run caught it.** The handoff check read the handed state only
+  when a wall carried memory, on fixed generations, and left the pins out.
+- **Test first.** A new fixture, `handoff-driven-pins`: the cavity's whole
+  medium the parametric pump and its top side driven, the same edit at step
+  128 of 256, the handed state read at the handoff's own step. Pins are
+  included when the reference is driven, since the core's driven handoff
+  pins them at the handoff. Before the fix it read Q 4.3e-7 off the pins and
+  1.2e-1 on them, and failed.
+- **Fix.** `handoff_finalize` pins through `pinned_trace_flux`, the boundary
+  stages' own: the authored mass on a fixed generation, and the map in force
+  at the handoff on a driven one, linear or not.
+- **After it** the fixture reads Q 4.3e-7 off the pins and 1.6e-7 on them at
+  the handoff, and 6.8e-7 after 256 steps. The fixture joins the device
+  suite and the nightly browser run's handoffs part.
+- **Checked on Metal:** all 21 handoff runs pass, the examples and the
+  fixtures.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

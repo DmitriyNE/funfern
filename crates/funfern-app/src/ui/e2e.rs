@@ -94,6 +94,7 @@ pub(crate) fn add(app: &mut App) {
         "switch" => (Fixture::Switch, vec![None]),
         "handoff" => (Fixture::Handoff, vec![None]),
         "handoff-driven" => (Fixture::HandoffDriven, vec![None]),
+        "handoff-driven-pins" => (Fixture::HandoffDrivenPins, vec![None]),
         "remesh" => (Fixture::Remesh, vec![None]),
         "handoff-memory-rebuild" => (Fixture::HandoffMemory(MemoryHandoff::Rebuild), vec![None]),
         "handoff-memory-remesh" => (Fixture::HandoffMemory(MemoryHandoff::Remesh), vec![None]),
@@ -179,6 +180,14 @@ enum Fixture {
     /// every driven handoff was refused once a run had advanced (RT-1 of
     /// that day's review).
     HandoffDriven,
+    /// The cavity's whole medium the parametric pump and its top side
+    /// driven, the same edit at step 128: the driven generation's pinned
+    /// nodes lie on a medium whose mass at the handoff is not the authored
+    /// one. The handed state is read at the handoff's own step, pins
+    /// included, against the core's driven handoff, which pins them at the
+    /// mass in force there; the device pinned them at the authored mass
+    /// until 2026-10-22 (GPU-3 of the 2026-10-20 review).
+    HandoffDrivenPins,
     /// The cavity remeshed finer at step 128 of 256, nothing else changed:
     /// the field is interpolated onto another mesh of the same geometry, its
     /// component totals kept.
@@ -315,7 +324,9 @@ impl Fixture {
         match self {
             Fixture::Cavity | Fixture::CavityBatches => (&[], 256),
             Fixture::Switch => (&[(128, Action::Switch)], 256),
-            Fixture::Handoff | Fixture::HandoffDriven => (&[(128, Action::Edit)], 256),
+            Fixture::Handoff | Fixture::HandoffDriven | Fixture::HandoffDrivenPins => {
+                (&[(128, Action::Edit)], 256)
+            }
             Fixture::Remesh => (&[(128, Action::Remesh)], 256),
             // The pulse's front reaches the wall near step 150: the handoff
             // comes once the wall holds memory, and the run goes on for as
@@ -348,6 +359,13 @@ impl Fixture {
             self,
             Fixture::HandoffMemory(MemoryHandoff::Running | MemoryHandoff::RunningLate)
         )
+    }
+
+    /// Whether the handed state is read at the handoff's own step, before
+    /// the new generation steps, where no wall's memory calls for it: a
+    /// driven generation's pins, which its first step sets again.
+    fn reads_the_handoff(self) -> bool {
+        matches!(self, Fixture::HandoffDrivenPins)
     }
 
     /// Whether a pulse at step 0 sets the field going. A field-dependent medium
@@ -401,6 +419,7 @@ impl Fixture {
             | Fixture::DeviceLoss => (cavity_document(), None),
             Fixture::Rejection => (rejection_document(), None),
             Fixture::HandoffDriven => (pump_document(), None),
+            Fixture::HandoffDrivenPins => (pumped_driven_document(), None),
             Fixture::Observables => (observables::observables_document(), None),
             Fixture::FarField => (far_field::far_field_document(0.0), None),
             Fixture::FarFieldLate => (
@@ -952,6 +971,34 @@ fn pump_document() -> TopologyDocument {
     document
 }
 
+/// The cavity's whole medium the parametric pump on its mass row and its top
+/// side driven by [`WALL_DRIVE`]: the pinned nodes lie on the pumped medium.
+fn pumped_driven_document() -> TopologyDocument {
+    let mut document = cavity_document();
+    let mut walls = OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+    walls.sides[OuterSide::Top.index()] = OuterBoundaryCondition::Dirichlet { signal: WALL_DRIVE };
+    document.model.draft.outer_boundaries = walls;
+    document.model.accepted.outer_boundaries = walls;
+    let mut editor = TopologyEditor::from_document(document).expect("the driven cavity opens");
+    let medium = editor
+        .document
+        .model
+        .draft
+        .material(DEFAULT_MATERIAL)
+        .expect("the default medium")
+        .clone();
+    let preset = law_presets()
+        .iter()
+        .find(|preset| preset.name == "Parametric pump" && preset.row == LawPresetRow::Mass)
+        .expect("the parametric pump preset");
+    editor
+        .update_material(apply_law_preset(preset, &medium).expect("the preset applies"))
+        .expect("the pumped medium");
+    let mut document = editor.document;
+    document.model.accepted = document.model.draft.clone();
+    document
+}
+
 /// Advances the fixture a phase; answers a run's verdict once it has one.
 fn advance(
     driver: &mut Driver,
@@ -1019,7 +1066,10 @@ fn advance(
             }
             let temporal = active.canonical_temporal_operator.is_some();
             let expected = driver.material.is_some()
-                || matches!(driver.fixture, Fixture::Rejection | Fixture::HandoffDriven);
+                || matches!(
+                    driver.fixture,
+                    Fixture::Rejection | Fixture::HandoffDriven | Fixture::HandoffDrivenPins
+                );
             if temporal != expected {
                 return Some(Err(format!(
                     "the document prepared a {} generation",
@@ -1526,7 +1576,7 @@ fn advance(
                     }
                 }
             }
-            if reference.carry.is_some() {
+            if reference.carry.is_some() || driver.fixture.reads_the_handoff() {
                 let seen = display.full_readbacks;
                 request.request_full_state_readback();
                 driver.phase = Phase::Carried {
@@ -1610,40 +1660,62 @@ fn advance(
                 return None;
             }
             let tolerance = driver.fixture.tolerance();
-            // The prescribed nodes are left out of Q here: the device pins
-            // them to the signal on the new generation's clock as it takes
-            // the field, where the reference pins them as it steps, and on an
-            // edited medium the two values differ until that step.
-            let unpinned = reference
+            // Q off the prescribed nodes, and on them where the reference
+            // pins them at the handoff. The device pins them to the signal on
+            // the new generation's clock as it takes the field; the fixed
+            // reference pins them as it steps, and on an edited medium the
+            // two values differ until that step, but the driven reference
+            // pins them as it takes the field, at the mass in force then.
+            let pinned = reference
                 .active
                 .canonical_forcing
                 .prescribed()
                 .iter()
-                .map(Option::is_none)
+                .map(Option::is_some)
                 .collect::<Vec<_>>();
+            let unpinned = pinned.iter().map(|pinned| !pinned).collect::<Vec<_>>();
             let (q, b, _) = match field_errors(&reference, display, Some(&unpinned)) {
                 Ok(errors) => errors,
                 Err(failure) => return Some(Err(failure)),
             };
+            let pins = if matches!(reference.state, State::Temporal(_)) && pinned.contains(&true) {
+                match field_errors(&reference, display, Some(&pinned)) {
+                    Ok((pins, _, _)) => Some(pins),
+                    Err(failure) => return Some(Err(failure)),
+                }
+            } else {
+                None
+            };
             let wall = match wall_errors(&reference, display) {
-                Ok(Some(wall)) => wall,
-                Ok(None) => return Some(Err("the carry's snapshot has no wall to read".into())),
+                Ok(None) if reference.carry.is_some() => {
+                    return Some(Err("the carry's snapshot has no wall to read".into()));
+                }
+                Ok(wall) => wall,
                 Err(failure) => return Some(Err(failure)),
             };
-            let summary = format!(
-                "at the handoff Q {q:.3e}, b {b:.3e}, wall z {:.3e}, memory {:.3e}, energy {:.3e}",
-                wall.z, wall.memory, wall.energy
-            );
+            let mut summary = format!("at the handoff Q {q:.3e}");
+            let mut largest = q;
+            if let Some(pins) = pins {
+                summary += &format!(", {pins:.3e} on the pins");
+                largest = worse(largest, pins);
+            }
+            summary += &format!(", b {b:.3e}");
+            largest = worse(largest, b);
+            if let Some(wall) = &wall {
+                summary += &format!(
+                    ", wall z {:.3e}, memory {:.3e}, energy {:.3e}",
+                    wall.z, wall.memory, wall.energy
+                );
+                largest = worse(largest, worse(wall.z, worse(wall.memory, wall.energy)));
+            }
             report(&format!("e2e {:?}: {summary}", driver.fixture));
-            if !within(
-                worse(worse(q, b), worse(wall.z, worse(wall.memory, wall.energy))),
-                tolerance,
-            ) {
+            if !within(largest, tolerance) {
                 return Some(Err(format!(
-                    "{summary}: the device's carry stands from the reference's beyond {tolerance:.0e}"
+                    "{summary}: the device's handed state stands from the reference's beyond \
+                     {tolerance:.0e}"
                 )));
             }
-            if let Some(carry) = &mut reference.carry {
+            if let (Some(carry), Some(wall)) = (&mut reference.carry, &wall) {
                 carry.at_handoff = [q, b, wall.z, wall.memory];
             }
             state.e2e_steps.limit = Some(driver.base + stop(next + 1));

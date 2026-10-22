@@ -902,8 +902,8 @@ jobs:
     # - recorders: the recorders' fixtures and the late clocks' -
     #   `observables`, `far-field`, `far-field-late` and
     #   `handoff-memory-running-late` - about four hours served as Pages;
-    # - handoffs: the handoffs added on 2026-10-20, `handoff-driven` and
-    #   `handoff-memory-flux`;
+    # - handoffs: the handoffs added on 2026-10-20 and after,
+    #   `handoff-driven`, `handoff-driven-pins` and `handoff-memory-flux`;
     # - state: the rest.
     runs-on: ubuntu-24.04
     permissions:
@@ -986,8 +986,8 @@ jobs:
         # and the slowest page, cavity-batches' four runs, 745 s.
         env:
           FUNFERN_EXPECT_BUILD: ${{ github.sha }}
-          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'recorders' && 'observables,far-field,far-field-late,handoff-memory-running-late' || matrix.part == 'handoffs' && 'handoff-driven,handoff-memory-flux' || '' }}
-          FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables,far-field,far-field-late,handoff-memory-running-late,handoff-driven,handoff-memory-flux' || '' }}
+          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'recorders' && 'observables,far-field,far-field-late,handoff-memory-running-late' || matrix.part == 'handoffs' && 'handoff-driven,handoff-driven-pins,handoff-memory-flux' || '' }}
+          FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables,far-field,far-field-late,handoff-memory-running-late,handoff-driven,handoff-driven-pins,handoff-memory-flux' || '' }}
           FUNFERN_E2E_DEADLINE: ${{ env.FULL != 'true' && '600' || '1500' }}
           FUNFERN_E2E_HOSTING: ${{ matrix.hosting }}
           FUNFERN_TEST_ISOLATED: ${{ matrix.hosting == 'isolated' && '1' || '0' }}
