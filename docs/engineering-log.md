@@ -27146,3 +27146,24 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: a temporal-law patch may not change a field law (GPU-12)
+
+- **The defect.** `temporal_law_patch` compared only the first three words
+  of each coefficient record's metadata: ownership, record kind and drive
+  kind. A patch that brought in a Kerr χ was admitted. The queue refuses a
+  temporal-law patch only where the running generation already has field
+  laws. The samples then read the Kerr secant while the nodes, the filter
+  and the energy stayed linear, a generation half nonlinear.
+- **Test first.** `a_temporal_law_patch_cannot_change_a_field_law` admits a
+  patch to the same records, and refuses one that sets the Kerr flag and
+  its parameters and one that changes only the parameters. Before the fix
+  both were admitted.
+- **Fix.** The patch is refused where a record's field-law flags or its
+  field word, the fourth, differ from the current generation's: a field law
+  changes by a generation transition.
+- **Checked on Metal:** the temporal and rollback examples, which patch
+  temporal laws, pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

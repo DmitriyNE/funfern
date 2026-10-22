@@ -981,6 +981,23 @@ impl CanonicalGpuLiveEvent {
                 "a live temporal-law patch cannot change material ownership or drive kind",
             ));
         }
+        // Nor a field law, its kind or its parameters: the patch rewrites the
+        // records the samples read, while the nodes, the filter and the
+        // energy keep the generation's map (GPU-12 of the 2026-10-20 review).
+        if current_records
+            .iter()
+            .zip(&target_records)
+            .any(|(current, target)| {
+                (current[0].data.w ^ target[0].data.w)
+                    & (TEMPORAL_FIELD_KERR | TEMPORAL_FIELD_SATURABLE)
+                    != 0
+                    || current[3].data != target[3].data
+            })
+        {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a field law changes by a generation transition",
+            ));
+        }
         // A gate is a function of absolute time, with its start on the
         // epoch; the patch carries neither, and the app takes a new
         // generation for every material edit anyway.
@@ -11480,6 +11497,25 @@ mod tests {
                  where it is {expected}"
             );
         }
+    }
+
+    /// GPU-12 of the 2026-10-20 review: a temporal-law patch may not bring a
+    /// field law in, nor change one's parameters. Admitted, the samples read
+    /// the new map while the nodes, the filter and the energy stayed linear,
+    /// a generation half nonlinear.
+    #[test]
+    fn a_temporal_law_patch_cannot_change_a_field_law() {
+        let (_, _, _, _, _, current) = temporal_plan();
+        let manifest = current.manifest.temporal.unwrap();
+        let primary = current.tables[manifest.header_offset].data.x as usize;
+        assert!(CanonicalGpuLiveEvent::temporal_law_patch(&current, &current, 13).is_ok());
+        let mut kerr = current.clone();
+        kerr.tables[primary].data.w |= TEMPORAL_FIELD_KERR;
+        kerr.tables[primary + 3].data = UVec4::new(0.2_f32.to_bits(), 0, 0, 1.0_f32.to_bits());
+        assert!(CanonicalGpuLiveEvent::temporal_law_patch(&current, &kerr, 13).is_err());
+        let mut parameters = current.clone();
+        parameters.tables[primary + 3].data.x = 0.2_f32.to_bits();
+        assert!(CanonicalGpuLiveEvent::temporal_law_patch(&current, &parameters, 13).is_err());
     }
 
     #[test]
