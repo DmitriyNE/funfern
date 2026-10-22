@@ -27524,3 +27524,34 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a face new behind a wall takes nothing from its other side (MESH-13)
+
+- **The defect.** A face can become active behind a separated wall: a hole
+  turned into a walled subdomain, or the undo that hands off after a walled
+  subdomain is made a hole. The transfer to it went wrong on both paths.
+  - The exact-point copy took the only source node at a wall point, which
+    was the outer side's, since a hole has one copy of the rim.
+  - Failing that, the location took any source triangle holding the point,
+    again the outer side's.
+  The new face's wall nodes took the outer field while its interior stayed
+  zero, a ring that radiated into the face, and no total correction applies.
+- **Test first.** `a_face_new_behind_a_wall_takes_nothing_from_its_other_side`
+  meshes one reflecting loop with its inner face a hole and again as a
+  subdomain, transfers a field of one over the outer face, and counts the
+  new face's nodes that read it. Before the fix there were 878 element-node
+  places, and the outer face kept its own.
+- **Fix.** A target node on one side of a separated curve takes no donor that
+  lies on the curve's other side alone. That is so where the source node it
+  would copy carries the other side and not its own, and, for the location,
+  where the source walled the curve on the other side only. Such a node is
+  unmapped, as the face's interior is, and the new face starts at rest. A
+  donor on no separated side, as a transmitting curve's, still gives both
+  sides the field they shared.
+- **Not covered:** a curve walled on both sides on one stretch and on one
+  side on another counts as walled on both for the location. The exact copy
+  still decides by the node itself.
+- **Checked on Metal:** the 28 handoff, remesh and adaptation runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

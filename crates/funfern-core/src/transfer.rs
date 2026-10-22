@@ -447,7 +447,31 @@ struct QuadraticTransferWork {
     /// one source node copies it; coincident nodes on separated sides stay
     /// with the trace-aware location below.
     source_by_point: BTreeMap<[u64; 2], Vec<u32>>,
+    /// The separated sides each source node lies on.
+    source_sides: Vec<BTreeSet<BoundaryTraceKey>>,
     samples: Vec<Option<QuadraticTransferSample>>,
+}
+
+/// Whether a target node on one side of a separated curve would take a donor
+/// that `held` places on the curve's other side alone: the source walled the
+/// curve on that side only, so the target's side is a face new behind the
+/// wall, and nothing of the source is its field. Copied from the other side,
+/// a new face's wall nodes took the outer field while its interior stayed
+/// zero (MESH-13 of the 2026-10-20 review). A donor on no separated side, as
+/// a transmitting curve's, holds the field both sides share.
+fn behind_the_wall(
+    target: &TargetTracePreference,
+    held: impl Fn(&BoundaryTraceKey) -> bool,
+) -> bool {
+    target.boundaries.iter().any(|key| match key {
+        BoundaryTraceKey::Curve { curve, side } => {
+            held(&BoundaryTraceKey::Curve {
+                curve: *curve,
+                side: side.opposite(),
+            }) && !held(key)
+        }
+        BoundaryTraceKey::Internal { .. } => false,
+    })
 }
 
 fn point_key(point: Point2) -> [u64; 2] {
@@ -478,6 +502,7 @@ impl QuadraticTransferWork {
             target_traces: Vec::new(),
             source_traces: SourceTraceTriangles::default(),
             source_by_point: BTreeMap::new(),
+            source_sides: Vec::new(),
             samples: Vec::new(),
         }
     }
@@ -530,6 +555,10 @@ impl QuadraticTransferWork {
                 }
                 self.target_traces = quadratic_trace_nodes(target_mesh, target_operator)?;
                 self.source_traces = source_trace_triangles(source_mesh)?;
+                self.source_sides = quadratic_trace_nodes(source_mesh, source_operator)?
+                    .into_iter()
+                    .map(|preference| preference.boundaries)
+                    .collect();
                 if unified_topology {
                     for (index, point) in source_operator.node_points().iter().enumerate() {
                         self.source_by_point
@@ -563,17 +592,29 @@ impl QuadraticTransferWork {
                         samples: std::mem::take(&mut self.samples),
                     }));
                 }
+                let target = &self.target_traces[index];
                 let exact = match self
                     .source_by_point
                     .get(&point_key(points[index]))
                     .map(Vec::as_slice)
                 {
-                    Some([node]) => Some(exact_sample(*node)),
+                    Some([node])
+                        if !behind_the_wall(target, |key| {
+                            self.source_sides[*node as usize].contains(key)
+                        }) =>
+                    {
+                        Some(exact_sample(*node))
+                    }
                     _ => None,
                 };
+                let new_behind_a_wall = behind_the_wall(target, |key| {
+                    self.source_traces.boundaries.contains_key(key)
+                });
                 let sample = exact.or_else(|| {
-                    let preferred =
-                        preferred_trace_triangles(&self.target_traces[index], &self.source_traces);
+                    if new_behind_a_wall {
+                        return None;
+                    }
+                    let preferred = preferred_trace_triangles(target, &self.source_traces);
                     self.bins
                         .as_ref()
                         .unwrap()
@@ -1846,6 +1887,102 @@ mod tests {
             0,
             "{wrong} of {} nodes took the other side's value",
             expected.len()
+        );
+    }
+
+    /// MESH-13 of the 2026-10-20 review: a face that becomes active behind a
+    /// separated wall takes nothing from the other side of it. A hole made a
+    /// walled subdomain, the reverse of what an undo hands off after a
+    /// subdomain is made a hole: the new face's wall nodes copied the outer
+    /// field, exactly by point or from the outer triangle holding them, while
+    /// its interior stayed zero, a ring that radiated into the face.
+    #[test]
+    fn a_face_new_behind_a_wall_takes_nothing_from_its_other_side() {
+        let center = Point2::new(0.3, 0.0);
+        let geometry = TopologyGeometry {
+            curves: vec![
+                TopologyCurve::new(
+                    crate::CurveId(1),
+                    CurveSpline::Closed(PeriodicCubicSpline::rounded(center, 0.35)),
+                    (0..8)
+                        .map(|index| CurveSpan {
+                            id: CurveSpanId(10 + index),
+                            behavior: SpanBehavior::REFLECTING,
+                        })
+                        .collect(),
+                )
+                .unwrap(),
+            ],
+            ..TopologyGeometry::default()
+        };
+        let mesh_with = |inner_active: bool, revision: u64| {
+            let topology = compile_topology(&geometry, revision).unwrap();
+            let inner = topology.face_at(center).unwrap();
+            let assignments = topology
+                .faces
+                .iter()
+                .map(|face| FaceRegionAssignment {
+                    face: face.id,
+                    region: if face.id == inner {
+                        inner_active.then_some(RegionId(2))
+                    } else {
+                        Some(RegionId(1))
+                    },
+                })
+                .collect::<Vec<_>>();
+            let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+            let mesh = mesh_topology_plan(
+                &plan,
+                revision,
+                MeshingOptions {
+                    target_edge_length: 0.08,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap();
+            let regions = [RegionId(1), RegionId(2)].map(|id| Region {
+                id,
+                material: MaterialId(1),
+                frame: crate::MaterialFrame::world(),
+            });
+            let operator = QuadraticWaveOperator::assemble_topology(
+                &mesh,
+                &plan,
+                TopologyWaveModel {
+                    physics: crate::PhysicsModel::Mechanical,
+                    materials: &[Material::default_medium()],
+                    regions: &regions,
+                    outer_boundaries: &OuterBoundaryConditions::default(),
+                },
+            )
+            .unwrap();
+            (mesh, operator)
+        };
+        let (source, source_operator) = mesh_with(false, 1);
+        let (target, target_operator) = mesh_with(true, 2);
+        let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
+            .unwrap();
+        // One over the outer face, the only one the source has; nothing for
+        // the new face, which reads the exposed value.
+        let transferred = map
+            .interpolate(&vec![1.0; source_operator.degrees_of_freedom()], 0.0)
+            .unwrap();
+        let mut taken = 0;
+        let mut outer_lost = 0;
+        for (triangle, nodes) in target.triangles.iter().zip(target_operator.element_nodes()) {
+            for node in nodes {
+                let value = transferred[*node as usize];
+                match triangle.region {
+                    RegionId(2) if value != 0.0 => taken += 1,
+                    RegionId(1) if (value - 1.0).abs() > 1.0e-12 => outer_lost += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(taken, 0, "nodes of the new face took the outer field");
+        assert_eq!(
+            outer_lost, 0,
+            "nodes of the outer face lost their own field"
         );
     }
 
