@@ -667,6 +667,7 @@ impl Playground {
             let mut handed_off = false;
             let mut installed_origin = 0.0;
             let upload = job.result.take().unwrap().and_then(|prepared| {
+                request.admit(&prepared.plan, prepared.transfer.as_ref())?;
                 if let Some(transfer) = prepared.transfer {
                     handed_off = true;
                     request
@@ -855,6 +856,7 @@ impl Playground {
                 } else {
                     reset
                 };
+                let reset = reset.and_then(|plan| request.admit(&plan, None).map(|()| plan));
                 match reset {
                     Ok(plan) => {
                         request.install(assets, commands, plan);
@@ -2177,6 +2179,70 @@ mod tests {
             (energy - 0.5 * authored).abs() <= 1.0e-9 * authored,
             "stored {energy}, authored {authored}"
         );
+    }
+
+    /// GPU-7 of the 2026-10-20 review: a candidate with a buffer past what
+    /// the device binds is refused before its upload, the running generation
+    /// kept and the refusal in the diagnostics warning. Uploaded, its bind
+    /// group failed validation and stopped rendering for good.
+    #[test]
+    fn a_candidate_past_the_device_limits_is_refused_before_its_upload() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame = |state: &mut Playground, request: &mut CanonicalGpuRequest| {
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    &display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+            });
+        };
+        let mut state = with_baffles(&[]);
+        let accepted = activate(&mut state).bundle.token;
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut state, &mut request);
+        let generation = request.generation();
+        assert_ne!(generation, 0, "Reset installed the running generation");
+
+        // A device that binds a kibibyte at most, and a finer mesh to hand
+        // off to.
+        request.set_limits(Some(crate::canonical_gpu::CanonicalGpuLimits {
+            max_storage_buffer_binding_size: 1024,
+            max_buffer_size: 1 << 30,
+        }));
+        state.editor.document.presentation.mesh_edge *= 0.5;
+        for _ in 0..100_000 {
+            if state.runtime.last_error().is_some() || state.coordinator.uploading.is_some() {
+                break;
+            }
+            frame(&mut state, &mut request);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(state.coordinator.uploading.is_none(), "no upload began");
+        assert_eq!(request.generation(), generation);
+        assert_eq!(request.handoff_outcome(), CanonicalGpuHandoffOutcome::None);
+        assert_eq!(state.runtime.active().unwrap().bundle.token, accepted);
+        let refusal = state.runtime.last_error().expect("the refusal is recorded");
+        assert!(
+            refusal.message.contains("this device binds"),
+            "{}",
+            refusal.message
+        );
+        assert!(state.diagnostics_warning());
     }
 
     /// Reported: a rejected handoff kept the candidate's step. The upload took

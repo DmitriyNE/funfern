@@ -925,6 +925,13 @@ The far field's times, and the clock under them, late into a run.
   anchor apart from the carrier's reduced phase read 4.1e-4 (GPU-6 of the
   2026-10-20 review). `canonical_gpu_handoff --source --integrated` carries
   an integrated drive across a handoff, which no other run did.
+- **A plan past the device's limits.** `canonical_gpu_binding_limit` makes
+  the device bind half the largest buffer of the cavity's plan at edge 0.08,
+  the 4.1 MiB table buffer, through Bevy's constrained limits. The request
+  must admit against that limit, copied from the device as the app starts,
+  refuse that plan naming the buffer, and install and step a coarser plan
+  that fits. Installed, the larger plan's bind group failed validation and
+  the app quit (GPU-7 of the 2026-10-20 review).
 - **Two fixes they found.**
   - **The compensated sum.** Metal's fast math folded the rounding out of the
     clock's compensated sum at every rebase and handoff, 3.5e-3 s at 36 hours,

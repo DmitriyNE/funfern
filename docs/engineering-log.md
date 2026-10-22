@@ -27005,3 +27005,57 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: a plan past the device's limits is refused before upload (GPU-7)
+
+- **The defect.** Nothing compared a plan's buffers with what the device
+  binds or allocates, and every binding binds a whole buffer. A plan past
+  the limit was uploaded, and its bind group failed validation: rendering
+  stopped for good, natively the app quit, and the running generation was
+  lost where the scene could have been refused. The review's cases are a
+  fixed scene whose second-order wall's trace reaches about 3,400 nodes
+  (its boundary buffer holds about 12·T² bytes, the trace matrix, its
+  transpose, the diagonal and modal correction and the dense inverse) and
+  the table buffer at about 175k DOFs, each past WebGPU's default 128 MiB.
+- **Reproduced on Metal.** A scratch example made the device bind half the
+  cavity's largest buffer at edge 0.08, the 4.1 MiB table buffer, through
+  Bevy's constrained limits, then installed and stepped the plan:
+  `create_bind_group` failed, "Buffer binding 5 range 4327424 exceeds
+  max_*_buffer_binding_size limit 2163712", and the app quit.
+- **Fix.**
+  - The plugin's `finish` copies the device's storage-binding and buffer
+    limits into the request: Bevy's render plugin, added first, has put the
+    render device in the main world by then. Where no device is, as in host
+    tests, there are none and every plan is admitted.
+  - `CanonicalGpuPlan::buffer_bytes` names each buffer its install binds
+    and measures it on its words. The manifest's report leaves the temporal
+    runtime bank out of the state buffer, so it is not used.
+  - `CanonicalGpuRequest::admit` refuses a plan, or a handoff's transfer,
+    with a buffer past either limit, naming it: "the generation's table
+    buffer needs 4.1 MiB, more than the 2.1 MiB this device binds".
+  - The app admits every upload before `install` or `begin_handoff` makes
+    a buffer, and Reset's plan too. A refusal goes through the candidate's
+    rejection, `reject_ready`, so the running generation stays and the
+    diagnostics warning lights.
+- **Tests.**
+  - `a_plan_past_the_device_limits_is_refused`: the largest buffer at each
+    limit is admitted, a byte under either refused and named.
+  - `a_candidate_past_the_device_limits_is_refused_before_its_upload`: a
+    running generation, a device that binds a kibibyte, and a finer mesh.
+    No upload begins, the generation stays, and the refusal is the
+    candidate's error, with the warning lit.
+  - A new device run, `canonical_gpu_binding_limit`, does the repro's
+    setup. The request admits against the constrained limit, refuses the
+    plan and names its buffer, and a coarser plan, 0.77 MB at most, installs
+    and steps 16 steps.
+- **Not covered.** The area probe's contributions buffer is the recorders',
+  not the solver's, and is not admitted. At its cap of 200,000 element
+  pieces it holds 233.6 MB, past 128 MiB from about 115k pieces. This was
+  found while mapping GPU-7 and is not in the review. The browser path of
+  `finish` is not run here: on wasm Bevy finishes its plugins once the
+  device exists, which is what the native run reads.
+- **Checked on Metal:** the 19 app fixtures, which upload through the
+  admission, and the new run pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

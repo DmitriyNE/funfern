@@ -251,6 +251,35 @@ impl CanonicalGpuClock {
     }
 }
 
+/// What the device binds and allocates at most, which every plan is admitted
+/// against before its buffers are made: past either, its bind group failed
+/// validation and rendering stopped for good, with the running generation lost
+/// where the scene could have been refused (GPU-7 of the 2026-10-20 review).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CanonicalGpuLimits {
+    pub max_storage_buffer_binding_size: u64,
+    pub max_buffer_size: u64,
+}
+
+impl CanonicalGpuLimits {
+    /// Refuses a buffer of `bytes` the device cannot bind whole, naming it.
+    fn admit(self, name: &str, bytes: usize) -> Result<(), String> {
+        let limit = self
+            .max_storage_buffer_binding_size
+            .min(self.max_buffer_size);
+        if bytes as u64 <= limit {
+            return Ok(());
+        }
+        let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+        Err(format!(
+            "the generation's {name} buffer needs {:.1} MiB, more than the {:.1} MiB \
+             this device binds",
+            mib(bytes as u64),
+            mib(limit)
+        ))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum CanonicalGpuBuildError {
     InvalidClock,
@@ -1134,6 +1163,42 @@ pub struct CanonicalGpuPlan {
 }
 
 impl CanonicalGpuPlan {
+    /// Each buffer the plan's install binds, by name and size, measured on
+    /// the words themselves: the manifest's report leaves out the temporal
+    /// runtime bank, which the state buffer carries.
+    pub fn buffer_bytes(&self) -> [(&'static str, usize); 9] {
+        [
+            ("control", size_of::<GpuCanonicalControl>()),
+            ("status", size_of::<GpuCanonicalStatus>()),
+            (
+                "state",
+                self.state.len() * size_of::<GpuCanonicalStateWord>(),
+            ),
+            ("node", self.nodes.len() * size_of::<GpuCanonicalNode>()),
+            (
+                "sample",
+                self.samples.len() * size_of::<GpuCanonicalSample>(),
+            ),
+            (
+                "table",
+                self.tables.len() * size_of::<GpuCanonicalTableWord>(),
+            ),
+            (
+                "scratch",
+                self.scratch.len() * size_of::<GpuCanonicalScratchWord>(),
+            ),
+            (
+                "boundary",
+                self.boundary.len() * size_of::<GpuCanonicalTableWord>(),
+            ),
+            (
+                "live-event",
+                live_word_count(self.control.counts_a.x, self.integrated_count as u32) as usize
+                    * size_of::<GpuCanonicalStateWord>(),
+            ),
+        ]
+    }
+
     /// The epoch origin the plan's clock starts from, in seconds: zero for
     /// the app's fresh generations, the running time for a handoff's
     /// candidate.
@@ -4491,6 +4556,9 @@ pub struct CanonicalGpuRequest {
     /// The GPU's times for recent frames, taken in by the render world. Kept
     /// across generations: what it measures is the frame, not the solver.
     gpu_frames: GpuFrameReadings,
+    /// The device's buffer limits, copied in once it exists; none where no
+    /// device is, as in host tests, which admits every plan.
+    limits: Option<CanonicalGpuLimits>,
 }
 
 impl Default for CanonicalGpuRequest {
@@ -4520,6 +4588,7 @@ impl Default for CanonicalGpuRequest {
             stranded_event: false,
             pacing_note: PacingNote::default(),
             gpu_frames: GpuFrameReadings::default(),
+            limits: None,
         }
     }
 }
@@ -4670,6 +4739,38 @@ fn add_canonical_buffers(
 impl CanonicalGpuRequest {
     pub(crate) fn buffer_handles(&self) -> Option<&CanonicalGpuBufferHandles> {
         self.buffers.as_ref()
+    }
+
+    pub fn limits(&self) -> Option<CanonicalGpuLimits> {
+        self.limits
+    }
+
+    pub fn set_limits(&mut self, limits: Option<CanonicalGpuLimits>) {
+        self.limits = limits;
+    }
+
+    /// Refuses a plan, or a handoff's transfer, with a buffer the device
+    /// cannot bind, before [`Self::install`] or [`Self::begin_handoff`] makes
+    /// any: the running generation stays, and the refusal is the caller's to
+    /// report.
+    pub fn admit(
+        &self,
+        plan: &CanonicalGpuPlan,
+        transfer: Option<&CanonicalGpuTransferPlan>,
+    ) -> Result<(), String> {
+        let Some(limits) = self.limits else {
+            return Ok(());
+        };
+        for (name, bytes) in plan.buffer_bytes() {
+            limits.admit(name, bytes)?;
+        }
+        if let Some(transfer) = transfer {
+            limits.admit(
+                "handoff transfer",
+                transfer.words.len() * size_of::<GpuCanonicalTransferWord>(),
+            )?;
+        }
+        Ok(())
     }
 
     pub fn install(
@@ -6703,6 +6804,22 @@ impl Plugin for CanonicalWaveGpuPlugin {
                 )
                     .in_set(RenderSystems::Cleanup),
             );
+    }
+
+    // The render device is in the main world by now: Bevy's render plugin,
+    // added first, puts it there as it finishes.
+    fn finish(&self, app: &mut App) {
+        let limits = app
+            .world()
+            .get_resource::<RenderDevice>()
+            .map(|device| device.limits())
+            .map(|limits| CanonicalGpuLimits {
+                max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
+                max_buffer_size: limits.max_buffer_size,
+            });
+        app.world_mut()
+            .resource_mut::<CanonicalGpuRequest>()
+            .set_limits(limits);
     }
 }
 
@@ -9483,6 +9600,39 @@ mod tests {
 
     fn plan(boundary: OuterBoundaryCondition) -> CanonicalGpuPlan {
         plan_with_trace_lane(boundary, true)
+    }
+
+    /// GPU-7 of the 2026-10-20 review: a plan with a buffer past what the
+    /// device binds or allocates is refused before any buffer is made, the
+    /// buffer named; one that fits is admitted, and so is every plan where no
+    /// device's limits are known.
+    #[test]
+    fn a_plan_past_the_device_limits_is_refused() {
+        let plan = plan(OuterBoundaryCondition::SecondOrderOutgoing);
+        let (largest_name, largest) = plan
+            .buffer_bytes()
+            .into_iter()
+            .max_by_key(|(_, bytes)| *bytes)
+            .unwrap();
+        let limits = |binding: usize, buffer: usize| {
+            Some(CanonicalGpuLimits {
+                max_storage_buffer_binding_size: binding as u64,
+                max_buffer_size: buffer as u64,
+            })
+        };
+        let mut request = CanonicalGpuRequest::default();
+        assert_eq!(request.admit(&plan, None), Ok(()));
+        request.set_limits(limits(largest, largest));
+        assert_eq!(request.admit(&plan, None), Ok(()));
+        for (binding, buffer) in [(largest - 1, 1 << 40), (1 << 40, largest - 1)] {
+            request.set_limits(limits(binding, buffer));
+            let refusal = request.admit(&plan, None).unwrap_err();
+            assert!(
+                refusal.contains(&format!("{largest_name} buffer"))
+                    && refusal.contains("this device binds"),
+                "{refusal}"
+            );
+        }
     }
 
     /// A pulse packs its start against the epoch origin, kept small as the
