@@ -27289,3 +27289,21 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 4: the overlay's manual range takes finite numbers only (PER-4)
+
+- **The defect.** The material overlay's manual Min and Max are DragValues
+  with no range, and egui's parser reads `inf`, `1e400` and `NaN`. A document
+  is valid only with finite bounds. One infinity typed, and every later
+  autosave, save and link failed with a generic message.
+- **Test first.** `the_overlay_range_takes_finite_numbers_only` drives the
+  View panel through the egui harness: click the Min field, select all, type,
+  Enter. 2.5 is taken, which shows the typing reaches the field; before the
+  fix `inf` was taken too, and the document did not save.
+- **Fix.** Both fields parse as egui's own fields do, whitespace and the
+  minus sign allowed, finite only. Text that does not parse leaves the bound
+  as it was, as any unparsed text does.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. No device run: nothing but the panel's
+  parsing changes.

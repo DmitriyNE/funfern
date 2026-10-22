@@ -232,8 +232,16 @@ impl Playground {
             ui.checkbox(&mut p.material_overlay_logarithmic, "Logarithmic scale");
             if !p.material_overlay_auto_range {
                 ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut p.material_overlay_manual_min).prefix("Min "));
-                    ui.add(egui::DragValue::new(&mut p.material_overlay_manual_max).prefix("Max "));
+                    ui.add(
+                        egui::DragValue::new(&mut p.material_overlay_manual_min)
+                            .prefix("Min ")
+                            .custom_parser(finite_number),
+                    );
+                    ui.add(
+                        egui::DragValue::new(&mut p.material_overlay_manual_max)
+                            .prefix("Max ")
+                            .custom_parser(finite_number),
+                    );
                 });
             }
             if let Some(error) = &overlay_error {
@@ -802,9 +810,78 @@ fn compact_count(value: f64) -> String {
     }
 }
 
+/// A number as egui's own fields parse one, whitespace and the minus sign
+/// allowed, finite only. The overlay's range bounds take no other: typed as
+/// `inf` or `1e400`, a bound held an infinity, which no document may hold, and
+/// every later autosave, save and link failed (PER-4 of the 2026-10-20
+/// review).
+fn finite_number(text: &str) -> Option<f64> {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| if c == '\u{2212}' { '-' } else { c })
+        .collect::<String>()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PER-4 of the 2026-10-20 review: the material overlay's manual range
+    /// takes finite numbers only. Typed as `inf` or `1e400`, a bound held an
+    /// infinity, and every later autosave, save and link failed.
+    #[test]
+    fn the_overlay_range_takes_finite_numbers_only() {
+        // A finite number typed is taken: the typing reaches the field.
+        for (text, taken) in [
+            ("2.5", Some(2.5)),
+            ("inf", None),
+            ("1e400", None),
+            ("-inf", None),
+            ("NaN", None),
+        ] {
+            let mut state = Playground::default();
+            let presentation = &mut state.editor.document.presentation;
+            presentation.material_overlay = crate::document::MaterialOverlay::Property(
+                crate::document::MaterialProperty::Density,
+            );
+            presentation.material_overlay_auto_range = false;
+            let driver = PanelDriver::new();
+            let widgets = driver.pass(vec![], |ui| state.view_panel(ui));
+            let min = widgets
+                .iter()
+                .find(|widget| widget.label.starts_with("Min"))
+                .cloned()
+                .expect("the overlay's Min field");
+            driver.pass(click(&min), |ui| state.view_panel(ui));
+            driver.pass(vec![key(egui::Key::A, egui::Modifiers::COMMAND)], |ui| {
+                state.view_panel(ui)
+            });
+            driver.pass(typed(text), |ui| state.view_panel(ui));
+            driver.pass(vec![key(egui::Key::Enter, egui::Modifiers::NONE)], |ui| {
+                state.view_panel(ui)
+            });
+            driver.pass(vec![], |ui| state.view_panel(ui));
+            let typed_min = state
+                .editor
+                .document
+                .presentation
+                .material_overlay_manual_min;
+            assert!(
+                typed_min.is_finite(),
+                "typed {text}: the bound reads {typed_min}"
+            );
+            if let Some(taken) = taken {
+                assert_eq!(typed_min, taken, "typed {text}");
+            }
+            assert!(
+                crate::topology_persistence::save(&state.editor.document).is_ok(),
+                "typed {text}: the document does not save"
+            );
+        }
+    }
 
     /// The style is the energy flow's: its choice and the lines' labels show
     /// for the energy flow, and the complementary field keeps the arrows and
