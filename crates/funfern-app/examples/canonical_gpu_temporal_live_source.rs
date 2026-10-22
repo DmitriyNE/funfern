@@ -189,8 +189,14 @@ fn main() -> AppExit {
     let events = VecDeque::from([
         CanonicalGpuLiveEvent::source_weight_patch(&old_forcing, &middle_authored, time_step, 1)
             .expect("live source-weight event"),
-        CanonicalGpuLiveEvent::source_patch(&middle_authored, &final_authored, time_step, 2)
-            .expect("live source-drive event"),
+        CanonicalGpuLiveEvent::source_patch(
+            &middle_authored,
+            &final_authored,
+            time_step,
+            EPOCH_ORIGIN,
+            2,
+        )
+        .expect("live source-drive event"),
         CanonicalGpuLiveEvent::primary_pulse(base, &pulse, 3).expect("live pulse event"),
     ]);
 

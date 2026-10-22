@@ -548,7 +548,21 @@ impl Playground {
                                     }
                                     PreparedSolverUpdate::SourceDrivesOnly => {
                                         CanonicalGpuLiveEvent::source_patch(
-                                            current, target, dt, serial,
+                                            current,
+                                            target,
+                                            dt,
+                                            // The device's origin, read as the
+                                            // running generation's; a readback
+                                            // of the one before reads a time
+                                            // within an epoch of it (GPU-8).
+                                            display.clock.map_or(0.0, |clock| {
+                                                if display.generation == request.generation() {
+                                                    clock.epoch_origin_seconds
+                                                } else {
+                                                    clock.absolute_seconds
+                                                }
+                                            }),
+                                            serial,
                                         )
                                     }
                                     _ => unreachable!("a patch carries a source-only update"),

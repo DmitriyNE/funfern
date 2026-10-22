@@ -705,11 +705,18 @@ impl CanonicalGpuLiveEvent {
 
     /// Rewrites the running drives of `current` as `target` authors them.
     /// A harmonic's carrier runs on through the edit, and its phase steps by
-    /// as much as the authored phase did.
+    /// as much as the authored phase did. A pulse train's start is reduced by
+    /// its repeat against `origin_seconds`, the device clock's origin as the
+    /// host last read it, and the device moves it onto its own origin part by
+    /// part: exact at that origin, and to f32's spacing at the distance from
+    /// it within an epoch. Reduced against zero, the device formed it as one
+    /// f32 at the run's age: 10 hours in, a pulse landed 1.1 ms off (GPU-8 of
+    /// the 2026-10-20 review).
     pub fn source_patch(
         current: &CanonicalForcing,
         target: &CanonicalForcing,
         time_step: f64,
+        origin_seconds: f64,
         serial: u32,
     ) -> Result<Self, CanonicalGpuBuildError> {
         Self::validate_serial(serial)?;
@@ -718,7 +725,10 @@ impl CanonicalGpuLiveEvent {
                 "a live source patch must keep the generation's drives",
             ));
         }
-        let clock = CanonicalGpuClock::initial(time_step)?;
+        let clock = CanonicalGpuClock {
+            epoch_origin_seconds: origin_seconds,
+            ..CanonicalGpuClock::initial(time_step)?
+        };
         let mut upload = vec![GpuCanonicalTableWord {
             data: UVec4::new(
                 EVENT_SOURCE_PATCH,
@@ -728,7 +738,22 @@ impl CanonicalGpuLiveEvent {
             ),
         }];
         for (current, target) in current.sources().iter().zip(target.sources()) {
-            upload.extend(patched_drive(current.drive(), target.drive(), clock)?);
+            let mut words = patched_drive(current.drive(), target.drive(), clock)?;
+            // The device takes a pulse's start as an absolute pair, the
+            // window's first lane and the runtime word's last: packed beside
+            // the origin, what it subtracts its own from is small.
+            if drive_signal(target.drive()).is_pulsed() {
+                for slot in [0, 3] {
+                    let relative = f64::from(f32::from_bits(words[slot + 2].data.x))
+                        + f64::from(f32::from_bits(words[slot + 1].data.w));
+                    let start = origin_seconds + relative;
+                    let high = finite_f32(start, "pulse start")?;
+                    words[slot + 2].data.x = high.to_bits();
+                    words[slot + 1].data.w =
+                        finite_f32(start - f64::from(high), "pulse start residual")?.to_bits();
+                }
+            }
+            upload.extend(words);
         }
         Ok(Self {
             kind: EVENT_SOURCE_PATCH,
@@ -11282,6 +11307,95 @@ mod tests {
         let mut changed_static = target;
         changed_static.nodes[0].mass_loss.x *= 1.01;
         assert!(CanonicalGpuLiveEvent::temporal_law_patch(&current, &changed_static, 14).is_err());
+    }
+
+    /// GPU-8 of the 2026-10-20 review: a live patch of a pulse train lands
+    /// its start where the running clock has got to, to f32's resolution of
+    /// small times. Packed against zero, the device formed the start as one
+    /// f32 at the run's age before reducing it by the repeat: 10 hours in,
+    /// every later pulse moved by up to 2 ms.
+    #[test]
+    fn a_live_pulse_patch_starts_on_the_running_clock() {
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            23,
+            MeshingOptions {
+                target_edge_length: 0.3,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 23).unwrap();
+        let (start, repeat) = (0.37, 0.8);
+        let forcing = |amplitude: f64| {
+            let mut forcing = CanonicalForcing::none(&operator);
+            forcing
+                .push_source(
+                    CanonicalSource::direct(
+                        &operator,
+                        operator.primary_mass().to_vec(),
+                        TimeSignal::pulsed(
+                            [0.0, amplitude, 2.0, 0.0],
+                            PulseEnvelope::Gaussian { width: 0.05 },
+                            start,
+                            repeat,
+                        ),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            forcing
+        };
+        let time_step = 0.8 * operator.maximum_time_step();
+        // The device's origin, and the time the host packs against: that
+        // origin, or a time up to an epoch from it where the readback the
+        // host has is of another generation.
+        for (origin, lag) in [0.0_f64, 37.25, 36_000.687_5, 129_600.312_5]
+            .into_iter()
+            .flat_map(|origin| [(origin, 0.0), (origin, 100.5)])
+        {
+            let packed = origin + lag;
+            let event = CanonicalGpuLiveEvent::source_patch(
+                &forcing(1.0),
+                &forcing(1.5),
+                time_step,
+                packed,
+                1,
+            )
+            .unwrap();
+            let (runtime, window) = (event.upload[2].data, bits_vec4(event.upload[3].data));
+            // `live_event_stage`'s arithmetic, against the running origin as
+            // the clock keeps it, whole seconds and a fraction.
+            let (whole, fraction) = (origin.floor() as f32, (origin - origin.floor()) as f32);
+            let moved = (window.x - whole) + (f32::from_bits(runtime.w) - fraction);
+            let device =
+                host_pulse_start_after(Vec4::new(moved, window.y, window.z, window.w), 0.0);
+            // The train's latest start not after the time packed against, from
+            // the device's origin: the host's readback lags the device, so
+            // every later pulse of the train is still to come.
+            let reduce = |relative: f64| {
+                if relative < 0.0 {
+                    relative - repeat * (relative / repeat).ceil()
+                } else {
+                    relative
+                }
+            };
+            let expected = packed + reduce(start - packed) - origin;
+            // f32's spacing at the start's distance from the origin.
+            let tolerance = 1.0e-6 + f64::from(f32::EPSILON) * expected.abs();
+            assert!(
+                (f64::from(device) - expected).abs() < tolerance,
+                "{origin} s in, packed at {packed} s, the next start {device} s from the origin \
+                 where it is {expected}"
+            );
+        }
     }
 
     #[test]

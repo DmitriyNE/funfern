@@ -27059,3 +27059,34 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: a live pulse patch is packed against the device's origin (GPU-8)
+
+- **The defect.** A live source patch packed a pulse train's start against
+  t = 0, as an absolute pair. The device moved it onto its running origin
+  part by part, then reduced it by the repeat in f32 at the magnitude of
+  the run's age. The install path reduces it on the host in f64 against
+  the origin.
+- **Test first.** `a_live_pulse_patch_starts_on_the_running_clock` packs a
+  patch of a train (start 0.37 s, repeat 0.8 s) and runs
+  `live_event_stage`'s arithmetic and `pulse_start_after`'s twin on what it
+  uploads. Before the fix the next pulse landed 1.8e-6 s off at 37 s in,
+  1.1e-3 s at 10 hours and 3.1e-4 s at 36 hours.
+- **Fix.**
+  - `CanonicalGpuLiveEvent::source_patch` takes the device clock's origin
+    as the host last read it. It reduces the start against it in f64, as
+    the install does, and packs it as the absolute pair the device takes,
+    beside that origin. The device's own subtraction is unchanged, and
+    what it subtracts is now small.
+  - The app passes the display's epoch origin when the readback is of the
+    running generation. Otherwise it passes the readback's time, which
+    lies within an epoch of the new origin, since a handoff starts its
+    clock at the running time. The examples pass their clocks' origins.
+- **After it** the test holds 1e-6 s at the origin, and f32's spacing at
+  the start's distance from it where the host packs against a time up to
+  an epoch away.
+- **Checked on Metal:** the pulse, live-event and live-source runs pass,
+  `canonical_gpu_pulse --long` across its rebase included.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
