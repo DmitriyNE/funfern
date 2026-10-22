@@ -265,8 +265,21 @@ pub struct CanonicalGpuLimits {
 }
 
 impl CanonicalGpuLimits {
+    /// The render device's limits, which Bevy's render plugin, added first,
+    /// has put in the main world by the time a plugin finishes; none where no
+    /// device is.
+    pub(crate) fn of_device(world: &World) -> Option<Self> {
+        world
+            .get_resource::<RenderDevice>()
+            .map(|device| device.limits())
+            .map(|limits| Self {
+                max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
+                max_buffer_size: limits.max_buffer_size,
+            })
+    }
+
     /// Refuses a buffer of `bytes` the device cannot bind whole, naming it.
-    fn admit(self, name: &str, bytes: usize) -> Result<(), String> {
+    pub(crate) fn admit(self, name: &str, bytes: usize) -> Result<(), String> {
         let limit = self
             .max_storage_buffer_binding_size
             .min(self.max_buffer_size);
@@ -275,8 +288,7 @@ impl CanonicalGpuLimits {
         }
         let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
         Err(format!(
-            "the generation's {name} buffer needs {:.1} MiB, more than the {:.1} MiB \
-             this device binds",
+            "the {name} buffer needs {:.1} MiB, more than the {:.1} MiB this device binds",
             mib(bytes as u64),
             mib(limit)
         ))
@@ -4811,11 +4823,11 @@ impl CanonicalGpuRequest {
             return Ok(());
         };
         for (name, bytes) in plan.buffer_bytes() {
-            limits.admit(name, bytes)?;
+            limits.admit(&format!("generation's {name}"), bytes)?;
         }
         if let Some(transfer) = transfer {
             limits.admit(
-                "handoff transfer",
+                "generation's handoff transfer",
                 transfer.words.len() * size_of::<GpuCanonicalTransferWord>(),
             )?;
         }
@@ -6868,17 +6880,8 @@ impl Plugin for CanonicalWaveGpuPlugin {
             );
     }
 
-    // The render device is in the main world by now: Bevy's render plugin,
-    // added first, puts it there as it finishes.
     fn finish(&self, app: &mut App) {
-        let limits = app
-            .world()
-            .get_resource::<RenderDevice>()
-            .map(|device| device.limits())
-            .map(|limits| CanonicalGpuLimits {
-                max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
-                max_buffer_size: limits.max_buffer_size,
-            });
+        let limits = CanonicalGpuLimits::of_device(app.world());
         app.world_mut()
             .resource_mut::<CanonicalGpuRequest>()
             .set_limits(limits);

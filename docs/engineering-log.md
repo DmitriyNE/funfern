@@ -27407,3 +27407,40 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: the area probes' buffers are admitted against the device's limits
+
+- **The user's choices for area 5.** The plan was approved with three
+  changes:
+  - this commit comes first;
+  - the legacy local mesh repair, `MeshUpdateJob`, is removed rather than
+    mended, which retires MESH-16, MESH-24 and MESH-25;
+  - MESH-21 is fixed, since the `Scene` model's validation still serves
+    `mesh_scene`, which the device examples and many tests build on.
+  The user also asked that the `Scene` model be phased out eventually;
+  plan.md records it.
+- **The defect.** Found while mapping GPU-7 and not in the review. The area
+  probe recorder uploads a 1,168-byte record per element piece into one
+  buffer, which it binds whole. Its cap allows 200,000 pieces, 233.6 MB.
+  WebGPU's default per-binding limit, 128 MiB, is passed at about 115k pieces.
+  There the recorder's bind group failed validation and rendering stopped for
+  good, as the solver's did before GPU-7.
+- **Test first.** `area_probes_past_the_device_limits_are_refused`: a device
+  that binds 1 KiB, less than one record, refuses an area probe, leaving
+  nothing bound, and a large one admits it. Before the fix both were
+  admitted.
+- **Fix.**
+  - The probe recorders' plugin copies the device's limits as the solver's
+    does, through one helper, `CanonicalGpuLimits::of_device`.
+  - The area probes' contribution and scratch buffers are admitted before
+    any is made. A refusal clears the area probes and is the recorder's
+    error, which the session already reports in the diagnostics warning; the
+    run goes on.
+  - The other recorders' buffers are bounded far below any limit.
+  - The limit message names its buffer whole: "the generation's table
+    buffer…" as before, "the area probes' contribution buffer…" here.
+- **Checked on Metal:** `canonical_gpu_binding_limit` and the `observables`
+  fixture, which records area probes, pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

@@ -1230,6 +1230,12 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
 
 ## Maintenance
 
+- [ ] Phase out the `Scene` model, the obstacle-and-internal-boundary scene
+  of the editor before the topology editor, with `mesh_scene` and its
+  validation. The app builds every mesh from a `TopologyScene`; the device
+  examples and many host tests still build theirs through `Scene`, so they
+  move first. Its local repair, `MeshUpdateJob`, went in area 5 of the
+  2026-10-20 review's fixes (the user's request, 2026-10-23).
 - [ ] Testing campaign, structure first: configuration sweeps at the
   preparation layer, regression scenes that prepare, an audit of what the
   tests feed the solvers and mutations that prove the gate bites, then the

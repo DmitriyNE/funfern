@@ -24,8 +24,8 @@ use funfern_core::{
 };
 
 use crate::canonical_gpu::{
-    CanonicalGpuRequest, CanonicalGpuTemporalManifest, GpuCanonicalControl, GpuCanonicalNode,
-    GpuCanonicalStateWord, GpuCanonicalTableWord,
+    CanonicalGpuLimits, CanonicalGpuRequest, CanonicalGpuTemporalManifest, GpuCanonicalControl,
+    GpuCanonicalNode, GpuCanonicalStateWord, GpuCanonicalTableWord,
 };
 use crate::paced_readback::{PacedReadback, PacedReadbackComplete, PacedReadbackPlugin};
 
@@ -222,6 +222,9 @@ impl ProbeBufferHandles {
 #[derive(Resource, Clone, Default, ExtractResource)]
 pub struct WaveGpuRequest {
     generation: u64,
+    /// The device's buffer limits, copied in once it exists; none where no
+    /// device is, as in host tests, which admits every recorder.
+    limits: Option<CanonicalGpuLimits>,
     pub(crate) probes: Option<ProbeBufferHandles>,
     pub(crate) probe_revision: u64,
     probe_readback_entity: Option<Entity>,
@@ -304,6 +307,10 @@ impl WaveGpuRequest {
     /// observable and contour remain compatible.
     pub fn adopt_canonical_generation(&mut self, generation: u64) {
         self.generation = generation;
+    }
+
+    pub fn set_limits(&mut self, limits: Option<CanonicalGpuLimits>) {
+        self.limits = limits;
     }
 
     pub fn probe_revision(&self) -> u64 {
@@ -932,6 +939,29 @@ impl WaveGpuRequest {
         if probes.is_empty() {
             self.clear_area_probe_buffers(assets, commands);
             return Ok(());
+        }
+        // A record per element piece, bound whole: past what the device binds,
+        // the recorder's bind group failed validation and rendering stopped
+        // for good, at about 115k pieces under WebGPU's default 128 MiB where
+        // the cap allows 200k. Refused, the run goes on (the solver's buffers
+        // are admitted alike, GPU-7 of the 2026-10-20 review).
+        if let Some(limits) = self.limits {
+            let pieces = contribution_count.max(1);
+            let admitted = limits
+                .admit(
+                    "area probes' contribution",
+                    pieces * size_of::<GpuCanonicalAreaContribution>(),
+                )
+                .and_then(|()| {
+                    limits.admit(
+                        "area probes' scratch",
+                        pieces * size_of::<GpuAreaProbeContributionSample>(),
+                    )
+                });
+            if let Err(refusal) = admitted {
+                self.clear_area_probe_buffers(assets, commands);
+                return Err(refusal);
+            }
         }
         let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
         let mut contributions = Vec::with_capacity(contribution_count.max(1));
@@ -2235,6 +2265,13 @@ impl Plugin for WaveGpuPlugin {
                     .in_set(RenderSystems::PrepareBindGroups),
             );
     }
+
+    fn finish(&self, app: &mut App) {
+        let limits = CanonicalGpuLimits::of_device(app.world());
+        app.world_mut()
+            .resource_mut::<WaveGpuRequest>()
+            .set_limits(limits);
+    }
 }
 
 #[derive(Resource)]
@@ -3510,6 +3547,50 @@ mod tests {
                 "stride {stride}: the shader refuses steps the host chose"
             );
             assert!(chosen.len() as u64 >= 1100 / stride - 1, "stride {stride}");
+        }
+    }
+
+    /// The area probes' buffers are admitted against what the device binds,
+    /// as the solver's are (GPU-7 of the 2026-10-20 review). Past it, the
+    /// recorder's bind group failed validation and rendering stopped for good:
+    /// a 1,168-byte record per element piece passes WebGPU's default 128 MiB
+    /// at about 115k pieces, where the cap allows 200k. Refused, the run goes
+    /// on and the refusal is the recorder's error.
+    #[test]
+    fn area_probes_past_the_device_limits_are_refused() {
+        let operator = canonical_operator();
+        let world = World::new();
+        let mut assets = Assets::<ShaderBuffer>::default();
+        let areas = vec![AreaProbeInput {
+            id: 1,
+            stencil: None,
+        }];
+        let mut queue = CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, &world);
+        let context = RecorderContext {
+            time_step: 0.01,
+            physics: PhysicsModel::Mechanical,
+            history: RecorderHistory::Restart,
+        };
+        for (binding, admitted) in [(1 << 30, true), (1024, false)] {
+            let mut request = WaveGpuRequest::default();
+            request.set_limits(Some(CanonicalGpuLimits {
+                max_storage_buffer_binding_size: binding,
+                max_buffer_size: 1 << 30,
+            }));
+            let result = request.update_canonical_area_probes(
+                &mut assets,
+                &mut commands,
+                &operator,
+                &areas,
+                60.0,
+                context,
+            );
+            assert_eq!(result.is_ok(), admitted, "binding {binding}: {result:?}");
+            if let Err(refusal) = result {
+                assert!(refusal.contains("this device binds"), "{refusal}");
+                assert!(request.area_probes.is_none(), "nothing is left bound");
+            }
         }
     }
 
