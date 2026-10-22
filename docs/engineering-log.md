@@ -27090,3 +27090,35 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: the trapezoid kick books a driven pin's work at its signal (GPU-9)
+
+- **The defect.** Two parts.
+  - `kick_trapezoid_node` booked a pinned node's work into the bulk at the
+    kick's mean flux over the stage's mass, `0.5·(old + kicked)/M`. The plain
+    kick books it at the pin's signal, as the reference does: on a driven
+    medium the flux jump's quotient mixes in the other end's mass. The
+    prescribed-exchange and source lanes drifted from the reference at
+    first order; the trajectory was untouched.
+  - `apply_wall_step` set the trapezoid flag whatever the scene, where the
+    reference steps by the trapezoid rule only when the scene has a wall.
+    A scene without one took the trapezoid kick, and its pins that kick's
+    booking.
+- **Test first.**
+  - `canonical_gpu_temporal_forced` now holds the prescribed-exchange lane
+    to the reference's sum. Before the fix it read 1.07e-4 off with
+    `FORCED_PINNED_LOSS=1 FORCED_WALLS=second`, and 8.6e-3 off with
+    `FORCED_PINNED_LOSS=1` alone, a pumped medium with a harmonic pin and no
+    wall, which the suite now runs too.
+  - `a_scene_without_walls_takes_no_trapezoid_flag` failed on the
+    reflecting plan.
+- **Fix.** The trapezoid kick books a driven pin's work, the source's and the
+  held force's, at its signal. The plan takes the trapezoid flag only when
+  `operator.has_walls()`, as the reference reads it.
+- **After it** the lanes read 8.1e-8 and 3.6e-6 from the reference, held to
+  1e-4.
+- **Checked on Metal:** the full device suite, 101 of 101, since the flag
+  changes how every scene without a wall kicks.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

@@ -50,6 +50,8 @@ struct Expected {
     /// What the reference's wall carried out and its source put in.
     escaped: f64,
     injected: f64,
+    /// What the reference's pins exchanged with the bulk.
+    exchanged: f64,
     started: Instant,
     deadline: Instant,
     finished: bool,
@@ -220,12 +222,14 @@ fn main() -> AppExit {
     let mut oracle = state.clone();
     let mut escaped = 0.0;
     let mut injected = 0.0;
+    let mut exchanged = 0.0;
     for _ in 0..TOTAL_STEPS {
         let accounting = oracle
             .step_with_forcing(&operator, &forcing)
             .expect("f64 forced step");
         escaped += accounting.boundary_loss;
         injected += accounting.source_work;
+        exchanged += accounting.prescribed_exchange;
     }
     assert!(
         bare || escaped > 1.0e-9,
@@ -262,6 +266,7 @@ fn main() -> AppExit {
         complementary: oracle.complementary_flux().to_vec(),
         escaped,
         injected,
+        exchanged,
         started: Instant::now(),
         deadline: check::deadline(120),
         finished: false,
@@ -357,6 +362,19 @@ fn drive(
             display.accounting[4], expected.escaped, display.accounting[0], expected.injected
         );
         if !within(wall, 1.0e-4) || !within(source, 1.0e-4) {
+            expected.failed = true;
+        }
+    }
+    // A driven pin's exchange with the bulk, which each kick books at the
+    // pin's signal, as the reference does (GPU-9 of the 2026-10-20 review).
+    if expected.exchanged != 0.0 {
+        let pinned = (f64::from(display.accounting[1]) - expected.exchanged).abs()
+            / expected.exchanged.abs();
+        println!(
+            "forced temporal prescribed lane: {:.6e} against {:.6e} ({pinned:.2e})",
+            display.accounting[1], expected.exchanged
+        );
+        if !within(pinned, 1.0e-4) {
             expected.failed = true;
         }
     }

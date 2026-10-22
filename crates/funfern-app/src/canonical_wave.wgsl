@@ -2691,12 +2691,20 @@ fn kick_trapezoid_node(
     if second && !on_trace && !pinned {
         next = kicked / (1.0 + duration * damping * inverse_mass);
     }
-    let midpoint = 0.5 * (old + kicked) * inverse_mass;
+    var midpoint = 0.5 * (old + kicked) * inverse_mass;
     // The source works over the whole kick, to the flux the node ends it
     // with: a first-order wall's implicit half moves it on after the plain
     // kick here, and a trace node's solve does in the finalize, which charges
     // its share there (the reference's `wall_moved_source_work`).
-    let source_work = duration * 0.5 * (old + next) * inverse_mass * source;
+    var source_field = 0.5 * (old + next) * inverse_mass;
+    // A driven pin's field at its stage is its signal, as the plain kick
+    // books it: the flux jump's quotient mixes in the other end's mass
+    // (GPU-9 of the 2026-10-20 review).
+    if pinned && temporal_enabled() {
+        midpoint = prescribed_value(node, target_time);
+        source_field = midpoint;
+    }
+    let source_work = duration * source_field * source;
     let force_work = duration * midpoint * held_force;
     // The walls' dissipation at this kick's end of the step: the start's
     // field on the first, the end's on the second. A driven pin's is its

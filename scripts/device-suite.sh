@@ -60,6 +60,7 @@ RUNS=(
   'FORCED_WALLS=second canonical_gpu_temporal_forced'
   'FORCED_WALLS=second FORCED_WALL_STEP=half-kicks canonical_gpu_temporal_forced'
   'FORCED_PINNED_LOSS=1 FORCED_WALLS=second canonical_gpu_temporal_forced'
+  'FORCED_PINNED_LOSS=1 canonical_gpu_temporal_forced'
   'NONLINEAR_WALL=1 canonical_gpu_nonlinear'
   'NONLINEAR_WALL=2 canonical_gpu_nonlinear'
   'NONLINEAR_WALL=2 NONLINEAR_WALL_STEP=half-kicks canonical_gpu_nonlinear'

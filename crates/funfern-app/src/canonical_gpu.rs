@@ -1352,7 +1352,7 @@ impl CanonicalGpuPlan {
     ) -> Result<Self, CanonicalGpuBuildError> {
         let mut plan = Self::compile_inner(operator, None, state, forcing, clock)?;
         plan.apply_integrator(state.integrator(), FourthOrderForm::Drift);
-        plan.apply_wall_step(state.wall_step());
+        plan.apply_wall_step(state.wall_step(), operator.has_walls());
         Ok(plan)
     }
 
@@ -1376,7 +1376,7 @@ impl CanonicalGpuPlan {
         }
         let mut plan = Self::compile_inner(operator, Some(quadratic), state, forcing, clock)?;
         plan.apply_integrator(state.integrator(), FourthOrderForm::Drift);
-        plan.apply_wall_step(state.wall_step());
+        plan.apply_wall_step(state.wall_step(), operator.has_walls());
         Ok(plan)
     }
 
@@ -1425,12 +1425,14 @@ impl CanonicalGpuPlan {
     /// Sets how the device steps the walls, the state's own way, so the
     /// device and the CPU reference it is compiled from step alike. The
     /// wall's factor already came from that state, prepared for the duration
-    /// its way solves over.
-    fn apply_wall_step(&mut self, wall_step: CanonicalWallStep) {
+    /// its way solves over. Where the scene has no wall the reference kicks
+    /// plainly whatever its wall step, and so does the device (GPU-9 of the
+    /// 2026-10-20 review).
+    fn apply_wall_step(&mut self, wall_step: CanonicalWallStep, walls: bool) {
         let flags = self.control.boundary_offsets.w;
         self.manifest.dispatches_per_step -= self.wall_dispatches(flags);
         let mut flags = flags & !TRAPEZOID_WALL_FLAG;
-        if wall_step == CanonicalWallStep::Trapezoid {
+        if wall_step == CanonicalWallStep::Trapezoid && walls {
             flags |= TRAPEZOID_WALL_FLAG;
         }
         self.manifest.dispatches_per_step += self.wall_dispatches(flags);
@@ -10302,6 +10304,25 @@ mod tests {
     /// of them where the half kicks take it twice, after a field pass; and
     /// the kick form three passes for the wall's rate before its second
     /// kick. A first-order wall steps in the nodal kicks.
+    /// GPU-9 of the 2026-10-20 review: a scene without a wall kicks plainly
+    /// whatever its wall step, as the reference does. Flagged for the
+    /// trapezoid rule, its pins' work was booked by that rule's kick.
+    #[test]
+    fn a_scene_without_walls_takes_no_trapezoid_flag() {
+        for (boundary, walls) in [
+            (OuterBoundaryCondition::Reflecting, false),
+            (OuterBoundaryCondition::FirstOrderOutgoing, true),
+            (OuterBoundaryCondition::SecondOrderOutgoing, true),
+        ] {
+            let plan = plan(boundary);
+            assert_eq!(
+                plan.control.boundary_offsets.w & TRAPEZOID_WALL_FLAG != 0,
+                walls,
+                "{boundary:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_driven_wall_takes_one_solve_a_step_under_the_trapezoid_rule() {
         let second_order = OuterBoundaryCondition::SecondOrderOutgoing;
