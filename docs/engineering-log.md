@@ -26922,3 +26922,40 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: a refused event leaves the ledger as it was (GPU-4)
+
+- **The defect.** The device's ledger is a base, the candidate totals, plus
+  a per-item bank of step contributions under the accepted lane.
+  `event_begin` folds that bank into the totals the candidate starts from
+  and clears the other lane's bank, counting on the commit to flip to it.
+  An event refused, or a filter not taken, kept the accepted lane, and so
+  kept a bank already counted in the base. Every later step's reduction
+  added it again, and the event's own partial bookings stayed in the base.
+  Nothing in the shipped app reads the device ledger; the device runs that
+  compare it would have read it wrong after any refusal.
+- **Test first.** `canonical_gpu_live_events`, after its five paused events
+  and 48 steps on a first-order wall and a driven source, now sends a pulse
+  whose energy overflows f32, which the device refuses, and steps 16 more.
+  The wall's loss lane must hold the reference's sum over every step. Before
+  the fix it read 2.669e-3 against 1.682e-3, 5.9e-1 off.
+- **Fix.**
+  - A refusal (`refuse_event`, shared by the live event's and the resident
+    filter's) restores the candidate's totals from the accepted ones and
+    sets a flag, `BANK_FOLDED` in the event word: the accepted bank has
+    been counted.
+  - Every read of the accepted bank goes through `accepted_bank`, which
+    reads it as empty while the flag stands, in the next step's staging and
+    in the reduction. A commit, which flips the lane, clears the flag; an
+    event or filter that begins keeps it until its own commit or refusal.
+- **Not measured:** no run makes the resident filter refuse its candidate.
+  The nonlinear and oscillator runs take every filter, at amplitudes up to
+  three times their default, so that path is covered by sharing
+  `refuse_event` with the live one.
+- **After it** the lane reads 7.9e-8 from the reference, held to 1e-5.
+- **Checked on Metal:** 47 runs of the events, the filters and the ledgers
+  pass: the live events, the timing runs, the nonlinear, oscillator, forced
+  and rollback examples, the cavity, observables and rejection fixtures.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

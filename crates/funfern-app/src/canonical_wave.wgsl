@@ -246,6 +246,26 @@ fn wall_solve_half() -> f32 {
 fn accepted_slot() -> u32 { return control.event.z & 1u; }
 fn event_operation() -> u32 { return control.event.z >> 8u; }
 fn live_event() -> bool { return (control.event.z & 2u) != 0u; }
+// Set where an event is refused, or a filter not taken, after `event_begin`
+// folded the accepted lane's accounting bank into the totals the candidate
+// starts from. That bank then reads as empty until the next commit replaces
+// it; read as it stands, every later step counted it again (GPU-4 of the
+// 2026-10-20 review).
+const BANK_FOLDED: u32 = 4u;
+fn accepted_bank(item: u32) -> vec4<f32> {
+    if (control.event.z & BANK_FOLDED) != 0u { return vec4<f32>(0.0); }
+    return scratch[accounting_bank_offset(accepted_slot()) + item].values;
+}
+
+// An event refused, or a filter not taken: the accepted lane stays, and the
+// candidate's totals go back to the accepted ones, which hold its bank.
+fn refuse_event() {
+    control.event.z = accepted_slot() | BANK_FOLDED;
+    control.candidate_accounting_a = control.accepted_accounting_a;
+    control.candidate_accounting_b = control.accepted_accounting_b;
+    control.candidate_accounting_c = control.accepted_accounting_c;
+    atomicStore(&status.candidate, 0u);
+}
 
 const TEMPORAL_RUNTIME_WORDS_PER_SLOT: u32 = 3u;
 // A material's runtime record: two slots, then one gate window per lane. A
@@ -1550,7 +1570,8 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
     let operation = upload.x;
     if i == 0u {
         control.event.y = upload.y;
-        control.event.z = accepted_slot() | 2u | (operation << 8u);
+        control.event.z = accepted_slot() | (control.event.z & BANK_FOLDED) | 2u
+            | (operation << 8u);
         control.event.w = upload.w;
     }
     if operation == 1u || operation == 4u {
@@ -1710,7 +1731,7 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(1)
 fn resident_filter_begin() {
     if stopped() { return; }
-    control.event.z = accepted_slot() | (2u << 8u);
+    control.event.z = accepted_slot() | (control.event.z & BANK_FOLDED) | (2u << 8u);
     // `CANONICAL_GRID_FILTER_STRENGTH`, packed with the generation.
     control.event.w = bitcast<u32>(control.evolution.x);
 }
@@ -2129,8 +2150,7 @@ fn commit_event() {
         if live_event() {
             control.event_result = vec4<u32>(
                 control.event.y, event_operation(), control.event.y, failure);
-            control.event.z = accepted_slot();
-            atomicStore(&status.candidate, 0u);
+            refuse_event();
         } else {
             atomicMax(&status.latch, failure);
         }
@@ -2189,8 +2209,7 @@ fn resident_filter_commit() {
     // anything non-finite is a fault on either.
     if failure != 0u && (field_laws() || restoring()) && (failure == STATUS_TIMESTEP
         || failure == STATUS_INVERSE_DOMAIN || failure == STATUS_INVERSE_CONVERGENCE) {
-        control.event.z = accepted_slot();
-        atomicStore(&status.candidate, 0u);
+        refuse_event();
         return;
     }
     if failure != 0u {
@@ -4461,9 +4480,8 @@ fn stage_accounting(@builtin(global_invocation_id) id: vec3<u32>) {
         let mode = i - control.counts_a.x - control.counts_a.y;
         contribution = scratch[mode_accounting_offset() + mode].values;
     }
-    let accepted = accounting_bank_offset(accepted_slot()) + i;
     let candidate = accounting_bank_offset(accepted_slot() ^ 1u) + i;
-    scratch[candidate].values = scratch[accepted].values + contribution;
+    scratch[candidate].values = accepted_bank(i) + contribution;
 }
 
 @compute @workgroup_size(128)
@@ -4471,7 +4489,7 @@ fn reduce_accounting(@builtin(local_invocation_id) id: vec3<u32>) {
     let local = id.x;
     var accounting_a = vec4<f32>(0.0);
     for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
-        let item = scratch[accounting_bank_offset(accepted_slot()) + node].values;
+        let item = accepted_bank(node);
         accounting_a.x += item.x;
         if nodes[node].boundary.x == NO_INDEX || has_prescribed_trace() {
             accounting_a.y += item.y;
@@ -4481,14 +4499,14 @@ fn reduce_accounting(@builtin(local_invocation_id) id: vec3<u32>) {
     }
     for (var sample = local; sample < control.counts_a.y; sample += WORKGROUP_SIZE) {
         let item = control.counts_a.x + sample;
-        accounting_a.w += scratch[accounting_bank_offset(accepted_slot()) + item].values.x;
+        accounting_a.w += accepted_bank(item).x;
     }
     for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
         // The half kicks charge a pinned trace's whole balance through its
         // modes; the trapezoid rule's pins return their own shares by node.
         if has_prescribed_trace() && !trapezoid_walls() {
             let item_index = control.counts_a.x + control.counts_a.y + mode;
-            let item = scratch[accounting_bank_offset(accepted_slot()) + item_index].values;
+            let item = accepted_bank(item_index);
             accounting_a.y += item.x + item.w;
         }
     }
@@ -4502,13 +4520,13 @@ fn reduce_accounting(@builtin(local_invocation_id) id: vec3<u32>) {
     // reduction and lands in `c.x`.
     var accounting_b = vec4<f32>(0.0);
     for (var node = local; node < control.counts_a.x; node += WORKGROUP_SIZE) {
-        let item = scratch[accounting_bank_offset(accepted_slot()) + node].values;
+        let item = accepted_bank(node);
         accounting_b.x += item.w;
         if node_is_active(node) { accounting_b.y -= item.z; }
     }
     for (var mode = local; mode < control.counts_b.z; mode += WORKGROUP_SIZE) {
         let item_index = control.counts_a.x + control.counts_a.y + mode;
-        accounting_b.x += scratch[accounting_bank_offset(accepted_slot()) + item_index].values.w;
+        accounting_b.x += accepted_bank(item_index).w;
     }
     let total_b = reduce_accounting_half(local, accounting_b);
     if local == 0u {

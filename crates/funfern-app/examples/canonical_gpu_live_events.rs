@@ -1,4 +1,10 @@
 //! Paused zero-duration edits on the production canonical GPU core.
+//!
+//! After them and 48 steps, a pulse whose energy overflows f32 is refused,
+//! and the wall's loss lane, read 16 steps on, must hold the reference's sum:
+//! a refused event left the accepted lane's accounting bank in the base the
+//! event had folded it into, and every later step counted it twice (GPU-4 of
+//! the 2026-10-20 review).
 
 #[path = "support/check.rs"]
 mod check;
@@ -22,17 +28,22 @@ const WARMUP_STEPS: u64 = 20;
 const MEASURED_STEPS: u64 = 48;
 const FILTER_STRENGTH: f64 = 0.35;
 const EVENT_COUNT: u32 = 5;
+const LEDGER_STEPS: u64 = 16;
 
 #[derive(Resource)]
 struct Pending {
     plan: Option<CanonicalGpuPlan>,
     events: VecDeque<CanonicalGpuLiveEvent>,
+    refused: Option<CanonicalGpuLiveEvent>,
 }
 
 #[derive(Resource)]
 struct Expected {
     primary: Vec<f64>,
     complementary: Vec<[f64; 2]>,
+    /// The reference's summed wall loss over every step, the refused
+    /// event's last sixteen included.
+    escaped: f64,
     phase: Phase,
     paused_time: f64,
     event_started: Option<Instant>,
@@ -49,6 +60,8 @@ enum Phase {
     Warmup,
     Event,
     Evolution,
+    Refusal,
+    Ledger,
     Done,
 }
 
@@ -161,10 +174,12 @@ fn main() -> AppExit {
     ]);
 
     let mut oracle = initial;
+    let mut escaped = 0.0;
     for _ in 0..WARMUP_STEPS {
-        oracle
+        escaped += oracle
             .step_with_forcing(&operator, &old_forcing)
-            .expect("old-source oracle step");
+            .expect("old-source oracle step")
+            .boundary_loss;
     }
     let edit_time = WARMUP_STEPS as f64 * time_step;
     // The anchor that keeps the carrier continuous at the edit under the new
@@ -192,17 +207,35 @@ fn main() -> AppExit {
         .apply_grid_filter(&operator, &accepted_new_forcing, FILTER_STRENGTH)
         .expect("filter oracle event");
     for _ in 0..MEASURED_STEPS {
-        oracle
+        escaped += oracle
             .step_with_forcing(&operator, &accepted_new_forcing)
-            .expect("new-source oracle step");
+            .expect("new-source oracle step")
+            .boundary_loss;
     }
+    let primary_expected = oracle.primary_flux().to_vec();
+    let complementary_expected = oracle
+        .complementary_flux()
+        .iter()
+        .map(|value| [value.x, value.y])
+        .collect();
+    for _ in 0..LEDGER_STEPS {
+        escaped += oracle
+            .step_with_forcing(&operator, &accepted_new_forcing)
+            .expect("oracle step after the refusal")
+            .boundary_loss;
+    }
+    // A pulse the device cannot hold: its energy overflows f32, and the
+    // event is refused with the run as it was.
+    let refused = CanonicalGpuLiveEvent::primary_pulse(
+        &operator,
+        &vec![1.0e30; operator.degrees_of_freedom()],
+        EVENT_COUNT + 1,
+    )
+    .expect("live pulse to refuse");
     let expected = Expected {
-        primary: oracle.primary_flux().to_vec(),
-        complementary: oracle
-            .complementary_flux()
-            .iter()
-            .map(|value| [value.x, value.y])
-            .collect(),
+        primary: primary_expected,
+        complementary: complementary_expected,
+        escaped,
         phase: Phase::Warmup,
         paused_time: edit_time,
         event_started: None,
@@ -228,6 +261,7 @@ fn main() -> AppExit {
     .insert_resource(Pending {
         plan: Some(plan),
         events,
+        refused: Some(refused),
     })
     .insert_resource(expected)
     .add_systems(Startup, install)
@@ -359,6 +393,51 @@ fn validate(
                 b_error,
             );
             expected.failed = !within(q_error, 3.0e-5) || !within(b_error, 3.0e-5);
+            expected.settle_after = None;
+            expected.phase = if expected.failed {
+                Phase::Done
+            } else {
+                Phase::Refusal
+            };
+        }
+        Phase::Refusal => {
+            if let Some(event) = pending.refused.clone() {
+                if request.queue_live_event(&mut assets, event).is_ok() {
+                    pending.refused = None;
+                }
+                return;
+            }
+            if request.stats().processed_event() != EVENT_COUNT + 1 {
+                return;
+            }
+            if request.stats().event_rejection() == 0
+                || clock.accepted_steps != WARMUP_STEPS + MEASURED_STEPS
+            {
+                eprintln!("the overflowing pulse was taken, or it moved the clock");
+                expected.failed = true;
+                expected.phase = Phase::Done;
+                return;
+            }
+            request.request_steps(LEDGER_STEPS);
+            expected.phase = Phase::Ledger;
+        }
+        Phase::Ledger if clock.accepted_steps >= WARMUP_STEPS + MEASURED_STEPS + LEDGER_STEPS => {
+            if expected.settle_after.is_none() {
+                expected.settle_after = Some(display.readbacks + 2);
+                return;
+            }
+            if display.readbacks < expected.settle_after.unwrap() {
+                return;
+            }
+            let lane = f64::from(display.accounting[4]);
+            let error = (lane - expected.escaped).abs() / expected.escaped.abs().max(1.0e-12);
+            println!(
+                "a refused pulse, then {LEDGER_STEPS} steps: wall lane {lane:.6e} against {:.6e} ({error:.2e})",
+                expected.escaped
+            );
+            // Within 1e-5, as the nonlinear gate holds its wall lane: the
+            // M1 Max reads 7.9e-8, and a bank counted twice 5.9e-1.
+            expected.failed = !within(error, 1.0e-5);
             expected.phase = Phase::Done;
         }
         _ => {}
