@@ -570,7 +570,11 @@ impl CanonicalGpuRuntimeTransfer {
             .enumerate()
             .map(|(target_node, row)| {
                 target_forcing.prescribed()[target_node]?;
+                // A row's empty slots point at node 0 with no weight: taken
+                // as a donor where node 0 was prescribed, they gave a newly
+                // driven node its carrier (MESH-3 of the 2026-10-20 review).
                 (0..row.source_count as usize)
+                    .filter(|slot| row.coefficients[*slot] != 0.0)
                     .filter_map(|slot| {
                         let source_node = row.source_nodes[slot];
                         source_forcing.prescribed()[source_node as usize]
@@ -10915,6 +10919,58 @@ mod tests {
                 "rates {primary} and {complementary}"
             );
         }
+    }
+
+    /// MESH-3 of the 2026-10-20 review: a node prescribed only in the target
+    /// takes no donor. A transfer row's empty slots point at node 0 with no
+    /// weight; where node 0 was prescribed in the source, as an electric wall
+    /// makes it, the newly driven side inherited its carrier and ran
+    /// ω·t_handoff out of phase with the reference.
+    #[test]
+    fn a_newly_prescribed_node_takes_no_donor_from_an_empty_slot() {
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            9,
+            MeshingOptions {
+                target_edge_length: 0.25,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 9).unwrap();
+        let interpolation =
+            QuadraticTransferMap::identity_on_mesh(&mesh, &scalar, &scalar).unwrap();
+        let primary =
+            CanonicalPrimaryTransferMap::prepare(&interpolation, &operator, &operator).unwrap();
+        let wall = TimeSignal::harmonic(0.0, 0.0, 1.0, 0.0);
+        let drive = TimeSignal::harmonic(0.0, 0.3, 0.8, 0.0);
+        let newly_driven = 5;
+        let mut source_pins = vec![None; operator.degrees_of_freedom()];
+        source_pins[0] = Some(wall);
+        let mut target_pins = source_pins.clone();
+        target_pins[newly_driven] = Some(drive);
+        let source = CanonicalForcing::from_prescribed(&operator, source_pins).unwrap();
+        let target = CanonicalForcing::from_prescribed(&operator, target_pins).unwrap();
+        let runtime = CanonicalGpuRuntimeTransfer::from_primary_transfer(
+            &operator, &operator, &source, &target, &primary, [0; 4],
+        )
+        .unwrap();
+        assert_eq!(
+            runtime.prescribed_sources[0],
+            Some(0),
+            "the wall carries on"
+        );
+        assert_eq!(
+            runtime.prescribed_sources[newly_driven], None,
+            "a newly driven node starts its own carrier"
+        );
     }
 
     #[test]

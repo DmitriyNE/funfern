@@ -27483,3 +27483,22 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. No device run: only the session's
   adaptation bookkeeping changes.
+
+## 2026-10-23 — Step 3, area 5: a newly prescribed node takes no donor from an empty slot (MESH-3)
+
+- **The defect.** At a handoff, a prescribed node of the target carries on
+  the carrier of a prescribed node it is transferred from, chosen by weight
+  among its transfer row's source slots. Every row has seven slots, and the
+  ones a source does not fill point at node 0 with no weight: an identity
+  row's six. Where node 0 was prescribed in the source, as an electric wall
+  side makes it, those empty slots were candidates. A side newly switched to
+  a harmonic Dirichlet drive took node 0's carrier and ran ω·t_handoff out
+  of phase with the reference, where it should start its own.
+- **Test first.** `a_newly_prescribed_node_takes_no_donor_from_an_empty_slot`:
+  node 0 pinned in both generations, node 5 newly driven in the target, over
+  an identity map. Before the fix node 5's donor was node 0.
+- **Fix.** Slots with no weight are no donors.
+- **Checked on Metal:** all 22 handoff runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
