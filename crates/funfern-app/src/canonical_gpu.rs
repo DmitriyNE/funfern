@@ -8103,9 +8103,11 @@ fn compute_canonical_wave(
             EVENT_LINEAR_LAW_PATCH => {
                 pass.set_pipeline(pipelines[15]);
                 pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
+                // The acceptance indexes the nodes and then the samples in
+                // one range, as the stage passes do.
                 pass.set_pipeline(pipelines[20]);
                 pass.dispatch_workgroups(
-                    workgroups(handles.node_count.max(handles.sample_count)),
+                    workgroups(handles.node_count + handles.sample_count),
                     1,
                     1,
                 );

@@ -234,6 +234,22 @@ fn main() -> AppExit {
     let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
         .expect("canonical operator");
     let canonical_elapsed = canonical_started.elapsed();
+    // A lossy law patch is compiled from other rates than the reference
+    // steps with, so the device agrees only if the patch rewrites every
+    // coefficient: patching in the rates the plan already has passes with
+    // any of them left as compiled.
+    let unpatched = (event == "law-patch" && loss).then(|| {
+        let mut unpatched_scene = scene.clone();
+        let material = &mut unpatched_scene.materials[0];
+        for (channel, rate) in [
+            (&mut material.electric_loss, 0.3),
+            (&mut material.magnetic_loss, 0.2),
+        ] {
+            channel.as_mut().expect("lossy material").base_rate = ScalarField::constant(rate);
+        }
+        CanonicalWaveOperator::compile_scene(&mesh, &scalar, &unpatched_scene, 1)
+            .expect("unpatched canonical operator")
+    });
     let overlay_stencils = if vector_overlay_samples > 0 {
         (0..vector_overlay_samples)
             .map(|sample| {
@@ -317,9 +333,14 @@ fn main() -> AppExit {
     };
     let initial_step = clock.step_in_epoch as u64;
     let gpu_plan_started = Instant::now();
-    let mut plan =
-        CanonicalGpuPlan::compile_with_quadratic(&operator, &scalar, &initial, &forcing, clock)
-            .expect("canonical GPU plan");
+    let mut plan = CanonicalGpuPlan::compile_with_quadratic(
+        unpatched.as_ref().unwrap_or(&operator),
+        &scalar,
+        &initial,
+        &forcing,
+        clock,
+    )
+    .expect("canonical GPU plan");
     let gpu_plan_elapsed = gpu_plan_started.elapsed();
     let mut oracle = initial;
     let event_serial = u32::from(event != "none");

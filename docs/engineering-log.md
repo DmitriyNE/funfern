@@ -26871,3 +26871,24 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: a linear law patch rewrites every sample (GPU-5)
+
+- **The defect.** A linear law patch is accepted by `event_accept_tables`,
+  which copies each staged loss fraction into the accepted one, the nodes
+  first and then the samples, in one index range of N + S. The host
+  dispatched it over `max(N, S)` threads. The event committed as accepted,
+  while the last N samples kept the loss the generation was compiled with.
+- **Why no run caught it.** `canonical_gpu_timing --law-patch` patched in the
+  rates the plan already had, so a sample left unpatched held the same rate.
+- **Test first.** With `--loss`, the timing run now compiles its plan from
+  other rates (0.3/s and 0.2/s where the reference steps at 0.08/s and
+  0.05/s), and the patch must bring every coefficient to the reference's.
+  Before the fix, at 8,944 nodes and 17,484 samples, the run read Q 6.8e-3
+  and b 3.1e-2 and failed.
+- **Fix.** The acceptance is dispatched over N + S, as the stage passes are.
+- **After it** the run reads Q 6.0e-7 and b 7.7e-7.
+- **Checked on Metal:** both law-patch timing runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

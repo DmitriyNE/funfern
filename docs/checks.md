@@ -1273,7 +1273,10 @@ leaves too. The timing example therefore holds the device's ledger to the
 reference's own remainder, which under the half kicks is roundoff.
 `--leapfrog` steps both at the leapfrog's own step instead of the production
 integrator's. `--law-patch` is the check that a patch's commit keeps the
-wall step. On a driven generation `FORCED_WALL_STEP=half-kicks` on
+wall step; with `--loss` the plan is compiled from other rates than the
+reference's, 0.3/s and 0.2/s, and the patch must bring every node and sample
+to the reference's, which a patch that left the last samples as compiled
+failed at b `3.1e-2` (GPU-5 of the 2026-10-20 review). On a driven generation `FORCED_WALL_STEP=half-kicks` on
 `canonical_gpu_temporal_forced`, with `FORCED_WALLS=second` for a
 second-order wall, `DRIVEN_WALL_STEP=half-kicks` on
 `canonical_gpu_driven_document`, `TEMPORAL_AMR_WALL_STEP=half-kicks` on
