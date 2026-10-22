@@ -1018,11 +1018,20 @@ fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
     let w1 = (point - a).cross(c - a) / denominator;
     let w2 = (b - a).cross(point - a) / denominator;
     let weights = [1.0 - w1 - w2, w1, w2];
+    // The weights round with the coordinates' magnitude, and more the smaller
+    // the element is: a weight is a distance over the element's height. An
+    // absolute tolerance refused points on a small element's own edge
+    // (MESH-10 of the 2026-10-20 review).
     let scale = triangle
         .iter()
         .map(|p| p.x.abs().max(p.y.abs()))
         .fold(1.0, f64::max);
-    let tolerance = 64.0 * f64::EPSILON * scale;
+    let longest = [b - a, c - b, a - c]
+        .iter()
+        .map(|edge| edge.norm())
+        .fold(0.0, f64::max);
+    let height = denominator / longest;
+    let tolerance = 64.0 * f64::EPSILON * scale / height.min(1.0);
     weights
         .iter()
         .all(|weight| *weight >= -tolerance && *weight <= 1.0 + tolerance)
@@ -1041,6 +1050,37 @@ mod tests {
         TopologyVertex, TopologyVertexId, TopologyVertexLocation, TopologyWaveModel,
         WaveCoefficients, carve_topology_mesh, compile_topology, mesh_topology_plan,
     };
+
+    /// MESH-10 of the 2026-10-20 review: a point on an element's own edge lies
+    /// in it whatever the element's size. The tolerance was absolute, while
+    /// the weights' rounding grows as the element shrinks: with adaptation's
+    /// minimum edge at 0.005 near walls, separated midpoints took the other
+    /// side's value and new hole-rim points were extended, not interpolated.
+    #[test]
+    fn a_point_on_a_small_elements_edge_lies_in_it() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut uniform = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let edge = 0.005;
+        let mut refused = 0;
+        for _ in 0..20_000 {
+            let a = Point2::new(-0.9 + 1.8 * uniform(), -0.9 + 1.8 * uniform());
+            let angle = std::f64::consts::TAU * uniform();
+            let towards =
+                |angle: f64| Point2::new(a.x + edge * angle.cos(), a.y + edge * angle.sin());
+            let (b, c) = (towards(angle), towards(angle + 1.2));
+            for (from, to) in [(a, b), (b, c), (c, a)] {
+                if barycentric(from.lerp(to, uniform()), [a, b, c]).is_none() {
+                    refused += 1;
+                }
+            }
+        }
+        assert_eq!(refused, 0, "points on their own element's edge refused");
+    }
 
     /// A carved mesh keeps most of its nodes at exactly their old points, and
     /// the transfer copies those one to one, bit for bit, instead of locating

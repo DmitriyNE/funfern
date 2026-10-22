@@ -27502,3 +27502,25 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a point on a small element's edge lies in it (MESH-10)
+
+- **The defect.** The transfer locates each new node in an element of the old
+  mesh by its barycentric weights, accepting weights down to −64·ε·scale,
+  where scale is the coordinates' magnitude. A weight is a distance over the
+  element's height, so its rounding grows as the element shrinks, as
+  ε·scale/height. Adaptation's minimum edge is 0.005 near walls. There,
+  points on an element's own edge were refused by it: a separated wall's
+  midpoints took the other side's value, and new hole-rim points were filled
+  by extension, not interpolated.
+- **Test first.** `a_point_on_a_small_elements_edge_lies_in_it` draws 20,000
+  triangles of edge 0.005 across the domain, by a seeded generator, and a
+  point on each of their edges. Before the fix, 1,963 of the 60,000 points
+  were refused.
+- **Fix.** The tolerance is divided by the element's smallest height, the
+  doubled area over its longest edge, where that is below one: unchanged for
+  elements of unit size, and grown as they shrink.
+- **Checked on Metal:** the 28 handoff, remesh and adaptation runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
