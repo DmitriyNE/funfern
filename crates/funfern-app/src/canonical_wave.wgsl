@@ -465,6 +465,29 @@ fn sinc(value: f32) -> f32 {
     return portable_sin(value) / value;
 }
 
+// An integrated drive's rate anchor carried `elapsed` on, to where its
+// carrier's phase is already reduced to `phase`. Formed from that phase, the
+// drive's mean rate, anchor + (b/ω) cos φ, carries over to f32's rounding of
+// the sum: the drive evaluated at `elapsed` rounds its own phase apart from
+// the reduced one at the magnitude of ω·elapsed, which moved the mean rate
+// at every rebase and handoff for good (GPU-6 and GPU-10 of the 2026-10-20
+// review). A carrier that has turned less than half a cycle keeps its phase
+// to f32's resolution, and is read at `elapsed` directly, which stays exact
+// as ω goes to zero.
+fn carried_rate_anchor(
+    anchor: f32, parameters: vec4<f32>, phase: f32, elapsed: f32,
+) -> f32 {
+    let turned = parameters.z * elapsed;
+    if abs(turned) < PI {
+        let half_phase = 0.5 * turned;
+        return anchor + parameters.x * elapsed
+            + parameters.y * elapsed * sinc(half_phase)
+                * portable_sin(parameters.w + half_phase);
+    }
+    return anchor + parameters.x * elapsed
+        + parameters.y / parameters.z * (portable_cos(parameters.w) - portable_cos(phase));
+}
+
 // Portable trigonometry: this block is the same in every shader that needs
 // it, which `every_shader_carries_the_same_portable_trigonometry` holds.
 // WGSL promises its own sin and cos only to 2^-11 absolute, and SwiftShader's
@@ -2417,11 +2440,15 @@ fn rebase_clock_records(@builtin(global_invocation_id) id: vec3<u32>) {
             window.x = bitcast<u32>(
                 pulse_start_after(bitcast<vec4<f32>>(window), elapsed));
         } else {
+            let signal = vec4<f32>(
+                table_float(base, 0u), table_float(base, 1u),
+                table_float(base, 2u), table_float(base, 3u));
+            let phase = reduced_phase(signal.w + signal.z * elapsed);
             if runtime.x == DRIVE_INTEGRATED {
-                runtime.y = bitcast<u32>(source_drive(i, elapsed));
+                runtime.y = bitcast<u32>(carried_rate_anchor(
+                    table_float(base + 1u, 1u), signal, phase, elapsed));
             }
-            parameters.w = bitcast<u32>(reduced_phase(
-                table_float(base, 3u) + table_float(base, 2u) * elapsed));
+            parameters.w = bitcast<u32>(phase);
         }
         for (var slot = 0u; slot < 2u; slot += 1u) {
             let slot_base = root + DRIVE_SLOT_WORDS * slot;

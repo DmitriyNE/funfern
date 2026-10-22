@@ -26959,3 +26959,49 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: an integrated drive keeps its mean rate across rebases and handoffs (GPU-6, GPU-10)
+
+- **The defect.** An integrated drive, which every authored harmonic source
+  compiles to, holds its rate as an anchor plus the carrier's integral,
+  `anchor + a·t + (b/ω)(cos φ − cos(φ + ωt))`, so its mean rate is
+  `anchor + (b/ω) cos φ`. A rebase, and a handoff that retained or replaced
+  the drive, formed the new anchor by evaluating the drive at the elapsed
+  time and the new phase by reducing `φ + ω·elapsed`, each in f32 at the
+  magnitude of `ω·elapsed`. The two rounded apart, and the mean rate moved
+  by about `(b/ω)·1e-4` each time, for good. A closed medium integrates a
+  mean rate, so its mean field drifted, and the offsets random-walked.
+- **Test first.** A new run, `canonical_gpu_integrated_rebase`, drives a
+  closed reflecting box in proportion to the nodal mass with an integrated
+  harmonic whose integral has no mean. The field stays uniform, and the
+  box's total flux integrates the rate exactly. The clock starts 64 steps
+  before a rebase at 1,000 s and runs 8 s past it. Before the fix the total
+  read 4.1e-4 of its swing off the reference; across two rebases, 8.7e-3.
+- **What the run leaves out.** Inside one epoch the device's mean rate
+  carries a bias of its own: the carrier's phase in the rate rounds against
+  the grid of the local time's magnitude. A run inside one epoch reads
+  2.8e-3 after 127 s, which is the late-epoch error the plan already lists.
+  Measured after a rebase, where the local time is small, that bias stays
+  far below the rebase's. plan.md's item now records the mean-rate bias,
+  and a live source patch's one-off share of it.
+- **Fix.** One helper, `carried_rate_anchor`, forms the anchor from the
+  carrier's phase already reduced at the new origin:
+  `anchor + a·E + (b/ω)(cos φ − cos φ')`, which keeps the mean rate to the
+  sum's rounding. A carrier that has turned less than half a cycle keeps
+  its phase to f32's resolution, and is read at the elapsed time as before,
+  which stays exact as ω goes to zero. `rebase_clock_records` uses it, and
+  the transfer shader's copy is used by `retain_drive` and `replace_drive`.
+- **Coverage for the handoff.** No device run carried an integrated drive
+  across a handoff. `canonical_gpu_handoff --source --integrated` does now:
+  the target's reference runs on from the rate the integral reached. It
+  passed before the change and after (Q 2.4e-7), early in its epoch, where
+  the defect is too small to read.
+- **After it** the rebase run reads 2.4e-5 of the swing, held to 1e-4.
+  Both runs join the device suite. The host test that reads
+  `replace_drive`'s text for its phase and anchor reads the new lines.
+- **Checked on Metal:** 49 runs pass: every handoff run, the temporal
+  examples that cross a rebase, the live events, the cavity fixtures,
+  `far-field-late` and the two new runs.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

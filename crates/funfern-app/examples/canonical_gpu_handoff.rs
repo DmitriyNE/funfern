@@ -14,6 +14,11 @@
 //! phase it has reached and then steps by as much as its authored phase moved;
 //! the gate also checks that a carrier kept running without the step lands
 //! far from the oracle.
+//!
+//! `--integrated` makes the `--source` drive an integrated one, as every
+//! authored harmonic source compiles: the handoff carries its rate anchor
+//! with its carrier, and the target's reference runs on from the rate the
+//! integral had reached.
 
 #[path = "support/check.rs"]
 mod check;
@@ -32,11 +37,12 @@ use funfern_app::canonical_gpu::{
 use funfern_core::{
     BACKGROUND_REGION, CanonicalAuxiliaryState, CanonicalForcing,
     CanonicalOutgoingHistoryTransferMap, CanonicalOutgoingNormalizedTransferJob,
-    CanonicalPrimaryTransferMap, CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferJob,
-    CanonicalWallStep, CanonicalWaveOperator, CanonicalWaveState, InternalBoundary,
-    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw, MeshingOptions,
-    OpenCubicSpline, OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, Point2,
-    PulseEnvelope, QuadraticTransferMap, QuadraticWaveOperator, Scene, TimeSignal, mesh_scene,
+    CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalThinGapHistoryTransferMap,
+    CanonicalVectorTransferJob, CanonicalWallStep, CanonicalWaveOperator, CanonicalWaveState,
+    InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw,
+    MeshingOptions, OpenCubicSpline, OuterBoundaryCondition, OuterBoundaryConditions, OuterSide,
+    Point2, PulseEnvelope, QuadraticTransferMap, QuadraticWaveOperator, Scene, TimeSignal,
+    mesh_scene,
 };
 
 const WARMUP_STEPS: u64 = 12;
@@ -133,6 +139,19 @@ fn main() -> AppExit {
         !(edit && pulse),
         "--edit gives harmonic carriers other numbers; a pulse's carrier counts from its centre"
     );
+    let integrated = std::env::args().any(|argument| argument == "--integrated");
+    assert!(
+        !(integrated && (edit || pulse)),
+        "--integrated carries an unchanged harmonic; a pulse is never integrated"
+    );
+    let rate_drive = |signal: TimeSignal| {
+        if integrated {
+            CanonicalRateDrive::legacy(signal, 0.0)
+        } else {
+            CanonicalRateDrive::direct(signal)
+        }
+        .expect("source rate drive")
+    };
     let requested_edge =
         std::env::args().find_map(|argument| argument.strip_prefix("--edge=")?.parse::<f64>().ok());
     let source_edge = requested_edge.unwrap_or(if standard { 0.08 } else { 0.16 });
@@ -322,20 +341,20 @@ fn main() -> AppExit {
             .collect::<Vec<_>>();
         source_forcing
             .push_source(
-                funfern_core::CanonicalSource::direct(
+                funfern_core::CanonicalSource::new(
                     &source_operator,
                     source_weights,
-                    source_signal,
+                    rate_drive(source_signal),
                 )
                 .expect("source generation drive"),
             )
             .expect("source generation forcing");
         target_forcing
             .push_source(
-                funfern_core::CanonicalSource::direct(
+                funfern_core::CanonicalSource::new(
                     &target_operator,
                     target_source_weights.clone(),
-                    target_source_signal,
+                    rate_drive(target_source_signal),
                 )
                 .expect("target generation drive"),
             )
@@ -567,12 +586,23 @@ fn main() -> AppExit {
         let mut forcing = CanonicalForcing::from_prescribed(&target_operator, signals)
             .expect("target oracle forcing");
         if source_drive {
+            let signal = carried(source_signal, target_source_signal, stepped);
+            // An integrated drive runs on from the rate its integral had
+            // reached at the handoff.
+            let drive = if integrated {
+                rate_drive(source_signal)
+                    .value(handoff_time)
+                    .and_then(|rate| CanonicalRateDrive::legacy_with_rate_anchor(signal, 0.0, rate))
+            } else {
+                CanonicalRateDrive::direct(signal)
+            }
+            .expect("shifted target rate drive");
             forcing
                 .push_source(
-                    funfern_core::CanonicalSource::direct(
+                    funfern_core::CanonicalSource::new(
                         &target_operator,
                         target_source_weights.clone(),
-                        carried(source_signal, target_source_signal, stepped),
+                        drive,
                     )
                     .expect("shifted target drive"),
                 )

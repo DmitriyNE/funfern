@@ -916,6 +916,15 @@ The far field's times, and the clock under them, late into a run.
   - **State bounds.** The late runs' state bounds stand above the others'.
     Late in an epoch the local time is one f32 near 256 s, and drive phases
     carry 1e-4 rad from it.
+- **An integrated drive across a rebase.** `canonical_gpu_integrated_rebase`
+  drives a closed reflecting box in proportion to the nodal mass with an
+  integrated harmonic whose integral has no mean, so the field stays uniform
+  and the box's total flux integrates the rate. Its clock starts 64 steps
+  before a rebase at 1,000 s and runs 8 s past it. The total reads 2.4e-5 of
+  its swing from the reference, held to 1e-4; a rebase that formed the rate
+  anchor apart from the carrier's reduced phase read 4.1e-4 (GPU-6 of the
+  2026-10-20 review). `canonical_gpu_handoff --source --integrated` carries
+  an integrated drive across a handoff, which no other run did.
 - **Two fixes they found.**
   - **The compensated sum.** Metal's fast math folded the rounding out of the
     clock's compensated sum at every rebase and handoff, 3.5e-3 s at 36 hours,

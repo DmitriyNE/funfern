@@ -83,6 +83,8 @@ RUNS=(
   'canonical_gpu_cavity_modes --physics te'
   'canonical_gpu_handoff'
   'canonical_gpu_handoff --source --prescribed --edit'
+  'canonical_gpu_handoff --source --integrated'
+  'canonical_gpu_integrated_rebase'
   'canonical_gpu_handoff --failure'
   'canonical_gpu_handoff --second-order'
   'canonical_gpu_handoff --second-order --pinned-sides'

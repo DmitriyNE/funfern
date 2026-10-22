@@ -1593,7 +1593,18 @@ is next touched.
   epoch, `far-field-late`'s state reads 1.25e-4 off the f64 reference, where a
   run early in its epoch reads 2e-6. The error is bounded by the epoch's
   length, which a shorter epoch would cut, at the cost of more rebases (found
-  by PH-18 on 2026-10-18).
+  by PH-18 on 2026-10-18). On an integrated source it is a mean-rate bias as
+  well: the carrier's phase in the rate rounds against the grid of the local
+  time's magnitude, a steady offset for the epoch. A uniformly driven box's
+  total flux reads 2.8e-3 of its swing off after 127 s inside one epoch
+  (`canonical_gpu_integrated_rebase` with its start moved to the epoch's
+  start), where 8 s after a rebase it reads 2.4e-5. Each rebase draws the
+  bias afresh, so the total walks rather than drifts (found with GPU-6 on
+  2026-10-22). A live source patch anchors the new drive on the old one
+  evaluated at the running time, so that instant's bias stays in the new
+  drive's mean rate for good, an offset of the same size each edit; forming
+  both from their reduced phases, as `carried_rate_anchor` does at a rebase
+  and a handoff, would keep it out.
 - `CanonicalForcing::handed_on`, the reference's statement of how the device
   runs a generation's drives from a handoff, does not model a harmonic source
   or flux carried across a handoff with new parameters. The device's

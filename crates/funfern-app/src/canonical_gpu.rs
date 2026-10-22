@@ -11039,9 +11039,15 @@ mod tests {
         let step = f32::from_bits(transfer.words[steps.x as usize].data.x);
         assert!((step - 0.3).abs() < 1.0e-6, "step {step}");
         let shader = include_str!("canonical_transfer_runtime.wgsl");
-        assert!(shader.contains("old_parameters.w + old_parameters.z * old_elapsed + step"));
+        assert!(
+            shader.contains("reduced_phase(old_parameters.w + old_parameters.z * old_elapsed)")
+        );
+        assert!(shader.contains("parameters.w = reduced_phase(old_phase + step);"));
         assert!(shader.contains("phase_step(transfer[10].data.x, i)"));
-        assert!(shader.contains("runtime.y = bitcast<u32>(old_drive(old_base, old_elapsed));"));
+        assert!(shader.contains("var anchor = old_drive(old_base, old_elapsed);"));
+        assert!(
+            shader.contains("bitcast<f32>(old_runtime.y), old_parameters, old_phase, old_elapsed)")
+        );
         assert!(shader.contains("start_drive(new_base, preparation_delta);"));
     }
 

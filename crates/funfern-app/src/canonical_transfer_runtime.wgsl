@@ -142,6 +142,21 @@ fn sinc(value: f32) -> f32 {
     }
     return portable_sin(value) / value;
 }
+const PI: f32 = 3.14159265;
+// `canonical_wave.wgsl`'s `carried_rate_anchor`.
+fn carried_rate_anchor(
+    anchor: f32, parameters: vec4<f32>, phase: f32, elapsed: f32,
+) -> f32 {
+    let turned = parameters.z * elapsed;
+    if abs(turned) < PI {
+        let half_phase = 0.5 * turned;
+        return anchor + parameters.x * elapsed
+            + parameters.y * elapsed * sinc(half_phase)
+                * portable_sin(parameters.w + half_phase);
+    }
+    return anchor + parameters.x * elapsed
+        + parameters.y / parameters.z * (portable_cos(parameters.w) - portable_cos(phase));
+}
 fn old_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(old_tables[word].data[lane]);
 }
@@ -222,14 +237,12 @@ fn retain_drive(old_base: u32, new_base: u32, elapsed: f32) {
         old_float(old_base, 0u), old_float(old_base, 1u),
         old_float(old_base, 2u), old_float(old_base, 3u));
     var runtime = old_tables[old_base + 1u].data;
+    let phase = reduced_phase(parameters.w + parameters.z * elapsed);
     if runtime.x == DRIVE_INTEGRATED {
-        let half_phase = 0.5 * parameters.z * elapsed;
-        let next_anchor = bitcast<f32>(runtime.y) + parameters.x * elapsed
-            + parameters.y * elapsed * sinc(half_phase)
-                * portable_sin(parameters.w + half_phase);
-        runtime.y = bitcast<u32>(next_anchor);
+        runtime.y = bitcast<u32>(
+            carried_rate_anchor(bitcast<f32>(runtime.y), parameters, phase, elapsed));
     }
-    parameters.w = reduced_phase(parameters.w + parameters.z * elapsed);
+    parameters.w = phase;
     write_drive(new_base, parameters, runtime, old_tables[old_base + 2u].data);
 }
 fn replace_drive(old_base: u32, new_base: u32, old_elapsed: f32, step: f32) {
@@ -241,9 +254,16 @@ fn replace_drive(old_base: u32, new_base: u32, old_elapsed: f32, step: f32) {
         old_float(old_base, 0u), old_float(old_base, 1u),
         old_float(old_base, 2u), old_float(old_base, 3u));
     // The old carrier's phase where it has got to, then the edit's step.
-    parameters.w = reduced_phase(old_parameters.w + old_parameters.z * old_elapsed + step);
+    let old_phase = reduced_phase(old_parameters.w + old_parameters.z * old_elapsed);
+    parameters.w = reduced_phase(old_phase + step);
     if runtime.x == DRIVE_INTEGRATED {
-        runtime.y = bitcast<u32>(old_drive(old_base, old_elapsed));
+        let old_runtime = old_tables[old_base + 1u].data;
+        var anchor = old_drive(old_base, old_elapsed);
+        if old_runtime.x == DRIVE_INTEGRATED {
+            anchor = carried_rate_anchor(
+                bitcast<f32>(old_runtime.y), old_parameters, old_phase, old_elapsed);
+        }
+        runtime.y = bitcast<u32>(anchor);
     }
     write_drive(new_base, parameters, runtime, new_tables[new_base + 2u].data);
 }
