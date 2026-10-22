@@ -27122,3 +27122,27 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: a live law patch keeps the force cache as it is (GPU-11)
+
+- **The defect.** Where no complementary loss moves `b` between kicks, the
+  nodes keep their constitutive force in a cache. The lanes are refreshed
+  only while the cache is on. A live linear law patch that set every
+  complementary rate to zero turned the cache on at its commit (op 3)
+  without refreshing it. From the next step every node felt the
+  difference between the force at the state the cache last held and the
+  force at the current one. The shipped app sends no live linear law patch;
+  examples and tests can.
+- **Test first.** `a_live_law_patch_may_not_switch_the_force_cache` installs
+  a plan with complementary loss (cache off) and one without (cache on), and
+  queues a patch that would switch the cache and one that would not. Before
+  the fix every patch was queued.
+- **Fix.** The request keeps the generation's cache flag, now named
+  `FORCE_CACHE_FLAG`, with its buffers. `queue_live_event` refuses a linear
+  law patch whose flag differs: adding or removing every complementary loss
+  takes a new generation. Refusing either way keeps the flag one per
+  generation, so the request's copy stays true.
+- **Checked on Metal:** the live-event, live-source and law-patch runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

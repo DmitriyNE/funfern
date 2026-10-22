@@ -173,6 +173,9 @@ const KICK_FORM_FLAG: u32 = 512;
 const TRAPEZOID_WALL_FLAG: u32 = 1024;
 /// A trace row is prescribed: the wall's solve holds it.
 const PRESCRIBED_TRACE_FLAG: u32 = 8;
+/// The nodes keep their constitutive force between kicks, where no
+/// complementary loss moves `b` between them.
+const FORCE_CACHE_FLAG: u32 = 4;
 /// The short-wave split's passes a step: field and stresses before the first
 /// kick, which applies them; field, stresses, predict, stresses and apply
 /// after the second.
@@ -4422,6 +4425,7 @@ pub(crate) struct CanonicalGpuBufferHandles {
     trace_direct: bool,
     grid_filter_admitted: bool,
     field_laws: bool,
+    force_cache: bool,
     sample_secants: bool,
     integrated_count: u32,
     nonlinear_trace: bool,
@@ -4734,6 +4738,7 @@ fn add_canonical_buffers(
         trace_direct: plan.trace_direct,
         grid_filter_admitted: plan.grid_filter_admitted,
         field_laws: plan.field_laws,
+        force_cache: plan.control.boundary_offsets.w & FORCE_CACHE_FLAG != 0,
         sample_secants: plan.manifest.temporal.is_some(),
         integrated_count: plan.integrated_count as u32,
         nonlinear_trace: plan.control.boundary_offsets.w & NONLINEAR_TRACE_FLAG != 0,
@@ -5339,6 +5344,19 @@ impl CanonicalGpuRequest {
         };
         if !payload_valid {
             return Err("live canonical event does not match the active generation".into());
+        }
+        // A law patch keeps the generation's force cache as it is. Switched
+        // on, the cache held the force of the state it was last refreshed at,
+        // and from the next step every node felt the difference (GPU-11 of the
+        // 2026-10-20 review).
+        if event.kind == EVENT_LINEAR_LAW_PATCH
+            && (event.upload[0].data.w & FORCE_CACHE_FLAG != 0) != handles.force_cache
+        {
+            return Err(
+                "a law patch that adds or removes every complementary loss takes a new \
+                 generation"
+                    .into(),
+            );
         }
         // A source edit rewrites the drive table and the nodal weights and
         // nothing else. The weights are normalized by the generation's fixed
@@ -10810,6 +10828,51 @@ mod tests {
 
     /// The device's commit reads a law patch's loss flags from the event
     /// word, so a staged patch must leave there what a live one uploads.
+    /// GPU-11 of the 2026-10-20 review: a live law patch that would switch
+    /// the force cache, kept where no complementary loss is, is refused.
+    /// Switched on, the cache held the force of whatever state it was last
+    /// refreshed at, and from the next step every node felt the difference.
+    #[test]
+    fn a_live_law_patch_may_not_switch_the_force_cache() {
+        let lossless = plan(OuterBoundaryCondition::Reflecting);
+        let mut lossy = lossless.clone();
+        lossy
+            .stage_linear_loss_patch(
+                &vec![0.0; lossy.node_count],
+                &vec![0.3; lossy.sample_count],
+                1,
+            )
+            .unwrap();
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            for (plan, complementary, admitted) in [
+                (lossy.clone(), 0.0, false),
+                (lossy, 0.2, true),
+                (lossless.clone(), 0.3, false),
+                (lossless, 0.0, true),
+            ] {
+                let (nodes, samples, step) = (plan.node_count, plan.sample_count, plan.time_step);
+                let mut request = CanonicalGpuRequest::default();
+                request.install(&mut assets, &mut commands, plan);
+                let patch = CanonicalGpuLiveEvent::linear_loss_patch(
+                    step,
+                    &vec![0.0; nodes],
+                    &vec![complementary; samples],
+                    2,
+                )
+                .unwrap();
+                assert_eq!(
+                    request.queue_live_event(&mut assets, patch).is_ok(),
+                    admitted,
+                    "complementary rate {complementary}"
+                );
+            }
+        });
+    }
+
     #[test]
     fn a_staged_law_patch_carries_the_live_patch_flags() {
         let base = plan(OuterBoundaryCondition::Reflecting);
