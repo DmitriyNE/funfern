@@ -27195,3 +27195,23 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: readback staging buffers leaving the pool are destroyed (GPU-13)
+
+- **The defect.** The paced readback keeps a pool of staging buffers keyed by
+  size. `retire_unused` and `discard` dropped the buffers that left it, and
+  on the web wgpu does not destroy a buffer it drops: its memory waits for
+  the garbage collector. A handoff changes the readback's size, so under
+  adaptation at about 137k DOFs each one left up to three 2.2 MB staging
+  buffers behind, about 2 MB a second. Native builds free them on drop.
+- **Reproduced by reading only.** Natively nothing shows, and no run here
+  measures the web build's memory.
+- **Fix.** A buffer leaving the pool is destroyed: one whose map failed, and
+  each that no copy has taken for ten frames. An untaken buffer has no copy
+  or map in flight. This is the rule the solver's shader buffers already
+  follow (`destroy_released_shader_buffers`).
+- **Checked on Metal:** the full device suite, 102 of 102, every readback
+  through the pool. It closes area 3 at this commit.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

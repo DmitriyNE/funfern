@@ -200,6 +200,7 @@ impl Staging {
         if let Some(buffers) = self.buffers.get_mut(&buffer.size()) {
             buffers.retain(|staging| staging.buffer.id() != buffer.id());
         }
+        buffer.destroy();
     }
 
     fn give_back(&mut self, buffer: &Buffer) {
@@ -212,6 +213,13 @@ impl Staging {
         }
     }
 
+    /// Retires the buffers no copy has taken for a while. A buffer leaving
+    /// the pool is destroyed, not only dropped: on the web wgpu does not
+    /// destroy a buffer it drops, and the pool is keyed by size, which a
+    /// handoff changes, so under adaptation each one left its retired
+    /// buffers to the garbage collector, about 2 MB a second at 137k DOFs
+    /// (GPU-13 of the 2026-10-20 review). An untaken buffer has no copy or
+    /// map in flight.
     fn retire_unused(&mut self) {
         for buffers in self.buffers.values_mut() {
             for staging in buffers.iter_mut() {
@@ -219,7 +227,13 @@ impl Staging {
                     staging.frames_unused += 1;
                 }
             }
-            buffers.retain(|staging| staging.frames_unused < UNUSED_FRAMES_KEPT);
+            buffers.retain(|staging| {
+                let kept = staging.frames_unused < UNUSED_FRAMES_KEPT;
+                if !kept {
+                    staging.buffer.destroy();
+                }
+                kept
+            });
         }
         self.buffers.retain(|_, buffers| !buffers.is_empty());
     }
