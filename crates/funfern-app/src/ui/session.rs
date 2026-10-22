@@ -792,6 +792,50 @@ mod tests {
         assert!(!state.fit, "a step within the scene");
     }
 
+    /// PER-3 of the 2026-10-20 review: undo across a New or an opened example
+    /// brings the outgoing scene's settings and readouts back with its model,
+    /// and redo the incoming ones. A second New over other settings is a step
+    /// of its own. Before, the outgoing mesh edge, adaptation and readouts
+    /// were lost for good, and the autosave wrote the mix.
+    #[test]
+    fn undo_across_a_replaced_scene_brings_its_settings_and_readouts_back() {
+        let mut state = Playground::default();
+        let presentation = &mut state.editor.document.presentation;
+        presentation.mesh_edge = 0.05;
+        presentation.adaptation.enabled = !presentation.adaptation.enabled;
+        state.editor.document.readouts.far_field.span = 3.5;
+        let outgoing = state.editor.document.clone();
+        state.open_example(0);
+        let incoming = state.editor.document.clone();
+        assert!(
+            incoming.presentation != outgoing.presentation
+                && incoming.readouts != outgoing.readouts,
+            "the example must bring other settings"
+        );
+        state.undo();
+        assert!(
+            state.editor.document == outgoing,
+            "undo brings the outgoing settings and readouts back"
+        );
+        state.redo();
+        assert!(
+            state.editor.document == incoming,
+            "redo brings the incoming ones"
+        );
+
+        state.new_scene();
+        let steps = state.editor.history_len().0;
+        state.editor.document.presentation.mesh_edge = 0.07;
+        state.new_scene();
+        assert_eq!(
+            state.editor.history_len().0,
+            steps + 1,
+            "a second New over other settings is a step"
+        );
+        state.undo();
+        assert_eq!(state.editor.document.presentation.mesh_edge, 0.07);
+    }
+
     /// Opening another scene drops the outgoing generation, as at launch:
     /// the host forgets the active topology and its clock, and the new
     /// scene's first preparation is a fresh full build rather than a repair

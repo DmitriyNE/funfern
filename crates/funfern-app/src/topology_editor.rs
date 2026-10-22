@@ -111,7 +111,8 @@ pub struct TopologyDocument {
     pub model: TopologyDocumentModel,
     pub presentation: PresentationSettings,
     /// What each probe's readout shows. Kept with the view, like
-    /// `presentation`: not undone, and never seen by the solver.
+    /// `presentation`: an edit's undo leaves it, a replaced scene's brings it
+    /// back with that scene, and the solver never sees it.
     pub readouts: ProbeReadouts,
 }
 
@@ -271,13 +272,22 @@ enum ControlRemovalTarget {
     OpenEnd { from_end: usize },
 }
 
-/// One step of the undo or redo history: the model to return to, and
-/// whether moving across the step swaps the whole scene, as New, an opened
-/// example or a load does, rather than edit it.
+/// One step of the undo or redo history: the model to return to, and, where
+/// moving across the step swaps the whole scene, as New, an opened example or
+/// a load does, rather than edit it, the presentation and readouts that came
+/// with that scene. An edit leaves those as they are; a replaced scene's came
+/// back without them, and the outgoing mesh edge, adaptation and readouts were
+/// lost for good (PER-3 of the 2026-10-20 review).
 #[derive(Clone, Debug)]
 struct HistoryStep {
     model: TopologyDocumentModel,
-    replaces_scene: bool,
+    scene_view: Option<(PresentationSettings, ProbeReadouts)>,
+}
+
+impl HistoryStep {
+    fn replaces_scene(&self) -> bool {
+        self.scene_view.is_some()
+    }
 }
 
 pub struct TopologyEditor {
@@ -414,7 +424,7 @@ impl TopologyEditor {
         }
         self.undo.push(HistoryStep {
             model: before,
-            replaces_scene: false,
+            scene_view: None,
         });
         if self.undo.len() > HISTORY_LIMIT {
             self.undo.remove(0);
@@ -437,9 +447,10 @@ impl TopologyEditor {
         self.before = None;
         let left = std::mem::replace(&mut self.document.model, previous.model);
         let accepted = left.accepted.clone();
+        let scene_view = previous.scene_view.map(|view| self.swap_scene_view(view));
         self.redo.push(HistoryStep {
             model: left,
-            replaces_scene: previous.replaces_scene,
+            scene_view,
         });
         self.changed();
         self.follow_accepted(&accepted);
@@ -453,9 +464,10 @@ impl TopologyEditor {
         self.before = None;
         let left = std::mem::replace(&mut self.document.model, next.model);
         let accepted = left.accepted.clone();
+        let scene_view = next.scene_view.map(|view| self.swap_scene_view(view));
         self.undo.push(HistoryStep {
             model: left,
-            replaces_scene: next.replaces_scene,
+            scene_view,
         });
         self.changed();
         self.follow_accepted(&accepted);
@@ -476,15 +488,27 @@ impl TopologyEditor {
         }
     }
 
+    /// Puts a replaced scene's presentation and readouts in place, and answers
+    /// the ones it took the place of.
+    fn swap_scene_view(
+        &mut self,
+        (presentation, readouts): (PresentationSettings, ProbeReadouts),
+    ) -> (PresentationSettings, ProbeReadouts) {
+        (
+            std::mem::replace(&mut self.document.presentation, presentation),
+            std::mem::replace(&mut self.document.readouts, readouts),
+        )
+    }
+
     /// Whether the next undo swaps in a whole other scene: it steps back over
     /// a New, an opened example or a load rather than an edit.
     pub fn undo_replaces_scene(&self) -> bool {
-        self.undo.last().is_some_and(|step| step.replaces_scene)
+        self.undo.last().is_some_and(HistoryStep::replaces_scene)
     }
 
     /// Whether the next redo swaps in a whole other scene.
     pub fn redo_replaces_scene(&self) -> bool {
-        self.redo.last().is_some_and(|step| step.replaces_scene)
+        self.redo.last().is_some_and(HistoryStep::replaces_scene)
     }
 
     pub fn history_len(&self) -> (usize, usize) {
@@ -515,16 +539,17 @@ impl TopologyEditor {
         loaded.next_material = loaded.next_material.max(self.next_material);
         loaded.next_probe = loaded.next_probe.max(self.next_probe);
         let mut undo = std::mem::take(&mut self.undo);
-        if loaded.document.model == self.document.model {
+        if loaded.document == self.document {
             // The same scene again, as a second New, is no step, as an edit
             // that changes nothing is none, and a redo waiting stays. Taken,
             // its Undo brought back what was there and, as a scene
-            // replacement, restarted the run besides.
+            // replacement, restarted the run besides. Over other settings or
+            // readouts it is a step, which brings them back.
             loaded.redo = std::mem::take(&mut self.redo);
         } else {
             undo.push(HistoryStep {
                 model: self.document.model.clone(),
-                replaces_scene: true,
+                scene_view: Some((self.document.presentation, self.document.readouts.clone())),
             });
             if undo.len() > HISTORY_LIMIT {
                 undo.remove(0);

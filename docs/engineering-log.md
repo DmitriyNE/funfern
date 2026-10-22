@@ -27336,3 +27336,33 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 4: undo across a replaced scene brings its settings and readouts back (PER-3)
+
+- **The defect.** A history step held only the document's model. Undo across
+  New, an opened example or a load brought the outgoing scene back with the
+  incoming one's presentation and readouts: its mesh edge, its adaptation
+  and its probes' readouts were lost for good, and the autosave wrote the
+  mix. A second New compared models only, so over changed settings it
+  replaced them with no step at all.
+- **Test first.** `undo_across_a_replaced_scene_brings_its_settings_and_readouts_back`
+  sets the mesh edge, adaptation and a readout, opens an example, and then:
+  - undoes, and expects the outgoing document back whole;
+  - redoes, and expects the example's;
+  - runs a second New over a changed edge, and expects one step more, whose
+    undo brings the edge back.
+  Before the fix the undo kept the example's settings.
+- **Fix.**
+  - A step that replaces the scene keeps its presentation and readouts beside
+    the model, and moving across it swaps them with the model. An edit's step
+    keeps none, so an edit's undo leaves them as before.
+  - A replacement is no step only when it brings the same document whole.
+  - The comments that said presentation and readouts are "not undone" now
+    say an edit does not undo them.
+- **The sequence harness** kept a shadow history that weighed a New by the
+  model alone. It now captures the settings and readouts before each action
+  and weighs them too, as the editor does.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. No device run: only the editor's history
+  changes.

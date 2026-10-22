@@ -306,8 +306,8 @@ pub struct PresentationSettings {
     /// The materials the editor shows in its Advanced view: every law slot and
     /// the numeric effective law, rather than the medium's named values. Each
     /// material keeps its own, so it reads as part of the material, but it is
-    /// a way of looking at it: kept with the view, not undone, and never seen
-    /// by the solver.
+    /// a way of looking at it: kept with the view, not undone by an edit, and
+    /// never seen by the solver.
     pub advanced_materials: AdvancedMaterials,
     /// Whether the Advanced view writes each row's effective law with its
     /// expressions evaluated, rather than by the names the author gave them.
@@ -580,8 +580,8 @@ pub enum TransferReference {
 /// What a probe's readout shows: which plots, over how many seconds, and the
 /// averaging and waterfall scale behind them. Like the rest of the view it is
 /// a way of looking at the scene: kept with the document so a scene opens its
-/// probes on what they are there to show, but not undone, and never seen by
-/// the solver. Each probe kind reads its own plots and leaves the others; the
+/// probes on what they are there to show, but not undone by an edit, and never
+/// seen by the solver. Each probe kind reads its own plots and leaves the others; the
 /// far-field readout uses the same type.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ProbeReadout {

@@ -1207,7 +1207,15 @@ impl Panel {
     }
 
     /// The shadow history's step for `action`, from what it was observed to do.
-    fn record(&mut self, action: &Action, whole: TopologyDocumentModel) {
+    fn record(
+        &mut self,
+        action: &Action,
+        whole: TopologyDocumentModel,
+        view: (
+            crate::document::PresentationSettings,
+            crate::document::ProbeReadouts,
+        ),
+    ) {
         let before = authored(&whole);
         let after = authored(&self.state.editor.document.model);
         // A step of the history taken amid another action is recorded as
@@ -1260,10 +1268,14 @@ impl Panel {
                 self.redo.clear();
             }
             // A replacement is a step unless it brings the same document,
-            // accepted scene and all, which is what an edit's commit weighs
-            // too; validation moves the accepted scene, not an action.
+            // accepted scene, settings and readouts all, which is what an
+            // edit's commit weighs too; validation moves the accepted scene,
+            // not an action.
             Action::New => {
-                if self.state.editor.document.model != whole {
+                let document = &self.state.editor.document;
+                if document.model != whole
+                    || (document.presentation, document.readouts.clone()) != view
+                {
                     self.undo.push(before);
                     self.redo.clear();
                 }
@@ -1308,6 +1320,10 @@ impl Panel {
 
     fn step(mut self, action: Action) -> Self {
         let before = self.state.editor.document.model.clone();
+        let view = (
+            self.state.editor.document.presentation,
+            self.state.editor.document.readouts.clone(),
+        );
         self.state.message.clear();
         self.state.notices.clear();
         self.act(&action);
@@ -1345,7 +1361,7 @@ impl Panel {
                 "{action:?} handed out held ids {reused:?}"
             );
         }
-        self.record(&action, before);
+        self.record(&action, before, view);
         self
     }
 
