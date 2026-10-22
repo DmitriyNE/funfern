@@ -333,18 +333,25 @@ impl Playground {
     }
 
     /// Writes the autosave now if the document has moved since the last one,
-    /// the debounce notwithstanding: what a stop of rendering does first, so
-    /// the last edit is not the one a reload loses.
-    pub(crate) fn autosave_now(&mut self) {
-        if self.editor.document != self.autosave_observed || self.autosave_due.is_some() {
+    /// the debounce notwithstanding, or the last one failed: what a stop of
+    /// rendering does first, so the last edit is not the one a reload loses.
+    /// Answers whether the autosave holds the document as it stands, and if
+    /// not, why: a failure that nothing has written over since leaves it
+    /// unsaved too (PER-1 of the 2026-10-20 review).
+    pub(crate) fn autosave_now(&mut self) -> Result<(), String> {
+        if self.editor.document != self.autosave_observed
+            || self.autosave_due.is_some()
+            || self.autosave_failure.is_some()
+        {
             self.autosave_observed = self.editor.document.clone();
             self.write_autosave();
         }
+        self.autosave_failure.clone().map_or(Ok(()), Err)
     }
 
     fn write_autosave(&mut self) {
         self.autosave_due = None;
-        let written = crate::recovery::save(&self.editor.document);
+        let written = (self.autosave_writer)(&self.editor.document);
         self.autosave_written(written);
         self.refresh_link();
     }
@@ -353,10 +360,10 @@ impl Playground {
     /// it should have kept would otherwise be lost to a reload unannounced.
     fn autosave_written(&mut self, written: Result<(), String>) {
         match written {
-            Ok(()) => self.autosave_failing = false,
-            Err(_) if self.autosave_failing => {}
+            Ok(()) => self.autosave_failure = None,
+            Err(error) if self.autosave_failure.is_some() => self.autosave_failure = Some(error),
             Err(error) => {
-                self.autosave_failing = true;
+                self.autosave_failure = Some(error.clone());
                 self.raise_notice(
                     "Autosave failed",
                     format!(
@@ -1233,6 +1240,49 @@ mod tests {
                 "Scene not saved",
                 "Permission denied (os error 13)".to_string()
             )]
+        );
+    }
+
+    /// PER-1 of the 2026-10-20 review: the stop says the document is saved
+    /// only where the autosave holds it. A write that failed then, or one
+    /// that failed before and that nothing has written over since, is said
+    /// so with why: a reload trusting "saved" lost the session.
+    #[test]
+    fn the_stop_says_whether_the_document_was_saved() {
+        fn full(_: &crate::topology_editor::TopologyDocument) -> Result<(), String> {
+            Err("the disk is full".to_owned())
+        }
+        use bevy::ecs::system::RunSystemOnce;
+        let stop = |playground: Playground| {
+            let mut world = World::new();
+            world.init_resource::<bevy::ecs::message::Messages<bevy::app::AppExit>>();
+            world.insert_resource(playground);
+            world.insert_resource(crate::stopped::RenderStopped::device_lost());
+            world.run_system_once(crate::stopped::announce).unwrap();
+            world.resource::<crate::stopped::RenderStopped>().message()
+        };
+        let edited = |writer| {
+            let mut playground = Playground {
+                autosave_writer: writer,
+                ..Default::default()
+            };
+            playground.editor.document.presentation.grid ^= true;
+            playground
+        };
+        let saved = stop(edited(|_| Ok(())));
+        assert!(saved.contains("The document is saved"), "{saved}");
+        let failed = stop(edited(full));
+        assert!(
+            !failed.contains("is saved") && failed.contains("the disk is full"),
+            "{failed}"
+        );
+        // Failed at the edit, and the document not moved since.
+        let mut earlier = edited(full);
+        let _ = earlier.autosave_now();
+        let skipped = stop(earlier);
+        assert!(
+            !skipped.contains("is saved") && skipped.contains("the disk is full"),
+            "{skipped}"
         );
     }
 

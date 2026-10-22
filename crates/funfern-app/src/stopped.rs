@@ -4,8 +4,8 @@
 //! with no word on the page. Here the render world stops and the main world
 //! keeps running: the session writes its autosave if the document moved since
 //! the last one; the page is told in the words of its own startup overlay,
-//! that the document is saved, the running simulation is not, and a reload
-//! starts again; and natively the same goes to standard error and the process
+//! whether the document is saved - the running simulation is not - and that a
+//! reload starts again; and natively the same goes to standard error and the process
 //! exits with an error. The field itself is not promised: nothing holds a copy
 //! of it the application could resume from.
 
@@ -19,6 +19,9 @@ pub(crate) struct RenderStopped {
     pub(crate) kind: StopKind,
     pub(crate) description: String,
     announced: bool,
+    /// Whether the autosave held the document when the stop was announced,
+    /// and if not, why.
+    saved: Option<Result<(), String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +31,17 @@ pub(crate) enum StopKind {
 }
 
 impl RenderStopped {
+    /// A device lost and not yet announced, for host tests.
+    #[cfg(test)]
+    pub(crate) fn device_lost() -> Self {
+        Self {
+            kind: StopKind::DeviceLost,
+            description: "Destroyed".to_owned(),
+            announced: false,
+            saved: None,
+        }
+    }
+
     /// Whether [`announce`] has acted on it, which the end-to-end fixture
     /// that loses the device waits for.
     pub(crate) fn announced(&self) -> bool {
@@ -47,7 +61,17 @@ impl RenderStopped {
     /// itself is reported - on Metal it did - so a rendering error names the
     /// GPU too; its description's first line, since wgpu's can run to many.
     pub(crate) fn message(&self) -> String {
-        let kept = "The document is saved; the running simulation is not.";
+        // Said saved only where the autosave holds it: a reload trusting the
+        // word lost a session whose autosave had failed (PER-1 of the
+        // 2026-10-20 review).
+        let kept = match &self.saved {
+            Some(Ok(())) => "The document is saved; the running simulation is not.".to_owned(),
+            Some(Err(error)) => format!(
+                "The document could not be saved ({error}): a reload loses the changes since \
+                 the last autosave, and the running simulation."
+            ),
+            None => "The running simulation is not saved.".to_owned(),
+        };
         match self.kind {
             StopKind::DeviceLost => format!("The GPU device was lost. {kept}"),
             StopKind::RenderError => {
@@ -80,6 +104,7 @@ fn policy(error: &RenderError, main_world: &mut World, _: &mut World) -> RenderE
             },
             description: error.description.clone(),
             announced: false,
+            saved: None,
         });
     }
     RenderErrorPolicy::StopRendering
@@ -102,7 +127,7 @@ pub(crate) fn announce(
         return;
     }
     stopped.announced = true;
-    playground.autosave_now();
+    stopped.saved = Some(playground.autosave_now());
     let message = stopped.message();
     tell_page(stopped.attribute(), &message);
     if driver.is_some() {

@@ -224,8 +224,11 @@ pub struct Playground {
     /// The address carries a scene link, opened or copied, which autosave
     /// keeps up with the document.
     pub(super) link_in_address: bool,
-    /// The last autosave failed, and said so.
-    pub(super) autosave_failing: bool,
+    /// Why the last autosave failed, which it said once.
+    pub(super) autosave_failure: Option<String>,
+    /// What writes the autosave: [`crate::recovery::save`], but in host
+    /// tests, which must not write the real one.
+    pub(crate) autosave_writer: fn(&TopologyDocument) -> Result<(), String>,
     pub(super) probe_upload: Option<ProbeUpload>,
     /// The upload before it, kept because the readback it issued is still in
     /// flight when the next one is made, and the samples in it are the last of
@@ -488,7 +491,11 @@ impl Default for Playground {
             autosave_observed: document,
             autosave_due: None,
             link_in_address: false,
-            autosave_failing: false,
+            autosave_failure: None,
+            #[cfg(not(test))]
+            autosave_writer: crate::recovery::save,
+            #[cfg(test)]
+            autosave_writer: |_| Ok(()),
             probe_upload: None,
             probe_upload_previous: None,
             probe_clock_restarted: true,

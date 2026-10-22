@@ -27215,3 +27215,39 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 4: the stop says the document is saved only when it is (PER-1)
+
+- **The user's choices for area 4.** The plan was approved as presented:
+  PER-1, PER-6, PER-4, PER-5, PER-3, then PER-2. For PER-2 the user chose
+  option B: a file whose accepted scene fails a rule added since it was
+  written is kept as written, checked for structure only, and opens with
+  its draft invalid.
+- **The defect.** When rendering stopped, `announce` wrote the autosave and
+  the page and terminal said "The document is saved; the running simulation
+  is not." `autosave_now` returned nothing, so the message was the same when
+  the write failed: in a browser that blocks storage, or natively on a full
+  disk. The notice of the failure is an egui window, which no longer draws
+  once rendering has stopped. A write skipped because the document had not
+  moved since an earlier failure also counted as saved.
+- **A test hook.** The session's autosave went straight to `recovery::save`,
+  which natively writes the user's own autosave, so no host test could
+  exercise a write. The writer is now a field of the session,
+  `recovery::save` in the app and a writer that writes nothing in host
+  tests, so no host test touches the real autosave.
+- **Test first.** `the_stop_says_whether_the_document_was_saved` announces a
+  stop over an edited document with a writer that succeeds, one that fails,
+  and one that failed at the edit before the stop. Before the fix the second
+  read "The document is saved".
+- **Fix.**
+  - `autosave_now` also writes when the last write failed, and answers
+    whether the autosave holds the document as it stands, and if not, why.
+  - The session keeps the failure's reason with the flag it had.
+  - The stop keeps the answer, and its message reads "The document could
+    not be saved (why): a reload loses the changes since the last autosave,
+    and the running simulation" where the write failed.
+- **Checked on Metal:** the `device-loss` fixture passes, the message read
+  "The document is saved" and the autosave holding the document.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
