@@ -1157,7 +1157,10 @@ mod tests {
             kind: Some(BackgroundAmrKind::Adaptation),
             phase: Some("Adapting mesh"),
         });
-        state.amr_adaptation_source = Some(1);
+        state.amr_adaptation_source = Some(AdaptationSource {
+            mesh_revision: 1,
+            geometry_revision: 1,
+        });
         assert!(state.adaptation_in_flight());
         state.drain_background_amr();
         assert!(

@@ -29,6 +29,22 @@ use super::scene_card::SceneCard;
 use super::workers::{BackgroundAmrWorker, BackgroundPreparationWorker};
 use super::*;
 
+/// The mesh an adaptation started from: its revision and its geometry's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AdaptationSource {
+    pub(super) mesh_revision: u64,
+    pub(super) geometry_revision: u64,
+}
+
+impl AdaptationSource {
+    pub(super) fn of(mesh: &funfern_core::TriMesh) -> Self {
+        Self {
+            mesh_revision: mesh.mesh_revision,
+            geometry_revision: mesh.geometry_revision,
+        }
+    }
+}
+
 #[derive(Resource)]
 pub struct Playground {
     pub(super) editor: TopologyEditor,
@@ -328,7 +344,7 @@ pub struct Playground {
     pub(super) amr_adaptation_completed: Option<Result<MeshAdaptationResult, MeshAdaptationError>>,
     /// Revision of the active mesh the running adaptation started from. The
     /// job is dropped as soon as that mesh is no longer the active one.
-    pub(super) amr_adaptation_source: Option<u64>,
+    pub(super) amr_adaptation_source: Option<AdaptationSource>,
     pub(super) amr_adaptation_state: Option<MeshAdaptationState>,
     pub(super) amr_pending_state: Option<MeshAdaptationState>,
     pub(super) amr_report: Option<MeshAdaptationReport>,

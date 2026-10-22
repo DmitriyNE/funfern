@@ -188,13 +188,16 @@ impl Playground {
         // An adaptation spans many frames while the user may remesh underneath
         // it. Its result is only meaningful against the mesh it started from,
         // so once another mesh is active the job is dropped here instead of
-        // finishing and being rejected at the handoff as an error.
+        // finishing and being rejected at the handoff as an error. A mesh
+        // retraced for a non-geometric edit keeps its revision and moves its
+        // geometry's, which the handoff refuses as well (MESH-5 of the
+        // 2026-10-20 review).
         let adaptation_in_progress = self.adaptation_in_flight();
         if adaptation_in_progress
             && self.amr_adaptation_source.is_some_and(|source| {
                 self.runtime
                     .active()
-                    .is_none_or(|active| active.mesh.mesh_revision != source)
+                    .is_none_or(|active| AdaptationSource::of(&active.mesh) != source)
             })
         {
             if let Some(worker) = &mut self.background_amr {
@@ -413,7 +416,7 @@ impl Playground {
                 field,
                 options,
             );
-            self.amr_adaptation_source = Some(active.mesh.mesh_revision);
+            self.amr_adaptation_source = Some(AdaptationSource::of(&active.mesh));
             self.start_adaptation_job(job);
             self.amr_status = "adapting mesh".into();
             return;
@@ -724,7 +727,7 @@ mod tests {
             Arc::new(|_, _| 0.09),
             MeshAdaptationOptions::default(),
         ));
-        state.amr_adaptation_source = Some(first.mesh.mesh_revision);
+        state.amr_adaptation_source = Some(AdaptationSource::of(&first.mesh));
 
         state
             .editor
@@ -736,6 +739,72 @@ mod tests {
         settle(&mut state.editor);
         let second = activate(&mut state);
         assert_ne!(second.mesh.mesh_revision, first.mesh.mesh_revision);
+
+        state.refresh_amr(
+            &CanonicalGpuRequest::default(),
+            &CanonicalGpuDisplay::default(),
+            &WaveDisplay::default(),
+        );
+        assert!(state.amr_adaptation_job.is_none());
+        assert!(state.amr_adaptation_source.is_none());
+        assert_eq!(state.amr_error, None);
+        assert!(
+            state.amr_status.contains("discarded"),
+            "status was {:?}",
+            state.amr_status
+        );
+    }
+
+    /// MESH-5 of the 2026-10-20 review: a non-geometric edit, a side's law
+    /// switched, retraces the active mesh: its revision stays and its
+    /// geometry's moves. An adaptation of the mesh before it passed the stale
+    /// check and failed at the handoff, "Adapted mesh does not match the active
+    /// topology", lighting the diagnostics warning. It is discarded quietly, as
+    /// a replaced mesh's is.
+    #[test]
+    fn an_adaptation_of_a_retraced_mesh_is_discarded_without_an_error() {
+        let mut state = with_baffles(&[]);
+        let first = activate(&mut state);
+        state.editor.document.presentation.adaptation.enabled = true;
+        state.amr_adaptation_job = Some(MeshAdaptationJob::new_topology(
+            first.mesh.clone(),
+            &first.bundle.plan,
+            MeshAdaptationState::from_mesh(&first.mesh),
+            state.runtime.reserve_mesh_revision(),
+            Arc::new(|_, _| 0.09),
+            MeshAdaptationOptions::default(),
+        ));
+        state.amr_adaptation_source = Some(AdaptationSource::of(&first.mesh));
+
+        // The baffle's left side made a matched wall: a law, not a shape.
+        let spans = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curves
+            .iter()
+            .flat_map(|curve| curve.spans.iter().map(|span| span.id))
+            .collect::<std::collections::BTreeSet<_>>();
+        state
+            .editor
+            .set_span_face_condition(
+                &spans,
+                CurveTraceSide::Left,
+                FaceBoundaryCondition::Impedance { ratio: 1.0 },
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        let second = activate(&mut state);
+        assert_eq!(
+            second.mesh.mesh_revision, first.mesh.mesh_revision,
+            "retraced"
+        );
+        assert_ne!(
+            second.mesh.geometry_revision, first.mesh.geometry_revision,
+            "retraced"
+        );
 
         state.refresh_amr(
             &CanonicalGpuRequest::default(),
@@ -778,7 +847,7 @@ mod tests {
                 ..Default::default()
             },
         ));
-        state.amr_adaptation_source = Some(active.mesh.mesh_revision);
+        state.amr_adaptation_source = Some(AdaptationSource::of(&active.mesh));
         let refresh = |state: &mut Playground| {
             state.refresh_amr(
                 &CanonicalGpuRequest::default(),
@@ -851,7 +920,7 @@ mod tests {
                 ..Default::default()
             },
         ));
-        state.amr_adaptation_source = Some(active.mesh.mesh_revision);
+        state.amr_adaptation_source = Some(AdaptationSource::of(&active.mesh));
 
         for _ in 0..10_000 {
             state.refresh_amr(

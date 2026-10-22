@@ -27462,3 +27462,24 @@ Measured again first, then made quadratic in the trace.
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs. No device run: only the session's
   adaptation bookkeeping changes.
+
+## 2026-10-23 — Step 3, area 5: an adaptation of a retraced mesh is discarded quietly (MESH-5)
+
+- **The defect.** A non-geometric edit, such as a separated side's law
+  switched, keeps the mesh and retraces it onto the new plan: the mesh's
+  revision stays, and its geometry's moves. An adaptation running across
+  that edit passed the stale check, which compared mesh revisions only. It
+  then failed at the handoff with "Adapted mesh does not match the active
+  topology": `amr_error` lit the diagnostics warning, and the cycle was lost.
+- **Test first.** `an_adaptation_of_a_retraced_mesh_is_discarded_without_an_error`
+  starts an adaptation on the baffle scene, makes the baffle's left side a
+  matched wall, and activates the retraced mesh, checking that it kept its
+  revision and moved its geometry's. Before the fix the job ran on.
+- **Fix.** The adaptation's source is the mesh's revision and its geometry's,
+  `AdaptationSource`, and the stale check compares both. A retraced mesh's
+  adaptation is dropped as a replaced mesh's is, with the status
+  "adaptation discarded" and no error.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. No device run: only the session's
+  adaptation bookkeeping changes.

@@ -85,6 +85,7 @@ mod workers;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use session::flush_when_the_page_leaves;
 pub(crate) use session::{UnsavedGuard, autosave_at_exit};
+use state::AdaptationSource;
 pub use state::Playground;
 
 // The shared vocabulary every submodule reaches through `use super::*`. A
