@@ -229,6 +229,9 @@ pub struct Playground {
     /// What writes the autosave: [`crate::recovery::save`], but in host
     /// tests, which must not write the real one.
     pub(crate) autosave_writer: fn(&TopologyDocument) -> Result<(), String>,
+    /// The document an autosave is due for and has not written, shared with
+    /// what writes it where no frame is left to.
+    pub(crate) unsaved: super::session::Unsaved,
     pub(super) probe_upload: Option<ProbeUpload>,
     /// The upload before it, kept because the readback it issued is still in
     /// flight when the next one is made, and the samples in it are the last of
@@ -496,6 +499,7 @@ impl Default for Playground {
             autosave_writer: crate::recovery::save,
             #[cfg(test)]
             autosave_writer: |_| Ok(()),
+            unsaved: Default::default(),
             probe_upload: None,
             probe_upload_previous: None,
             probe_clock_restarted: true,

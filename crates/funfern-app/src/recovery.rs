@@ -84,9 +84,7 @@ pub fn load() -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-// Unused by host tests, whose sessions write no autosave.
 #[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(test, allow(dead_code))]
 pub fn save(document: &Document) -> Result<(), String> {
     let path = recovery_path()?;
     write_atomic(&path, persistence::save(document)?.as_bytes())

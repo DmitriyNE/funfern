@@ -27251,3 +27251,41 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 4: the autosave's debounce yields to a close, an exit, a quit and a page that leaves (PER-6)
+
+- **The defect.** The autosave waits 0.8 s after an edit before it writes,
+  and only a frame writes it. A quit, a closed window or a reload inside
+  those 0.8 s lost the edit, the scene link in the address with it.
+- **Test first.** Two host tests, against stubs that wrote nothing:
+  - `an_edit_inside_the_debounce_is_written_at_a_close_or_an_exit`: an edit
+    whose write the debounce holds, then a window's close asked for, or the
+    app's exit.
+  - `an_unwritten_edit_is_written_where_no_frame_is_left`: the same edit
+    written from the copy kept for it, once, and nothing once its frame has
+    written it.
+  Both failed.
+- **Fix.**
+  - The session keeps the document an autosave is due for and has not
+    written, with whether the address follows it. The edit sets it, and
+    the write clears it.
+  - `autosave_at_exit`, in `Last` after Bevy's exit systems, writes the
+    autosave when a window's close is asked for or the app exits. Bevy
+    closes the window and exits at the end of that frame.
+  - A quit on macOS closes the windows and ends the loop with no frame for
+    that system, as winit's `will_terminate` does, read from its source.
+    So `UnsavedGuard`, a resource that Bevy drops as it tears the world
+    down, writes the kept copy.
+  - In the browser, `pagehide`, and `visibilitychange` to hidden, write
+    the kept copy at once and refresh the link: a hidden or unloading page
+    may run no frame.
+- **Not measured.** The quit's path and the page's handlers were not run
+  here. They share the flush the tests hold, and the wasm build checks
+  them. The plan's browser check, an edit and a reload inside the debounce,
+  had no way to land inside it reliably: the page shows no sign of when an
+  edit's write is due.
+- **Checked on Metal:** the 19 app fixtures pass, each exiting through the
+  new system.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

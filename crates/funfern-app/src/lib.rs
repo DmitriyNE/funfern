@@ -81,7 +81,14 @@ fn run_app(build: Build) -> AppExit {
             commands.spawn(Camera2d);
         })
         .add_systems(Update, stopped::announce)
-        .add_systems(EguiPrimaryContextPass, ui::frame);
+        .add_systems(EguiPrimaryContextPass, ui::frame)
+        // The autosave's debounce yields to a close, an exit, a quit and a
+        // page that leaves (`ui::session`).
+        .add_systems(Last, ui::autosave_at_exit.after(bevy::window::ExitSystems));
+    let unsaved = app.world().resource::<ui::Playground>().unsaved();
+    #[cfg(target_arch = "wasm32")]
+    ui::flush_when_the_page_leaves(unsaved.clone());
+    app.insert_resource(ui::UnsavedGuard(unsaved));
     if build == Build::Fixtures {
         ui::e2e::add(&mut app);
     }

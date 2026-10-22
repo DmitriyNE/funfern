@@ -29,6 +29,83 @@ pub(super) struct Notice {
     pub(super) text: String,
 }
 
+/// A document an autosave is due for and has not written, with whether the
+/// address follows it: kept beside the session for what writes it where no
+/// frame is left to, a quit on macOS or a page that leaves. An edit inside the
+/// autosave's 0.8 s debounce was lost to a quit, a closed window or a reload
+/// (PER-6 of the 2026-10-20 review).
+pub(crate) type Unsaved = std::sync::Arc<std::sync::Mutex<Option<(TopologyDocument, bool)>>>;
+
+/// Writes the document an autosave was due for, if any, and the address's
+/// link with it where the address follows the document.
+pub(crate) fn flush_unsaved(
+    unsaved: &Unsaved,
+    writer: fn(&TopologyDocument) -> Result<(), String>,
+) {
+    let Some((document, link)) = unsaved.lock().ok().and_then(|mut slot| slot.take()) else {
+        return;
+    };
+    let _ = writer(&document);
+    if link {
+        let _ = crate::sharing::encode(&document)
+            .and_then(|fragment| crate::sharing::replace_fragment(&fragment));
+    }
+}
+
+/// Writes the autosave when a window's close is asked for or the app exits,
+/// the debounce notwithstanding. Bevy closes the window and exits at the end
+/// of the frame that asked, after this.
+pub(crate) fn autosave_at_exit(
+    mut closes: MessageReader<bevy::window::WindowCloseRequested>,
+    mut exits: MessageReader<AppExit>,
+    mut playground: ResMut<Playground>,
+) {
+    let asked = closes.read().count() + exits.read().count();
+    if asked > 0 {
+        let _ = playground.autosave_now();
+    }
+}
+
+/// Writes the edit the debounce holds when the app's world is torn down: a
+/// quit on macOS closes the windows and ends the loop without a frame for
+/// [`autosave_at_exit`] to run in.
+#[derive(Resource)]
+pub(crate) struct UnsavedGuard(pub(crate) Unsaved);
+
+impl Drop for UnsavedGuard {
+    fn drop(&mut self) {
+        flush_unsaved(&self.0, crate::recovery::save);
+    }
+}
+
+/// Writes the edit the debounce holds when the page is hidden or leaves: a
+/// hidden or unloading page runs no frame to write it in, so the handlers
+/// write the copy kept for it, at once.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn flush_when_the_page_leaves(unsaved: Unsaved) {
+    use wasm_bindgen::{JsCast, closure::Closure};
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let leaving = unsaved.clone();
+    let pagehide = Closure::<dyn FnMut()>::new(move || {
+        flush_unsaved(&leaving, crate::recovery::save);
+    });
+    window.set_onpagehide(Some(pagehide.as_ref().unchecked_ref()));
+    pagehide.forget();
+    let watched = document.clone();
+    let visibility = Closure::<dyn FnMut()>::new(move || {
+        if watched.hidden() {
+            flush_unsaved(&unsaved, crate::recovery::save);
+        }
+    });
+    document.set_onvisibilitychange(Some(visibility.as_ref().unchecked_ref()));
+    visibility.forget();
+}
+
 impl Playground {
     pub(super) fn set_document(
         &mut self,
@@ -319,10 +396,17 @@ impl Playground {
         TopologyEditor::from_document(document.clone())?;
         self.set_document(document, false, true)
     }
+    pub(crate) fn unsaved(&self) -> Unsaved {
+        self.unsaved.clone()
+    }
+
     pub(super) fn autosave(&mut self) {
         if self.editor.document != self.autosave_observed {
             self.autosave_observed = self.editor.document.clone();
             self.autosave_due = Some(Instant::now());
+            if let Ok(mut unsaved) = self.unsaved.lock() {
+                *unsaved = Some((self.editor.document.clone(), self.link_in_address));
+            }
         }
         if self
             .autosave_due
@@ -351,6 +435,9 @@ impl Playground {
 
     fn write_autosave(&mut self) {
         self.autosave_due = None;
+        if let Ok(mut unsaved) = self.unsaved.lock() {
+            *unsaved = None;
+        }
         let written = (self.autosave_writer)(&self.editor.document);
         self.autosave_written(written);
         self.refresh_link();
@@ -1283,6 +1370,90 @@ mod tests {
         assert!(
             !skipped.contains("is saved") && skipped.contains("the disk is full"),
             "{skipped}"
+        );
+    }
+
+    thread_local! {
+        static WRITTEN: std::cell::RefCell<Vec<TopologyDocument>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record(document: &TopologyDocument) -> Result<(), String> {
+        WRITTEN.with(|written| written.borrow_mut().push(document.clone()));
+        Ok(())
+    }
+
+    fn written() -> Vec<TopologyDocument> {
+        WRITTEN.with(|written| written.borrow().clone())
+    }
+
+    /// An edited session, its autosave due and not yet written.
+    fn edited_inside_the_debounce() -> Playground {
+        let mut state = Playground {
+            autosave_writer: record,
+            ..Default::default()
+        };
+        state.editor.document.presentation.grid ^= true;
+        state.autosave();
+        state
+    }
+
+    /// PER-6 of the 2026-10-20 review: an edit inside the autosave's debounce
+    /// is written when a window's close is asked for, and when the app exits.
+    /// A quit or a closed window lost it.
+    #[test]
+    fn an_edit_inside_the_debounce_is_written_at_a_close_or_an_exit() {
+        use bevy::ecs::system::RunSystemOnce;
+        for close in [true, false] {
+            WRITTEN.with(|written| written.borrow_mut().clear());
+            let state = edited_inside_the_debounce();
+            assert!(written().is_empty(), "the debounce holds the write");
+            let edited = state.editor.document.clone();
+            let mut world = World::new();
+            world
+                .init_resource::<bevy::ecs::message::Messages<bevy::window::WindowCloseRequested>>(
+                );
+            world.init_resource::<bevy::ecs::message::Messages<AppExit>>();
+            world.insert_resource(state);
+            if close {
+                world.write_message(bevy::window::WindowCloseRequested {
+                    window: Entity::PLACEHOLDER,
+                });
+            } else {
+                world.write_message(AppExit::Success);
+            }
+            world.run_system_once(autosave_at_exit).unwrap();
+            assert!(
+                written().last() == Some(&edited),
+                "close {close}: not written"
+            );
+        }
+    }
+
+    /// PER-6: where no frame is left to write it - macOS's quit, a page that
+    /// leaves - the edit the debounce holds is written from the copy kept
+    /// for it, once, and nothing once its frame has written it.
+    #[test]
+    fn an_unwritten_edit_is_written_where_no_frame_is_left() {
+        WRITTEN.with(|written| written.borrow_mut().clear());
+        let mut state = edited_inside_the_debounce();
+        let unsaved = state.unsaved();
+        flush_unsaved(&unsaved, record);
+        assert!(
+            written() == vec![state.editor.document.clone()],
+            "the edit is not written"
+        );
+        flush_unsaved(&unsaved, record);
+        assert_eq!(written().len(), 1, "written once");
+        state.editor.document.presentation.grid ^= true;
+        state.autosave();
+        let _ = state.autosave_now();
+        let after_its_frame = written().len();
+        flush_unsaved(&unsaved, record);
+        assert_eq!(
+            written().len(),
+            after_its_frame,
+            "nothing left once written"
         );
     }
 
