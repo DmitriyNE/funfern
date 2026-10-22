@@ -27167,3 +27167,31 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-22 — Step 3, area 3: the kick form's first rate pass reads the wall after the short-wave half (GPU-14)
+
+- **The defect.** In the fourth-order kick form under the trapezoid wall
+  step, the first rate pass (pipeline 42) reads a first-order wall node's
+  flux for its `−D U` term. It ran before the first kick, which is where
+  the short-wave split's first half is applied, so it read the flux before
+  that half. The reference applies the half before `wall_rate_at`. Beside a
+  first-order wall with short-wave loss, the corrected force at the wall's
+  neighbours differed by an `h²/12` term every step.
+- **Test first.** `NONLINEAR_WALL=1 NONLINEAR_SHORT_WAVE=0.3` on
+  `canonical_gpu_nonlinear`, a Kerr and saturable medium in the kick form, a
+  first-order wall and short-wave loss, read Q 2.3e-6 against 1.1e-6
+  without the short-wave loss. Its loss lane read 3.0e-5 off the reference
+  and its wall lane 1.6e-6. Every other run in the suite reads its loss
+  lane within 1.1e-6, so the lane, held to 1e-3, is now held to 1e-5, and
+  the run joins the suite. Before the fix it fails there.
+- **Fix.** The first rate pass takes the short-wave half off a moving
+  wall node's flux, `old − h/2 · gather`, before the wall's rate. The stages
+  that gather it run before the rate pass, and the kick's own application
+  books the energy.
+- **After it** Q reads 6.3e-7, the loss lane 5.6e-8 and the wall lane
+  8.9e-8.
+- **Checked on Metal:** 37 runs pass: the nonlinear, oscillator, long-run
+  and timing examples.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

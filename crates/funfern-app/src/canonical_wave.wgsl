@@ -4115,8 +4115,14 @@ fn fourth_order_rate(node: u32, second: bool) {
             if trace != NO_INDEX {
                 wall = scratch[trace_solution_offset() + trace].values.x;
             } else if damping != 0.0 {
-                let flux = select(
+                var flux = select(
                     accepted_q(node), candidate_q(node), second || has_loss_stages());
+                // The first kick's flux after the short-wave split's first
+                // half, as the kick applies it and the reference reads the
+                // wall's rate (GPU-14 of the 2026-10-20 review).
+                if !second && short_wave_offset() != 0u && short_wave_moves(node) {
+                    flux -= 0.5 * h * short_wave_gather(node);
+                }
                 wall = -damping * temporal_primary_field(node, flux, time);
             }
         }

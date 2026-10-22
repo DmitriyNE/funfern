@@ -402,15 +402,17 @@ fn drive(
     }
     // The device charges the viscosity at the field of the mean flux, the
     // reference by the store's exact difference, and an f32 lane accumulates
-    // every step's rounding: held to 1e-3 of the sum, as the oscillator gate
-    // holds its lanes.
+    // every step's rounding: the M1 Max reads 1.1e-6 at most, held to 1e-5.
+    // Beside a first-order wall in the kick form, a wall rate read before
+    // the short-wave split's first half read 3.0e-5 (GPU-14 of the
+    // 2026-10-20 review).
     if let Some(lost) = expected.lost {
         let error = (f64::from(display.accounting[2]) - lost).abs() / lost.abs().max(1.0e-12);
         println!(
             "nonlinear loss lane: {:.6e} against {lost:.6e} ({error:.2e})",
             display.accounting[2]
         );
-        if !within(error, 1.0e-3) {
+        if !within(error, 1.0e-5) {
             expected.failed = true;
         }
     }
