@@ -27444,3 +27444,21 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a committed mesh starts the coarsening confirmation afresh (MESH-4)
+
+- **The defect.** Adaptation coarsens only after two estimates in a row ask
+  for it. The handler that commits a new mesh cleared the estimate's state
+  but not that streak, a reset the switch to the unified topology (eddad77)
+  dropped. After the first coarsening, every new mesh, an edit's included,
+  was coarsened on a single estimate taken right after its transfer: an extra
+  handoff each time, each with its interpolation error.
+- **Test first.** `a_committed_mesh_starts_the_coarsening_confirmation_afresh`
+  carries a streak of 1 into a handoff, accepts it through the test device
+  and lets the session commit the mesh. Before the fix the streak was still 1.
+- **Fix.** The commit resets the streak with the rest of the old mesh's
+  estimate.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs. No device run: only the session's
+  adaptation bookkeeping changes.

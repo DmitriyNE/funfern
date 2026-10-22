@@ -821,6 +821,11 @@ impl Playground {
                         self.amr_indicator_source = None;
                         self.amr_indicator_result = None;
                         self.amr_last_analyzed_step = None;
+                        // A streak of estimates asking to coarsen was of the
+                        // old mesh: carried over, the new one was coarsened on
+                        // a single estimate taken right after its transfer
+                        // (MESH-4 of the 2026-10-20 review).
+                        self.amr_coarsen_streak = 0;
                         self.message = "Simulation topology committed".into();
                         self.record_handoff(&active);
                     }
@@ -2257,6 +2262,72 @@ mod tests {
             refusal.message
         );
         assert!(state.diagnostics_warning());
+    }
+
+    /// MESH-4 of the 2026-10-20 review: a committed mesh starts the coarsening
+    /// confirmation afresh. A streak left from the old mesh let the new one be
+    /// coarsened on a single estimate taken right after its transfer, an extra
+    /// handoff each time, each with its interpolation error.
+    #[test]
+    fn a_committed_mesh_starts_the_coarsening_confirmation_afresh() {
+        fn frame(
+            world: &mut World,
+            state: &mut Playground,
+            request: &mut CanonicalGpuRequest,
+            display: &CanonicalGpuDisplay,
+        ) {
+            let mut recorders = WaveGpuRequest::default();
+            let vector = VectorOverlayDisplay::default();
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+            });
+        }
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let mut display = CanonicalGpuDisplay::default();
+        let mut state = with_baffles(&[]);
+        activate(&mut state);
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut world, &mut state, &mut request, &display);
+
+        // One estimate on the old mesh asked to coarsen; a finer mesh hands off.
+        state.amr_coarsen_streak = 1;
+        state.editor.document.presentation.mesh_edge *= 0.5;
+        for _ in 0..100_000 {
+            if state.coordinator.uploading.is_some() {
+                break;
+            }
+            frame(&mut world, &mut state, &mut request, &display);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            request.handoff_outcome(),
+            CanonicalGpuHandoffOutcome::Pending,
+            "the handoff began"
+        );
+        world.resource_scope(|_, mut assets: Mut<Assets<ShaderBuffer>>| {
+            request.accept_handoff(&mut assets, &mut display);
+        });
+        frame(&mut world, &mut state, &mut request, &display);
+        assert!(
+            state.coordinator.uploading.is_none(),
+            "the mesh is committed"
+        );
+        assert_eq!(state.amr_coarsen_streak, 0, "the old mesh's streak is gone");
     }
 
     /// Reported: a rejected handoff kept the candidate's step. The upload took
