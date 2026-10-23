@@ -1079,7 +1079,10 @@ struct BoundaryRecord {
     /// The face's mesh vertices, in the order of `nodes`.
     vertices: [usize; 2],
     condition: FaceBoundaryCondition,
-    pair: Option<(BoundaryPairKey, usize, f64)>,
+    /// A thin gap's pair, this side's slot in it, the gap's stiffness ratio
+    /// and this side's stiffness; the spring takes both sides' (MESH-18 of
+    /// the 2026-10-20 review).
+    pair: Option<(BoundaryPairKey, usize, f64, f64)>,
 }
 
 enum IndicatorPhase {
@@ -1598,10 +1601,9 @@ impl SolutionIndicatorJob {
                         let point = boundary
                             .spline
                             .evaluate(0.5 * (edge.parameters[0] + edge.parameters[1]));
-                        let spring = stiffness_ratio
-                            * self
-                                .material_at(boundary.region, point)?
-                                .geometric_mean_stiffness();
+                        let stiffness = self
+                            .material_at(boundary.region, point)?
+                            .geometric_mean_stiffness();
                         Some((
                             BoundaryPairKey {
                                 carrier: BoundaryPairCarrier::Legacy(id),
@@ -1609,7 +1611,8 @@ impl SolutionIndicatorJob {
                                 end,
                             },
                             slot,
-                            spring,
+                            stiffness_ratio,
+                            stiffness,
                         ))
                     }
                 };
@@ -1631,7 +1634,7 @@ impl SolutionIndicatorJob {
             condition,
             pair,
         });
-        if let Some((key, slot, _)) = pair {
+        if let Some((key, slot, _, _)) = pair {
             let entry = self.boundary_pairs.entry(key).or_default();
             if entry[slot].replace(record_index).is_some() {
                 return Err(SolutionIndicatorError::InvalidMesh);
@@ -1744,8 +1747,7 @@ impl SolutionIndicatorJob {
                         };
                         let point = self.operator.node_points()[nodes[0]]
                             .lerp(self.operator.node_points()[nodes[2]], 0.5);
-                        let spring = stiffness_ratio
-                            * self.material_at(region, point)?.geometric_mean_stiffness();
+                        let stiffness = self.material_at(region, point)?.geometric_mean_stiffness();
                         Some((
                             BoundaryPairKey {
                                 carrier: BoundaryPairCarrier::Topology(curve, span),
@@ -1753,7 +1755,8 @@ impl SolutionIndicatorJob {
                                 end,
                             },
                             slot,
-                            spring,
+                            stiffness_ratio,
+                            stiffness,
                         ))
                     }
                 };
@@ -1769,7 +1772,7 @@ impl SolutionIndicatorJob {
             condition,
             pair,
         });
-        if let Some((key, slot, _)) = pair {
+        if let Some((key, slot, _, _)) = pair {
             let entry = self.boundary_pairs.entry(key).or_default();
             if entry[slot].replace(record_index).is_some() {
                 return Err(SolutionIndicatorError::InvalidMesh);
@@ -2243,19 +2246,22 @@ impl SolutionIndicatorJob {
             return Err(SolutionIndicatorError::InvalidMesh);
         }
         let normal = outward_normal(geometry.points, edge_points);
-        let paired_nodes = if let Some((key, slot, spring)) = record.pair {
+        let paired_nodes = if let Some((key, slot, ratio, stiffness)) = record.pair {
             let pair = self
                 .boundary_pairs
                 .get(&key)
                 .ok_or(SolutionIndicatorError::InvalidMesh)?;
             let partner_index = pair[1 - slot].ok_or(SolutionIndicatorError::InvalidMesh)?;
             let partner = self.boundary_records[partner_index];
-            let Some((partner_key, partner_slot, partner_spring)) = partner.pair else {
+            let Some((partner_key, partner_slot, partner_ratio, partner_stiffness)) = partner.pair
+            else {
                 return Err(SolutionIndicatorError::InvalidMesh);
             };
+            // As the operator springs it, from the stiffness on both sides.
+            let spring = ratio * (stiffness * partner_stiffness).sqrt();
             if partner_key != key
                 || partner_slot == slot
-                || (partner_spring - spring).abs() > 1.0e-12 * spring.abs().max(1.0)
+                || (partner_ratio - ratio).abs() > 1.0e-12 * ratio.abs().max(1.0)
                 || [0, 2].into_iter().any(|endpoint| {
                     (self.operator.node_points()[record.nodes[endpoint]]
                         - self.operator.node_points()[partner.nodes[endpoint]])
@@ -3133,6 +3139,87 @@ mod tests {
             3,
         )
         .unwrap();
+        assert_eq!(
+            result.report.boundary_edges_evaluated,
+            expected_boundary_edges
+        );
+        assert!(result.report.boundary_residual_contribution > 0.0);
+    }
+
+    /// MESH-18 of the 2026-10-20 review: the operator springs a thin gap at
+    /// its stiffness ratio times the geometric mean of the two sides'
+    /// stiffness, and the estimate took each side's own. With two materials
+    /// across the gap the partners disagreed and the estimate was refused as
+    /// an invalid mesh.
+    #[test]
+    fn topology_indicator_pairs_a_thin_gap_between_two_materials() {
+        let behavior = SpanBehavior::Separated {
+            left: FaceBoundaryCondition::Reflecting,
+            right: FaceBoundaryCondition::Reflecting,
+            coupling: InternalBoundaryCoupling::ThinGap {
+                stiffness_ratio: 0.7,
+            },
+        };
+        let mut curve = TopologyCurve::new(
+            CurveId(1),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(-1.0, 0.0), Point2::new(1.0, 0.0)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(1),
+                behavior,
+            }],
+        )
+        .unwrap();
+        curve.nodes[0].vertex = Some(crate::TopologyVertexId(1));
+        curve.nodes[1].vertex = Some(crate::TopologyVertexId(2));
+        let (plan, mesh, _, mut scene) = topology_setup(
+            TopologyGeometry {
+                curves: vec![curve],
+                vertices: [(1, crate::OuterSide::Left), (2, crate::OuterSide::Right)]
+                    .map(|(id, side)| crate::TopologyVertex {
+                        id: crate::TopologyVertexId(id),
+                        location: crate::TopologyVertexLocation::Outer {
+                            side,
+                            fraction: 0.5,
+                        },
+                    })
+                    .to_vec(),
+                ..TopologyGeometry::default()
+            },
+            74,
+        );
+        assert_eq!(plan.domains.len(), 2);
+        scene.materials.push(Material {
+            id: MaterialId(2),
+            name: "Stiffer".into(),
+            stiffness: crate::ScalarField::constant(2.5),
+            ..Material::default_medium()
+        });
+        scene.regions[1].material = MaterialId(2);
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_topology(
+                &mesh,
+                &plan,
+                TopologyWaveModel::from_scene(&scene),
+            )
+            .unwrap(),
+        );
+        let expected_boundary_edges = mesh.boundary_edges.len();
+        let state = snapshot(&mesh, &operator, |point| point.x + 0.4 * point.y);
+        let result = run(
+            SolutionIndicatorJob::new_topology(
+                mesh,
+                operator,
+                &plan,
+                TopologyWaveModel::from_scene(&scene),
+                state,
+                SolutionIndicatorOptions::default(),
+            ),
+            3,
+        )
+        .expect("a thin gap between two materials is estimated");
         assert_eq!(
             result.report.boundary_edges_evaluated,
             expected_boundary_edges

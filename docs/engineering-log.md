@@ -27970,3 +27970,23 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: the scalar estimate springs a thin gap from both sides (MESH-18)
+
+- **The defect.** The operator couples a thin gap's two sides with a spring
+  of its stiffness ratio times the geometric mean of the two sides'
+  stiffness. The scalar estimate computed each side's spring from that side's
+  material alone and required the partners to agree, so a thin gap between
+  two materials was refused as an invalid mesh. The app always attaches a
+  canonical supplement and never reached this.
+- **Test first.** `topology_indicator_pairs_a_thin_gap_between_two_materials`
+  puts a thin-gap divider across the domain with stiffness 1 above and 2.5
+  below, and requires the estimate to run with every boundary edge evaluated.
+  Before the fix it failed with `InvalidMesh`.
+- **Fix.** Each side's record carries the gap's stiffness ratio and its own
+  stiffness; the pair's spring is formed from both when the partners meet,
+  as the operator forms it, and the partners must agree on the ratio. With
+  one material on both sides the spring is the same as before.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
