@@ -28178,3 +28178,30 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: a van der Pol gain left on the other loss row goes with its parameters (NUM-7)
+
+- **The defect.** The self-oscillation preset writes its van der Pol gain on
+  the skin's primary loss, the electric one in TM. A switch to TE, whose
+  primary is magnetic, leaves the material as it is, and the gain then sat on
+  the other row. Choosing a medium recognised van der Pol only on the primary
+  row, and its last pass made every other loss channel constant at its base
+  rate, which for van der Pol is the gain: the gain became a passive loss at
+  its own rate, its threshold parameter was orphaned, and every TM/TE toggle
+  added two more parameters, until the limit.
+- **Test first.**
+  `a_van_der_pol_gain_left_on_the_other_row_goes_with_its_parameters` picks
+  the self-oscillating medium in TM, TE, TM, TE, TM and TE in turn, requiring
+  each time the medium recognised, its own two parameters and nothing on the
+  other row. Before the fix the first switch to TE left four parameters.
+- **Fix.** Choosing a medium retires a van der Pol channel on the row that is
+  not the primary one, with the parameters only it referred to, among the
+  outgoing parts NUM-6 retires first.
+- **Left open.** Between the switch and the next choice of medium the disk
+  still carries its gain on the other row, which the solver does not run, so
+  its preparation fails until a medium is chosen again. Moving the channel to
+  the new primary row on a TM/TE switch would close that; it is for the user
+  to decide.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

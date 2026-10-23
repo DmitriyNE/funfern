@@ -838,6 +838,7 @@ pub fn apply_medium_preset(
     if !preset.self_oscillating {
         retired = apply_self_oscillation(false, &retired, physics)?;
     }
+    retired = retire_off_row_oscillation(&retired, physics);
     let mut applied = apply_law_preset(preset.response(), &retired)?;
     applied = apply_restoring_preset(preset.restoring(), &applied)?;
     applied = apply_self_oscillation(preset.self_oscillating, &applied, physics)?;
@@ -859,6 +860,40 @@ pub fn apply_medium_preset(
         }
     }
     Ok(applied)
+}
+
+/// A van der Pol gain on the loss that is not the skin's primary one goes,
+/// with the parameters only it referred to. The preset writes it on the
+/// primary loss, and a switch between TM and TE leaves it on the other row,
+/// where the final pass of [`apply_medium_preset`] made it a constant loss at
+/// the gain's rate, orphaned its threshold and added parameters on every
+/// toggle (NUM-7 of the 2026-10-20 review).
+fn retire_off_row_oscillation(material: &Material, physics: PhysicsModel) -> Material {
+    let mut retired = material.clone();
+    let channel = if primary_loss_is_electric(physics) {
+        &mut retired.magnetic_loss
+    } else {
+        &mut retired.electric_loss
+    };
+    let Some(found) = channel else {
+        return retired;
+    };
+    let RateLaw::VanDerPol { threshold, .. } = &found.law.rate else {
+        return retired;
+    };
+    let names = [&found.base_rate, threshold]
+        .into_iter()
+        .filter_map(|slot| slot.source().map(str::to_owned))
+        .collect::<Vec<_>>();
+    *channel = None;
+    let referenced = retired
+        .parameter_names()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    retired.parameters.retain(|parameter| {
+        !names.contains(&parameter.name) || referenced.contains(&parameter.name)
+    });
+    retired
 }
 
 /// Whether a skin's primary loss channel, the one on the displayed field, is
@@ -1624,6 +1659,40 @@ mod tests {
             identify_medium_preset(&switched, physics).unwrap().preset,
             travelling
         );
+    }
+
+    /// NUM-7 of the 2026-10-20 review: a TM self-oscillating medium carries its
+    /// van der Pol gain on the electric loss, the TM primary. Switched to TE,
+    /// where the primary is magnetic, re-picking a medium made that gain a
+    /// passive loss at the gain's rate, left its threshold parameter behind,
+    /// and added parameters on every TM/TE toggle until the limit.
+    #[test]
+    fn a_van_der_pol_gain_left_on_the_other_row_goes_with_its_parameters() {
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let oscillating = MEDIA
+            .iter()
+            .find(|entry| entry.self_oscillating && entry.restoring().id.is_empty())
+            .unwrap();
+        let mut material = Material::default_medium();
+        for physics in [tm, te, tm, te, tm, te] {
+            material = apply_medium_preset(oscillating, &material, physics).unwrap();
+            assert_eq!(
+                identify_medium_preset(&material, physics).unwrap().preset,
+                oscillating
+            );
+            assert_eq!(material.parameters.len(), oscillating.variables().count());
+            let other = if primary_loss_is_electric(physics) {
+                &material.magnetic_loss
+            } else {
+                &material.electric_loss
+            };
+            assert_eq!(other, &None, "a gain left on the other row");
+        }
     }
 
     /// A material composed by hand is not a medium, and so reads Custom in
