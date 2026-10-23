@@ -1236,6 +1236,14 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   examples and many host tests still build theirs through `Scene`, so they
   move first. Its local repair, `MeshUpdateJob`, went in area 5 of the
   2026-10-20 review's fixes (the user's request, 2026-10-23).
+- [ ] Refill a repair's band by a free tip as well as a full build meshes it.
+  Dragging a welded baffle 0.025 to 0.038 a step, the refill beside its free
+  tip reaches 4.2° to 8° where a full build of the same scene has 16° to 22°.
+  MESH-14 of the 2026-10-20 review holds refills to half the last full build's
+  worst angle, so the worst of them are carved again wider or rebuilt in full
+  (one move in 32 of `a_refill_under_the_floor_carves_again_with_a_wider_cavity`);
+  a refill that matched the fresh mesher there would spare that rebuild and
+  keep the step a sliver shortens (2026-10-23).
 - [ ] Accept a crossing near a hidden sample of both curves. MESH-9 of the
   2026-10-20 review moved a transmitting crossing within the tolerance of one
   curve's hidden sample onto that sample, which took a line swept across a

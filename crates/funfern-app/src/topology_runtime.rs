@@ -248,6 +248,11 @@ pub struct PreparedTopology {
     pub carve: Option<CarveReport>,
     /// Why a repair was abandoned for a full rebuild, when it was.
     pub repair_fallback: Option<String>,
+    /// The worst angle of the full build this mesh descends from, through
+    /// repairs and adaptations. A repair's refill is held to half of it,
+    /// where the mesh's own worst angle carried every sliver an earlier
+    /// repair accepted (MESH-14 of the 2026-10-20 review).
+    pub full_build_worst_angle: f64,
     pub timing: TopologyPreparationTiming,
     /// Options the mesh was built with. A request with different options is
     /// a full rebuild even when the plan is unchanged.
@@ -355,6 +360,7 @@ pub struct TopologyPreparationJob {
     carve_job: Option<TopologyCarveJob>,
     carve: Option<CarveReport>,
     repair_fallback: Option<String>,
+    full_build_worst_angle: f64,
     mesh_job: Option<TopologyMeshingJob>,
     mesh: Option<Arc<TriMesh>>,
     assembly_job: Option<QuadraticAssemblyJob>,
@@ -539,15 +545,18 @@ impl TopologyPreparationJob {
             TopologyMeshUpdateAction::Repair(_) => {
                 let previous = previous.as_ref().unwrap();
                 (
-                    Some(TopologyCarveJob::new(
-                        previous.mesh.clone(),
-                        &previous.bundle.plan,
-                        bundle.plan.as_ref().clone(),
-                        bundle.snapshot.clone(),
-                        mesh_revision,
-                        options,
-                        preserve_adaptation,
-                    )),
+                    Some(
+                        TopologyCarveJob::new(
+                            previous.mesh.clone(),
+                            &previous.bundle.plan,
+                            bundle.plan.as_ref().clone(),
+                            bundle.snapshot.clone(),
+                            mesh_revision,
+                            options,
+                            preserve_adaptation,
+                        )
+                        .with_quality_reference(previous.full_build_worst_angle),
+                    ),
                     None,
                     None,
                     TopologyPreparationPhase::Repairing,
@@ -626,6 +635,9 @@ impl TopologyPreparationJob {
                 })
             })
             .flatten();
+        let full_build_worst_angle = previous
+            .as_ref()
+            .map_or(f64::INFINITY, |previous| previous.full_build_worst_angle);
         Ok(Self {
             bundle,
             probes: document.model.probes.clone().into(),
@@ -638,6 +650,7 @@ impl TopologyPreparationJob {
             carve_job,
             carve: None,
             repair_fallback: None,
+            full_build_worst_angle,
             mesh_job,
             mesh,
             operator,
@@ -695,6 +708,7 @@ impl TopologyPreparationJob {
             snapshot: previous.bundle.snapshot.clone(),
             plan: previous.bundle.plan.clone(),
         });
+        let full_build_worst_angle = previous.full_build_worst_angle;
         Ok(Self {
             bundle,
             probes: document.model.probes.clone().into(),
@@ -708,6 +722,7 @@ impl TopologyPreparationJob {
             carve_job: None,
             carve: None,
             repair_fallback: None,
+            full_build_worst_angle,
             mesh_job: None,
             mesh: Some(Arc::new(mesh)),
             operator: None,
@@ -878,6 +893,7 @@ impl TopologyPreparationJob {
             self.mesh_job = None;
             match result {
                 Ok(mesh) => {
+                    self.full_build_worst_angle = mesh.quality.minimum_angle_degrees;
                     self.mesh = Some(Arc::new(mesh));
                     self.phase = TopologyPreparationPhase::Assembling;
                 }
@@ -1283,6 +1299,7 @@ impl TopologyPreparationJob {
             adapted: self.adapted,
             carve: self.carve,
             repair_fallback: self.repair_fallback.take(),
+            full_build_worst_angle: self.full_build_worst_angle,
             timing: self.timing,
             meshing: self.meshing,
         }))
@@ -4809,31 +4826,83 @@ mod tests {
         assert_eq!(digests, PINNED_DIGESTS, "{digests:016x?}");
     }
 
+    /// MESH-14 of the 2026-10-20 review: a repair's refill was held to half
+    /// the previous mesh's worst angle, so every sliver a repair accepted
+    /// lowered the next floor, and over a drag of welded baffles the worst
+    /// angle sank to 4.17° where the full build had 16° to 22°. Repairs are
+    /// held to the last full build's worst angle, which none of them lowers;
+    /// a move whose refill cannot meet it is rebuilt in full.
+    #[test]
+    fn repairs_over_a_drag_hold_the_floor_of_the_last_full_build() {
+        let minimum = options().minimum_angle_degrees;
+        let mut failures = vec![];
+        for spacing in [0.025, 0.038] {
+            for count in [1, 2] {
+                let mut reference = f64::INFINITY;
+                move_welded_baffles(count, spacing, 8, |step, prepared| {
+                    let worst = (0..prepared.mesh.triangles.len())
+                        .filter_map(|index| prepared.mesh.triangle_quality(index))
+                        .map(|quality| quality.minimum_angle_degrees)
+                        .fold(f64::INFINITY, f64::min);
+                    if matches!(
+                        prepared.mesh_action,
+                        TopologyMeshUpdateAction::FullRebuild(_)
+                    ) {
+                        reference = worst;
+                    } else if worst < 0.5 * minimum.min(reference) {
+                        failures.push(format!(
+                            "{count} welded at {spacing}, move {step}: {worst:.2}° under the floor of {:.2}°",
+                            0.5 * minimum.min(reference)
+                        ));
+                    }
+                });
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     /// A refill refused for an element under the quality floor is carved
     /// again with the cavity a ring wider, as many times as it takes up to
-    /// the limit, rather than falling back to a full rebuild. Moving a
-    /// welded baffle 0.025 and 0.038 a step, with one baffle and two, puts
-    /// first refills under the floor that one to five extra rings carve.
+    /// the limit, before a full rebuild. Moving a welded baffle 0.025 and
+    /// 0.038 a step, with one baffle and two, puts first refills under the
+    /// floor that extra rings carve. A few refills by a free tip stay under
+    /// the last full build's floor at every width and are rebuilt in full,
+    /// with the reason kept (MESH-14 of the 2026-10-20 review).
     #[test]
     fn a_refill_under_the_floor_carves_again_with_a_wider_cavity() {
-        let mut retried = 0;
+        let (mut retried, mut rebuilt) = (0, 0);
         for spacing in [0.025, 0.038] {
             for count in [1, 2] {
                 move_welded_baffles(count, spacing, 8, |step, prepared| {
                     if step == 0 {
                         return;
                     }
-                    let carve = prepared.carve.unwrap_or_else(|| {
-                        panic!(
-                            "{count} welded at {spacing}, move {step} fell back: {:?}",
-                            prepared.repair_fallback
-                        )
-                    });
-                    retried += usize::from(carve.quality_retries > 0);
+                    match prepared.carve {
+                        Some(carve) => retried += usize::from(carve.quality_retries > 0),
+                        None => {
+                            assert_eq!(
+                                prepared.mesh_action,
+                                TopologyMeshUpdateAction::FullRebuild(
+                                    TopologyFullRebuildReason::RepairFailed
+                                ),
+                                "{count} welded at {spacing}, move {step}"
+                            );
+                            assert!(
+                                prepared
+                                    .repair_fallback
+                                    .as_deref()
+                                    .is_some_and(|reason| reason.contains("degenerate")),
+                                "{:?}",
+                                prepared.repair_fallback
+                            );
+                            rebuilt += 1;
+                        }
+                    }
                 });
             }
         }
         assert!(retried >= 3, "only {retried} carves needed a wider cavity");
+        assert!(rebuilt <= 4, "{rebuilt} of 32 moves were rebuilt in full");
     }
 
     /// Adaptation checks every constrained edge against the plan it came from,

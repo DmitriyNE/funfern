@@ -27827,3 +27827,37 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: repairs are held to the last full build's floor (MESH-14)
+
+- **The defect.** A repair refuses a refill with an element under half the
+  mesher's minimum angle, or half the previous mesh's worst angle where that
+  is lower. The previous mesh carries every sliver an earlier repair
+  accepted, so each lowered the next floor. Over a drag of welded baffles the
+  worst angle sank to 4.17° where the full build had 16° to 22°, and the
+  wider retry stopped firing.
+- **What the user chose.** The planned fix took the floor from the kept
+  triangles, and failed the gate (entry above). Of the remedies put to the
+  user, they chose the last full build's worst angle, carried through every
+  repair and adaptation, and to let the moves whose refill cannot meet it be
+  rebuilt in full.
+- **Test first.** `repairs_over_a_drag_hold_the_floor_of_the_last_full_build`
+  drags one and two welded baffles 0.025 and 0.038 a step, eight steps each,
+  and requires every repaired mesh to stay above half the last full build's
+  worst angle. Before the fix four moves fell under it, the worst at 4.17°
+  against 5°.
+- **Fix.** `TopologyCarveJob::with_quality_reference` holds the refill to a
+  given worst angle, kept across its wider retries; without one the job uses
+  the previous mesh's, as before. The runtime keeps
+  `PreparedTopology::full_build_worst_angle`: a mesh job's measured worst
+  angle when it meshes in full, the predecessor's through repairs and
+  adaptations, and passes it to the carve.
+- **The welded drag.** `a_refill_under_the_floor_carves_again_with_a_wider_cavity`
+  required every move to repair. Now six refills are carved again wider and
+  one move, a refill by the free tip at 3.47° at every width, is rebuilt in
+  full with the reason kept; the test counts both. Refills by a free tip being
+  worse than a full build is an item under Maintenance in `docs/plan.md`.
+- **Checked on Metal:** the five remesh and repair runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

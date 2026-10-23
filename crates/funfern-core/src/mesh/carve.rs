@@ -412,8 +412,12 @@ pub struct TopologyCarveJob {
     incident: Vec<Vec<usize>>,
     areas: Vec<f64>,
     /// The smallest angle in the previous mesh; the refill may not do worse
-    /// than half of it.
+    /// than half of it, unless a quality reference says otherwise.
     previous_worst_angle: f64,
+    /// What the refill's quality floor is taken from, where the caller knows
+    /// better than the previous mesh's worst angle; see
+    /// [`Self::with_quality_reference`].
+    quality_reference: Option<f64>,
     grid: Option<TriangleGrid>,
     old_boundary_edges: BTreeMap<(usize, usize), usize>,
     builder: Option<MeshBuilder>,
@@ -465,6 +469,17 @@ impl TopologyCarveJob {
         )
     }
 
+    /// Holds the refill to `worst_angle_degrees` rather than to the previous
+    /// mesh's worst angle. The previous mesh carries every sliver an earlier
+    /// repair accepted, and each lowered the next floor, so over a drag the
+    /// floor sank and the wider retry stopped firing (MESH-14 of the
+    /// 2026-10-20 review). The app passes the worst angle of the last full
+    /// build, which no repair lowers.
+    pub fn with_quality_reference(mut self, worst_angle_degrees: f64) -> Self {
+        self.quality_reference = Some(worst_angle_degrees);
+        self
+    }
+
     /// A carve whose cavity grows by `margin` rings beyond the first.
     #[allow(clippy::too_many_arguments)]
     fn with_margin(
@@ -514,6 +529,7 @@ impl TopologyCarveJob {
             incident: vec![],
             areas: vec![],
             previous_worst_angle: f64::INFINITY,
+            quality_reference: None,
             grid: None,
             old_boundary_edges: BTreeMap::new(),
             builder: None,
@@ -698,12 +714,13 @@ impl TopologyCarveJob {
                 match verify_repair_quality(
                     &mesh,
                     self.report.kept_triangles,
-                    self.previous_worst_angle,
+                    self.quality_reference.unwrap_or(self.previous_worst_angle),
                     self.options,
                 ) {
                     Ok(()) => return Ok(Some(mesh)),
                     Err(MeshError::DegenerateRepair { .. }) if self.margin < MAX_CARVE_MARGIN => {
                         let retries = self.report.quality_retries + 1;
+                        let reference = self.quality_reference;
                         *self = Self::with_margin(
                             self.previous.clone(),
                             self.old_atoms.clone(),
@@ -715,6 +732,7 @@ impl TopologyCarveJob {
                             self.margin + 1,
                         );
                         self.report.quality_retries = retries;
+                        self.quality_reference = reference;
                         CarvePhase::Index(0)
                     }
                     Err(error) => return Err(error),
@@ -1565,17 +1583,19 @@ impl TopologyCarveJob {
 
 /// Refuses a refill with elements the solver could not step. Refinement
 /// beside frozen rim edges accepts elements it cannot fix, so the floor is
-/// generous: half the mesher's minimum angle, or half the worst angle the
-/// repaired mesh already had, whichever is lower. Anything below is a refill
+/// generous: half the mesher's minimum angle, or half a reference worst
+/// angle, whichever is lower: the last full build's where the caller gives
+/// it, see [`TopologyCarveJob::with_quality_reference`], else the repaired
+/// mesh's own. Anything below is a refill
 /// defect, and the error says so by name and place, so a fallback that shows
 /// it in the panel is a bug report rather than noise.
 fn verify_repair_quality(
     mesh: &TriMesh,
     kept: usize,
-    previous_worst_angle: f64,
+    reference_worst_angle: f64,
     options: MeshingOptions,
 ) -> Result<(), MeshError> {
-    let floor = 0.5 * options.minimum_angle_degrees.min(previous_worst_angle);
+    let floor = 0.5 * options.minimum_angle_degrees.min(reference_worst_angle);
     let mut count = 0;
     let mut worst = f64::INFINITY;
     let mut point = Point2::default();
