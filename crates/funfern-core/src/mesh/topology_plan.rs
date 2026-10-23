@@ -16,6 +16,7 @@ use super::{
 use crate::{
     CompiledBoundaryStep, CompiledEdge, CompiledEdgeSource, CurveId, CurveSpanId, FaceId, Point2,
     PredicateSign, RegionId, SpanBehavior, TopologySnapshot, TraceVertexId, orient2d,
+    point_segment_distance, pseudo_angle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2389,6 +2390,263 @@ fn chord_within(topology: &TopologySnapshot, edges: &[usize], coarsening: AtomCo
     })
 }
 
+/// Halves the runs [`conflicting_runs`] names until it names none. `None`
+/// where every run it names is one arrangement segment already.
+fn settle_runs(
+    topology: &TopologySnapshot,
+    domains: &[PlannedFaceDomain],
+    mut runs: Vec<Vec<usize>>,
+    cell: f64,
+    separation: f64,
+) -> Option<Vec<Vec<usize>>> {
+    loop {
+        let conflicting = conflicting_runs(topology, domains, &runs, cell, separation);
+        if conflicting.is_empty() {
+            return Some(runs);
+        }
+        if conflicting.iter().all(|&index| runs[index].len() < 2) {
+            return None;
+        }
+        let mut halved = Vec::with_capacity(runs.len() + conflicting.len());
+        for (index, run) in runs.into_iter().enumerate() {
+            if conflicting.contains(&index) && run.len() > 1 {
+                let middle = middle_joint(topology, &run);
+                halved.push(run[..=middle].to_vec());
+                halved.push(run[middle + 1..].to_vec());
+            } else {
+                halved.push(run);
+            }
+        }
+        runs = halved;
+    }
+}
+
+/// The position in `run` of the edge ending at the joint nearest half its
+/// length.
+fn middle_joint(topology: &TopologySnapshot, run: &[usize]) -> usize {
+    let length = |edge: usize| {
+        let edge = &topology.edges[edge];
+        (edge.points[1] - edge.points[0]).norm()
+    };
+    let total = run.iter().map(|&edge| length(edge)).sum::<f64>();
+    let mut reached = 0.0;
+    let mut nearest = (f64::INFINITY, 0);
+    for (position, &edge) in run[..run.len() - 1].iter().enumerate() {
+        reached += length(edge);
+        let miss = (reached - 0.5 * total).abs();
+        if miss < nearest.0 {
+            nearest = (miss, position);
+        }
+    }
+    nearest.1
+}
+
+/// The runs whose chords would mesh another arrangement than the compiled
+/// one: those of a face cycle left with fewer than three atoms around an
+/// area, those whose
+/// chords leave a point in another order than their segments do, those of
+/// two chords that share no point and come within `separation`, half the
+/// arrangement's tolerance, and a run with an arrangement vertex in the
+/// sliver between it and its chord. `cell` sizes the grid the last two
+/// search.
+fn conflicting_runs(
+    topology: &TopologySnapshot,
+    domains: &[PlannedFaceDomain],
+    runs: &[Vec<usize>],
+    cell: f64,
+    separation: f64,
+) -> BTreeSet<usize> {
+    let mut conflicting = BTreeSet::new();
+    let mut run_of_edge = vec![usize::MAX; topology.edges.len()];
+    for (index, run) in runs.iter().enumerate() {
+        for &edge in run {
+            run_of_edge[edge] = index;
+        }
+    }
+    let chords = runs
+        .iter()
+        .map(|run| {
+            [
+                topology.edges[run[0]].points[0],
+                topology.edges[run[run.len() - 1]].points[1],
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    for cycle in domains.iter().flat_map(|domain| &domain.steps) {
+        let key = |step: &PlannedFaceStep| {
+            let side = match step.boundary.source {
+                PlannedBoundarySource::Outer(_) => None,
+                PlannedBoundarySource::Curve { side, .. } => Some(side),
+            };
+            (run_of_edge[step.edge], side)
+        };
+        let atoms = (0..cycle.len())
+            .filter(|&index| {
+                key(&cycle[index]) != key(&cycle[(index + cycle.len() - 1) % cycle.len()])
+            })
+            .count();
+        // A cycle that walks each of its runs on both sides is a slit, cut
+        // in after the triangulation, and encloses nothing to need three.
+        let keys = cycle.iter().map(key).collect::<BTreeSet<_>>();
+        let slit = keys.iter().all(|(run, side)| {
+            side.is_some() && keys.contains(&(*run, side.map(CurveTraceSide::opposite)))
+        });
+        if atoms < 3 && !slit {
+            conflicting.extend(cycle.iter().map(|step| run_of_edge[step.edge]));
+        }
+    }
+
+    let mut leaving = BTreeMap::<(u64, u64), Vec<(f64, f64, usize)>>::new();
+    for (index, run) in runs.iter().enumerate() {
+        let [start, end] = chords[index];
+        if start == end {
+            conflicting.insert(index);
+            continue;
+        }
+        let first = &topology.edges[run[0]];
+        let last = &topology.edges[run[run.len() - 1]];
+        for (point, along, chord) in [
+            (start, first.points[1] - start, end - start),
+            (end, last.points[0] - end, start - end),
+        ] {
+            leaving.entry(point_key(point)).or_default().push((
+                pseudo_angle(along.x, along.y),
+                pseudo_angle(chord.x, chord.y),
+                index,
+            ));
+        }
+    }
+    for directions in leaving.values_mut() {
+        if directions.len() < 2 {
+            continue;
+        }
+        directions.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Strictly increasing around the point but for one turn past the
+        // half-line the angles start from.
+        let descents = (0..directions.len())
+            .filter(|&index| directions[(index + 1) % directions.len()].1 <= directions[index].1)
+            .count();
+        if descents != 1 {
+            conflicting.extend(directions.iter().map(|direction| direction.2));
+        }
+    }
+
+    let cell = cell.max(separation);
+    let cell_of = |point: Point2| {
+        (
+            (point.x / cell).floor() as i64,
+            (point.y / cell).floor() as i64,
+        )
+    };
+    let mut grid = BTreeMap::<(i64, i64), Vec<usize>>::new();
+    for (index, [a, b]) in chords.iter().enumerate() {
+        let low = cell_of(Point2::new(
+            a.x.min(b.x) - separation,
+            a.y.min(b.y) - separation,
+        ));
+        let high = cell_of(Point2::new(
+            a.x.max(b.x) + separation,
+            a.y.max(b.y) + separation,
+        ));
+        for x in low.0..=high.0 {
+            for y in low.1..=high.1 {
+                grid.entry((x, y)).or_default().push(index);
+            }
+        }
+    }
+    let mut checked = BTreeSet::new();
+    for members in grid.values() {
+        for (position, &first) in members.iter().enumerate() {
+            for &second in &members[position + 1..] {
+                if !checked.insert((first.min(second), first.max(second))) {
+                    continue;
+                }
+                let [a0, a1] = chords[first];
+                let [b0, b1] = chords[second];
+                if a0 != b0
+                    && a0 != b1
+                    && a1 != b0
+                    && a1 != b1
+                    && segment_distance([a0, a1], [b0, b1]) < separation
+                {
+                    conflicting.extend([first, second]);
+                }
+            }
+        }
+    }
+
+    let mut points = BTreeMap::<(i64, i64), BTreeSet<(u64, u64)>>::new();
+    for edge in &topology.edges {
+        for point in edge.points {
+            points
+                .entry(cell_of(point))
+                .or_default()
+                .insert(point_key(point));
+        }
+    }
+    for (index, run) in runs.iter().enumerate().filter(|(_, run)| run.len() > 1) {
+        let sliver = run
+            .iter()
+            .map(|&edge| topology.edges[edge].points[0])
+            .chain([chords[index][1]])
+            .collect::<Vec<_>>();
+        let own = sliver
+            .iter()
+            .map(|point| point_key(*point))
+            .collect::<BTreeSet<_>>();
+        let low = cell_of(Point2::new(
+            sliver
+                .iter()
+                .map(|point| point.x)
+                .fold(f64::INFINITY, f64::min),
+            sliver
+                .iter()
+                .map(|point| point.y)
+                .fold(f64::INFINITY, f64::min),
+        ));
+        let high = cell_of(Point2::new(
+            sliver
+                .iter()
+                .map(|point| point.x)
+                .fold(f64::NEG_INFINITY, f64::max),
+            sliver
+                .iter()
+                .map(|point| point.y)
+                .fold(f64::NEG_INFINITY, f64::max),
+        ));
+        let inside = (low.0..=high.0)
+            .flat_map(|x| (low.1..=high.1).map(move |y| (x, y)))
+            .filter_map(|cell| points.get(&cell))
+            .flatten()
+            .filter(|key| !own.contains(key))
+            .any(|&(x, y)| {
+                let point = Point2::new(f64::from_bits(x), f64::from_bits(y));
+                super::locate_in_polygon(point, &sliver) != PolygonLocation::Outside
+            });
+        if inside {
+            conflicting.insert(index);
+        }
+    }
+    conflicting
+}
+
+/// The distance between two segments, zero where they cross.
+fn segment_distance(a: [Point2; 2], b: [Point2; 2]) -> f64 {
+    let opposite = |first: PredicateSign, second: PredicateSign| {
+        first != PredicateSign::Zero && second != PredicateSign::Zero && first != second
+    };
+    if opposite(orient2d(a[0], a[1], b[0]), orient2d(a[0], a[1], b[1]))
+        && opposite(orient2d(b[0], b[1], a[0]), orient2d(b[0], b[1], a[1]))
+    {
+        return 0.0;
+    }
+    point_segment_distance(a[0], b[0], b[1])
+        .min(point_segment_distance(a[1], b[0], b[1]))
+        .min(point_segment_distance(b[0], a[0], a[1]))
+        .min(point_segment_distance(b[1], a[0], a[1]))
+}
+
 /// Cuts `chain`, arrangement segments in increasing parameter order whose
 /// joints may all merge, into runs within the tolerance and the cap. Greedy
 /// runs, each as long as it may be, leave the chain's remainder as one short
@@ -2551,6 +2809,22 @@ impl TopologyMeshPlan {
                 start = end + 1;
             }
         }
+        // Merged chords stand in for the arrangement's segments, and nothing
+        // checked that they still mesh the arrangement that was compiled
+        // (MESH-7 of the 2026-10-20 review): a ring wall's chord crossed a
+        // disc compiled clear of it, and a thin cap's arc merged into the
+        // very chord that cuts it off, a cycle of two. Such runs are halved
+        // until none is left; one that cannot be falls back on the plan as
+        // compiled.
+        let Some(mut runs) = settle_runs(
+            topology,
+            &self.domains,
+            runs,
+            coarsening.maximum_chord,
+            0.5 * crate::topology::arrangement_tolerance(topology.domain),
+        ) else {
+            return Ok(self.clone());
+        };
         runs.sort_by_key(|run| run.iter().copied().min());
         let mut run_of_edge = vec![usize::MAX; topology.edges.len()];
         for (index, run) in runs.iter().enumerate() {
@@ -3670,6 +3944,224 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// Points on a circle for a uniform cubic B-spline, whose curve passes
+    /// inside its controls: at their nodes, through the circle.
+    fn circle_controls(center: Point2, radius: f64, count: usize, phase: f64) -> Vec<Point2> {
+        let step = std::f64::consts::TAU / count as f64;
+        let radius = radius * 3.0 / (2.0 + step.cos());
+        (0..count)
+            .map(|index| {
+                let angle = phase + index as f64 * step;
+                center + Point2::new(angle.cos(), angle.sin()) * radius
+            })
+            .collect()
+    }
+
+    /// Meshes `geometry` from its plan coarsened at a curve tolerance of
+    /// 5e-4, the app's at its coarsest; `None` where the arrangement refuses
+    /// it, else what went wrong.
+    fn coarsened_mesh_fault(geometry: &TopologyGeometry) -> Option<Option<String>> {
+        let options = super::super::MeshingOptions {
+            target_edge_length: 0.35,
+            curve_tolerance: 5.0e-4,
+            minimum_angle_degrees: 8.0,
+            max_vertices: 40_000,
+            max_triangles: 80_000,
+            max_refinement_steps: 40_000,
+        };
+        let topology = compile_topology(geometry, 70).ok()?;
+        let fine = TopologyMeshPlan::new(&topology, &assign_each_face(&topology)).unwrap();
+        let plan = match fine.coarsened(&topology, AtomCoarsening::from_meshing(options)) {
+            Ok(plan) => plan,
+            Err(error) => return Some(Some(format!("coarsening: {error:?}"))),
+        };
+        if plan
+            .domains
+            .iter()
+            .flat_map(|domain| &domain.steps)
+            .any(|cycle| cycle.len() < 3)
+        {
+            return Some(Some("a cycle of fewer than three atoms".into()));
+        }
+        // Overlapping triangles trip the meshing tests' check that the walk
+        // and the scan find the same triangle.
+        let meshed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mesh_topology_plan(&plan, 170, options)
+        }));
+        Some(match meshed {
+            Err(_) => Some("overlapping triangles".into()),
+            Ok(Err(error)) => Some(format!("{error:?}")),
+            Ok(Ok(mesh)) if (mesh_area(&mesh) - 4.0).abs() > 1.0e-9 => {
+                Some(format!("area {}", mesh_area(&mesh)))
+            }
+            Ok(Ok(_)) => None,
+        })
+    }
+
+    /// MESH-7 of the 2026-10-20 review: a disc a few ten-thousandths inside a
+    /// ring wall, at twenty angles for each of four gaps the arrangement
+    /// accepts. Coarsened to a tolerance wider than the gap, the ring's
+    /// chords cut into the disc: 19 of the 80 meshed with overlapping
+    /// triangles and 6 failed with a triangle in the wrong face.
+    #[test]
+    fn coarsened_chords_keep_clear_of_a_disc_beside_a_ring_wall() {
+        let mut faults = vec![];
+        for step in 0..80 {
+            let gap = [2.5e-4, 3.0e-4, 3.5e-4, 4.0e-4][step % 4];
+            let phase = step as f64 * 0.037;
+            let ring = TopologyCurve::new(
+                CurveId(71),
+                CurveSpline::Closed(
+                    PeriodicCubicSpline::uniform(circle_controls(
+                        Point2::new(0.0, 0.0),
+                        0.8,
+                        48,
+                        phase,
+                    ))
+                    .unwrap(),
+                ),
+                spans(1000, 48, SpanBehavior::REFLECTING),
+            )
+            .unwrap();
+            let disc = TopologyCurve::new(
+                CurveId(72),
+                CurveSpline::Closed(
+                    PeriodicCubicSpline::uniform(circle_controls(
+                        Point2::new(0.5 - gap, 0.0),
+                        0.3,
+                        32,
+                        phase * 3.0,
+                    ))
+                    .unwrap(),
+                ),
+                spans(2000, 32, SpanBehavior::REFLECTING),
+            )
+            .unwrap();
+            let geometry = TopologyGeometry {
+                curves: vec![ring, disc],
+                ..TopologyGeometry::default()
+            };
+            match coarsened_mesh_fault(&geometry) {
+                None => faults.push(format!("{step}: refused by the arrangement")),
+                Some(Some(fault)) => faults.push(format!("{step}: {fault}")),
+                Some(None) => {}
+            }
+        }
+        assert!(faults.is_empty(), "{} faults: {faults:#?}", faults.len());
+    }
+
+    /// MESH-7 of the 2026-10-20 review: a cap cut off a circle by a straight
+    /// curve between two of its neighbouring nodes, the circle drawn through
+    /// 70 to 127 controls so the cap's sag runs from above the curve
+    /// tolerance to below the arrangement's. 36 of the 58 compile, and in 29
+    /// of them the arc fit within the tolerance of the cut, merged into the
+    /// cut's own chord, and left the cap a cycle of two atoms.
+    #[test]
+    fn a_thin_cap_keeps_three_atoms_through_coarsening() {
+        let (mut faults, mut meshed) = (vec![], 0);
+        for count in 70..128 {
+            let mut circle = TopologyCurve::new(
+                CurveId(73),
+                CurveSpline::Closed(
+                    PeriodicCubicSpline::uniform(circle_controls(
+                        Point2::new(0.0, 0.0),
+                        0.6,
+                        count,
+                        0.3,
+                    ))
+                    .unwrap(),
+                ),
+                spans(3000, count, SpanBehavior::REFLECTING),
+            )
+            .unwrap();
+            let ends = [0, 1].map(|node| circle.spline.node_point(node).unwrap());
+            let vertices = [TopologyVertexId(74), TopologyVertexId(75)];
+            for (node, vertex) in vertices.iter().enumerate() {
+                circle.nodes[node].vertex = Some(*vertex);
+            }
+            let behavior = [SpanBehavior::REFLECTING, SpanBehavior::Transmitting][count % 2];
+            let mut cut = TopologyCurve::new(
+                CurveId(74),
+                CurveSpline::Open(OpenCubicSpline::polyline(ends.to_vec()).unwrap()),
+                spans(4000, 1, behavior),
+            )
+            .unwrap();
+            for (node, vertex) in vertices.iter().enumerate() {
+                cut.nodes[node].vertex = Some(*vertex);
+            }
+            let geometry = TopologyGeometry {
+                curves: vec![circle, cut],
+                vertices: vertices
+                    .iter()
+                    .zip(ends)
+                    .map(|(id, point)| TopologyVertex {
+                        id: *id,
+                        location: TopologyVertexLocation::Interior(point),
+                    })
+                    .collect(),
+                ..TopologyGeometry::default()
+            };
+            match coarsened_mesh_fault(&geometry) {
+                None => {}
+                Some(Some(fault)) => faults.push(format!("{count}: {fault}")),
+                Some(None) => meshed += 1,
+            }
+        }
+        assert!(faults.is_empty(), "{} faults: {faults:#?}", faults.len());
+        assert!(meshed >= 30, "{meshed} caps meshed");
+    }
+
+    /// A free straight baffle is a face cycle of two atoms, one segment walked
+    /// out on one side and back on the other, which encloses nothing and
+    /// cannot be halved. Counted as a collapsed cycle, it turned the whole
+    /// plan back into the compiled one, the Luneburg lens's 1,504 vertices
+    /// into 2,011, while the MESH-7 fix was being written.
+    #[test]
+    fn a_free_slit_keeps_its_face_coarsened() {
+        let ring = TopologyCurve::new(
+            CurveId(76),
+            CurveSpline::Closed(
+                PeriodicCubicSpline::uniform(circle_controls(Point2::new(0.0, 0.0), 0.7, 24, 0.0))
+                    .unwrap(),
+            ),
+            spans(5000, 24, SpanBehavior::REFLECTING),
+        )
+        .unwrap();
+        let baffle = TopologyCurve::new(
+            CurveId(77),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(-0.2, 0.1), Point2::new(0.2, 0.1)])
+                    .unwrap(),
+            ),
+            spans(6000, 1, SpanBehavior::REFLECTING),
+        )
+        .unwrap();
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![ring, baffle],
+                ..TopologyGeometry::default()
+            },
+            78,
+        )
+        .unwrap();
+        let fine = TopologyMeshPlan::new(&topology, &assign_each_face(&topology)).unwrap();
+        let coarse = fine
+            .coarsened(
+                &topology,
+                AtomCoarsening {
+                    tolerance: 5.0e-4,
+                    maximum_chord: 0.35,
+                },
+            )
+            .unwrap();
+        assert!(
+            coarse.boundaries.len() * 2 < fine.boundaries.len(),
+            "{} atoms coarsened from {}",
+            coarse.boundaries.len(),
+            fine.boundaries.len()
+        );
     }
 
     #[test]

@@ -27694,3 +27694,43 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: coarsened atoms mesh the arrangement that was compiled (MESH-7, first part)
+
+- **The defect.** The mesh is built from a coarsened plan, whose atoms merge
+  runs of arrangement segments into one chord where the run stays within the
+  curve tolerance of it, 5e-4 at the app's coarsest. The arrangement only keeps
+  segments that do not meet 2e-4 apart, and nothing checked that the merged
+  chords still mesh the arrangement that was compiled. A ring wall's chord
+  could cut into a disc compiled clear of it, and a thin cap's arc could merge
+  into the very chord that cuts it off, leaving the cap a cycle of two atoms.
+- **Test first.** `coarsened_chords_keep_clear_of_a_disc_beside_a_ring_wall`
+  puts a disc 2.5e-4 to 4e-4 inside a ring wall at 80 placements and meshes
+  each from its coarsened plan: before the fix 19 meshed with overlapping
+  triangles and 6 failed with a triangle in the wrong face.
+  `a_thin_cap_keeps_three_atoms_through_coarsening` cuts a cap off a circle
+  between two neighbouring nodes, the circle drawn through 70 to 127 controls:
+  36 compile, and 29 of them coarsened into a cycle of two atoms that cannot
+  mesh.
+- **Fix.** After the runs are cut, `conflicting_runs` names the runs whose
+  chords would mesh another arrangement: those of a face cycle left with fewer
+  than three atoms around an area, those whose chords leave a point in another
+  angular order than their segments do, two chords that share no point and
+  come within half the arrangement's tolerance, and a run with an arrangement
+  vertex inside the sliver between it and its chord. `settle_runs` halves the
+  named runs at the joint nearest their middle until none is named. Where every
+  named run is one segment already, the plan as compiled is used, which meshes
+  the arrangement by construction.
+- **Found on the way.** The first version counted a free slit, a cycle that
+  walks one segment out and back, as a collapsed cycle and turned the Luneburg
+  lens's plan back into the compiled one, 1,504 vertices into 2,011.
+  `a_free_slit_keeps_its_face_coarsened` holds that a slit's face stays
+  coarsened. And the meshing tests' check that the triangle walk and the scan
+  find the same triangle fired on points lying on an edge two triangles share,
+  where either is right; it now requires both to report the boundary there.
+  The cap meshes it flagged were sound, with area 4 and no inverted triangle.
+- **Nothing else moves.** The 92 regression, frozen and gallery scenes
+  prepare to the same mesh hashes as before, in the same time.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

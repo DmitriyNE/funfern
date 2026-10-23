@@ -742,9 +742,15 @@ pub struct TopologyJob {
     result: Option<TopologyResult>,
 }
 
+/// The arrangement's tolerance in `domain`: segments that do not meet are
+/// farther apart than this.
+pub(crate) fn arrangement_tolerance(domain: DomainRect) -> f64 {
+    domain.width().max(domain.height()) * 1.0e-4
+}
+
 impl TopologyJob {
     pub fn new(geometry: TopologyGeometry, revision: u64) -> Self {
-        let tolerance = geometry.domain.width().max(geometry.domain.height()) * 1.0e-4;
+        let tolerance = arrangement_tolerance(geometry.domain);
         Self::with_options(
             geometry,
             revision,

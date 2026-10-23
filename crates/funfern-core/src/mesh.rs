@@ -1689,11 +1689,22 @@ impl MeshBuilder {
 
     /// The triangle holding `point`, by the walk from `start` and by the scan
     /// where the walk gives up, counted. Every meshing test holds the walk to
-    /// the scan.
+    /// the scan. A point on an edge two triangles share is on the boundary of
+    /// both, and the two may stop at either.
     fn locate_from(&mut self, start: usize, point: Point2) -> Option<(usize, PolygonLocation)> {
         if let Some(found) = self.walk_from(start, point) {
             #[cfg(test)]
-            assert_eq!(Some(found), self.containing_triangle(point));
+            {
+                let scanned = self.containing_triangle(point);
+                if found.1 == PolygonLocation::Boundary {
+                    assert_eq!(
+                        scanned.map(|(_, location)| location),
+                        Some(PolygonLocation::Boundary)
+                    );
+                } else {
+                    assert_eq!(Some(found), scanned);
+                }
+            }
             return Some(found);
         }
         self.stats.location_scans += 1;
