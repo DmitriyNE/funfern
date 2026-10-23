@@ -86,6 +86,9 @@ pub struct TopologyMeshingJob {
     trace_vertices: BTreeMap<TraceVertexId, usize>,
     slit_runs: Vec<(RegionId, Vec<PlannedFaceStep>)>,
     slit_steps: Vec<PlannedFaceStep>,
+    /// The steps through traces a stretch merged where it passed one point
+    /// twice, whose sectors are split apart again with the slits'.
+    merged_steps: Vec<PlannedFaceStep>,
     legalization_work: usize,
     state: TopologyMeshingState,
     /// Triangles below this index were imported by a repair and are verified
@@ -104,6 +107,7 @@ impl TopologyMeshingJob {
             trace_vertices: BTreeMap::new(),
             slit_runs: vec![],
             slit_steps: vec![],
+            merged_steps: vec![],
             legalization_work: 0,
             state: TopologyMeshingState::Initialize,
             region_check_from: 0,
@@ -133,6 +137,7 @@ impl TopologyMeshingJob {
             trace_vertices,
             slit_runs,
             slit_steps: vec![],
+            merged_steps: vec![],
             legalization_work: 0,
             state,
             region_check_from,
@@ -194,6 +199,7 @@ impl TopologyMeshingJob {
                 let prepared = prepare_topology_builder(&self.plan, b)?;
                 self.trace_vertices = prepared.trace_vertices;
                 self.slit_runs = prepared.slit_runs;
+                self.merged_steps = prepared.merged_steps;
                 let domain = b
                     .domains
                     .first()
@@ -245,7 +251,13 @@ impl TopologyMeshingJob {
                 }
             }
             TopologyMeshingState::SplitSlitVertices => {
-                split_slit_trace_vertices(b, &self.slit_steps, &mut self.trace_vertices)?;
+                let steps = self
+                    .slit_steps
+                    .iter()
+                    .chain(&self.merged_steps)
+                    .copied()
+                    .collect::<Vec<_>>();
+                split_slit_trace_vertices(b, &steps, &mut self.trace_vertices)?;
                 TopologyMeshingState::ApplySlitLineage
             }
             TopologyMeshingState::ApplySlitLineage => {
@@ -477,6 +489,7 @@ impl TopologyMeshingJob {
 struct PreparedTopology {
     trace_vertices: BTreeMap<TraceVertexId, usize>,
     slit_runs: Vec<(RegionId, Vec<PlannedFaceStep>)>,
+    merged_steps: Vec<PlannedFaceStep>,
 }
 
 /// Ends one stretch of a face cycle. The stretch has to come back to where it
@@ -570,6 +583,7 @@ fn prepare_topology_builder(
     let mut trace_vertices = BTreeMap::new();
     let mut chains = BTreeMap::<(usize, Option<CurveTraceSide>), ExpandedChain>::new();
     let mut free_slits = BTreeMap::<(RegionId, CurveId), Vec<PlannedFaceStep>>::new();
+    let mut merged = BTreeSet::<TraceVertexId>::new();
     let coinciding = coinciding_separated_edges(
         plan.domains
             .iter()
@@ -633,6 +647,8 @@ fn prepare_topology_builder(
             // While removed steps are being skipped: the trace the stretch
             // left from, if it had begun.
             let mut run: Option<Option<TraceVertexId>> = None;
+            // The first trace the stretch passed at each point.
+            let mut passed = BTreeMap::<(u64, u64), TraceVertexId>::new();
             for offset in 0..cycle.len() {
                 let step = &cycle[(start + offset) % cycle.len()];
                 if is_slit(step) {
@@ -665,20 +681,28 @@ fn prepare_topology_builder(
                 };
                 // A stretch that leaves a junction through one sector and
                 // returns through another names two traces at one point of one
-                // face - a curve that meets itself does this, and so does a
-                // slit's attachment. They are one mesh vertex: seeding it
-                // before the chain is expanded keeps the boundary edges and the
-                // polygon on the same vertex instead of leaving the arriving
-                // one with no triangle to belong to. The sectors are separated
-                // again by `split_slit_trace_vertices` once the slits are cut.
-                if let Some([first, _]) = ends
-                    && step.boundary.traces[1] != first
-                    && trace_points.get(&step.boundary.traces[1]) == trace_points.get(&first)
-                    && let Some(vertex) = trace_vertices.get(&first).copied()
+                // face - a curve that meets itself does this, a slit's
+                // attachment, and two loops touching at one vertex. They are
+                // one mesh vertex: seeding it before the chain is expanded
+                // keeps the boundary edges and the polygon on the same vertex
+                // instead of leaving the arriving one with no triangle to
+                // belong to. Any point the stretch passed counts, not only its
+                // first: where the cycle started decided it, and two vertices
+                // at one point of a polygon stalled ear clipping (MESH-6 of
+                // the 2026-10-20 review). The sectors are separated again by
+                // `split_slit_trace_vertices` after the slits are cut, slit or
+                // none.
+                if ends.is_none() {
+                    passed.clear();
+                }
+                let arriving = step.boundary.traces[1];
+                if let Some(point) = trace_points.get(&arriving)
+                    && let Some(&earlier) = passed.get(&point_key(*point))
+                    && earlier != arriving
+                    && let Some(vertex) = trace_vertices.get(&earlier).copied()
                 {
-                    trace_vertices
-                        .entry(step.boundary.traces[1])
-                        .or_insert(vertex);
+                    trace_vertices.entry(arriving).or_insert(vertex);
+                    merged.extend([earlier, arriving]);
                 }
                 let key = (step.edge, side);
                 if let std::collections::btree_map::Entry::Vacant(entry) = chains.entry(key) {
@@ -735,6 +759,11 @@ fn prepare_topology_builder(
                     ends.map_or(step.boundary.traces[0], |ends| ends[0]),
                     step.boundary.traces[1],
                 ]);
+                for trace in step.boundary.traces {
+                    if let Some(point) = trace_points.get(&trace) {
+                        passed.entry(point_key(*point)).or_insert(trace);
+                    }
+                }
             }
             close_face_cycle(&trace_points, &mut polygon, &mut ends, &mut cycles)?;
         }
@@ -782,10 +811,28 @@ fn prepare_topology_builder(
                 .map(|run| (region, run)),
         );
     }
+    let merged_steps = plan
+        .domains
+        .iter()
+        .flat_map(|domain| domain.steps.iter().flatten())
+        .filter(|step| {
+            step.boundary
+                .traces
+                .iter()
+                .any(|trace| merged.contains(trace))
+        })
+        .copied()
+        .collect();
     Ok(PreparedTopology {
         trace_vertices,
         slit_runs,
+        merged_steps,
     })
+}
+
+/// A point's exact coordinates as a key, with -0 and 0 alike.
+fn point_key(point: Point2) -> (u64, u64) {
+    ((point.x + 0.0).to_bits(), (point.y + 0.0).to_bits())
 }
 
 pub(super) fn new_bridge_search(domain: TriangulationDomain, index: usize) -> BridgeSearch {
@@ -3486,6 +3533,143 @@ mod tests {
             18,
         )
         .unwrap()
+    }
+
+    /// MESH-6 of the 2026-10-20 review: two reflecting squares touching at a
+    /// corner they share, drawn either way round from each of their corners.
+    /// The face around both walks the shared corner twice. Starting there,
+    /// its two sectors became one vertex, coupling the field across both
+    /// walls, and adaptation refused the mesh; starting elsewhere, the polygon
+    /// named the corner twice as two vertices and ear clipping stalled. Of the
+    /// 64 drawings, 16 merged and 48 stalled.
+    #[test]
+    fn loops_touching_at_one_corner_keep_their_sectors_apart() {
+        let shared = TopologyVertexId(60);
+        let square = |id: u64, corners: [[f64; 2]; 4], reversed: bool, start: usize| {
+            let mut corners = corners.to_vec();
+            if reversed {
+                corners.reverse();
+            }
+            corners.rotate_left(start);
+            let mut curve = TopologyCurve::new(
+                CurveId(id),
+                CurveSpline::Closed(
+                    PeriodicCubicSpline::polygon(
+                        corners
+                            .iter()
+                            .map(|corner| Point2::new(corner[0], corner[1]))
+                            .collect(),
+                    )
+                    .unwrap(),
+                ),
+                spans(id * 10, 4, SpanBehavior::REFLECTING),
+            )
+            .unwrap();
+            let node = corners
+                .iter()
+                .position(|corner| *corner == [0.0, 0.0])
+                .unwrap();
+            curve.nodes[node].vertex = Some(shared);
+            curve
+        };
+        let mut failures = vec![];
+        for variant in 0..64 {
+            let first = square(
+                61,
+                [[-0.5, -0.5], [0.0, -0.5], [0.0, 0.0], [-0.5, 0.0]],
+                variant & 1 == 1,
+                (variant >> 2) % 4,
+            );
+            let second = square(
+                62,
+                [[0.0, 0.0], [0.5, 0.0], [0.5, 0.5], [0.0, 0.5]],
+                variant & 2 == 2,
+                (variant >> 4) % 4,
+            );
+            let topology = compile_topology(
+                &TopologyGeometry {
+                    curves: vec![first, second],
+                    vertices: vec![TopologyVertex {
+                        id: shared,
+                        location: TopologyVertexLocation::Interior(Point2::new(0.0, 0.0)),
+                    }],
+                    ..TopologyGeometry::default()
+                },
+                60,
+            )
+            .unwrap();
+            let plan = TopologyMeshPlan::new(&topology, &assign_each_face(&topology)).unwrap();
+            let expected = plan
+                .vertices
+                .iter()
+                .filter(|vertex| vertex.point == Point2::new(0.0, 0.0))
+                .map(|vertex| vertex.id)
+                .collect::<BTreeSet<_>>();
+            let mesh = match mesh_topology_plan(&plan, 160, mesh_options()) {
+                Ok(mesh) => mesh,
+                Err(error) => {
+                    failures.push(format!("{variant}: {error:?}"));
+                    continue;
+                }
+            };
+            let actual = mesh
+                .vertices
+                .iter()
+                .filter(|vertex| vertex.point == Point2::new(0.0, 0.0))
+                .filter_map(|vertex| vertex.trace)
+                .collect::<BTreeSet<_>>();
+            let one_sided = mesh.boundary_edges.iter().all(|edge| {
+                !matches!(
+                    edge.label,
+                    BoundaryLabel::Curve {
+                        separated: true,
+                        ..
+                    }
+                ) || mesh
+                    .triangles
+                    .iter()
+                    .filter(|triangle| {
+                        triangle.vertices.contains(&edge.vertices[0])
+                            && triangle.vertices.contains(&edge.vertices[1])
+                    })
+                    .count()
+                    == 1
+            });
+            if expected.len() != 4 || actual != expected || !one_sided {
+                failures.push(format!(
+                    "{variant}: {} planned, {} meshed, one-sided {one_sided}",
+                    expected.len(),
+                    actual.len()
+                ));
+            }
+            let mesh = std::sync::Arc::new(mesh);
+            let mut adaptation = super::super::MeshAdaptationJob::new_topology(
+                mesh.clone(),
+                &plan,
+                super::super::MeshAdaptationState::from_mesh(&mesh),
+                161,
+                std::sync::Arc::new(
+                    |point: Point2, _| {
+                        if point.norm() < 0.2 { 0.08 } else { 0.35 }
+                    },
+                ),
+                super::super::MeshAdaptationOptions {
+                    meshing: mesh_options(),
+                    minimum_target_edge_length: 0.08,
+                    maximum_target_edge_length: 0.35,
+                    ..Default::default()
+                },
+            );
+            let adapted = loop {
+                if let Some(outcome) = adaptation.advance(4096) {
+                    break outcome;
+                }
+            };
+            if let Err(error) = adapted {
+                failures.push(format!("{variant}: adaptation {error:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[test]

@@ -27660,3 +27660,37 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: loops touching at one vertex keep their sectors apart (MESH-6)
+
+- **The defect.** A face's boundary cycle is cut into stretches, each a polygon
+  for ear clipping. Where a stretch leaves a junction through one sector and
+  comes back through another, the two sectors' traces are made one mesh vertex
+  so the polygon closes, and `split_slit_trace_vertices` separates them again
+  after the slits are cut. Two separated loops touching at one vertex give the
+  face around them such a junction, passed twice by one cycle, and two things
+  went wrong. The merge was made only on a return to the stretch's first
+  trace, so where the cycle started decided it: started elsewhere, the polygon
+  named the corner twice as two vertices at one point, and ear clipping
+  stalled. Started at the corner, the sectors merged, but the split seeded only
+  slit steps and, with no slit, left them merged: one vertex coupled the field
+  across both walls, and adaptation refused the mesh.
+- **Test first.** `loops_touching_at_one_corner_keep_their_sectors_apart`
+  draws two reflecting squares touching at a shared corner, each either way
+  round and from each of its corners, 64 drawings. Each must mesh with the
+  corner's four planned traces on four vertices, every separated edge with one
+  triangle, and adapt. Before the fix, 48 stalled in ear clipping and 16 met
+  with three vertices, which adaptation refused with "topology interval
+  endpoint lost its trace identity".
+- **Fix.** A stretch merges a trace into any earlier trace it passed at the
+  same point, not only its first, and records the traces it merged. The
+  sector split takes the steps through merged traces as well as the slits',
+  so merged sectors come apart whether or not a slit is present. The approved
+  plan was to merge only on stretches that contain a slit; reading the code,
+  that leaves the stall, and the user chose this, the review's other fix.
+- **Nothing else moves.** The 92 regression, frozen and gallery scenes
+  prepare to the same mesh hashes as before.
+- **Checked on Metal:** the eight remesh and adaptation runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
