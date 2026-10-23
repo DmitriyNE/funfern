@@ -27555,3 +27555,23 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a paired split at the capacity commits a partial mesh (MESH-12)
+
+- **The defect.** Refinement stops at the vertex capacity and commits what its
+  splits have made. Its guard left room for one more vertex, but a split on a
+  separated trace adds one on each side. One vertex short of the capacity,
+  the pair's second split failed with a capacity error after the first side
+  had changed, and the whole transaction was discarded. From then on
+  refinement committed nothing.
+- **Test first.** `a_paired_split_at_the_capacity_commits_a_partial_mesh`
+  refines the separated baffle toward 0.07 near it with the capacity set 1 to
+  40 vertices above the mesh's, and requires each run to commit with the
+  capacity limit. Before the fix, 19, 21 and 23 vertices of room failed with
+  `Mesh(Capacity)`.
+- **Fix.** The guard requires room for two vertices before any split. A single
+  split may stop one vertex short of the capacity, a partial mesh as before.
+- **Checked on Metal:** the three adaptation runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

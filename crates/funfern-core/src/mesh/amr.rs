@@ -1708,7 +1708,11 @@ impl MeshAdaptationJob {
             self.phase = AdaptationPhase::ApplyRefine(None);
             return Ok(());
         }
-        if self.builder.vertices.len() >= self.options.meshing.max_vertices
+        // A split adds a vertex, and one on a separated trace a vertex on each
+        // side. With room for one, the pair's second failed and the whole
+        // transaction with it, where a stop at the capacity commits what the
+        // splits before it made (MESH-12 of the 2026-10-20 review).
+        if self.builder.vertices.len() + 2 > self.options.meshing.max_vertices
             || self.builder.triangles.len() + 4 > self.options.meshing.max_triangles
         {
             self.report.limit = Some(MeshAdaptationLimit::Capacity);
@@ -2571,6 +2575,51 @@ mod tests {
                 .map(|vertex| (vertex.id, vertex.point))
                 .collect()
         );
+    }
+
+    /// MESH-12 of the 2026-10-20 review: a split on a separated trace adds a
+    /// vertex on each side. The capacity guard left room for one, so one
+    /// vertex short of the capacity the pair's second split failed and the
+    /// whole transaction with it, where any other split stops at the capacity
+    /// and commits what it has.
+    #[test]
+    fn a_paired_split_at_the_capacity_commits_a_partial_mesh() {
+        let (plan, source, configuration) = topology_setup(separated_baffle(), 211, 0.28, 0.07);
+        let fine: Arc<dyn MeshSizeField> = Arc::new(
+            |point: Point2, _| {
+                if point.y.abs() < 0.18 { 0.07 } else { 0.28 }
+            },
+        );
+        let mut failures = Vec::new();
+        for room in 1..=40 {
+            let mut configuration = configuration;
+            configuration.max_topology_changes = 4_000;
+            configuration.max_work_units = 20_000_000;
+            configuration.meshing.max_vertices = source.vertices.len() + room;
+            configuration.meshing.max_triangles = 200_000;
+            let mut job = MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                312,
+                fine.clone(),
+                configuration,
+            );
+            let outcome = loop {
+                if let Some(outcome) = job.advance(37) {
+                    break outcome;
+                }
+            };
+            match outcome {
+                Ok(result) => assert_eq!(
+                    result.report.limit,
+                    Some(MeshAdaptationLimit::Capacity),
+                    "room {room}"
+                ),
+                Err(error) => failures.push(format!("room {room}: {error:?}")),
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
     }
 
     #[test]
