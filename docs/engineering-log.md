@@ -28080,3 +28080,25 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: a driven handoff's fluxes are checked under the runtime it carries (NUM-2)
+
+- **The defect.** The CPU reference builds a driven handoff's state with
+  `new_at`, which checks that the fluxes have a field under the operator's
+  runtime as authored, and installed the carried runtime only afterwards. A
+  defocusing Kerr medium with a Switch alternate holds, once switched, fluxes
+  its authored mass cannot, and such a handoff was refused as past the law's
+  bound. The device checks against the runtime it carries; this touched the
+  CPU reference that tests and examples hold the device to.
+- **Test first.** `a_handoff_checks_its_fluxes_under_the_runtime_it_carries`
+  switches a bounded defocusing Kerr medium to four times its mass and hands
+  over twice the base mass's flux, which the switched runtime holds and the
+  authored one does not. Before the fix it was refused with "the field has
+  left the law's declared amplitude bound".
+- **Fix.** `new_under` builds the state under a given runtime, checks the
+  fluxes against it and keeps it; `new_at` passes the authored one and the
+  handoff the carried one.
+- **Checked on Metal:** the 22 handoff runs pass against the reference.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

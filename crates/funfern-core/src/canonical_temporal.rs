@@ -3834,6 +3834,29 @@ impl CanonicalTemporalWaveState {
         complementary_flux: Vec<Point2>,
         time: f64,
     ) -> Result<Self, WaveError> {
+        Self::new_under(
+            operator,
+            time_step,
+            primary_flux,
+            complementary_flux,
+            time,
+            operator.initial_runtime(),
+        )
+    }
+
+    /// [`Self::new_at`] under `runtime` rather than the operator's as
+    /// authored: the fluxes are checked against the maps it puts in force. A
+    /// handoff carries its runtime, and checked against the authored one a
+    /// state a switched coefficient holds was refused (NUM-2 of the
+    /// 2026-10-20 review).
+    fn new_under(
+        operator: &CanonicalTemporalWaveOperator,
+        time_step: f64,
+        primary_flux: Vec<f64>,
+        complementary_flux: Vec<Point2>,
+        time: f64,
+        runtime: CanonicalMaterialRuntimeState,
+    ) -> Result<Self, WaveError> {
         if !time_step.is_finite() || time_step <= 0.0 {
             return Err(WaveError::Unsupported(
                 "the time-driven state was given a time step that is not positive and finite",
@@ -3869,7 +3892,6 @@ impl CanonicalTemporalWaveState {
             // A state has to be one the maps can hold: a flux past a declared
             // amplitude bound has no field, and is refused here rather than
             // on the first step.
-            let runtime = operator.initial_runtime();
             operator.primary_field_at(&primary_flux, time, &runtime)?;
             operator.complementary_field_at(&complementary_flux, time, &runtime)?;
         }
@@ -3897,7 +3919,7 @@ impl CanonicalTemporalWaveState {
                     0
                 }
             ],
-            runtime: operator.initial_runtime(),
+            runtime,
             time_step,
             time,
             integrator: CanonicalIntegrator::default(),
@@ -4164,16 +4186,16 @@ impl CanonicalTemporalWaveState {
                 maximum,
             });
         }
-        let mut handed = Self::new_at(
+        let mut handed = Self::new_under(
             target,
             time_step,
             fields.primary_flux,
             fields.complementary_flux,
             time,
+            runtime,
         )?
         .with_integrator(integrator)
         .with_wall_step(wall_step);
-        handed.runtime = runtime;
         if !fields.integrated.field.is_empty() {
             handed = handed.with_integrated_field(target, fields.integrated.field.clone())?;
         }
@@ -10270,6 +10292,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// NUM-2 of the 2026-10-20 review: a driven handoff's fluxes were checked
+    /// against the target's runtime as authored, and the carried one was
+    /// installed only after. A defocusing Kerr medium switched to a heavier
+    /// mass holds fluxes its authored mass cannot, and such a state was
+    /// refused as past the law's bound.
+    #[test]
+    fn a_handoff_checks_its_fluxes_under_the_runtime_it_carries() {
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = bounded_kerr(-0.2, 1.0);
+        scene.materials[0].mass_law.alternate = Some(ScalarField::constant(4.0));
+        let operator = compile(&scene).unwrap();
+        let base = operator.base();
+        let mut runtime = operator.initial_runtime();
+        runtime
+            .begin_switch(scene.materials[0].id, true, 0.0, 0.0)
+            .unwrap();
+        let primary_flux = base
+            .primary_mass()
+            .iter()
+            .map(|mass| 2.0 * mass)
+            .collect::<Vec<_>>();
+        assert!(
+            operator
+                .primary_field_at(&primary_flux, 0.0, &runtime)
+                .is_ok()
+        );
+        assert!(
+            operator
+                .primary_field_at(&primary_flux, 0.0, &operator.initial_runtime())
+                .is_err()
+        );
+        let fields = crate::canonical_transfer::HandedFields {
+            primary_flux,
+            complementary_flux: vec![Point2::default(); base.complementary_degrees_of_freedom()],
+            integrated: Default::default(),
+            thin_gaps: vec![],
+            outgoing_z: vec![],
+        };
+        let handed = CanonicalTemporalWaveState::from_handed(
+            &operator,
+            &CanonicalForcing::none(base),
+            fields,
+            runtime.clone(),
+            (
+                0.0,
+                CanonicalIntegrator::default(),
+                crate::canonical_wave::default_wall_step(),
+            ),
+            0.4 * operator.maximum_time_step(),
+            0.0,
+        )
+        .expect("the state is held under the carried runtime");
+        assert_eq!(handed.state.runtime, runtime);
     }
 
     #[test]
