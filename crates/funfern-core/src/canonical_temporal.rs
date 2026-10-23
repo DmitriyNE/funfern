@@ -1578,8 +1578,16 @@ pub fn canonical_temporal_indicator_supplement(
             }
         }
         let share = residual / owners.len().max(1) as f64;
+        // The pole store's energy, shared along the wall as the fixed
+        // supplement shares it (MESH-15 of the 2026-10-20 review).
+        let energy_share = current_z
+            .iter()
+            .map(|value| 0.5 * value * value)
+            .sum::<f64>()
+            / owners.len().max(1) as f64;
         for element in owners {
             element_boundary_residual[element] += share;
+            element_energy[element] += energy_share;
         }
     }
 
@@ -9072,6 +9080,19 @@ mod tests {
                 "inert boundary residual differs at {element}: {left} against {right}"
             );
         }
+        // MESH-15 of the 2026-10-20 review: the wall's pole store is energy
+        // too, and the driven supplement left its share out of the elements
+        // along the wall, so the indicator jumped when a drive switched on.
+        let differing = temporal
+            .element_energy
+            .iter()
+            .zip(&fixed.element_energy)
+            .filter(|(left, right)| (*left - *right).abs() > 1.0e-10 * right.abs().max(1.0e-12))
+            .count();
+        assert_eq!(
+            differing, 0,
+            "inert element energy differs on {differing} elements"
+        );
     }
 
     #[test]
@@ -11394,10 +11415,19 @@ mod tests {
                 &runtime,
             )
             .unwrap();
+        // With the second-order wall's pole store, shared along the wall as
+        // the fixed estimate shares it (MESH-15 of the 2026-10-20 review); the
+        // scene has no thin gap, so every auxiliary is the wall's.
+        let poles = snapshot
+            .auxiliary
+            .iter()
+            .map(|value| 0.5 * value * value)
+            .sum::<f64>();
+        assert!(poles > 0.0);
         let split = estimate.element_energy.iter().sum::<f64>();
         assert!(
-            (split - stored).abs() <= 1e-12 * stored,
-            "{split} against {stored}"
+            (split - stored - poles).abs() <= 1e-12 * (stored + poles),
+            "{split} against {stored} and {poles}"
         );
         // Read with the linear maps, the same state is mis-weighed.
         let (_, linear, _) = nonlinear_snapshot(&Scene::default());

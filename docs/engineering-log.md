@@ -27950,3 +27950,23 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: the driven estimate counts the wall's pole store (MESH-15)
+
+- **The defect.** The adaptation indicator weighs each element's residual by
+  its energy. The fixed supplement shares the second-order outgoing wall's
+  pole store, Σ½z², among the elements along the wall; the driven
+  supplement left it out, so those elements read less energy than the fixed
+  path gives the same state, and the global indicator jumped when a drive
+  switched on.
+- **Test first.** `open_boundary_supplement_matches_the_fixed_one_when_inert`,
+  which compared the inert driven supplement's outgoing defect and boundary
+  residuals with the fixed one's, compares the element energies too. Before
+  the fix 63 elements differed.
+- **Fix.** The driven supplement adds the same share. The nonlinear test
+  that equated the elements' energy with the solver's bulk store,
+  `the_nonlinear_estimate_splits_the_solver_energy_and_departs_from_linear`,
+  now expects the bulk store and the wall's pole store together.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
