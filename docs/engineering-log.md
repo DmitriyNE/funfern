@@ -28036,3 +28036,28 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 6: a reversed Switch starts inside [0, 1] (NUM-4)
+
+- **The defect.** A Switch reversed mid-ramp starts its new ramp from the
+  blend it had reached. Smootherstep rounds just past 1 near the end of a
+  ramp, and `begin` stored that unclamped: `begin(true, 0.1, 0.2)` reversed at
+  0.3 stored 1.0000000000000013. The runtime's validity check wants [0, 1]
+  exactly, so every later evaluation and `restored` refused it. On the device,
+  which stores the start the same way in f32, a reversal in the last 0.4% of a
+  ramp left the indicator on the authored state, the energy view on the
+  authored runtime and adaptation without an estimate, and nothing reached
+  the diagnostics.
+- **Test first.**
+  `a_switch_reversed_at_the_end_of_its_ramp_starts_inside_the_unit_interval`
+  reverses at the ramp's end and requires the start in [0, 1] and `blend` and
+  `restored` to accept it; before the fix the start was 1.0000000000000013.
+  `a_reversed_switch_stores_its_start_clamped_on_the_device` holds the shader
+  to the same clamp.
+- **Fix.** The start blend is clamped to [0, 1] in `begin` and where
+  `canonical_wave.wgsl` stores it.
+- **Checked on Metal:** the 24 switch, temporal and law runs pass, and the
+  shaders compile in Chrome.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

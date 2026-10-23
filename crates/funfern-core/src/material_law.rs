@@ -1108,10 +1108,13 @@ impl MaterialSwitchRuntime {
             return Err(MaterialError::InvalidValue);
         }
         let target_blend = if switched { 1.0 } else { 0.0 };
+        // Clamped: smootherstep rounds just past 1 near the end of a ramp, and
+        // a start outside [0, 1] fails every later evaluation (NUM-4 of the
+        // 2026-10-20 review). The device clamps it the same way.
         let start_blend = if duration == 0.0 {
             target_blend
         } else {
-            self.blend(commit_time)?
+            self.blend(commit_time)?.clamp(0.0, 1.0)
         };
         Ok(Self {
             start_blend,
@@ -2847,6 +2850,33 @@ mod tests {
         assert_ne!(
             new.multiplier_with_runtime(commit_time + 0.125, origin(), new_runtime),
             old.multiplier_with_runtime(commit_time + 0.125, origin(), old_runtime)
+        );
+    }
+
+    /// NUM-4 of the 2026-10-20 review: smootherstep rounds just above 1 at the
+    /// end of a ramp, 1.0000000000000013 here, and a Switch reversed there
+    /// stored it as its start, outside [0, 1]: every later evaluation refused
+    /// the runtime, and `restored` did too.
+    #[test]
+    fn a_switch_reversed_at_the_end_of_its_ramp_starts_inside_the_unit_interval() {
+        let rising = MaterialSwitchRuntime::default()
+            .begin(true, 0.1, 0.2)
+            .unwrap();
+        let falling = rising.begin(false, 0.3, 0.2).unwrap();
+        assert!(
+            (0.0..=1.0).contains(&falling.start_blend),
+            "{}",
+            falling.start_blend
+        );
+        assert!(falling.blend(0.35).is_ok());
+        assert!(
+            MaterialSwitchRuntime::restored(
+                falling.start_blend,
+                falling.target_blend,
+                falling.start_time,
+                falling.duration,
+            )
+            .is_ok()
         );
     }
 

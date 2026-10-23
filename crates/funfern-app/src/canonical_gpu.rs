@@ -11301,6 +11301,17 @@ mod tests {
         );
     }
 
+    /// NUM-4 of the 2026-10-20 review: the device stores a reversed Switch's
+    /// start blend clamped to [0, 1], as the host does; smootherstep rounds
+    /// just past 1 at the end of a ramp in f32 as well.
+    #[test]
+    fn a_reversed_switch_stores_its_start_clamped_on_the_device() {
+        let shader = include_str!("canonical_wave.wgsl");
+        assert!(shader.contains(
+            "var start = clamp(temporal_switch_blend(accepted, control.clock_f32.y), 0.0, 1.0);"
+        ));
+    }
+
     #[test]
     fn edited_source_handoff_selects_target_parameters_with_old_runtime_anchor() {
         let scene = Scene::initial();

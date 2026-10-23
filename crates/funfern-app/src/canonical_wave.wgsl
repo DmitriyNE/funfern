@@ -1695,7 +1695,9 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
             if i == upload.z {
                 let target_blend = f32(upload.w);
                 let duration = boundary_float(1u, 0u);
-                var start = temporal_switch_blend(accepted, control.clock_f32.y);
+                // Clamped as the host clamps it: smootherstep rounds just past
+                // 1 near the end of a ramp (NUM-4 of the 2026-10-20 review).
+                var start = clamp(temporal_switch_blend(accepted, control.clock_f32.y), 0.0, 1.0);
                 if duration == 0.0 { start = target_blend; }
                 tables[candidate + 1u].data = bitcast<vec4<u32>>(vec4<f32>(
                     start, target_blend, control.clock_f32.y, duration));
