@@ -27907,3 +27907,27 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a resolution change keeps the active mesh's revision (MESH-17)
+
+- **The defect.** A change of mesh resolution over an unchanged mesh scene
+  re-coarsens the plan. It was re-coarsened from the newest compile, while
+  the token and the snapshot kept the active mesh's topology revision. After
+  an edit that left the geometry alone, such as a material's, the newest
+  compile is the same geometry under a newer revision, so the rebuilt mesh
+  carried that revision. The handoff restores each component's flux total
+  only on a remesh of the same geometry, which it reads from the meshes'
+  geometry revisions, and took this one for an edit.
+- **Test first.**
+  `a_resolution_change_after_a_material_edit_keeps_the_geometry_revision`
+  edits the medium's stiffness, commits, and then refines the resolution. It
+  requires the rebuilt mesh to keep the active mesh's geometry revision and
+  the plan, the snapshot and the token to agree on it. Before the fix the mesh
+  carried revision 2 against the active mesh's 1.
+- **Fix.** The plan is re-derived from the snapshot the active mesh was built
+  from, `AcceptedTopology::compiled_plan`, which the fallback to the compiled
+  plan now shares.
+- **Checked on Metal:** the 25 handoff and remesh runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

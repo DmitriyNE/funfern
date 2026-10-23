@@ -83,20 +83,26 @@ impl AcceptedTopology {
         TopologyWaveModel::from_topology_scene(&self.authored)
     }
 
-    /// The same scene with the plan as compiled, one atom per arrangement
-    /// segment, which meshes the arrangement by construction: what a
-    /// coarsened plan that does not mesh falls back on. `None` where the plan
-    /// is that one already.
-    fn with_compiled_plan(&self) -> Result<Option<Self>, String> {
+    /// The plan of this scene's snapshot as compiled, one atom per
+    /// arrangement segment, before coarsening.
+    fn compiled_plan(&self) -> Result<TopologyMeshPlan, String> {
         let assignments = self
             .authored
             .resolve_face_assignments(&self.snapshot)
             .map_err(|issue| {
                 format!("Compiled topology does not match its authored scene: {issue}")
             })?;
-        let plan = TopologyMeshPlan::new(&self.snapshot, &assignments).map_err(|issue| {
+        TopologyMeshPlan::new(&self.snapshot, &assignments).map_err(|issue| {
             format!("Compiled topology does not match its authored scene: {issue}")
-        })?;
+        })
+    }
+
+    /// The same scene with the plan as compiled, one atom per arrangement
+    /// segment, which meshes the arrangement by construction: what a
+    /// coarsened plan that does not mesh falls back on. `None` where the plan
+    /// is that one already.
+    fn with_compiled_plan(&self) -> Result<Option<Self>, String> {
+        let plan = self.compiled_plan()?;
         Ok((plan != *self.plan).then(|| Self {
             token: self.token,
             authored: self.authored.clone(),
@@ -463,14 +469,20 @@ impl TopologyPreparationJob {
         let bundle = if same_mesh_scene {
             let previous = previous.as_ref().unwrap();
             // The plan's atoms depend on the meshing options, so a changed
-            // resolution re-derives them from the same compiled scene.
+            // resolution re-derives them, from the snapshot the active mesh was
+            // built from, whose revision the token keeps. The newer compile
+            // may be of the same geometry under a newer revision, and a plan
+            // from it gave the rebuilt mesh that revision, which the handoff
+            // took for an edit and left the component totals uncorrected
+            // (MESH-17 of the 2026-10-20 review).
             let plan = if previous.meshing == options {
                 previous.bundle.plan.clone()
             } else {
                 Arc::new(
-                    compiled
-                        .plan
-                        .coarsened(&compiled.topology, coarsening)
+                    previous
+                        .bundle
+                        .compiled_plan()?
+                        .coarsened(&previous.bundle.snapshot, coarsening)
                         .map_err(|issue| {
                             format!("Compiled topology could not be prepared for meshing: {issue}")
                         })?,
@@ -4229,6 +4241,67 @@ mod tests {
         );
         assert!(rebuilt.transfer.is_some());
         assert_eq!(rebuilt.mesh.mesh_revision, token.mesh_generation);
+    }
+
+    /// MESH-17 of the 2026-10-20 review: a resolution change after an edit
+    /// that left the geometry alone re-coarsened the plan from the newer
+    /// compile while the token and the snapshot kept the active mesh's
+    /// revision. The rebuilt mesh carried the newer geometry revision, and the
+    /// handoff took the remesh of unchanged geometry for an edit and left the
+    /// component totals uncorrected.
+    #[test]
+    fn a_resolution_change_after_a_material_edit_keeps_the_geometry_revision() {
+        let (mut editor, _, mut runtime) = hole_runtime();
+        let mut medium = editor.document.model.draft.materials[0].clone();
+        medium.stiffness = ScalarField::constant(1.5);
+        editor.update_material(medium).unwrap();
+        settle(&mut editor);
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                options(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let active = commit_prepared(&mut runtime, token);
+        assert_ne!(
+            editor.compiled_accepted.topology.revision, active.bundle.token.topology_revision,
+            "the material edit compiled no newer revision"
+        );
+        let finer = MeshingOptions {
+            target_edge_length: 0.15,
+            ..options()
+        };
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                finer,
+                false,
+            )
+            .unwrap();
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let rebuilt = commit_prepared(&mut runtime, token);
+        assert_eq!(
+            rebuilt.mesh_action,
+            TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::MeshingOptionsChanged)
+        );
+        assert_eq!(
+            rebuilt.mesh.geometry_revision,
+            active.mesh.geometry_revision
+        );
+        assert_eq!(
+            rebuilt.bundle.plan.geometry_revision,
+            rebuilt.bundle.token.topology_revision
+        );
+        assert_eq!(
+            rebuilt.bundle.snapshot.revision,
+            rebuilt.bundle.token.topology_revision
+        );
     }
 
     /// MESH-7 of the 2026-10-20 review: a coarsened plan that does not mesh
