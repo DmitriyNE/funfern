@@ -27575,3 +27575,27 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a span's sides pair stretch by stretch (MESH-11)
+
+- **The defect.** Adaptation splits and collapses a separated trace's two sides
+  together. Whether a side had a partner was decided by label: any atom of the
+  span on the other side made one. A transmitting span turns reflecting where
+  one side faces a hole, so one span can be single on its left along one
+  stretch and on its right along another. Each stretch then took the other as
+  its partner. Refinement on either failed the whole transaction ("paired
+  constrained edge is missing" on the left, "canonical paired edge is missing"
+  on the right), and the right stretch, taken for its partner's copy, never
+  coarsened. It repeated on every cycle.
+- **Test first.** `opposite_single_sides_of_one_span_adapt_on_their_own` crosses
+  a transmitting line with two others and makes the cell below its west
+  stretch and the one above its east stretch holes. It refines along the line
+  and coarsens back, and requires both single sides to gain edges and then lose
+  them. Before the fix, refinement failed with the error above.
+- **Fix.** `paired_label` takes the parameter and pairs only with an atom of
+  the other side that covers it. Its callers pass the vertex's parameter or the
+  edge's midpoint.
+- **Checked on Metal:** the three adaptation runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

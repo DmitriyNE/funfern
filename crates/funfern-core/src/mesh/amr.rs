@@ -1041,7 +1041,9 @@ impl MeshAdaptationJob {
         let Some(point) = self.builder.vertices[remove].boundary else {
             return Ok(None);
         };
-        if !self.canonical_boundary_face(point.label) || self.is_boundary_anchor(point) {
+        if !self.canonical_boundary_face(point.label, point.parameter)
+            || self.is_boundary_anchor(point)
+        {
             return Ok(None);
         }
         let Some((incoming, outgoing)) = self.face_edges(remove, point.label) else {
@@ -1082,7 +1084,7 @@ impl MeshAdaptationJob {
         }))
     }
 
-    fn canonical_boundary_face(&self, label: BoundaryLabel) -> bool {
+    fn canonical_boundary_face(&self, label: BoundaryLabel, parameter: f64) -> bool {
         match label {
             BoundaryLabel::InternalBoundary {
                 side: InternalBoundarySide::Right,
@@ -1096,7 +1098,7 @@ impl MeshAdaptationJob {
                 side: CurveTraceSide::Right,
                 separated: true,
                 ..
-            } => self.paired_label(label).is_none(),
+            } => self.paired_label(label, parameter).is_none(),
             _ => true,
         }
     }
@@ -1224,7 +1226,7 @@ impl MeshAdaptationJob {
         let pair_count = if candidate.boundary
             && self.builder.vertices[candidate.key.remove]
                 .boundary
-                .and_then(|point| self.paired_label(point.label))
+                .and_then(|point| self.paired_label(point.label, point.parameter))
                 .is_some()
         {
             2
@@ -1264,7 +1266,7 @@ impl MeshAdaptationJob {
             return Ok(false);
         };
         let mut plans = vec![plan];
-        if let Some(pair_label) = self.paired_label(point.label) {
+        if let Some(pair_label) = self.paired_label(point.label, point.parameter) {
             let partner = self
                 .builder
                 .vertices
@@ -1300,7 +1302,11 @@ impl MeshAdaptationJob {
         Ok(true)
     }
 
-    fn paired_label(&self, label: BoundaryLabel) -> Option<BoundaryLabel> {
+    /// The label of the other side at `parameter`, if that side is meshed
+    /// there. A curve's sides pair stretch by stretch: a transmitting span
+    /// turns reflecting where one side faces a hole, so one span can be single
+    /// on its left along one stretch and on its right along another.
+    fn paired_label(&self, label: BoundaryLabel, parameter: f64) -> Option<BoundaryLabel> {
         let pair = match label {
             BoundaryLabel::InternalBoundary {
                 id,
@@ -1334,7 +1340,13 @@ impl MeshAdaptationJob {
         }?;
         if matches!(label, BoundaryLabel::Curve { .. })
             && let AdaptationInput::Topology(contract) = &self.input
-            && !contract.atoms.iter().any(|atom| atom.label == pair)
+            && !contract.atoms.iter().any(|atom| {
+                let [a, b] = atom.boundary.parameter;
+                let (low, high) = (a.min(b), a.max(b));
+                atom.label == pair
+                    && (parameter >= low || parameter_close(parameter, low))
+                    && (parameter <= high || parameter_close(parameter, high))
+            })
         {
             return None;
         }
@@ -1733,7 +1745,8 @@ impl MeshAdaptationJob {
             .position(|boundary| edge_key(boundary.vertices[0], boundary.vertices[1]) == key)
         {
             let boundary = self.builder.boundary_edges[found];
-            let index = if self.canonical_boundary_face(boundary.label) {
+            let parameter = 0.5 * (boundary.parameters[0] + boundary.parameters[1]);
+            let index = if self.canonical_boundary_face(boundary.label, parameter) {
                 found
             } else {
                 let canonical = match boundary.label {
@@ -1794,7 +1807,7 @@ impl MeshAdaptationJob {
         let edge = self.builder.boundary_edges[index];
         let parameter = 0.5 * (edge.parameters[0] + edge.parameters[1]);
         let point = self.boundary_point(edge.label, parameter)?;
-        if let Some(pair_label) = self.paired_label(edge.label) {
+        if let Some(pair_label) = self.paired_label(edge.label, parameter) {
             let pair_index = self
                 .builder
                 .boundary_edges
@@ -2620,6 +2633,121 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// MESH-11 of the 2026-10-20 review: a transmitting line crossed by two
+    /// others, with the cell below its west stretch and the one above its east
+    /// stretch holes. Both stretches turn reflecting on one side, the west on
+    /// its left and the east on its right, so the one span carries single
+    /// sides of both hands. Paired by label, each found the other as its
+    /// partner: refinement on them failed the whole transaction, every cycle.
+    #[test]
+    fn opposite_single_sides_of_one_span_adapt_on_their_own() {
+        let outer = |id: u64, side: OuterSide, fraction: f64| TopologyVertex {
+            id: TopologyVertexId(id),
+            location: TopologyVertexLocation::Outer { side, fraction },
+        };
+        let line = |id: u64, from: Point2, to: Point2, ends: [u64; 2]| {
+            let mut curve = TopologyCurve::new(
+                CurveId(id),
+                CurveSpline::Open(OpenCubicSpline::polyline(vec![from, to]).unwrap()),
+                vec![CurveSpan {
+                    id: CurveSpanId(id),
+                    behavior: SpanBehavior::Transmitting,
+                }],
+            )
+            .unwrap();
+            curve.nodes[0].vertex = Some(TopologyVertexId(ends[0]));
+            curve.nodes[1].vertex = Some(TopologyVertexId(ends[1]));
+            curve
+        };
+        let geometry = TopologyGeometry {
+            curves: vec![
+                line(1, Point2::new(-1.0, 0.0), Point2::new(1.0, 0.0), [1, 2]),
+                line(2, Point2::new(-0.5, -1.0), Point2::new(-0.5, 1.0), [3, 5]),
+                line(3, Point2::new(0.5, -1.0), Point2::new(0.5, 1.0), [4, 6]),
+            ],
+            vertices: vec![
+                outer(1, OuterSide::Left, 0.5),
+                outer(2, OuterSide::Right, 0.5),
+                outer(3, OuterSide::Bottom, 0.25),
+                outer(4, OuterSide::Bottom, 0.75),
+                outer(5, OuterSide::Top, 0.75),
+                outer(6, OuterSide::Top, 0.25),
+            ],
+            ..TopologyGeometry::default()
+        };
+        let topology = compile_topology(&geometry, 261).unwrap();
+        let holes = [
+            topology.face_at(Point2::new(-0.75, -0.5)).unwrap(),
+            topology.face_at(Point2::new(0.75, 0.5)).unwrap(),
+        ];
+        let assignments = topology
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(index, face)| FaceRegionAssignment {
+                face: face.id,
+                region: (!holes.contains(&face.id)).then_some(RegionId(index as u64 + 1)),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        let mut configuration = options(0.28, 0.07);
+        configuration.max_topology_changes = 4_000;
+        configuration.max_work_units = 20_000_000;
+        let mut initial_meshing = configuration.meshing;
+        initial_meshing.target_edge_length = 0.35;
+        let source = Arc::new(mesh_topology_plan(&plan, 361, initial_meshing).unwrap());
+        let single = |mesh: &TriMesh, side: CurveTraceSide| {
+            mesh.boundary_edges
+                .iter()
+                .filter(|edge| {
+                    edge.label
+                        == BoundaryLabel::Curve {
+                            curve: CurveId(1),
+                            span: CurveSpanId(1),
+                            side,
+                            separated: true,
+                        }
+                })
+                .count()
+        };
+        let refined = run(
+            MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                362,
+                Arc::new(|point: Point2, _| if point.y.abs() < 0.2 { 0.07 } else { 0.28 }),
+                configuration,
+            ),
+            37,
+        );
+        for side in [CurveTraceSide::Left, CurveTraceSide::Right] {
+            assert!(
+                single(&refined.mesh, side) > single(&source, side),
+                "{side:?}: {:?}",
+                refined.report
+            );
+        }
+        let coarsened = run(
+            MeshAdaptationJob::new_topology(
+                Arc::new(refined.mesh.clone()),
+                &plan,
+                refined.state,
+                363,
+                Arc::new(|_, _| 0.28),
+                configuration,
+            ),
+            37,
+        );
+        for side in [CurveTraceSide::Left, CurveTraceSide::Right] {
+            assert!(
+                single(&coarsened.mesh, side) < single(&refined.mesh, side),
+                "{side:?}: {:?}",
+                coarsened.report
+            );
+        }
     }
 
     #[test]
