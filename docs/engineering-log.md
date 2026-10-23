@@ -27759,3 +27759,32 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: slit recovery leaves a carve's kept triangles as they were (MESH-8)
+
+- **The defect.** A repair keeps the triangles away from an edit frozen and
+  meshes the band it removed around them. Recovering a baffle's slit in that
+  band snaps a nearby free vertex onto the curve, or pushes one off a sliver
+  beside it, and neither move asked whether the vertex came with the frozen
+  triangles. A rim vertex moved, the kept triangles around it changed shape,
+  and the carve still counted them as kept.
+- **Test first.** `slit_recovery_leaves_the_kept_triangles_as_they_were`
+  refines an empty domain to 0.03 around its centre and adds a baffle there at
+  40 placements, requiring every carve to leave at least as many triangles
+  exactly as they were as it reports keeping. Before the fix, two placements
+  kept 6,189 and 6,190 while 6,188 were unchanged. Both were the snap; the
+  sweep did not reach the sliver push.
+- **Fix.** Neither move takes a vertex that came with the frozen triangles.
+  Every vertex of a frozen triangle did, so the kept part comes out exactly as
+  it went in. Outside a repair nothing is frozen and nothing changes.
+- **Also.** The comment on the meshing tests' walk-and-scan check, relaxed
+  with MESH-7, gave the wrong reason. Instrumented on the thin caps, the two
+  triangles were on either side of a separated wall, each with its own copy of
+  the wall's vertices, so a point on the wall lies on an edge of each; on an
+  edge two triangles share, the walk and the scan both take the lower. Where
+  the walk gives up on a point on a separated wall, the scan's lowest triangle
+  may be on the other side; nothing showed it.
+- **Checked on Metal:** the five remesh and repair runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

@@ -2388,6 +2388,51 @@ mod tests {
         }));
     }
 
+    /// MESH-8 of the 2026-10-20 review: a baffle added inside a finely adapted
+    /// region, at forty placements. Recovering its slit may snap a vertex onto
+    /// the curve or push one off a sliver, and neither move looked at whether
+    /// the vertex belonged to the triangles the carve keeps: a rim vertex
+    /// moved, its kept triangles changed shape, and the carve counted them as
+    /// kept all the same.
+    #[test]
+    fn slit_recovery_leaves_the_kept_triangles_as_they_were() {
+        let options = options(0.12);
+        let empty = compile_topology(&TopologyGeometry::default(), 1).unwrap();
+        let plan = single_face_plan(&empty, options);
+        let base = mesh_topology_plan(&plan, 10, options).unwrap();
+        let adapted = adapt_around(&base, &plan, Point2::new(0.0, 0.0), 0.03, options);
+        let before = triangle_keys(&adapted);
+        let mut faults = vec![];
+        for placement in 0..40 {
+            let angle = placement as f64 * 0.157;
+            let (sin, cos) = crate::portable_sin_cos(angle);
+            let offset = Point2::new(
+                0.013 * placement as f64 % 0.11,
+                0.007 * placement as f64 % 0.09,
+            );
+            let along = Point2::new(cos, sin) * 0.18;
+            let geometry = baffle_geometry(vec![
+                offset - along,
+                offset - along * 0.3,
+                offset + along * 0.4,
+                offset + along,
+            ]);
+            let Ok(topology) = compile_topology(&geometry, 2 + placement as u64) else {
+                continue;
+            };
+            let after = single_face_plan(&topology, options);
+            let (carved, report) = carve(&adapted, &plan, &after, &topology, options);
+            let kept = triangle_keys(&carved).intersection(&before).count();
+            if kept < report.kept_triangles {
+                faults.push(format!(
+                    "{placement}: {} kept, {kept} as they were",
+                    report.kept_triangles
+                ));
+            }
+        }
+        assert!(faults.is_empty(), "{} of 40: {faults:#?}", faults.len());
+    }
+
     /// Removing a divider merges its two faces: the strip where it ran is
     /// refilled and the absorbed face's triangles are relabeled to the
     /// survivor, nothing else changes.

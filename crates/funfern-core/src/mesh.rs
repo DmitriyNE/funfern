@@ -1569,6 +1569,15 @@ impl MeshBuilder {
             .position(|vertex| (vertex.point - point).norm() <= self.options.curve_tolerance * 0.1)
     }
 
+    /// Whether `vertex` came with a repair's frozen triangles. Every vertex of
+    /// a frozen triangle did, so a vertex that did not has none in its fan.
+    /// Slit recovery snapped and pushed such vertices like any other, and a
+    /// rim vertex that moved reshaped kept triangles the carve still counted
+    /// as kept (MESH-8 of the 2026-10-20 review).
+    fn imported(&self, vertex: usize) -> bool {
+        vertex < self.frozen_vertices
+    }
+
     /// Chain vertices and trace vertices, which a constraint point never moves.
     fn protected_constraint_vertices(&self) -> BTreeSet<usize> {
         self.internal_chains
@@ -1590,6 +1599,7 @@ impl MeshBuilder {
         let target_region = self.constraint_target_regions[boundary];
         self.vertices[vertex].boundary.is_none()
             && !protected.contains(&vertex)
+            && !self.imported(vertex)
             && !self.incident[vertex].is_empty()
             && self.incident[vertex].iter().all(|triangle_index| {
                 let triangle = self.triangles[*triangle_index];
@@ -1689,8 +1699,10 @@ impl MeshBuilder {
 
     /// The triangle holding `point`, by the walk from `start` and by the scan
     /// where the walk gives up, counted. Every meshing test holds the walk to
-    /// the scan. A point on an edge two triangles share is on the boundary of
-    /// both, and the two may stop at either.
+    /// the scan. A point on a separated wall lies on an edge of a triangle on
+    /// each side, the two sides' copies of one segment, and the walk stops on
+    /// the side it came from where the scan takes the lower-numbered; on an
+    /// edge two triangles share, both take the lower.
     fn locate_from(&mut self, start: usize, point: Point2) -> Option<(usize, PolygonLocation)> {
         if let Some(found) = self.walk_from(start, point) {
             #[cfg(test)]
@@ -1871,7 +1883,10 @@ impl MeshBuilder {
         .min(self.options.target_edge_length * 0.3);
 
         for (_, vertex) in adjacent {
-            if protected.contains(&vertex) || self.vertices[vertex].boundary.is_some() {
+            if protected.contains(&vertex)
+                || self.vertices[vertex].boundary.is_some()
+                || self.imported(vertex)
+            {
                 continue;
             }
             let point = self.point(vertex);
