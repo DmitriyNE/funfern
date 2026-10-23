@@ -27788,3 +27788,42 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: two repair lows (MESH-22, MESH-23)
+
+The carve's lows were to go in one commit; MESH-14 is left out of it, below.
+
+- **MESH-22, the size field before the chains.** A repair that preserves
+  adaptation refills its band at the sizes the removed triangles asked for,
+  but the field was installed after the changed atoms were cut into chains.
+  `a_straight_side_moved_through_an_adapted_band_takes_its_sizes` moves a
+  square hole through a band refined to 0.03: its straight sides were cut into
+  pieces of 0.1, at the coarse target, for refinement to split again; now
+  they are cut at the band's size. A free baffle is a slit, cut in after the
+  triangulation, and never went through this; the first version of the test
+  used one and passed before the fix.
+- **MESH-23, tiny islands.** A repair deleted every component of four kept
+  triangles or fewer, wherever it lay, so a small cell far from the edit was
+  carved and rebuilt on every repair, with its walls. Only islands that touch
+  the removed band go now. `a_small_cell_far_from_the_edit_is_kept` nudges a
+  hole with a reflecting triangle of side 0.06 in the far corner; its one
+  interior triangle was deleted before.
+- **MESH-14 held back.** The refill's quality floor is half the mesher's
+  minimum angle, or half the worst angle the previous mesh had where that is
+  lower, so each sliver a repair accepts lowers the next floor. The planned fix
+  took the worst angle among the kept triangles only, and
+  `the_refill_floor_comes_from_the_kept_triangles` held it (a sliver of under
+  4° pulled into the band gave a floor of 1.7° before, 9° after). The gate then
+  failed `a_refill_under_the_floor_carves_again_with_a_wider_cavity`: a welded
+  baffle moved 0.038 a step refills its free tip with a 3.47° element, which
+  the old floor let through because the previous mesh's worst angle was under
+  6.94°, and which every wider cavity made again. With the kept triangles'
+  floor of 5° the repair fell back to a full rebuild. The tip is no input
+  angle; the welds meet the wall at 80° to 100°. The floor needs a reference
+  repairs cannot lower that still allows what slit recovery leaves at a tip,
+  such as the worst angle of the last full build; that is for the user to
+  choose, and the carve keeps its old floor meanwhile.
+- **Checked on Metal:** the five remesh and repair runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

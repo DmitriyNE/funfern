@@ -662,6 +662,11 @@ impl TopologyCarveJob {
                 CarvePhase::Expand
             }
             CarvePhase::Expand => {
+                // Before the changed atoms are cut into chains, which take
+                // their pieces' lengths from it as the refill does: installed
+                // after, a straight curve moved through a fine band was cut at
+                // the coarse target (MESH-22 of the 2026-10-20 review).
+                self.install_size_field();
                 self.expand()?;
                 CarvePhase::Cycles
             }
@@ -670,25 +675,6 @@ impl TopologyCarveJob {
                 self.report.cavities = domains.len();
                 let mut builder = self.builder.take().unwrap();
                 builder.domains = domains;
-                if self.preserve_adaptation {
-                    let (removed, requests): (Vec<_>, Vec<_>) = self
-                        .deleted
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, deleted)| **deleted)
-                        .filter_map(|(index, _)| {
-                            let request = self.previous.requested_size(index)?;
-                            let points = self.previous.triangles[index]
-                                .vertices
-                                .map(|vertex| self.previous.vertices[vertex].point);
-                            Some((points, request))
-                        })
-                        .unzip();
-                    if !removed.is_empty() {
-                        self.size_field = Some(Arc::new(LocalSizeField::new(removed, requests)));
-                    }
-                }
-                builder.size_field = self.size_field.clone();
                 let frozen = builder.frozen_triangles;
                 CarvePhase::Mesh(Box::new(TopologyMeshingJob::resume(
                     self.plan.clone(),
@@ -810,6 +796,30 @@ impl TopologyCarveJob {
         Ok(())
     }
 
+    /// The sizes the removed triangles asked for, on the builder, where the
+    /// repair preserves adaptation.
+    fn install_size_field(&mut self) {
+        if self.preserve_adaptation {
+            let (removed, requests): (Vec<_>, Vec<_>) = self
+                .deleted
+                .iter()
+                .enumerate()
+                .filter(|(_, deleted)| **deleted)
+                .filter_map(|(index, _)| {
+                    let request = self.previous.requested_size(index)?;
+                    let points = self.previous.triangles[index]
+                        .vertices
+                        .map(|vertex| self.previous.vertices[vertex].point);
+                    Some((points, request))
+                })
+                .unzip();
+            if !removed.is_empty() {
+                self.size_field = Some(Arc::new(LocalSizeField::new(removed, requests)));
+            }
+        }
+        self.builder.as_mut().unwrap().size_field = self.size_field.clone();
+    }
+
     fn select(&mut self) -> Result<(), MeshError> {
         let mesh = self.previous.clone();
         let count = mesh.triangles.len();
@@ -902,6 +912,13 @@ impl TopologyCarveJob {
             let mut relabel = vec![None; count];
             let mut relabeled = 0;
             let mut visited = vec![false; count];
+            let band = deleted.clone();
+            let touches_band = |index: usize| {
+                mesh.triangles[index]
+                    .vertices
+                    .iter()
+                    .any(|vertex| incident[*vertex].iter().any(|other| band[*other]))
+            };
             for seed in 0..count {
                 if deleted[seed] || visited[seed] {
                     continue;
@@ -928,8 +945,11 @@ impl TopologyCarveJob {
                         }
                     }
                 }
-                // Tiny islands are not worth freezing inside a cavity.
-                if component.len() <= 4 {
+                // Tiny islands are not worth freezing inside a cavity. One
+                // away from it is no cavity's, and deleting it anyway rebuilt
+                // a small cell far from the edit on every repair (MESH-23 of
+                // the 2026-10-20 review).
+                if component.len() <= 4 && component.iter().any(|index| touches_band(*index)) {
                     for index in component {
                         deleted[index] = true;
                     }
@@ -2431,6 +2451,165 @@ mod tests {
             }
         }
         assert!(faults.is_empty(), "{} of 40: {faults:#?}", faults.len());
+    }
+
+    /// A carve job run through its selection, with what it chose to delete.
+    fn selected(
+        previous: &TriMesh,
+        previous_plan: &TopologyMeshPlan,
+        plan: &TopologyMeshPlan,
+        topology: &TopologySnapshot,
+        options: MeshingOptions,
+    ) -> TopologyCarveJob {
+        let mut job = TopologyCarveJob::new(
+            Arc::new(previous.clone()),
+            previous_plan,
+            plan.clone(),
+            Arc::new(topology.clone()),
+            previous.mesh_revision + 1,
+            options,
+            true,
+        );
+        while matches!(job.phase, CarvePhase::Index(_) | CarvePhase::Select) {
+            assert!(job.advance(1).is_none(), "the carve ended in its selection");
+        }
+        job
+    }
+
+    /// MESH-23 of the 2026-10-20 review: a repair deleted every component of
+    /// four kept triangles or fewer, wherever it was, so a small cell far from
+    /// the edit was carved and rebuilt on every repair, with its walls.
+    #[test]
+    fn a_small_cell_far_from_the_edit_is_kept() {
+        let options = options(0.12);
+        let cell = |center: Point2| {
+            let mut geometry = hole_geometry(center);
+            geometry.curves.push(
+                TopologyCurve::new(
+                    CurveId(5),
+                    CurveSpline::Closed(
+                        PeriodicCubicSpline::polygon(vec![
+                            Point2::new(0.7, 0.7),
+                            Point2::new(0.76, 0.7),
+                            Point2::new(0.73, 0.76),
+                        ])
+                        .unwrap(),
+                    ),
+                    spans(50, 3, SpanBehavior::REFLECTING),
+                )
+                .unwrap(),
+            );
+            geometry
+        };
+        let plan = |topology: &TopologySnapshot, hole: Point2| {
+            let [hole, cell] =
+                [hole, Point2::new(0.73, 0.72)].map(|point| topology.face_at(point).unwrap());
+            let assignments = topology
+                .faces
+                .iter()
+                .map(|face| FaceRegionAssignment {
+                    face: face.id,
+                    region: if face.id == hole {
+                        None
+                    } else if face.id == cell {
+                        Some(RegionId(3))
+                    } else {
+                        Some(RegionId(1))
+                    },
+                })
+                .collect::<Vec<_>>();
+            TopologyMeshPlan::new(topology, &assignments)
+                .unwrap()
+                .coarsened(
+                    topology,
+                    super::super::AtomCoarsening::from_meshing(options),
+                )
+                .unwrap()
+        };
+        let from = Point2::new(0.0, 0.0);
+        let to = Point2::new(0.04, 0.03);
+        let before_topology = compile_topology(&cell(from), 1).unwrap();
+        let before_plan = plan(&before_topology, from);
+        let before = mesh_topology_plan(&before_plan, 10, options).unwrap();
+        let after_topology = compile_topology(&cell(to), 2).unwrap();
+        let after_plan = plan(&after_topology, to);
+        let inside = |triangle: &MeshTriangle| triangle.region == RegionId(3);
+        let cell_triangles = (0..before.triangles.len())
+            .filter(|index| inside(&before.triangles[*index]))
+            .collect::<Vec<_>>();
+        assert!(
+            (1..=4).contains(&cell_triangles.len()),
+            "{}",
+            cell_triangles.len()
+        );
+        let job = selected(&before, &before_plan, &after_plan, &after_topology, options);
+        let deleted = cell_triangles
+            .iter()
+            .filter(|index| job.deleted[**index])
+            .count();
+        assert_eq!(deleted, 0, "{deleted} of the cell's triangles deleted");
+    }
+
+    /// MESH-22 of the 2026-10-20 review: a repair that preserves adaptation
+    /// refills its band at the sizes the removed triangles asked for, but the
+    /// field was installed after the changed atoms were cut into chains, so a
+    /// square hole's straight sides moved through a band refined to 0.03 were
+    /// cut at the coarse target of 0.12, and refinement had to split them
+    /// down again.
+    #[test]
+    fn a_straight_side_moved_through_an_adapted_band_takes_its_sizes() {
+        let options = options(0.12);
+        let square = |center: Point2| TopologyGeometry {
+            curves: vec![
+                TopologyCurve::new(
+                    CurveId(6),
+                    CurveSpline::Closed(
+                        PeriodicCubicSpline::polygon(
+                            [[-0.15, -0.15], [0.15, -0.15], [0.15, 0.15], [-0.15, 0.15]]
+                                .map(|[x, y]| center + Point2::new(x, y))
+                                .to_vec(),
+                        )
+                        .unwrap(),
+                    ),
+                    spans(60, 4, SpanBehavior::REFLECTING),
+                )
+                .unwrap(),
+            ],
+            ..TopologyGeometry::default()
+        };
+        let from = Point2::new(0.0, 0.0);
+        let to = Point2::new(0.02, 0.01);
+        let topology = compile_topology(&square(from), 1).unwrap();
+        let plan = plan_for(&topology, from, None, options);
+        let base = mesh_topology_plan(&plan, 10, options).unwrap();
+        let adapted = adapt_around(&base, &plan, from, 0.03, options);
+        let moved = compile_topology(&square(to), 2).unwrap();
+        let moved_plan = plan_for(&moved, to, None, options);
+        let mut job = selected(&adapted, &plan, &moved_plan, &moved, options);
+        while !matches!(job.phase, CarvePhase::Cycles) {
+            assert!(
+                job.advance(1).is_none(),
+                "the carve ended before its cycles"
+            );
+        }
+        let builder = job.builder.as_ref().unwrap();
+        let on_side = |point: Point2| {
+            let local = point - to;
+            (local.x.abs() - 0.15).abs() < 1.0e-9 || (local.y.abs() - 0.15).abs() < 1.0e-9
+        };
+        let pieces = job
+            .cavity_edges
+            .iter()
+            .map(|(_, a, b)| (builder.point(*a), builder.point(*b)))
+            .filter(|(a, b)| on_side(*a) && on_side(*b))
+            .map(|(a, b)| (b - a).norm())
+            .collect::<Vec<_>>();
+        let longest = pieces.iter().copied().fold(0.0, f64::max);
+        assert!(!pieces.is_empty());
+        assert!(
+            longest <= 0.031,
+            "the sides were cut into pieces of {longest}"
+        );
     }
 
     /// Removing a divider merges its two faces: the strip where it ran is
