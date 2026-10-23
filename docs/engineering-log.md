@@ -27622,3 +27622,41 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a crossing beside a hidden sample is compiled (MESH-9)
+
+- **The defect.** The topology compiler refuses two segments within its
+  tolerance that do not meet, a touch with no junction. A curve is sampled
+  into short segments, and a transmitting crossing that fell within the
+  tolerance of one of those samples left the sample's other segment within
+  the tolerance of the crossed one, refused. A crossing within a quarter of the
+  tolerance was refused anyway, as a cut shorter than the vertex merge, and a
+  line passing through a sample exactly as a contact no vertex authorised. A
+  line dragged across a circle flickered between valid and invalid, and
+  resizing the domain, which resamples, could turn a valid scene invalid.
+- **Test first.** `a_crossing_beside_a_hidden_sample_is_compiled` sweeps a
+  straight transmitting line across a transmitting circle at 1,000 heights
+  and requires each to compile into three faces. Before the fix, 47 were
+  refused as near contacts, among them height 0, where the line passes through
+  two of the circle's nodes.
+- **Fix.** A proper crossing within the tolerance of a hidden sample of either
+  segment, one inside its curve and not an authored vertex, moves onto the
+  nearest such sample: that segment is cut at the sample and the crossed one at
+  the sample's foot, taking the sample's own point. A sample within the
+  tolerance of a segment it does not meet is accepted when its neighbouring
+  segment's crossing of that segment moves onto it, so nothing is left within
+  the tolerance of an edge it is not joined to. A curve passing exactly through
+  another's segment at a hidden sample, its two segments' far ends on either
+  side, is a crossing at that sample. The approved plan was the first two; the
+  third is the same refusal at zero distance.
+- **Measured beyond the test.** Lines at 2,000 heights and slopes up to 0.45:
+  221 refused before, none after. A circle of radius 0.37 dragged across one of
+  0.45 at 2,000 positions: 447 refused before, 9 after. The 9 are crossings
+  within the tolerance of a sample of each curve, which would need the two
+  samples merged into one vertex; that is an item under Maintenance in
+  `docs/plan.md`.
+- **Nothing else moves.** The 92 regression, frozen and gallery scenes
+  prepare to the same mesh hashes as before.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

@@ -1236,6 +1236,15 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   examples and many host tests still build theirs through `Scene`, so they
   move first. Its local repair, `MeshUpdateJob`, went in area 5 of the
   2026-10-20 review's fixes (the user's request, 2026-10-23).
+- [ ] Accept a crossing near a hidden sample of both curves. MESH-9 of the
+  2026-10-20 review moved a transmitting crossing within the tolerance of one
+  curve's hidden sample onto that sample, which took a line swept across a
+  circle from 47 refused heights in 1,000 to none. Where a sample of each
+  curve lies within the tolerance, the two samples would have to merge into
+  one vertex, and the draft is still refused as a near contact: 9 of 2,000
+  positions of one circle across another, against 447 before. Every pair of
+  segments touching either sample would have to agree on the merge, so it was
+  left for now (2026-10-23).
 - [ ] Testing campaign, structure first: configuration sweeps at the
   preparation layer, regression scenes that prepare, an audit of what the
   tests feed the solvers and mutations that prove the gate bites, then the
