@@ -27990,3 +27990,28 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a baffle's segment is recovered through flips that still cross it (MESH-19)
+
+- **The defect.** Recovering a constrained segment flips the edges that
+  cross it, and it flipped only an edge whose new diagonal clears the
+  segment. Where every crossing edge's flip left a crossing it refused the
+  scene with "could not recover an internal-boundary segment", though the
+  segment is recoverable.
+- **Test first.** A search of 3,000 random scenes of one to three reflecting
+  baffles meshed at 0.16, 0.08 and 0.04 found one: three baffles, one folded
+  back on itself, at 0.04.
+  `a_folded_baffle_is_recovered_through_flips_that_still_cross` meshes it and
+  requires the whole domain covered. It failed with that error before.
+- **Fix.** Where no flip clears the segment, `recover_by_queued_flips`
+  recovers it as Sloan's algorithm does: the crossing edges in a queue,
+  ordered along the segment, each flipped where its quadrilateral is convex
+  and queued again if the new diagonal still crosses, a non-convex one left
+  for a later turn. The turns are bounded, sixteen per crossing edge and 64
+  more, and running out is the refusal it was. The queue runs only where the
+  recovery used to refuse, so no mesh that was made before changes.
+- **Measured beyond the test.** The search's 2,616 scenes the arrangement
+  accepts all mesh now; one failed before.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

@@ -365,6 +365,16 @@ struct MeshBuilder {
     /// [`MeshBuilder::end_constraint_points`]; nothing else moves or adds a
     /// vertex meanwhile, and the insertion keeps it current.
     vertex_grid: Option<VertexGrid>,
+    /// A segment being recovered by flips that may still cross it.
+    queued_flips: Option<QueuedFlips>,
+}
+
+/// The segment [`MeshBuilder::recover_by_queued_flips`] is recovering, the
+/// crossing edges waiting their turn and the turns left.
+struct QueuedFlips {
+    segment: (usize, usize),
+    waiting: VecDeque<(usize, usize)>,
+    turns: usize,
 }
 
 /// Vertex indices binned by position on a uniform grid over the vertices'
@@ -739,6 +749,7 @@ impl MeshBuilder {
             frozen_vertices: 0,
             size_field: None,
             vertex_grid: None,
+            queued_flips: None,
         }
     }
 
@@ -2079,6 +2090,7 @@ impl MeshBuilder {
     fn recover_constraint_edge(&mut self, requested: [usize; 2]) -> Result<bool, MeshError> {
         let requested_key = edge_key(requested[0], requested[1]);
         if self.adjacency.contains_key(&requested_key) {
+            self.queued_flips = None;
             self.repair_constraint_edge_slivers(requested);
             return Ok(true);
         }
@@ -2096,10 +2108,107 @@ impl MeshBuilder {
             "the segment walk chose another edge to flip than the scan"
         );
         let Some(edge) = crossing else {
-            return Err(MeshError::Topology(
-                "could not recover an internal-boundary segment",
-            ));
+            return self.recover_by_queued_flips(requested);
         };
+        self.flip_crossing(edge)?;
+        Ok(false)
+    }
+
+    /// Recovery where no flip takes a crossing edge out of `requested`'s way,
+    /// as Sloan's does it: the crossing edges are taken in turn, each flipped
+    /// where its quadrilateral is convex and queued again if the new diagonal
+    /// still crosses, a non-convex one left for a later turn. Refusing every
+    /// flip whose new diagonal still crossed left a valid scene, a baffle
+    /// folded back on itself, unmeshable (MESH-19 of the 2026-10-20 review).
+    /// The turns are bounded, and running out is the refusal it was.
+    fn recover_by_queued_flips(&mut self, requested: [usize; 2]) -> Result<bool, MeshError> {
+        let key = edge_key(requested[0], requested[1]);
+        let a = self.point(requested[0]);
+        let b = self.point(requested[1]);
+        let crosses = |builder: &Self, edge: (usize, usize)| {
+            ![edge.0, edge.1]
+                .iter()
+                .any(|vertex| requested.contains(vertex))
+                && builder.adjacency.contains_key(&edge)
+                && segment_relation(a, b, builder.point(edge.0), builder.point(edge.1))
+                    == SegmentRelation::ProperIntersection
+        };
+        if self
+            .queued_flips
+            .as_ref()
+            .is_none_or(|queued| queued.segment != key)
+        {
+            let mut crossings = self
+                .adjacency
+                .keys()
+                .copied()
+                .filter(|edge| crosses(self, *edge))
+                .collect::<Vec<_>>();
+            crossings.sort_by(|left, right| {
+                let along = |edge: &(usize, usize)| {
+                    let middle = self.point(edge.0).lerp(self.point(edge.1), 0.5);
+                    (middle - a).dot(b - a)
+                };
+                along(left).total_cmp(&along(right)).then(left.cmp(right))
+            });
+            self.queued_flips = Some(QueuedFlips {
+                segment: key,
+                turns: 16 * crossings.len() + 64,
+                waiting: crossings.into(),
+            });
+        }
+        loop {
+            let queued = self.queued_flips.as_mut().unwrap();
+            let next = queued.waiting.pop_front();
+            let exhausted = queued.turns == 0;
+            queued.turns = queued.turns.saturating_sub(1);
+            let (Some(edge), false) = (next, exhausted) else {
+                self.queued_flips = None;
+                return Err(MeshError::Topology(
+                    "could not recover an internal-boundary segment",
+                ));
+            };
+            if !crosses(self, edge) {
+                continue;
+            }
+            if self.boundary_keys.contains(&edge) {
+                self.queued_flips = None;
+                return Err(MeshError::Topology(
+                    "internal boundary crosses a constrained edge",
+                ));
+            }
+            let convex = self.adjacency.get(&edge).is_some_and(|sides| {
+                sides.len() == 2 && {
+                    let c = self.point(sides[0].1);
+                    let d = self.point(sides[1].1);
+                    let [p, q] = [self.point(edge.0), self.point(edge.1)];
+                    let opposite = |x: PredicateSign, y: PredicateSign| {
+                        x != PredicateSign::Zero && y != PredicateSign::Zero && x != y
+                    };
+                    opposite(orient2d(c, d, p), orient2d(c, d, q))
+                        && opposite(orient2d(p, q, c), orient2d(p, q, d))
+                }
+            });
+            if !convex {
+                self.queued_flips.as_mut().unwrap().waiting.push_back(edge);
+                continue;
+            }
+            let flipped = self.flip_crossing(edge)?;
+            if crosses(self, flipped) {
+                self.queued_flips
+                    .as_mut()
+                    .unwrap()
+                    .waiting
+                    .push_back(flipped);
+            }
+            return Ok(false);
+        }
+    }
+
+    /// Flips `edge`, an unconstrained edge crossing a segment being
+    /// recovered, to the other diagonal of its convex quadrilateral, which it
+    /// returns.
+    fn flip_crossing(&mut self, edge: (usize, usize)) -> Result<(usize, usize), MeshError> {
         let sides = self
             .adjacency
             .get(&edge)
@@ -2140,7 +2249,7 @@ impl MeshBuilder {
         self.replace_triangle(first_index, first_new);
         self.replace_triangle(second_index, second_new);
         self.stats.edge_flips += 1;
-        Ok(false)
+        Ok(edge_key(c, d))
     }
 
     fn cut_internal_boundary(&mut self, index: usize) -> Result<(), MeshError> {

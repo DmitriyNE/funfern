@@ -4168,6 +4168,66 @@ mod tests {
         );
     }
 
+    /// MESH-19 of the 2026-10-20 review: recovering a baffle's segment flipped
+    /// only edges whose new diagonal cleared the segment, and where every flip
+    /// left a crossing it gave up. Three reflecting baffles, one folded back
+    /// on itself, found by a search of 3,000 random scenes, failed at an edge
+    /// of 0.04 with "could not recover an internal-boundary segment".
+    #[test]
+    fn a_folded_baffle_is_recovered_through_flips_that_still_cross() {
+        let baffles = [
+            vec![
+                Point2::new(-0.20757880182399935, -0.602954806455759),
+                Point2::new(-0.3564975247345384, -0.6752755306813112),
+                Point2::new(-0.737639221526293, -0.4452055805386201),
+            ],
+            vec![
+                Point2::new(-0.4117088651115095, -0.7137174400330969),
+                Point2::new(-0.6825282156011658, -0.6984305958826897),
+                Point2::new(-0.22267004827183562, -0.7371181073428704),
+                Point2::new(-0.20410897469107872, -0.6027284655939809),
+            ],
+            vec![
+                Point2::new(0.49146739887898616, 0.5880842261091208),
+                Point2::new(0.740299250939839, 0.932208391090394),
+                Point2::new(0.5162693149595209, 0.7754735797356795),
+                Point2::new(0.35528611608704197, 0.8429244360769934),
+            ],
+        ];
+        let curves = baffles
+            .into_iter()
+            .enumerate()
+            .map(|(index, points)| {
+                let count = points.len() - 1;
+                TopologyCurve::new(
+                    CurveId(index as u64 + 1),
+                    CurveSpline::Open(OpenCubicSpline::polyline(points).unwrap()),
+                    spans(index as u64 * 10 + 1, count, SpanBehavior::REFLECTING),
+                )
+                .unwrap()
+            })
+            .collect();
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves,
+                ..TopologyGeometry::default()
+            },
+            2828,
+        )
+        .unwrap();
+        let options = super::super::MeshingOptions {
+            target_edge_length: 0.04,
+            curve_tolerance: 5.0e-4,
+            ..super::super::MeshingOptions::default()
+        };
+        let plan = TopologyMeshPlan::new(&topology, &assign_each_face(&topology))
+            .unwrap()
+            .coarsened(&topology, AtomCoarsening::from_meshing(options))
+            .unwrap();
+        let mesh = mesh_topology_plan(&plan, 3828, options).unwrap();
+        assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9);
+    }
+
     #[test]
     fn topology_mesher_recovers_three_separated_arms_at_a_junction() {
         let center = TopologyVertexId(30);
