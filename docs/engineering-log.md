@@ -27931,3 +27931,22 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a junction at a corner of the domain (MESH-20)
+
+- **The defect.** A curve's end on the outer boundary is a vertex given one
+  outer side and a fraction along it, and the arrangement accepts its contact
+  with that side. At a corner two sides meet, and the end touches the other
+  one too, which was refused as a touch with no junction. The editor clamps a
+  click to a corner, so every curve attached there was refused.
+- **Test first.** `a_curve_from_corner_to_corner_divides_the_domain` draws a
+  transmitting diagonal between opposite corners, each end named on either of
+  its two sides, and requires all four to compile into two faces that mesh
+  with area 4. Before the fix all four were refused with a near contact on the
+  side the end was not given.
+- **Fix.** A vertex on the outer boundary is accepted against a side it was
+  given, and against a side one of whose ends it lies on, which only a corner
+  does.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

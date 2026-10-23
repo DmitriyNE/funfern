@@ -1271,27 +1271,36 @@ fn authorized_contact(
     if va.is_some() && va == vb {
         return true;
     }
-    let outer_matches = |vertex: Option<TopologyVertexId>, source: CompiledEdgeSource| {
-        let CompiledEdgeSource::Outer(side) = source else {
+    // A vertex on the outer boundary touches the side it was given, and at a
+    // corner the other side that meets there as well: the editor clamps a
+    // click to a corner, and that contact was refused as a touch with no
+    // junction (MESH-20 of the 2026-10-20 review).
+    let outer_matches = |vertex: Option<TopologyVertexId>, segment: &RawSegment| {
+        let CompiledEdgeSource::Outer(side) = segment.source else {
             return false;
         };
         vertex.is_some_and(|id| {
             geometry.vertices.iter().any(|vertex| {
+                let Some(target) = vertex.point(geometry.domain) else {
+                    return false;
+                };
+                let at_corner = segment
+                    .points
+                    .iter()
+                    .any(|corner| (target - *corner).norm() <= tolerance);
                 vertex.id == id
                     && matches!(
                         vertex.location,
                         TopologyVertexLocation::Outer {
                             side: vertex_side,
                             ..
-                        } if vertex_side == side
+                        } if vertex_side == side || at_corner
                     )
-                    && vertex
-                        .point(geometry.domain)
-                        .is_some_and(|target| (target - point).norm() <= tolerance)
+                    && (target - point).norm() <= tolerance
             })
         })
     };
-    outer_matches(va, b.source) || outer_matches(vb, a.source)
+    outer_matches(va, b) || outer_matches(vb, a)
 }
 
 fn endpoint_id(segment: &RawSegment, parameter: f64) -> Option<TopologyVertexId> {
@@ -2395,6 +2404,78 @@ mod tests {
             refused.len(),
             refused.first()
         );
+    }
+
+    /// MESH-20 of the 2026-10-20 review: the editor clamps a click to a corner
+    /// of the domain, where two outer sides meet, and a vertex there is given
+    /// one of them. Its contact with the other side was refused as a touch
+    /// with no junction. A diagonal from corner to corner, each end named on
+    /// either of its sides, divides the domain in two.
+    #[test]
+    fn a_curve_from_corner_to_corner_divides_the_domain() {
+        let corner = |id: u64, side: OuterSide, fraction: f64| TopologyVertex {
+            id: TopologyVertexId(id),
+            location: TopologyVertexLocation::Outer { side, fraction },
+        };
+        let mut refused = vec![];
+        for top_right in [(OuterSide::Top, 0.0), (OuterSide::Right, 1.0)] {
+            for bottom_left in [(OuterSide::Bottom, 0.0), (OuterSide::Left, 1.0)] {
+                let mut diagonal = open(
+                    1,
+                    1,
+                    &[[1.0, 1.0], [-1.0, -1.0]],
+                    SpanBehavior::Transmitting,
+                );
+                attach(&mut diagonal, 0, TopologyVertexId(1));
+                attach(&mut diagonal, 1, TopologyVertexId(2));
+                let geometry = TopologyGeometry {
+                    domain: DomainRect::UNIT,
+                    curves: vec![diagonal],
+                    vertices: vec![
+                        corner(1, top_right.0, top_right.1),
+                        corner(2, bottom_left.0, bottom_left.1),
+                    ],
+                };
+                match compile_topology(&geometry, 0) {
+                    Ok(snapshot) => {
+                        assert_eq!(snapshot.faces.len(), 2);
+                        let assignments = snapshot
+                            .faces
+                            .iter()
+                            .enumerate()
+                            .map(|(index, face)| crate::FaceRegionAssignment {
+                                face: face.id,
+                                region: Some(crate::RegionId(index as u64 + 1)),
+                            })
+                            .collect::<Vec<_>>();
+                        let plan = crate::TopologyMeshPlan::new(&snapshot, &assignments).unwrap();
+                        let mesh = crate::mesh_topology_plan(
+                            &plan,
+                            1,
+                            crate::MeshingOptions {
+                                target_edge_length: 0.3,
+                                ..crate::MeshingOptions::default()
+                            },
+                        )
+                        .unwrap();
+                        let area = mesh
+                            .triangles
+                            .iter()
+                            .map(|triangle| {
+                                let [a, b, c] =
+                                    triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+                                0.5 * (b - a).cross(c - a)
+                            })
+                            .sum::<f64>();
+                        assert!((area - 4.0).abs() < 1.0e-9, "{area}");
+                    }
+                    Err(issue) => {
+                        refused.push(format!("{top_right:?} to {bottom_left:?}: {issue:?}"))
+                    }
+                }
+            }
+        }
+        assert!(refused.is_empty(), "{refused:#?}");
     }
 
     #[test]
