@@ -6488,6 +6488,53 @@ mod tests {
         (quadratic, canonical)
     }
 
+    /// NUM-5 of the 2026-10-20 review: a skin switch converted legacy damping
+    /// as a coefficient, `d/ρ` into the electromagnetic skins and back by the
+    /// stiffness, but the solver reads it as the primary field's rate in every
+    /// skin. A Mechanical medium of density 4 with damping 0.4, switched to TM,
+    /// decayed four times more slowly.
+    #[test]
+    fn legacy_damping_decays_alike_across_a_skin_switch() {
+        let tm_physics = PhysicsModel::Electromagnetic {
+            polarization: crate::ElectromagneticPolarization::Tm,
+        };
+        let mut mechanical = Scene::default();
+        mechanical.materials[0].mass_density = ScalarField::constant(4.0);
+        mechanical.materials[0].damping = ScalarField::constant(0.4);
+        let mut tm = mechanical.clone();
+        tm.physics = tm_physics;
+        tm.materials[0] = PhysicsModel::Mechanical
+            .convert_material(tm_physics, &mechanical.materials[0])
+            .unwrap();
+        let decay = |scene: &Scene| {
+            let (_, operator) = compile(scene);
+            let duration = 2.0;
+            let steps = (duration / (0.2 * operator.maximum_time_step())).ceil() as usize;
+            let time_step = duration / steps as f64;
+            let mode = operator
+                .node_points()
+                .iter()
+                .map(|point| (0.5 * std::f64::consts::PI * (point.x + 1.0)).cos())
+                .collect::<Vec<_>>();
+            let potential = vec![0.0; operator.degrees_of_freedom()];
+            let mut state = CanonicalWaveState::from_primary_and_potential(
+                &operator, time_step, &mode, &potential,
+            )
+            .unwrap();
+            let start = state.energy(&operator).unwrap();
+            for _ in 0..steps {
+                state.step(&operator).unwrap();
+            }
+            -(state.energy(&operator).unwrap() / start).ln() / duration
+        };
+        let (mechanical_rate, tm_rate) = (decay(&mechanical), decay(&tm));
+        assert!(mechanical_rate > 0.05, "{mechanical_rate}");
+        assert!(
+            (tm_rate - mechanical_rate).abs() <= 0.02 * mechanical_rate,
+            "Mechanical decays at {mechanical_rate}, TM at {tm_rate}"
+        );
+    }
+
     fn configured_scene(physics: PhysicsModel) -> Scene {
         let mut scene = Scene {
             physics,

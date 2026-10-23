@@ -415,17 +415,20 @@ impl PhysicsModel {
             ));
         }
 
+        // Legacy damping is the primary field's rate in every skin, as the
+        // solver reads it, so it crosses unchanged. Converted as a coefficient,
+        // `d/ρ` and back by the stiffness, a medium of density 4 decayed four
+        // times more slowly after a switch to TM (NUM-5 of the 2026-10-20
+        // review).
         let mut converted = material.clone();
         if crossing_to_em {
             converted.mass_density = material.stiffness.reciprocal()?;
             converted.stiffness = material.mass_density.clone();
-            converted.damping = material.damping.divide(&material.mass_density)?;
             converted.mass_law = material.stiffness_law.clone();
             converted.stiffness_law = material.mass_law.clone();
         } else {
             converted.mass_density = material.stiffness.clone();
             converted.stiffness = material.mass_density.reciprocal()?;
-            converted.damping = material.damping.multiply(&material.stiffness)?;
             converted.mass_law = material.stiffness_law.clone();
             converted.stiffness_law = material.mass_law.clone();
         }
@@ -2000,7 +2003,7 @@ mod tests {
             };
             assert!((mechanical.wave_speed(old) - tm.wave_speed(new)).abs() < 1.0e-14);
             assert!((mechanical.impedance(old) - tm.impedance(new)).abs() < 1.0e-14);
-            assert!((old.damping / old.mass_density - new.damping).abs() < 1.0e-14);
+            assert_eq!(old.damping, new.damping);
         }
 
         let mut physics = tm;

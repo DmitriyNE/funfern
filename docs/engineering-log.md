@@ -28132,3 +28132,29 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: legacy damping crosses a skin switch unchanged (NUM-5)
+
+- **The defect.** A switch of skin converts each material: the density and
+  stiffness exchange roles, and the legacy `damping` was converted as a
+  coefficient, `d/ρ` into the electromagnetic skins and back by the
+  stiffness, which kept the rate under the old scalar operator. The
+  canonical solver reads it as the primary field's rate in every skin, so a
+  Mechanical material of density 4 and damping 0.4 became, in TM, ε = 1,
+  μ = 4 and damping 0.1, and decayed four times more slowly. The round trip
+  back restored 0.4, which is what the unit test checked.
+- **Test first.** `legacy_damping_decays_alike_across_a_skin_switch` runs that
+  medium on the canonical solver from one mode in each skin and compares the
+  energy's decay rates over the same time. Before the fix they were 0.701 and
+  0.181; after, both 0.70109.
+- **Fix.** As the user chose: the damping crosses unchanged, and
+  `physics_material_conversion_preserves_characteristics_and_stays_bounded`
+  asserts it is equal rather than divided by the density. A stored scene
+  keeps its values, so nothing migrates. `ScalarField::multiply` and
+  `divide`, which only the conversion used, went with it.
+- **Plan.** The user asked for the legacy damping to be phased out with the
+  rest of the legacy parts, which come next after the review's fixes; both
+  are in the item under Maintenance in `docs/plan.md`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

@@ -224,26 +224,6 @@ impl ScalarField {
         })
     }
 
-    /// Builds a product and performs the small, structural simplifications used
-    /// when converting between physics material laws.
-    pub(crate) fn multiply(&self, right: &Self) -> Result<Self, MaterialError> {
-        Self::from_transformed_expression(Expression::Binary {
-            operator: BinaryOperator::Mul,
-            left: Box::new(self.expression()?),
-            right: Box::new(right.expression()?),
-        })
-    }
-
-    /// Builds a quotient and performs the small, structural simplifications used
-    /// when converting between physics material laws.
-    pub(crate) fn divide(&self, right: &Self) -> Result<Self, MaterialError> {
-        Self::from_transformed_expression(Expression::Binary {
-            operator: BinaryOperator::Div,
-            left: Box::new(self.expression()?),
-            right: Box::new(right.expression()?),
-        })
-    }
-
     fn expression(&self) -> Result<Expression, MaterialError> {
         match self {
             Self::Constant(value) => Ok(Expression::Constant(*value)),
@@ -1317,24 +1297,6 @@ mod tests {
             assert_eq!(
                 restored.evaluate(at(x, 0.0), &[]),
                 field.evaluate(at(x, 0.0), &[])
-            );
-        }
-
-        let damping = ScalarField::formula("0.2 + y*y").unwrap();
-        let density = ScalarField::formula("2 + x*x").unwrap();
-        let zero_loss = ScalarField::constant(0.0).divide(&density).unwrap();
-        assert_eq!(zero_loss, ScalarField::constant(0.0));
-        assert_eq!(
-            zero_loss.multiply(&density).unwrap(),
-            ScalarField::constant(0.0)
-        );
-        let normalized = damping.divide(&density).unwrap();
-        let round_trip = normalized.multiply(&density).unwrap();
-        assert_eq!(round_trip.source(), Some("0.2 + y * y"));
-        for (x, y) in [(-0.5, 0.2), (0.0, 0.0), (0.8, -0.4)] {
-            assert_eq!(
-                round_trip.evaluate(at(x, y), &[]),
-                damping.evaluate(at(x, y), &[])
             );
         }
 
