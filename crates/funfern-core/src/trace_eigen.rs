@@ -1036,9 +1036,12 @@ fn dot(left: &[f64], right: &[f64]) -> f64 {
 }
 
 /// A start vector of entries in `(-1, 1)` from an integer generator seeded by
-/// the vector's position, the same on every platform.
+/// the vector's position, the same on every platform. The seed's product
+/// wraps by design; written as `*`, it panicked in every debug build (NUM-8 of
+/// the 2026-10-20 review).
 fn start_vector(position: usize, size: usize) -> Vec<f64> {
-    let mut state = 0x9E37_79B9_7F4A_7C15_u64 ^ ((position as u64 + 1) * 0xD1B5_4A32_D192_ED03);
+    let mut state =
+        0x9E37_79B9_7F4A_7C15_u64 ^ (position as u64 + 1).wrapping_mul(0xD1B5_4A32_D192_ED03);
     (0..size)
         .map(|_| {
             state ^= state << 13;

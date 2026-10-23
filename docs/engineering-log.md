@@ -28015,3 +28015,24 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 6: the trace eigensolve's seed wraps by design (NUM-8)
+
+- **The defect.** The trace eigensolve seeds each start vector by
+  multiplying its position by a constant above 2^63 with a plain `*`. A
+  release build wraps the product, which is what the generator means; a
+  debug build panics on the overflow. Every scene with a second-order
+  outgoing wall, the default among them, panicked while preparing under
+  `cargo run`, `scripts/trunk serve` and a debug `cargo test`, and the wasm
+  app aborted. CI and the gate built release only.
+- **Test first.** `crates/funfern-core/tests/default_scene.rs` prepares the
+  default scene through its outgoing walls to the canonical operator. In the
+  debug profile it panicked with "attempt to multiply with overflow" at the
+  seed, as did the existing eigensolve tests.
+- **Fix.** `wrapping_mul`, the product a release build already took, so no
+  number changes.
+- **Guard.** CI's check job runs the new test in the debug profile after the
+  release tests, as the user chose, and so does the gate.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

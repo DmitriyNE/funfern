@@ -112,6 +112,12 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --release --locked
 
+      # A debug build panics on an integer overflow a release build wraps, as
+      # the trace eigensolve's seed did for every scene with a second-order
+      # outgoing wall (NUM-8 of the 2026-10-20 review).
+      - name: Prepare the default scene in the debug profile
+        run: cargo test -p funfern-core --test default_scene --locked
+
   # Nightly: the wall sweep over every gallery scene, the five arrays of one
   # obstacle included, which carry two thirds of its cases and stay out of
   # the gate (crates/funfern-app/tests/wall_sweep.rs).
