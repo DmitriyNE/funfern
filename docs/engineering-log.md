@@ -28061,3 +28061,22 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: the driven rate's van der Pol loss reads the node's own field (NUM-3)
+
+- **The defect.** `canonical_temporal_primary_rate`, which gives adaptation
+  its snapshot's velocity, wrote a self-oscillating node's loss as
+  `(β + α/m² · Q²) · Q`, taking the field as `Q/m`. Since 36f570f the step
+  reads `α u²` with `u` from the node's own inverse, which a field law on the
+  mass row makes other than `Q/m`. Beside Kerr the velocity at
+  self-oscillating nodes was off by 20 to 70% of the gain term, skewing the
+  field-law envelope and the wall residual the estimator reads.
+- **Test first.** `the_temporal_rate_is_the_trajectorys_own_derivative` gains
+  a van der Pol medium beside Kerr. Before the fix its rate missed the
+  trajectory by 3.2e-2 and then 2.0e-2 at half the step, a ratio of 1.61
+  where every other case closes at second order.
+- **Fix.** The loss is `(β + α u²) · Q` with `u` the field the rate already
+  computes. It is the same as before on a linear medium. The ratio is 3.88.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

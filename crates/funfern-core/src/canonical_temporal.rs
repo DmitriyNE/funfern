@@ -1670,14 +1670,14 @@ pub fn canonical_temporal_primary_rate(
     add_restoring_force(operator, &snapshot.integrated_field, &mut force)?;
     let source = forcing.integrated_rate(time)?;
     // The decay maps integrate `Q̇ = −λ Q` exactly, with `λ` the channel's
-    // rate or, on a self-oscillating node, `β + k Q²`.
+    // rate or, on a self-oscillating node, `β + α u²` with `u` the node's own
+    // field, as the step reads it. Taken as `Q/m`, it was 20 to 70% off the
+    // gain term beside a field law (NUM-3 of the 2026-10-20 review).
     let loss = if operator.has_active_loss {
-        let (beta, alpha, mass) = operator.active_loss_coefficients(time, runtime)?;
+        let (beta, alpha, _) = operator.active_loss_coefficients(time, runtime)?;
         flux.iter()
             .enumerate()
-            .map(|(node, flux)| {
-                (beta[node] + alpha[node] / (mass[node] * mass[node]) * flux * flux) * flux
-            })
+            .map(|(node, flux)| (beta[node] + alpha[node] * field[node] * field[node]) * flux)
             .collect::<Vec<_>>()
     } else if operator.has_loss {
         let rates = operator.loss_rates_at(time, runtime)?;
@@ -16013,6 +16013,16 @@ mod tests {
                 (
                     "van der Pol, with a gradient",
                     van_der_pol_operator(4.0, 0.05, 3.0),
+                    false,
+                    false,
+                    3.5,
+                ),
+                // NUM-3 of the 2026-10-20 review: the rate's van der Pol loss
+                // took the field as Q/m, where the step reads the node's own
+                // field through the Kerr law.
+                (
+                    "van der Pol beside Kerr",
+                    van_der_pol_operator_with(4.0, 0.05, 3.0, kerr(0.8)),
                     false,
                     false,
                     3.5,
