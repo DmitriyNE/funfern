@@ -27734,3 +27734,28 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a coarsened plan that does not mesh falls back on the compiled one (MESH-7, second part)
+
+- **The defect.** The runtime meshes the coarsened plan, and where that
+  failed the request failed with it, though the plan as compiled, one atom per
+  arrangement segment, meshes the arrangement by construction. The first part
+  stops the coarsening from making the faults found; this is the review's
+  third remedy, for any it did not find.
+- **Test first.** `a_coarsened_plan_that_does_not_mesh_falls_back_on_the_compiled_plan`
+  changes a scene's mesh resolution, which rebuilds it from a fresh coarsened
+  plan, and has the mesh job fail through a test-only switch. It requires the
+  candidate to be prepared from the compiled plan, to name the rebuild "coarsened
+  plan did not mesh" with the failure alongside, and to carry the field across.
+  Before the fix the request failed with the injected error.
+- **Fix.** `AcceptedTopology::with_compiled_plan` rebuilds the bundle with the
+  plan as compiled. A mesh job that fails on a coarsened plan swaps it in and
+  meshes again; the failure travels in `repair_fallback`, after a failed
+  repair's own message where both happened, and reaches the diagnostics as a
+  failed repair's does. A failure on the compiled plan fails the request as
+  before. Later requests at the same resolution reuse the compiled plan with
+  the mesh made from it.
+- **Checked on Metal:** the five remesh and repair runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

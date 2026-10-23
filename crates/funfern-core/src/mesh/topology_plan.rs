@@ -2000,6 +2000,9 @@ pub enum TopologyFullRebuildReason {
     /// A mesh the plans agreed to reuse carries trace ids the new plan
     /// renumbered, and the two numberings could not be matched up.
     TraceIdentityChanged,
+    /// The coarsened plan did not mesh, and the plan as compiled was meshed
+    /// instead; the runtime keeps the message alongside.
+    CoarsenedPlanFailed,
 }
 
 impl TopologyFullRebuildReason {
@@ -2010,6 +2013,7 @@ impl TopologyFullRebuildReason {
             Self::Requested => "rebuild requested",
             Self::RepairFailed => "mesh repair failed",
             Self::TraceIdentityChanged => "boundary trace identity changed",
+            Self::CoarsenedPlanFailed => "coarsened plan did not mesh",
         }
     }
 }

@@ -82,6 +82,28 @@ impl AcceptedTopology {
     pub fn model(&self) -> TopologyWaveModel<'_> {
         TopologyWaveModel::from_topology_scene(&self.authored)
     }
+
+    /// The same scene with the plan as compiled, one atom per arrangement
+    /// segment, which meshes the arrangement by construction: what a
+    /// coarsened plan that does not mesh falls back on. `None` where the plan
+    /// is that one already.
+    fn with_compiled_plan(&self) -> Result<Option<Self>, String> {
+        let assignments = self
+            .authored
+            .resolve_face_assignments(&self.snapshot)
+            .map_err(|issue| {
+                format!("Compiled topology does not match its authored scene: {issue}")
+            })?;
+        let plan = TopologyMeshPlan::new(&self.snapshot, &assignments).map_err(|issue| {
+            format!("Compiled topology does not match its authored scene: {issue}")
+        })?;
+        Ok((plan != *self.plan).then(|| Self {
+            token: self.token,
+            authored: self.authored.clone(),
+            snapshot: self.snapshot.clone(),
+            plan: Arc::new(plan),
+        }))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -340,6 +362,9 @@ pub struct TopologyPreparationJob {
     point_source_resolved: bool,
     #[cfg(test)]
     point_source_resolution_count: u32,
+    /// Replaces the next mesh job's outcome with a failure.
+    #[cfg(test)]
+    mesh_fails: bool,
     canonical_assembly_job: Option<CanonicalAssemblyJob>,
     canonical_operator: Option<Arc<CanonicalWaveOperator>>,
     /// The time-driven operator over the same base, when the document carries
@@ -619,6 +644,8 @@ impl TopologyPreparationJob {
             point_source_resolved: false,
             #[cfg(test)]
             point_source_resolution_count: 0,
+            #[cfg(test)]
+            mesh_fails: false,
             assembly_job: None,
             canonical_assembly_job: None,
             canonical_temporal_operator,
@@ -687,6 +714,8 @@ impl TopologyPreparationJob {
             point_source_resolved: false,
             #[cfg(test)]
             point_source_resolution_count: 0,
+            #[cfg(test)]
+            mesh_fails: false,
             assembly_job: None,
             canonical_assembly_job: None,
             canonical_temporal_operator: None,
@@ -840,13 +869,41 @@ impl TopologyPreparationJob {
             let result = job.advance(budget);
             self.timing.meshing_ms += elapsed_ms(started);
             let result = result?;
+            #[cfg(test)]
+            let result = if std::mem::take(&mut self.mesh_fails) {
+                Err(MeshError::Topology("a mesh failure the test asked for"))
+            } else {
+                result
+            };
             self.mesh_job = None;
             match result {
                 Ok(mesh) => {
                     self.mesh = Some(Arc::new(mesh));
                     self.phase = TopologyPreparationPhase::Assembling;
                 }
-                Err(error) => return Some(Err(self.fail(error.to_string()))),
+                // The plan's merged atoms stand in for the arrangement, and
+                // where they still do not mesh, the plan as compiled is meshed
+                // instead, the failure kept for the diagnostics as a failed
+                // repair's is (MESH-7 of the 2026-10-20 review).
+                Err(error) => match self.bundle.with_compiled_plan() {
+                    Ok(Some(bundle)) => {
+                        self.bundle = Arc::new(bundle);
+                        self.repair_fallback = Some(match self.repair_fallback.take() {
+                            Some(repair) => format!("{repair}; then {error}"),
+                            None => error.to_string(),
+                        });
+                        self.mesh_action = TopologyMeshUpdateAction::FullRebuild(
+                            TopologyFullRebuildReason::CoarsenedPlanFailed,
+                        );
+                        self.mesh_job = Some(TopologyMeshingJob::new(
+                            self.bundle.plan.as_ref().clone(),
+                            self.bundle.token.mesh_generation,
+                            self.meshing,
+                        ));
+                    }
+                    Ok(None) => return Some(Err(self.fail(error.to_string()))),
+                    Err(issue) => return Some(Err(self.fail(issue))),
+                },
             }
             return None;
         }
@@ -4155,6 +4212,48 @@ mod tests {
         );
         assert!(rebuilt.transfer.is_some());
         assert_eq!(rebuilt.mesh.mesh_revision, token.mesh_generation);
+    }
+
+    /// MESH-7 of the 2026-10-20 review: a coarsened plan that does not mesh
+    /// falls back on the plan as compiled, which meshes its arrangement by
+    /// construction, and the candidate says why, as a failed repair does.
+    /// Before, the request failed.
+    #[test]
+    fn a_coarsened_plan_that_does_not_mesh_falls_back_on_the_compiled_plan() {
+        let (editor, _, mut runtime) = hole_runtime();
+        let before = runtime.active.clone().unwrap();
+        let finer = MeshingOptions {
+            target_edge_length: 0.15,
+            ..options()
+        };
+        let token = runtime
+            .request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                finer,
+                false,
+            )
+            .unwrap();
+        runtime.preparing.as_mut().unwrap().mesh_fails = true;
+        assert_eq!(prepare(&mut runtime).unwrap(), token);
+        let rebuilt = commit_prepared(&mut runtime, token);
+        assert_eq!(
+            rebuilt.mesh_action,
+            TopologyMeshUpdateAction::FullRebuild(TopologyFullRebuildReason::CoarsenedPlanFailed)
+        );
+        assert!(
+            rebuilt
+                .repair_fallback
+                .as_deref()
+                .is_some_and(|message| message.contains("the test asked for")),
+            "{:?}",
+            rebuilt.repair_fallback
+        );
+        assert_eq!(*rebuilt.bundle.plan, editor.compiled_accepted.plan);
+        assert!(rebuilt.bundle.plan.boundaries.len() > before.bundle.plan.boundaries.len());
+        assert_eq!(rebuilt.mesh.mesh_revision, token.mesh_generation);
+        assert!(rebuilt.transfer.is_some());
     }
 
     /// Refinement an adaptation added survives an edit elsewhere: only the
