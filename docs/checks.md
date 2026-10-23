@@ -7,7 +7,6 @@ asserts.
 ```sh
 cargo run -p funfern-core --release --example mesh_timing -- --slices
 cargo run -p funfern-core --release --example mesh_timing -- --wave --slices
-cargo run -p funfern-core --release --example mesh_edit_timing -- --paced
 cargo run -p funfern-core --release --example wave_convergence
 cargo run -p funfern-core --release --example wave_boundary_reflection
 cargo run -p funfern-core --release --example temporal_amr_calibration
@@ -1150,8 +1149,6 @@ compares first- and second-order residual-energy reflection at two angles and tw
 wavelengths, alongside the ideal continuous plane-wave coefficients and a
 long-time finite-state check.
 Omit `--slices` for per-phase profiling.
-`mesh_edit_timing --paced` applies edits with 2 ms mesh slices at a simulated
-60 Hz schedule, excluding rendering.
 
 The `--mesh-edit-benchmark`, `--wave-gpu-check`, `--wave-transfer-check` and
 `--amr-check` application flags no longer exist; the unified-topology cutover

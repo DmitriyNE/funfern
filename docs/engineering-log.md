@@ -27861,3 +27861,29 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: the legacy local repair removed
+
+- **What went.** `MeshUpdateJob`, the `Scene` model's local repair of
+  coordinate edits (`crates/funfern-core/src/mesh/adaptation.rs`, 1,845 lines
+  with its six tests), which the app does not reach: every mesh it builds comes
+  from a `TopologyScene`, repaired by carving. The user chose to remove it
+  rather than fix the review's three findings in it (MESH-16, the right-sided
+  tangent at corners in its hull checks; MESH-24, material interfaces left out
+  of its compatibility check; MESH-25, a patch that left its bounds never
+  retried larger), which go with it.
+- **With it.** The eight tests in `crates/funfern-core/tests/mesh.rs` that
+  drove the job and their helper, and the middle of
+  `nested_material_regions_follow_explicit_region_ownership`, which edited the
+  nested scene through it; the test's `mesh_scene` and validation checks stay.
+  The `mesh_edit_timing` example timed the job's edits after one full build,
+  which `mesh_timing` already times, so it went whole, with its lines in
+  `docs/checks.md`. `MeshBuilder::insert_point`, a test-only way in, and a test
+  helper had no other caller. `docs/architecture.md` describes repair by
+  carving in the job's place.
+- **What stays.** The `Scene` model, `mesh_scene` and its validation: device
+  examples and host tests still build through them. Phasing them out is an
+  item under Maintenance in `docs/plan.md`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

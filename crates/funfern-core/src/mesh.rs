@@ -7,11 +7,9 @@ use crate::{
     incircle, orient2d,
 };
 use crate::{Scene, WORLD_TOLERANCE};
-mod adaptation;
 mod amr;
 mod carve;
 mod topology_plan;
-pub use adaptation::*;
 pub use amr::*;
 pub use carve::*;
 pub use topology_plan::*;
@@ -1436,13 +1434,6 @@ impl MeshBuilder {
             self.push_triangle(self.ccw_triangle([vertex, edge[1], opposite], region)?)?;
         }
         Ok(())
-    }
-
-    /// Inserts a refinement point where the scan finds it; the tests' way in.
-    #[cfg(test)]
-    fn insert_point(&mut self, point: Point2) -> Result<(), MeshError> {
-        let located = self.containing_triangle(point);
-        self.insert_located_point(point, located)
     }
 
     /// Inserts a refinement point at `located`, its containing triangle and

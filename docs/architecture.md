@@ -886,42 +886,13 @@ mesh has its own committed scene and resolution, separate from the latest reques
 Superseding a job always starts from that committed pair, so a half-finished
 candidate cannot become the source of a later edit.
 
-`MeshUpdateJob` attempts reuse for hole, material-interface, and open-baffle
-control-coordinate edits with unchanged IDs, roles, and knot intervals at the same
-resolution. Closed-wall motion currently uses the full region-aware mesher. The
-local path imports the accepted mesh and
-connectivity in resumable linear passes. Boundary vertices whose spline parameter
-positions changed move to the new spline; unchanged boundary vertices remain fixed.
-Interior displacement uses 24 Jacobi averaging sweeps with fixed boundary values
-and zero displacement outside a radius max(4h, 4×maximum boundary displacement).
-An extra triangle ring forms a frozen repair boundary. Motion exceeding 2h or a
-patch touching more than max(256, one third of the old elements) falls back.
-
-Moved elements must remain positively oriented. Changed spline edges are checked
-against cubic Bezier hulls and subdivided locally when needed. Constrained edge
-flips and quality refinement are confined to the frozen patch; an operation that
-needs to cross its boundary triggers full reconstruction. Conservative interior
-edge collapse checks the link condition, orientation, angle, and edge-size bounds.
-Collapse is attempted below 0.35h, separated from the 1.05h refinement threshold
-to reduce oscillation. Coordinate-edit repair does not collapse boundary vertices.
-Final compaction
-removes unused interior vertices; indices may change, but distant geometry and
-triangles are preserved.
-
-Local work is limited to five million units, 256 curved-boundary subdivisions and
-512 quality insertions, with the existing capacities and per-frame budget. Output
-passes check orientation, adjacency, and quality globally, and domain membership
-in the changed patch; unchanged regions inherit the source mesh's certificate.
-Import, final verification and compaction still touch the whole mesh; candidate
-point location and encroachment checks still scan globally. Geometry/topology
-changes, unlike those bookkeeping passes, are spatially bounded. Preserved-element
-statistics require both identical connectivity and exactly identical coordinates,
-and are computed before compaction. Connectivity-only reuse is reported separately
-by the core. Fallback frequency counts completed requests, excluding canceled jobs.
-
-Creation, deletion, knot edits, resolution changes, excessive motion and failed
-repair use the full resumable mesher. Resolution remains an application preference,
-excluded from geometry files and undo history.
+An edit to the topology is repaired by carving (`TopologyCarveJob`): the
+triangles away from the changed atoms are kept frozen and the band around them
+is meshed again. The `Scene` model's own local repair, `MeshUpdateJob`, which
+moved boundary vertices onto an edited spline and smoothed the interior, was
+removed in area 5 of the 2026-10-20 review's fixes, which the app did not
+reach. Resolution remains an application preference, excluded from geometry
+files and undo history.
 
 A transmitting curve may end in open space. Such an end divides nothing: the
 same face lies on both sides of the span, which carries no boundary condition
