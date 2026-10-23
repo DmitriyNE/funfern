@@ -823,7 +823,22 @@ pub fn apply_medium_preset(
     material: &Material,
     physics: PhysicsModel,
 ) -> Result<Material, MaterialError> {
-    let mut applied = apply_law_preset(preset.response(), material)?;
+    // Every part that changes retires first, and only then do the medium's
+    // parts go on. Each part retires the parameters of the one it replaces
+    // before adding its own, and in turn a material near the limit ran out on
+    // the way, though the finished medium would fit (NUM-6 of the 2026-10-20
+    // review).
+    let mut retired = material.clone();
+    if identify_law_preset(&retired).is_some_and(|found| found.preset != preset.response()) {
+        retired = apply_law_preset(&PRESETS[0], &retired)?;
+    }
+    if identify_restoring_preset(&retired).is_some_and(|found| found.preset != preset.restoring()) {
+        retired = apply_restoring_preset(&RESTORING_PRESETS[0], &retired)?;
+    }
+    if !preset.self_oscillating {
+        retired = apply_self_oscillation(false, &retired, physics)?;
+    }
+    let mut applied = apply_law_preset(preset.response(), &retired)?;
     applied = apply_restoring_preset(preset.restoring(), &applied)?;
     applied = apply_self_oscillation(preset.self_oscillating, &applied, physics)?;
     let oscillating = preset
@@ -1569,6 +1584,46 @@ mod tests {
         assert_eq!(linear.restoring, RestoringLaw::None);
         assert_eq!(linear.electric_loss, None);
         assert!(linear.parameters.is_empty());
+    }
+
+    /// NUM-6 of the 2026-10-20 review: a medium's three parts went on in turn,
+    /// each retiring only the parameters of the part it replaced before adding
+    /// its own. From a van der Pol lattice beside a parameter the user added,
+    /// Travelling modulation's first part ran into the eight-parameter limit,
+    /// though the finished material holds fewer.
+    #[test]
+    fn switching_medium_retires_every_outgoing_part_before_adding_any() {
+        let physics = skins()[1];
+        let lattice = MEDIA
+            .iter()
+            .find(|entry| entry.self_oscillating && entry.restoring().id == "R1")
+            .unwrap();
+        let mut material =
+            apply_medium_preset(lattice, &Material::default_medium(), physics).unwrap();
+        material.parameters.push(MaterialParameter {
+            name: "mine".into(),
+            value: 1.0,
+        });
+        let travelling = MEDIA
+            .iter()
+            .find(|entry| entry.response().name == "Travelling modulation")
+            .unwrap();
+        let switched = apply_medium_preset(travelling, &material, physics)
+            .expect("the finished medium fits the parameter limit");
+        assert_eq!(
+            switched.parameters.len(),
+            travelling.variables().count() + 1
+        );
+        assert!(
+            switched
+                .parameters
+                .iter()
+                .any(|parameter| parameter.name == "mine")
+        );
+        assert_eq!(
+            identify_medium_preset(&switched, physics).unwrap().preset,
+            travelling
+        );
     }
 
     /// A material composed by hand is not a medium, and so reads Custom in

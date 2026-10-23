@@ -28158,3 +28158,23 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: switching medium retires every outgoing part first (NUM-6)
+
+- **The defect.** A medium is three parts, its response, its restoring law
+  and its self-oscillation, and choosing one applied them in turn. Each part
+  retires the parameters of the part it replaces before adding its own, so
+  the material held the next part's incoming parameters beside the later
+  parts' outgoing ones. From a van der Pol lattice beside one parameter the
+  user added, Travelling modulation's response ran into the eight-parameter
+  limit, though the finished material holds fewer.
+- **Test first.**
+  `switching_medium_retires_every_outgoing_part_before_adding_any` makes that
+  switch and requires the travelling medium with the user's parameter beside
+  it. Before the fix it was refused with `ParameterLimit`.
+- **Fix.** Every part that changes is retired first, by the family's empty
+  preset, and only then do the medium's parts go on. A part that stays keeps
+  its parameters and their tuned values, as before.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
