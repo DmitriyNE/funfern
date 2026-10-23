@@ -1047,6 +1047,60 @@ fn multiple_open_baffles_keep_independent_labeled_faces() {
     }
 }
 
+/// MESH-21 of the 2026-10-20 review: validation took the container of a
+/// nested loop, and of an open boundary, to be the enclosing loop with the
+/// smallest perimeter. A star inside a circle has the longer one, so a disc and
+/// a baffle inside the star were held to the circle's region and the valid
+/// scene refused.
+#[test]
+fn a_loop_inside_a_star_inside_a_circle_belongs_to_the_star() {
+    let mut scene =
+        two_region_scene(|exterior, interior| LoopRole::MaterialInterface { exterior, interior });
+    for (id, name, stiffness, color) in [
+        (3, "Star", 0.6, [80, 130, 190]),
+        (4, "Core", 1.4, [90, 170, 90]),
+    ] {
+        scene.materials.push(medium(id, name, stiffness, color));
+        scene.regions.push(Region {
+            id: RegionId(id),
+            material: MaterialId(id),
+            frame: MaterialFrame::world(),
+        });
+    }
+    let star = (0..32)
+        .map(|index| {
+            let angle = index as f64 * std::f64::consts::PI / 16.0;
+            let radius = if index % 2 == 0 { 0.3 } else { 0.15 };
+            Point2::new(angle.cos(), angle.sin()) * radius
+        })
+        .collect::<Vec<_>>();
+    scene.obstacles.push(Obstacle::with_role(
+        ObstacleId(21),
+        PeriodicCubicSpline::polygon(star).unwrap(),
+        LoopRole::MaterialInterface {
+            exterior: RegionId(2),
+            interior: RegionId(3),
+        },
+    ));
+    scene.obstacles.push(Obstacle::with_role(
+        ObstacleId(22),
+        PeriodicCubicSpline::rounded(Point2::default(), 0.04),
+        LoopRole::MaterialInterface {
+            exterior: RegionId(3),
+            interior: RegionId(4),
+        },
+    ));
+    scene.internal_boundaries.push(InternalBoundary {
+        id: InternalBoundaryId(1),
+        spline: OpenCubicSpline::polyline(vec![Point2::new(0.07, 0.0), Point2::new(0.11, 0.0)])
+            .unwrap(),
+        region: RegionId(3),
+        span_laws: vec![InternalBoundaryLaw::REFLECTING],
+    });
+    let validation = validate(&scene);
+    assert!(validation.valid(), "{:?}", validation.issue);
+}
+
 #[test]
 fn nested_material_regions_follow_explicit_region_ownership() {
     let mut scene =

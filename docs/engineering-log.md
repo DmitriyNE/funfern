@@ -27887,3 +27887,23 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: legacy validation finds the innermost container (MESH-21)
+
+- **The defect.** The `Scene` model's validation, which the device examples
+  and host tests still build through, takes the container of a nested loop,
+  and of an open boundary, to be the enclosing loop with the smallest
+  perimeter. A star inside a circle has the longer perimeter, so a loop or a
+  baffle inside the star was held to the circle's region: a valid scene was
+  refused, or a wrong exterior accepted.
+- **Test first.** `a_loop_inside_a_star_inside_a_circle_belongs_to_the_star`
+  puts a 16-pointed star, perimeter about 5, inside a circle of about 2.4, a
+  disc and a short baffle inside the star, all with the star's region outside
+  them. Before the fix the disc was refused (`RegionTopology`); with the loops
+  fixed alone, the baffle (`BoundaryRegionTopology`).
+- **Fix.** The direct container is the enclosing loop the most other loops
+  enclose, from the containment matrix the validation already builds, for
+  loops and open boundaries alike.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.

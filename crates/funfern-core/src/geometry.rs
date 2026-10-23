@@ -2053,10 +2053,19 @@ impl ValidationJob {
     }
 
     fn region_topology_issue(&self) -> Option<ValidationIssue> {
+        // A loop's direct container is the innermost of those enclosing it,
+        // the one the most loops enclose. The smallest perimeter stood in for
+        // it, and a star inside a circle has the longer one (MESH-21 of the
+        // 2026-10-20 review).
+        let depth = |index: usize| {
+            (0..self.scene.obstacles.len())
+                .filter(|container| self.containment[index][*container])
+                .count()
+        };
         for (index, obstacle) in self.scene.obstacles.iter().enumerate() {
             let direct_container = (0..self.scene.obstacles.len())
                 .filter(|container| self.containment[index][*container])
-                .min_by(|a, b| self.perimeters[*a].total_cmp(&self.perimeters[*b]));
+                .max_by_key(|container| depth(*container));
             let expected_exterior = match direct_container {
                 None => BACKGROUND_REGION,
                 Some(container) => match self.scene.obstacles[container].role.interior() {
@@ -2085,7 +2094,7 @@ impl ValidationJob {
                 .iter()
                 .enumerate()
                 .filter(|(_, polygon)| point_inside_samples(point, polygon))
-                .min_by(|(a, _), (b, _)| self.perimeters[*a].total_cmp(&self.perimeters[*b]));
+                .max_by_key(|(index, _)| depth(*index));
             let expected = match direct_container {
                 None => Some(BACKGROUND_REGION),
                 Some((index, _)) => self.scene.obstacles[index].role.interior(),
