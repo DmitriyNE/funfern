@@ -1413,6 +1413,28 @@ fn stiffness_force(node: u32, time: f32) -> f32 {
     return result;
 }
 
+// `stiffness_force` on the free nodes' field, a pinned node's read as zero:
+// the grid filter's update lands on the free nodes only, and read beside a
+// pin its second difference coupled the pinned field in (NUM-9 of the
+// 2026-10-20 review).
+fn free_stiffness_force(node: u32, time: f32) -> f32 {
+    let range = nodes[node].stiffness.xy;
+    var row_field = 0.0;
+    if nodes[node].boundary.z == 0u {
+        row_field = candidate_q(node) * nodes[node].mass_loss.y;
+    }
+    var result = 0.0;
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
+        let column = tables[entry].data.x;
+        var column_field = 0.0;
+        if nodes[column].boundary.z == 0u {
+            column_field = candidate_q(column) * nodes[column].mass_loss.y;
+        }
+        result += table_float(entry, 2u) * (column_field - row_field);
+    }
+    return result;
+}
+
 fn constitutive_force(node: u32) -> f32 {
     let range = nodes[node].ranges.xy;
     let driven = temporal_enabled();
@@ -1953,7 +1975,9 @@ fn filter_first(@builtin(global_invocation_id) id: vec3<u32>) {
     let node = id.x;
     if stopped() || node >= control.counts_a.x { return; }
     if temporal_enabled() {
-        scratch[node].values.x = scratch[node_field_offset() + node].values.y;
+        // The free nodes' field, as `free_stiffness_force` reads it.
+        scratch[node].values.x = select(
+            scratch[node_field_offset() + node].values.y, 0.0, nodes[node].boundary.z != 0u);
         // Gate O: the total force on the integrated field, `F + R`.
         var total = filter_temporal_force(node);
         if restoring() {
@@ -1962,7 +1986,7 @@ fn filter_first(@builtin(global_invocation_id) id: vec3<u32>) {
         scratch[node].values.y = total;
         return;
     }
-    scratch[node].values.x = stiffness_force(node, control.clock_f32.y);
+    scratch[node].values.x = free_stiffness_force(node, control.clock_f32.y);
     scratch[node].values.y = constitutive_force(node);
 }
 

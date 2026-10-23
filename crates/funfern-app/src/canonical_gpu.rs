@@ -11312,6 +11312,21 @@ mod tests {
         ));
     }
 
+    /// NUM-9 of the 2026-10-20 review: the device's grid filter reads the free
+    /// nodes' field only, as the host's does, in both of its branches.
+    #[test]
+    fn the_device_filter_reads_the_free_nodes_field_only() {
+        let shader = include_str!("canonical_wave.wgsl");
+        assert!(
+            shader.contains(
+                "scratch[node].values.x = free_stiffness_force(node, control.clock_f32.y);"
+            )
+        );
+        assert!(shader.contains(
+            "scratch[node_field_offset() + node].values.y, 0.0, nodes[node].boundary.z != 0u);"
+        ));
+    }
+
     #[test]
     fn edited_source_handoff_selects_target_parameters_with_old_runtime_anchor() {
         let scene = Scene::initial();

@@ -2731,7 +2731,17 @@ impl CanonicalWaveState {
 
         let old_primary = self.primary_flux.clone();
         let old_complementary = self.complementary_flux.clone();
-        let primary_field = operator.primary_field(&old_primary)?;
+        // On the free nodes only, where the update lands, so that what it
+        // removes is a square: read beside a pin, the second difference
+        // coupled the pinned field in, and a driven side next to quiet nodes
+        // gained energy (NUM-9 of the 2026-10-20 review). The device reads
+        // the field the same way.
+        let mut primary_field = operator.primary_field(&old_primary)?;
+        for (value, signal) in primary_field.iter_mut().zip(&forcing.prescribed) {
+            if signal.is_some() {
+                *value = 0.0;
+            }
+        }
         let first = operator.compatible_stiffness(&primary_field)?;
         let first_over_mass = first
             .iter()

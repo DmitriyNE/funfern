@@ -28102,3 +28102,33 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: the grid filter reads the free nodes' field only (NUM-9)
+
+- **The defect.** The grid filter removes grid-scale content by an update
+  that, applied to every node, removes a square. It updates the free nodes
+  only, but its second difference read the pinned nodes' field too, so the
+  energy change gained a term coupling the pins in, of no fixed sign. Beside
+  a driven Dirichlet side with quiet free nodes it gained energy at second
+  order. The CPU reference refused the state, and the calibration that
+  unwraps it would have panicked; the device, which reads the field the same
+  way and commits a linear filter without a check, would have added the
+  energy.
+- **Test first.** `the_filter_beside_a_driven_side_at_rest_changes_nothing`
+  holds a side at 0.17 with every free node at rest and filters on the fixed
+  and the driven CPU paths, requiring both to leave the state as it was.
+  Before the fix the fixed path refused it with `InvalidState`.
+  `the_device_filter_reads_the_free_nodes_field_only` holds the shader to the
+  same reading.
+- **Fix.** The filter reads a pinned node's field as zero: on the fixed path,
+  in both of the driven path's corrections, and on the device in both
+  branches of its first pass (`free_stiffness_force`, and the driven
+  branch's field lane). What it removes is then a square on the free nodes.
+  The plan had the CPU reference only; the device read the field the same
+  way, so it is changed with it and the two stay one filter.
+- **Checked on Metal:** the filter-boundary run and the resident filter pass,
+  with the handoff and oscillator runs the pattern caught, and the shaders
+  compile in Chrome.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

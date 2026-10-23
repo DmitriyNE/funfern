@@ -4362,10 +4362,17 @@ impl CanonicalTemporalWaveState {
             return Ok(0.0);
         }
         let before = self.energy(operator)?;
+        // The free nodes' field only, as the fixed path reads it (NUM-9 of
+        // the 2026-10-20 review).
+        let pinned = forcing
+            .prescribed()
+            .iter()
+            .map(Option::is_some)
+            .collect::<Vec<_>>();
         let (primary_correction, integrated_correction) = if operator.has_field_laws {
-            self.tangent_grid_filter_corrections(operator)?
+            self.tangent_grid_filter_corrections(operator, &pinned)?
         } else {
-            self.frozen_grid_filter_corrections(operator)?
+            self.frozen_grid_filter_corrections(operator, &pinned)?
         };
 
         let scale = strength;
@@ -4419,6 +4426,7 @@ impl CanonicalTemporalWaveState {
     fn frozen_grid_filter_corrections(
         &self,
         operator: &CanonicalTemporalWaveOperator,
+        pinned: &[bool],
     ) -> Result<(Vec<f64>, Vec<f64>), WaveError> {
         let mass = operator.primary_mass_at(self.time, &self.runtime)?;
         let reach = operator.grid_filter_reach();
@@ -4444,7 +4452,8 @@ impl CanonicalTemporalWaveState {
             .primary_flux
             .iter()
             .zip(&mass)
-            .map(|(flux, mass)| flux / mass)
+            .zip(pinned)
+            .map(|((flux, mass), pinned)| if *pinned { 0.0 } else { flux / mass })
             .collect::<Vec<_>>();
         let primary_correction = stiffness(&inverse_mass(stiffness(&primary_field)?, true))?;
         let mut gathered = operator.force_at(&self.complementary_flux, self.time, &self.runtime)?;
@@ -4553,6 +4562,7 @@ impl CanonicalTemporalWaveState {
     fn tangent_grid_filter_corrections(
         &self,
         operator: &CanonicalTemporalWaveOperator,
+        pinned: &[bool],
     ) -> Result<(Vec<f64>, Vec<f64>), WaveError> {
         let (time, runtime) = (self.time, &self.runtime);
         let field = operator.primary_field_at(&self.primary_flux, time, runtime)?;
@@ -4583,7 +4593,12 @@ impl CanonicalTemporalWaveState {
                 .collect::<Vec<_>>();
             operator.gather_force(&fields)
         };
-        let primary_correction = stiffness(&weighted(stiffness(&field)?, true))?;
+        let free_field = field
+            .iter()
+            .zip(pinned)
+            .map(|(value, pinned)| if *pinned { 0.0 } else { *value })
+            .collect::<Vec<_>>();
+        let primary_correction = stiffness(&weighted(stiffness(&free_field)?, true))?;
         let mut gathered = operator.force_at(&self.complementary_flux, time, runtime)?;
         add_restoring_force(operator, &self.integrated_field, &mut gathered)?;
         let integrated_correction = weighted(stiffness(&weighted(gathered, false))?, false);
@@ -13016,6 +13031,49 @@ mod tests {
             .map(|point| 0.6 * amplitude * (0.8 * point.x + 1.2 * point.y).cos())
             .collect::<Vec<_>>();
         (primary, base.compatible_flux(&potential).unwrap())
+    }
+
+    /// NUM-9 of the 2026-10-20 review: beside a driven side with every free
+    /// node at rest, the filter's update read the pinned field through its
+    /// second difference and gained energy, on the fixed path and the driven
+    /// one alike, and the fixed path refused the state. Read on the free
+    /// nodes only, there is nothing to remove.
+    #[test]
+    fn the_filter_beside_a_driven_side_at_rest_changes_nothing() {
+        let (label, scene, condition) = filter_compositions()
+            .into_iter()
+            .find(|(label, _, _)| *label == "prescribed wall")
+            .unwrap();
+        let operator = filter_operator(&scene, condition);
+        let base = operator.base();
+        let forcing = filter_forcing(label, base);
+        let time_step = 0.4 * operator.maximum_time_step();
+        let mut temporal = CanonicalTemporalWaveState::new(
+            &operator,
+            time_step,
+            vec![0.0; base.degrees_of_freedom()],
+            vec![Point2::default(); base.complementary_degrees_of_freedom()],
+        )
+        .unwrap()
+        .pinned(&operator, &forcing)
+        .unwrap();
+        let mut fixed = CanonicalWaveState::new(
+            base,
+            time_step,
+            temporal.primary_flux().to_vec(),
+            temporal.complementary_flux().to_vec(),
+        )
+        .unwrap();
+        let before = fixed.primary_flux().to_vec();
+        let accounting = fixed
+            .apply_grid_filter(base, &forcing, 0.8)
+            .expect("the fixed filter contracts beside a driven side");
+        let removed = temporal
+            .apply_grid_filter_with_forcing(&operator, &forcing, 0.8)
+            .expect("the driven filter contracts beside a driven side");
+        assert_eq!(fixed.primary_flux(), before.as_slice());
+        assert_eq!(temporal.primary_flux(), before.as_slice());
+        assert!(accounting.filter_removed.abs() <= 1e-14 && removed.abs() <= 1e-14);
     }
 
     /// Inert, the filter beside every composition is the fixed path's filter.
