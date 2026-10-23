@@ -1290,6 +1290,20 @@ impl MeshAdaptationJob {
             let Some(pair) = self.boundary_plan(partner, pair_label)? else {
                 return Ok(false);
             };
+            // Two sides sharing both trace vertices, a free baffle's tips,
+            // keep two pieces each, as the mesher makes them: merged to one,
+            // they are the same edge both ways and close the slit (MESH-2 of
+            // the 2026-10-20 review).
+            let ends = |plan: &BoundaryCollapsePlan| {
+                plan.merged.map(|edge| {
+                    let mut vertices = edge.vertices;
+                    vertices.sort();
+                    vertices
+                })
+            };
+            if ends(&plans[0]) == ends(&pair) {
+                return Ok(false);
+            }
             if self.builder.point(plans[0].keep) != self.builder.point(pair.keep) {
                 return Err(MeshAdaptationError::InvalidSource(
                     "paired boundary collapses choose different parameters",
@@ -2747,6 +2761,73 @@ mod tests {
                 "{side:?}: {:?}",
                 coarsened.report
             );
+        }
+    }
+
+    /// MESH-2 of the 2026-10-20 review: a free baffle 0.1 long, meshed at 0.1
+    /// with the two pieces a side the mesher gives it and coarsened at 0.25.
+    /// Its two sides share both tips, so collapsing each side's middle vertex
+    /// left edges [A, B] and [B, A]. Verification found a non-manifold edge,
+    /// and the transaction went with every other collapse in it, on every
+    /// cycle.
+    #[test]
+    fn a_short_free_baffle_keeps_two_pieces_a_side_through_coarsening() {
+        let curve = TopologyCurve::new(
+            CurveId(1),
+            CurveSpline::Open(
+                OpenCubicSpline::polyline(vec![Point2::new(-0.05, 0.0), Point2::new(0.05, 0.0)])
+                    .unwrap(),
+            ),
+            vec![CurveSpan {
+                id: CurveSpanId(1),
+                behavior: SpanBehavior::REFLECTING,
+            }],
+        )
+        .unwrap();
+        let (plan, _, configuration) = topology_setup(
+            TopologyGeometry {
+                curves: vec![curve],
+                ..TopologyGeometry::default()
+            },
+            271,
+            0.25,
+            0.045,
+        );
+        let mut fine = configuration.meshing;
+        fine.target_edge_length = 0.1;
+        let source = Arc::new(mesh_topology_plan(&plan, 381, fine).unwrap());
+        let coarsened = run(
+            MeshAdaptationJob::new_topology(
+                source.clone(),
+                &plan,
+                MeshAdaptationState::from_mesh(&source),
+                382,
+                Arc::new(|_, _| 0.25),
+                configuration,
+            ),
+            37,
+        );
+        assert!(
+            coarsened.report.coarsening_changes > 0,
+            "{:?}",
+            coarsened.report
+        );
+        for side in [CurveTraceSide::Left, CurveTraceSide::Right] {
+            let pieces = coarsened
+                .mesh
+                .boundary_edges
+                .iter()
+                .filter(|edge| {
+                    edge.label
+                        == BoundaryLabel::Curve {
+                            curve: CurveId(1),
+                            span: CurveSpanId(1),
+                            side,
+                            separated: true,
+                        }
+                })
+                .count();
+            assert!(pieces >= 2, "{side:?}: {pieces}");
         }
     }
 

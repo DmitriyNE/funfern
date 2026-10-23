@@ -27599,3 +27599,26 @@ Measured again first, then made quadratic in the trace.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   release build, the wasm32 and threaded wasm checks, the browser shader
   compile and the protocol proofs.
+
+## 2026-10-23 — Step 3, area 5: a paired collapse keeps a short baffle open (MESH-2)
+
+- **The defect.** A separated span's two sides are collapsed together. Where
+  the two sides share both trace vertices, as a free baffle's tips are, one
+  piece a side is the same edge twice, [A, B] and [B, A], and closes the slit.
+  The mesher gives such spans two pieces a side for that reason; adaptation
+  built and checked each side's plan on its own and merged them anyway.
+  Verification then found a non-manifold edge and threw the transaction away
+  with every other collapse in the mesh, on every cycle, so coarsening never
+  succeeded for the scene.
+- **Test first.** `a_short_free_baffle_keeps_two_pieces_a_side_through_coarsening`
+  meshes a free baffle 0.1 long at 0.1 and coarsens at 0.25. It requires the
+  coarsening to commit and both sides to keep two pieces. Before the fix it
+  failed with "adaptation produced non-manifold adjacency". A sweep of the
+  maximum edge found the same at 0.25 and 0.4, and at 0.12 with the app's
+  collapse ratio.
+- **Fix.** A paired collapse whose two merged edges join the same two vertices
+  is refused, like any other collapse that fails its checks.
+- **Checked on Metal:** the three adaptation runs pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  release build, the wasm32 and threaded wasm checks, the browser shader
+  compile and the protocol proofs.
