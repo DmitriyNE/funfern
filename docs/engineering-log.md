@@ -28738,3 +28738,24 @@ which will take `adopt_legacy_damping` with it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: placement and volume-source drags commit once (UI-4)
+
+- **The defect.** The profile-placement and volume-source DragValues wrote
+  their value through `set_region_frame` and `set_volume_source` on every
+  frame of a drag, each a begin, changed and commit: an undo step and a
+  revalidation per frame, so about two seconds of scrubbing evicted the
+  user's earlier undo history (the history holds 100 steps). The colour
+  button had been fixed by staging its value until release.
+- **Test first.** `a_placement_drag_is_one_undo_step` drags the
+  placement's x field over several frames and requires no history entry
+  while the pointer is held and one once it lets go, with the dragged
+  value committed; before the fix the first moved frame committed already,
+  and every one after it.
+- **Fix.** Both editors work on a staged copy kept in the material session
+  while `egui_is_using_pointer()`, and commit it once the pointer lets go,
+  as the colour button does; a typed value, committed by its field on
+  Enter with no pointer held, commits at once as before.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

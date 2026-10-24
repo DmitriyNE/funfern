@@ -26,6 +26,13 @@ pub(super) struct MaterialSession {
     pub(super) names: BTreeMap<(u64, usize), (String, String)>,
     /// A colour being picked, committed once the pointer lets go.
     pub(super) colour: Option<(MaterialId, [u8; 3])>,
+    /// A region's profile placement being dragged, committed once the
+    /// pointer lets go: committed every frame, two seconds of scrubbing
+    /// evicted the undo history and revalidated the scene each frame (UI-4
+    /// of the 2026-10-20 review).
+    pub(super) frame: Option<(RegionId, MaterialFrame)>,
+    /// A region's volume source being dragged, committed the same way.
+    pub(super) source: Option<(RegionId, VolumeSource)>,
 }
 
 impl Default for MaterialSession {
@@ -37,6 +44,8 @@ impl Default for MaterialSession {
             errors: BTreeMap::new(),
             names: BTreeMap::new(),
             colour: None,
+            frame: None,
+            source: None,
         }
     }
 }

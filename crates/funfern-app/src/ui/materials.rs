@@ -264,7 +264,7 @@ impl Playground {
                 .iter()
                 .find(|source| source.region == region.id)
                 .cloned();
-            let mut source = existing.clone().unwrap_or(VolumeSource {
+            let source = existing.clone().unwrap_or(VolumeSource {
                 region: region.id,
                 enabled: false,
                 profile: ScalarField::constant(1.0),
@@ -273,6 +273,15 @@ impl Playground {
                 // `SWITCH_ON_PHASE`.
                 signal: TimeSignal::harmonic(0.0, 12.0, 3.0, SWITCH_ON_PHASE),
             });
+            // Edits land on a staged copy while the pointer is held, as the
+            // colour button's do, and commit once it lets go (UI-4 of the
+            // 2026-10-20 review).
+            let mut source = self
+                .material_session
+                .source
+                .clone()
+                .filter(|(id, _)| *id == region.id)
+                .map_or(source, |(_, staged)| staged);
             let mut source_changed = false;
             let fire_at = self.fire_times();
             ui.horizontal(|ui| {
@@ -311,11 +320,21 @@ impl Playground {
                 source_changed |= source.signal != before;
             }
             // Committed outside the block so unchecking is recorded rather than
-            // springing back on the next frame.
-            if source_changed
-                && let Err(error) = self.editor.set_volume_source(region.id, Some(source))
+            // springing back on the next frame; staged while the pointer is
+            // held, so a drag is one commit.
+            if source_changed {
+                self.material_session.source = Some((region.id, source));
+            }
+            if let Some((id, staged)) = self.material_session.source.clone()
+                && id == region.id
+                && !ui.ctx().egui_is_using_pointer()
             {
-                self.notify(error);
+                self.material_session.source = None;
+                if existing.as_ref() != Some(&staged)
+                    && let Err(error) = self.editor.set_volume_source(region.id, Some(staged))
+                {
+                    self.notify(error);
+                }
             }
 
             let uses_frame = self
@@ -331,7 +350,11 @@ impl Playground {
             if uses_frame {
                 ui.separator();
                 ui.label("Profile placement");
-                let mut frame = region.frame;
+                let mut frame = self
+                    .material_session
+                    .frame
+                    .filter(|(id, _)| *id == region.id)
+                    .map_or(region.frame, |(_, staged)| staged);
                 let before = frame;
                 ui.horizontal(|ui| {
                     ui.add(
@@ -383,10 +406,22 @@ impl Playground {
                             );
                         });
                 }
-                if frame != before
-                    && let Err(error) = self.editor.set_region_frame(region.id, frame)
+                // Staged while the pointer is held, committed once it lets go:
+                // committed every frame of a drag, two seconds of scrubbing
+                // evicted the undo history (UI-4 of the 2026-10-20 review).
+                if frame != before {
+                    self.material_session.frame = Some((region.id, frame));
+                }
+                if let Some((id, staged)) = self.material_session.frame
+                    && id == region.id
+                    && !ui.ctx().egui_is_using_pointer()
                 {
-                    self.notify(error);
+                    self.material_session.frame = None;
+                    if staged != region.frame
+                        && let Err(error) = self.editor.set_region_frame(region.id, staged)
+                    {
+                        self.notify(error);
+                    }
                 }
             }
         }
@@ -2410,6 +2445,89 @@ mod tests {
         state.material_session.staged = None;
         state.select_region(region);
         assert_eq!(state.material_session.selection, DEFAULT_MATERIAL);
+    }
+
+    /// UI-4 of the 2026-10-20 review: the placement's DragValues wrote the
+    /// frame through `set_region_frame` on every frame of a drag, an undo
+    /// step and a revalidation each, so two seconds of scrubbing evicted the
+    /// undo history. A drag is staged while the pointer is held and committed
+    /// once, when it lets go, as the colour button's is.
+    #[test]
+    fn a_placement_drag_is_one_undo_step() {
+        let mut state = Playground::default();
+        let crystal = crate::topology_examples::catalog()
+            .iter()
+            .find(|example| example.name == "Anisotropic crystal")
+            .expect("the gallery's crystal")
+            .document
+            .clone();
+        state.set_document(crystal, false, true).unwrap();
+        let region = state
+            .editor
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .find(|region| {
+                state
+                    .editor
+                    .document
+                    .model
+                    .draft
+                    .material(region.material)
+                    .is_some_and(Material::uses_frame)
+            })
+            .expect("the crystal's region")
+            .id;
+        state.select_region(region);
+        let frame_of = |state: &Playground| {
+            state
+                .editor
+                .document
+                .model
+                .draft
+                .regions
+                .iter()
+                .find(|candidate| candidate.id == region)
+                .unwrap()
+                .frame
+        };
+        let before = frame_of(&state);
+        let history = state.editor.history_len();
+        let driver = PanelDriver::new();
+        let widgets = driver.pass(vec![], |ui| state.materials_panel(ui));
+        let placement = widgets
+            .iter()
+            .find(|widget| widget.label == "Profile placement")
+            .expect("the placement heading");
+        let x_field = widgets
+            .iter()
+            .filter(|widget| widget.role == egui::accesskit::Role::SpinButton)
+            .find(|widget| widget.rect.min.y >= placement.rect.min.y)
+            .expect("the placement's x field");
+        let start = x_field.rect.center();
+        driver.pass(pointer_at(start, true), |ui| state.materials_panel(ui));
+        for step in 1..=4 {
+            let moved = start + egui::vec2(12.0 * step as f32, 0.0);
+            driver.pass(vec![egui::Event::PointerMoved(moved)], |ui| {
+                state.materials_panel(ui)
+            });
+            assert_eq!(
+                state.editor.history_len(),
+                history,
+                "frame {step} of the drag committed"
+            );
+        }
+        assert_eq!(frame_of(&state), before, "the draft moved under the drag");
+        let end = start + egui::vec2(48.0, 0.0);
+        driver.pass(pointer_at(end, false), |ui| state.materials_panel(ui));
+        assert_eq!(state.editor.history_len(), (history.0 + 1, 0));
+        assert_ne!(
+            frame_of(&state).origin.x,
+            before.origin.x,
+            "the release committed nothing"
+        );
     }
 
     /// Reported by the 2026-10-20 review (UI-1): the panel took the frame's
