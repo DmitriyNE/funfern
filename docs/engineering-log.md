@@ -28505,3 +28505,32 @@ runs.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 7: a breakpoint end lands on its dot after the start's span split (ED-2)
+
+Area 7 is the scene editor's four mediums; ED-1 went in step 2. Area 6
+closed with the full device suite at 101 of 102: `canonical_gpu_cavity_modes
+--physics te` hit its own 600 s deadline while Spotlight, a QuickLook STEP
+preview and Safari held the GPU and Teams, Chrome and two `vvp` runs the
+CPU (load average 59), with the Mechanical variant before it six times its
+10-23 time and every other fixture at its 10-23 time to the second. The user
+chose to push on that and have the three cavity fixtures rerun on a quiet
+host; that rerun is owed.
+
+- **The defect.** `create_open_curve` materialises the start's attachment
+  first; when that splits a span of the curve the end attaches to by
+  breakpoint, every node past the split moves up by one, and the end's
+  `Breakpoint { node }` still named its node by the old index. A loose end
+  carries its endpoint for the same reason since d96f812. Drawn from the rim
+  between dots 0 and 1 of a rounded loop to dot 3, at 45°, the end landed on
+  the old dot 2, at 0°: a loop the user never drew.
+- **Test first.** `a_breakpoint_end_lands_on_its_dot_after_the_starts_span_split`
+  draws exactly that chord as a baffle and requires the end's junction at
+  dot 3's point, the start having split one span and the drawn curve open.
+- **Fix.** `breakpoint_after_splits` moves a breakpoint's node index past
+  every span the edit's splits inserted ahead of it on that curve - an
+  inserted span sits at the index of the node it added - before the end is
+  materialised. Other attachments pass through unchanged.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

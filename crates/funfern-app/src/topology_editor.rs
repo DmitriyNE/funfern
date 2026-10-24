@@ -1149,6 +1149,12 @@ impl TopologyEditor {
                 loose.push((node, other, endpoint));
                 continue;
             }
+            // A breakpoint names its node by index, and the other end's
+            // attachment may already have split a span of that curve, moving
+            // every node past the split by one: drawn from the rim between
+            // dots 0 and 1 to dot 3, the end landed on the old dot 2 (ED-2 of
+            // the 2026-10-20 review).
+            let target = breakpoint_after_splits(&candidate.draft.geometry, target, &span_splits);
             let (vertex, point) = self.materialize_attachment(
                 &mut candidate.draft,
                 &mut candidate.probes,
@@ -3486,6 +3492,35 @@ fn attachment_face(
 
 /// The span that starts at an interior breakpoint, or why the node is not one.
 /// Every node of a closed curve qualifies; an open curve's ends do not.
+/// `target` with a breakpoint's node index moved past the spans `splits`
+/// inserted ahead of it on its curve, so that it names the node it was
+/// clicked on after those splits; a split's inserted span sits at the index
+/// of the node it added. Any other attachment is returned as it is.
+fn breakpoint_after_splits(
+    geometry: &TopologyGeometry,
+    target: TopologyAttachment,
+    splits: &[TopologySpanSplit],
+) -> TopologyAttachment {
+    let TopologyAttachment::Breakpoint { curve, node, side } = target else {
+        return target;
+    };
+    let Some(target_curve) = geometry.curve(curve) else {
+        return target;
+    };
+    let mut node = node;
+    for split in splits.iter().filter(|split| split.curve == curve) {
+        if let Some(position) = target_curve
+            .spans
+            .iter()
+            .position(|span| span.id == split.inserted)
+            && position <= node
+        {
+            node += 1;
+        }
+    }
+    TopologyAttachment::Breakpoint { curve, node, side }
+}
+
 fn breakpoint_span(curve: &TopologyCurve, node: usize) -> Result<usize, String> {
     if node >= curve.nodes.len()
         || (curve.spline.is_open() && (node == 0 || node + 1 == curve.nodes.len()))
@@ -6383,6 +6418,97 @@ mod tests {
                 .all(|span| span.behavior == SpanBehavior::Transmitting)
         );
         assert_eq!(editor.history_len(), (1, 0));
+    }
+
+    /// ED-2 of the 2026-10-20 review: the start's attachment can split a
+    /// span of the curve the end attaches to by breakpoint, and every node
+    /// past the split shifts by one, while the breakpoint still named its
+    /// node by the old index. Drawn from the rim between dots 0 and 1 to
+    /// dot 3 of a rounded loop, the end landed on the old dot 2.
+    #[test]
+    fn a_breakpoint_end_lands_on_its_dot_after_the_starts_span_split() {
+        let mut editor = TopologyEditor::default();
+        let loop_id = editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::default(), 0.25),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        let curve = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(loop_id)
+            .unwrap()
+            .clone();
+        let original = curve.spans[0].id;
+        let [a, b] = curve.spline.span_bounds(0).unwrap();
+        let parameter = (a + b) * 0.5;
+        let start = evaluate_curve(&curve, parameter);
+        let dot = curve.spline.node_point(3).unwrap();
+        let background = FaceAnchor::Outer {
+            side: OuterSide::Right,
+            fraction: 0.5,
+        }
+        .resolve(&editor.compiled_accepted.topology)
+        .unwrap();
+        // The side facing the disk: the chord runs inside it.
+        let side = [CurveTraceSide::Left, CurveTraceSide::Right]
+            .into_iter()
+            .find(|side| {
+                FaceAnchor::Curve {
+                    curve: loop_id,
+                    span: original,
+                    side: *side,
+                    parameter,
+                }
+                .resolve(&editor.compiled_accepted.topology)
+                .is_ok_and(|face| face != background)
+            })
+            .unwrap();
+        let edit = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![start, dot]).unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(TopologyAttachment::Boundary(FaceAnchor::Curve {
+                    curve: loop_id,
+                    span: original,
+                    side,
+                    parameter,
+                })),
+                Some(TopologyAttachment::Breakpoint {
+                    curve: loop_id,
+                    node: 3,
+                    side,
+                }),
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(edit.span_splits.len(), 1, "the start split a span");
+        let geometry = &editor.document.model.draft.geometry;
+        let drawn = geometry.curve(edit.curve).unwrap();
+        assert!(drawn.spline.is_open(), "the drawn curve is no loop");
+        let end = drawn
+            .nodes
+            .last()
+            .unwrap()
+            .vertex
+            .expect("the end is a junction");
+        let landed = geometry
+            .vertices
+            .iter()
+            .find(|vertex| vertex.id == end)
+            .and_then(|vertex| vertex.point(geometry.domain))
+            .unwrap();
+        assert!(
+            (landed - dot).norm() < 1.0e-9,
+            "the end landed at {landed:?}, dot 3 is at {dot:?}"
+        );
     }
 
     #[test]
