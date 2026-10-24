@@ -4934,7 +4934,14 @@ fn settle_merge(
             .find(|region| region.id == to)
             .ok_or("Exterior region no longer exists")?;
         exterior.material = replacement.material;
-        exterior.frame = MaterialFrame::world();
+        // The kept region's origin and angle, with the World attachment the
+        // background has to have: reset to world, its source moved to the
+        // domain centre and its anisotropy turned back without a word (ED-5
+        // of the 2026-10-20 review).
+        exterior.frame = MaterialFrame {
+            attachment: MaterialFrameAttachment::World,
+            ..replacement.frame
+        };
     }
     // Regions leave the document relative to the surviving identity, but
     // their dependents follow the user's choice: keeping the other material
@@ -7871,6 +7878,62 @@ mod tests {
         assert!(editor.document.model.draft.geometry.curves.is_empty());
         assert_eq!(editor.document.model.draft.regions.len(), 1);
         assert_eq!(editor.compiled_accepted.plan.domains.len(), 1);
+    }
+
+    /// ED-5 of the 2026-10-20 review: an exterior merge that keeps the
+    /// subdomain's material copied the material and reset region 1's frame
+    /// to world, so a source at the kept frame's origin moved to the domain
+    /// centre and its anisotropy turned back to world without a word. The
+    /// kept region's origin and angle stay, with the World attachment the
+    /// background has to have.
+    #[test]
+    fn an_exterior_merge_keeping_a_material_keeps_its_frame() {
+        let mut editor = TopologyEditor::default();
+        let glass = editor.add_material().unwrap();
+        settle(&mut editor);
+        let separator = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.0, -0.8),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.0, 0.8),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator { material: glass },
+                Some(outer(OuterSide::Bottom, 0.5)),
+                Some(outer(OuterSide::Top, 0.5)),
+            )
+            .unwrap();
+        settle(&mut editor);
+        let glass_region = editor
+            .document
+            .model
+            .draft
+            .regions
+            .iter()
+            .find(|region| region.material == glass)
+            .unwrap()
+            .id;
+        let frame = MaterialFrame {
+            origin: Point2::new(0.5, 0.0),
+            angle_radians: 0.4,
+            attachment: MaterialFrameAttachment::World,
+        };
+        editor.set_region_frame(glass_region, frame).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        editor
+            .remove_curve(separator.curve, Some(glass_region))
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let regions = &editor.document.model.draft.regions;
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].material, glass);
+        assert_eq!(
+            regions[0].frame, frame,
+            "the kept region's frame stays, World attached"
+        );
     }
 
     #[test]

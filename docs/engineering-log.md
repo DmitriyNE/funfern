@@ -28580,3 +28580,22 @@ host; that rerun is owed.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 7: an exterior merge keeps the kept region's frame (ED-5)
+
+- **The defect.** Removing the separator between a subdomain and the
+  exterior with the subdomain's material kept makes region 1 that
+  material: `settle_merge` copied the material and set the frame to
+  `MaterialFrame::world()`, so a source placed at the kept frame's origin
+  moved to the domain centre and an anisotropic medium's axes turned back
+  to world, without a word. The background only has to be World-attached.
+- **Test first.** `an_exterior_merge_keeping_a_material_keeps_its_frame`
+  gives a glass subdomain a frame at (0.5, 0) turned 0.4 rad, merges it
+  into the exterior keeping glass, and requires region 1 to carry that
+  origin and angle with the World attachment; before the fix it read the
+  origin at (0, 0) and the angle 0.
+- **Fix.** The exterior takes the kept region's frame with its attachment
+  set to World.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
