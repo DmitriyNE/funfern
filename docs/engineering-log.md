@@ -28831,3 +28831,33 @@ One commit for the two, both in the streamline lattice's low-pass filter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: the display reads through the runtime last agreed on (UI-3)
+
+- **The defect.** The painted field, the stored energy and the strength
+  readout are read through the material runtime the solver stepped with,
+  `accepted_material_runtime`, which is known only when a full snapshot and
+  the clock agree on an epoch. `temporal_view` fell back to the authored
+  runtime whenever they did not - after every generation change, and
+  across a rebase until the next snapshot - while the device ran the
+  runtime it carried over. With a Switch thrown from ε = 1 to 4 and AMR
+  on, the painted E_z was four times too large for 0.25 to 0.5 s after
+  each handoff and after each rebase; a straddling snapshot read four
+  times the energy, and `amr_energy_peak` latched it, raising the dormant
+  threshold for good. AMR itself waited in that case; the display did not.
+- **Test first.** `a_switched_medium_paints_through_the_runtime_last_agreed_on`
+  takes the doubled-mass medium with its agreeing snapshot, moves the clock
+  to another epoch so they disagree, and requires the field still painted
+  at 0.5 through the runtime last agreed on, the view to say the two
+  disagree, and the authored 1.0 only where nothing was ever agreed on;
+  before the fix the disagreeing display painted 1.0.
+- **Fix.** The frame keeps the last runtime a snapshot and the clock agreed
+  on, `display_material_runtime`, which the device carried into the new
+  generation; `temporal_view` reads through it where they disagree and
+  reports the disagreement; the energy and strength readouts hold their
+  last values and feed the peak nothing until the two align; a Reset
+  forgets it, since a Reset runs the authored runtime from the start, as
+  `running_material_runtime` already did on purpose.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

@@ -1372,6 +1372,7 @@ mod tests {
                 Some(&active),
                 &canonical,
                 &request,
+                None,
                 &mut display,
             );
             assert_eq!(display.snapshot_completed_steps, u64::from(steps));

@@ -288,6 +288,12 @@ pub struct Playground {
     pub(super) vector_overlay_previous_layout: Option<VectorOverlayLayout>,
     /// The lattice whose upload failed, not built again.
     pub(super) vector_overlay_failed: Option<VectorOverlayLayoutKey>,
+    /// The last material runtime a snapshot and the clock agreed on, which
+    /// the display reads through where they do not: after a generation
+    /// change and across a rebase the device runs the runtime it carried,
+    /// not the authored one (UI-3 of the 2026-10-20 review). A Reset starts
+    /// from the authored one again.
+    pub(super) display_material_runtime: Option<CanonicalMaterialRuntimeState>,
     /// A Reset installed this generation: the exposures restart when its
     /// first picture is on display, not while the outgoing field still is.
     pub(super) exposure_restart_at_generation: Option<u64>,
@@ -536,6 +542,7 @@ impl Default for Playground {
             vector_overlay_layout: None,
             vector_overlay_previous_layout: None,
             vector_overlay_failed: None,
+            display_material_runtime: None,
             exposure_restart_at_generation: None,
             background_failed: false,
             vector_overlay_filter_state: BTreeMap::new(),

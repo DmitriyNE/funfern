@@ -458,6 +458,14 @@ impl Playground {
             self.exposure_restart_at_generation = None;
             self.restart_exposures_after_handoff(true);
         }
+        // The runtime the display reads through until a snapshot and the
+        // clock next agree (UI-3 of the 2026-10-20 review).
+        if let Some(active) = self.runtime.active()
+            && let Some(temporal) = &active.canonical_temporal_operator
+            && let Some(runtime) = display.accepted_material_runtime(&temporal.initial_runtime())
+        {
+            self.display_material_runtime = Some(runtime);
+        }
         self.finish_source_commit(request);
         self.supervise_solver_fault(request, assets, commands);
         self.refresh_switch_states(display, request);
@@ -911,6 +919,8 @@ impl Playground {
                         self.amr_last_analyzed_step = None;
                         self.amr_last_started = None;
                         self.amr_energy_peak = 0.0;
+                        // A Reset runs the authored runtime from the start.
+                        self.display_material_runtime = None;
                         self.restart_probe_traces();
                         // The outgoing field stays on display until the zeroed
                         // generation's first picture arrives; the scale
@@ -1196,10 +1206,20 @@ impl Playground {
                 // co-energy, not the quadratic form, and an oscillator's
                 // integrated field stores `Σ m₀V(r)`; the gap and pole stores
                 // are unchanged by either.
-                let energy = match (breakdown, super::stored_energy_view(active, display)) {
+                let held = self.display_material_runtime.as_ref();
+                let view = super::stored_energy_view(active, display, held);
+                // A snapshot the clock does not agree with is read through a
+                // runtime that may not be the solver's: its energy is held
+                // until the two align, and never fed to the peak - a
+                // straddling snapshot read four times the energy and raised
+                // the dormant threshold for good (UI-3 of the 2026-10-20
+                // review).
+                let aligned = view.as_ref().is_none_or(|(.., aligned)| *aligned);
+                let energy = match (breakdown, view) {
+                    _ if !aligned => self.wave_energy,
                     // A snapshot without its `r` has no energy to report,
                     // rather than one missing the restoring store.
-                    (Some(breakdown), Some((temporal, runtime, time)))
+                    (Some(breakdown), Some((temporal, runtime, time, _)))
                         if !temporal.has_restoring()
                             || integrated.len() == temporal.base().degrees_of_freedom() =>
                     {
@@ -1215,7 +1235,10 @@ impl Playground {
                     (_, Some(_)) => None,
                     (breakdown, _) => breakdown.map(CanonicalEnergyBreakdown::total),
                 };
-                if let Some(energy) = energy.filter(|energy| energy.is_finite() && *energy > 0.0) {
+                if aligned
+                    && let Some(energy) =
+                        energy.filter(|energy| energy.is_finite() && *energy > 0.0)
+                {
                     // Full snapshots run throughout the simulation, whether
                     // AMR is currently enabled or not. Preserve that history
                     // so AMR enabled after a pulse does not establish its
@@ -1223,13 +1246,15 @@ impl Playground {
                     self.amr_energy_peak = self.amr_energy_peak.max(energy);
                 }
                 self.wave_energy = energy;
-                self.nonlinear_strength = super::field_law_view(active, display)
-                    .and_then(|(temporal, runtime, time)| {
-                        temporal
-                            .nonlinear_strength(&primary, &complementary, time, &runtime)
-                            .ok()
-                    })
-                    .unwrap_or_default();
+                if aligned {
+                    self.nonlinear_strength = super::field_law_view(active, display, held)
+                        .and_then(|(temporal, runtime, time, _)| {
+                            temporal
+                                .nonlinear_strength(&primary, &complementary, time, &runtime)
+                                .ok()
+                        })
+                        .unwrap_or_default();
+                }
                 self.energy_readback = display.full_readbacks;
                 self.energy_updated = Instant::now();
             }
@@ -1781,8 +1806,10 @@ mod tests {
         let operator = &active.canonical_operator;
         let primary = operator.primary_mass().to_vec();
         let complementary = vec![Point2::default(); operator.complementary_degrees_of_freedom()];
-        let (temporal, runtime, time) = super::super::stored_energy_view(&active, &display)
-            .expect("a pumped medium's energy is read through its runtime");
+        let (temporal, runtime, time, aligned) =
+            super::super::stored_energy_view(&active, &display, None)
+                .expect("a pumped medium's energy is read through its runtime");
+        assert!(aligned);
         assert!(time.abs() < 1.0e-12, "read at {time}");
         let reported = temporal
             .energy_at(&primary, &complementary, time, &runtime)
@@ -1845,6 +1872,7 @@ mod tests {
             Some(&active),
             &canonical,
             &request,
+            None,
             &mut display,
         );
         let runtime = canonical
@@ -2337,11 +2365,57 @@ mod tests {
             .map(|mass| *mass as f32)
             .collect::<Vec<_>>();
         let clock = super::super::latest_clock(&display);
-        let field = super::super::primary_field(&active, &display, &flux, clock);
+        let field = super::super::primary_field(&active, &display, None, &flux, clock);
         assert!(!field.is_empty());
         for value in field {
             assert!((value - 0.5).abs() < 1.0e-6, "painted {value}");
         }
+    }
+
+    /// UI-3 of the 2026-10-20 review: after every generation change, and
+    /// across a rebase until the next snapshot, no snapshot and clock agree
+    /// on an epoch, and the display read the field through the authored
+    /// runtime while the device ran the carried one: a thrown Switch painted
+    /// E_z four times too large for 0.25 to 0.5 s, and a straddling snapshot
+    /// put four times the energy into the latched peak. The display reads
+    /// through the last runtime a snapshot and the clock agreed on, and says
+    /// when the two do not.
+    #[test]
+    fn a_switched_medium_paints_through_the_runtime_last_agreed_on() {
+        let (active, mut display) = doubled_mass_medium();
+        let temporal = active.canonical_temporal_operator.as_ref().unwrap();
+        let held = display
+            .accepted_material_runtime(&temporal.initial_runtime())
+            .expect("the snapshot and the clock agree");
+        let flux = active
+            .canonical_operator
+            .primary_mass()
+            .iter()
+            .map(|mass| *mass as f32)
+            .collect::<Vec<_>>();
+        // The clock moves to an epoch the snapshot is not of.
+        display.clock.as_mut().unwrap().epoch = 1;
+        assert!(
+            display
+                .accepted_material_runtime(&temporal.initial_runtime())
+                .is_none(),
+            "the two still agree"
+        );
+        let clock = super::super::latest_clock(&display);
+        let (_, _, _, aligned) = super::super::stored_energy_view(&active, &display, Some(&held))
+            .expect("a switched medium's energy is read through a runtime");
+        assert!(!aligned, "a disagreement must be reported");
+        let field = super::super::primary_field(&active, &display, Some(&held), &flux, clock);
+        assert!(!field.is_empty());
+        for value in field {
+            assert!(
+                (value - 0.5).abs() < 1.0e-6,
+                "painted {value} through the authored mass"
+            );
+        }
+        // Nothing agreed on yet: the authored runtime is all there is.
+        let authored = super::super::primary_field(&active, &display, None, &flux, clock);
+        assert!(authored.iter().all(|value| (value - 1.0).abs() < 1.0e-6));
     }
 
     /// Reported: the stored energy of a switched or pumped linear medium was
@@ -2362,8 +2436,9 @@ mod tests {
             canonical_energy_breakdown(operator, &primary, &complementary, &vec![0.0; auxiliary])
                 .unwrap()
                 .total();
-        let (temporal, runtime, time) = super::super::stored_energy_view(&active, &display)
-            .expect("a switched medium's energy is read through its runtime");
+        let (temporal, runtime, time, _) =
+            super::super::stored_energy_view(&active, &display, None)
+                .expect("a switched medium's energy is read through its runtime");
         let energy = temporal
             .energy_at(&primary, &complementary, time, &runtime)
             .unwrap();

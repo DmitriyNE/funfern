@@ -2438,27 +2438,36 @@ fn barycentric_in(point: Point2, [a, b, c]: [Point2; 3]) -> Option<[f64; 3]> {
 
 /// The maps a generation's readbacks are read through, when `departs` says
 /// they are not the fixed ones: its time-driven operator, the runtime the
-/// solver stepped with (the authored one until a snapshot and a clock agree),
-/// and `time`, the readback's.
+/// solver stepped with, `time`, the readback's, and whether a snapshot and
+/// the clock agree on that runtime. Where they do not - after every
+/// generation change, and across a rebase until the next snapshot - the
+/// runtime is `held`, the last one they agreed on, which the device carried
+/// over, and the authored one only where nothing was ever agreed on: read
+/// through the authored one, a thrown Switch's field painted four times too
+/// large for up to half a second and a straddling snapshot put four times
+/// the energy into the latched peak (UI-3 of the 2026-10-20 review).
 fn temporal_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
+    held: Option<&funfern_core::CanonicalMaterialRuntimeState>,
     time: Option<f64>,
     departs: impl Fn(&funfern_core::CanonicalTemporalWaveOperator) -> bool,
 ) -> Option<(
     std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
     funfern_core::CanonicalMaterialRuntimeState,
     f64,
+    bool,
 )> {
     let operator = active
         .canonical_temporal_operator
         .as_ref()
         .filter(|operator| departs(operator))?;
     let authored = operator.initial_runtime();
-    let runtime = canonical
-        .accepted_material_runtime(&authored)
-        .unwrap_or(authored);
-    Some((operator.clone(), runtime, time.unwrap_or(0.0)))
+    let (runtime, aligned) = match canonical.accepted_material_runtime(&authored) {
+        Some(runtime) => (runtime, true),
+        None => (held.cloned().unwrap_or(authored), false),
+    };
+    Some((operator.clone(), runtime, time.unwrap_or(0.0), aligned))
 }
 
 /// The maps a full snapshot's stored energy is read through, at the
@@ -2468,14 +2477,17 @@ fn temporal_view(
 pub(crate) fn stored_energy_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
+    held: Option<&funfern_core::CanonicalMaterialRuntimeState>,
 ) -> Option<(
     std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
     funfern_core::CanonicalMaterialRuntimeState,
     f64,
+    bool,
 )> {
     temporal_view(
         active,
         canonical,
+        held,
         canonical.full_snapshot_seconds(),
         |operator| {
             operator.has_temporal_laws() || operator.has_field_laws() || operator.has_restoring()
@@ -2489,13 +2501,15 @@ pub(crate) fn stored_energy_view(
 fn primary_field_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
+    held: Option<&funfern_core::CanonicalMaterialRuntimeState>,
     time: Option<f64>,
 ) -> Option<(
     std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
     funfern_core::CanonicalMaterialRuntimeState,
     f64,
+    bool,
 )> {
-    temporal_view(active, canonical, time, |operator| {
+    temporal_view(active, canonical, held, time, |operator| {
         operator.has_temporal_laws() || operator.has_field_laws()
     })
 }
@@ -2505,23 +2519,29 @@ fn primary_field_view(
 pub(crate) fn field_law_view(
     active: &PreparedTopology,
     canonical: &CanonicalGpuDisplay,
+    held: Option<&funfern_core::CanonicalMaterialRuntimeState>,
 ) -> Option<(
     std::sync::Arc<funfern_core::CanonicalTemporalWaveOperator>,
     funfern_core::CanonicalMaterialRuntimeState,
     f64,
+    bool,
 )> {
     temporal_view(
         active,
         canonical,
+        held,
         canonical.full_snapshot_seconds(),
         |operator| operator.has_field_laws(),
     )
 }
 
+/// `held` is the last runtime a snapshot and the clock agreed on, which the
+/// fields are read through where they do not agree (UI-3).
 fn refresh_canonical_wave_display(
     active: Option<&Arc<PreparedTopology>>,
     canonical: &CanonicalGpuDisplay,
     request: &CanonicalGpuRequest,
+    held: Option<&funfern_core::CanonicalMaterialRuntimeState>,
     display: &mut WaveDisplay,
 ) {
     let Some(active) = active else { return };
@@ -2541,7 +2561,13 @@ fn refresh_canonical_wave_display(
         && copy.values.len() == operator.degrees_of_freedom()
         && copy.serial != display.picture_serial
     {
-        display.picture = primary_field(active, canonical, &copy.values, latest_clock(canonical));
+        display.picture = primary_field(
+            active,
+            canonical,
+            held,
+            &copy.values,
+            latest_clock(canonical),
+        );
         display.picture_serial = copy.serial;
     }
     display.picture_integrated.clear();
@@ -2577,6 +2603,7 @@ fn refresh_canonical_wave_display(
     display.current = primary_field(
         active,
         canonical,
+        held,
         &canonical.primary_flux,
         latest_clock(canonical),
     );
@@ -2588,6 +2615,7 @@ fn refresh_canonical_wave_display(
         display.snapshot_current = primary_field(
             active,
             canonical,
+            held,
             &canonical.primary_flux,
             canonical.full_snapshot_seconds(),
         );
@@ -2618,17 +2646,19 @@ fn latest_clock(canonical: &CanonicalGpuDisplay) -> Option<f64> {
 fn primary_field(
     active: &Arc<PreparedTopology>,
     canonical: &CanonicalGpuDisplay,
+    held: Option<&funfern_core::CanonicalMaterialRuntimeState>,
     flux: &[f32],
     time: Option<f64>,
 ) -> Vec<f32> {
-    let mapped_field =
-        primary_field_view(active, canonical, time).and_then(|(temporal, runtime, time)| {
+    let mapped_field = primary_field_view(active, canonical, held, time).and_then(
+        |(temporal, runtime, time, _)| {
             let flux = flux
                 .iter()
                 .map(|value| f64::from(*value))
                 .collect::<Vec<_>>();
             temporal.primary_field_at(&flux, time, &runtime).ok()
-        });
+        },
+    );
     match mapped_field {
         Some(field) => field.into_iter().map(|value| value as f32).collect(),
         None => flux
@@ -2697,6 +2727,7 @@ pub fn frame(
         state.runtime.active(),
         &canonical_display,
         &request,
+        state.display_material_runtime.as_ref(),
         &mut display,
     );
     state.refresh_amr(&request, &canonical_display, &display);
