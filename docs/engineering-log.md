@@ -28990,3 +28990,31 @@ One commit for the two, both in the drawing tools.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: a typed name commits when its field is not drawn, and a long probe name is refused aloud (UI-27, UI-34)
+
+One commit for the two, both in the probe name field; the region name
+field shares the first.
+
+- **UI-27.** A name typed into the probe or region field commits when the
+  field lets go, or, from `commit_typed_names` at the end of the frame,
+  when the selection has moved to another probe or region; the inspector's
+  tab switched or closed with the same probe selected drew no field and
+  moved no selection, and the next frame reset the text to the document's.
+  The frame now records which probe's and region's field it drew, and the
+  end of the frame commits a field it did not draw.
+  `a_typed_probe_name_survives_the_selection_moving` gains a frame that
+  draws another tab and requires the typing committed; before the fix the
+  name reverted.
+- **UI-34.** A probe name over 64 bytes was dropped without a word, by the
+  field and by the deferred commit, and measured before trimming. The
+  field stops at 64 characters, the commit measures the trimmed name in
+  the bytes the document holds, as the region field does, and refuses a
+  longer one with a status message. The test types forty accented
+  letters, which fit the field's 64 characters but not 64 bytes, and
+  requires the name unchanged and the refusal said; before the fix the
+  name was dropped without a word. A 70-character paste is cut at the
+  field's limit and commits.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

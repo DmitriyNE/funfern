@@ -1029,6 +1029,7 @@ impl Playground {
             self.region_name_typed = false;
         }
         let hint = default_region_name(region);
+        self.region_name_drawn = Some(region);
         let mut commit = None;
         ui.horizontal(|ui| {
             ui.label("Name");

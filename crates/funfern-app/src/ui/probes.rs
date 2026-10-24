@@ -19,6 +19,10 @@ use std::sync::Arc;
 
 use super::*;
 
+/// The most bytes a probe name holds, as `probe_definition_valid` and the
+/// document measure it.
+const PROBE_NAME_LIMIT: usize = 64;
+
 impl Playground {
     pub(super) fn selected_boundary_probe_target(&self) -> Option<TopologyBoundaryProbeTarget> {
         let selected = self.selection.spans()?;
@@ -222,9 +226,14 @@ impl Playground {
     /// an Undo held the name the Undo took back, and committing that undid
     /// the Undo. Once a frame, after the panels, for a field not drawn.
     pub(super) fn commit_typed_names(&mut self) {
-        self.commit_typed_probe_name(self.selected_probe);
-        let showing = (!self.hole_selected).then_some(self.region_selection);
-        self.commit_typed_region_name(showing);
+        // What the frame drew is what still shows: a field not drawn, with
+        // the selection unchanged - the inspector's tab switched or closed -
+        // never let go, and its typing was lost (UI-27 of the 2026-10-20
+        // review).
+        let probe = self.probe_name_drawn.take();
+        self.commit_typed_probe_name(probe);
+        let region = self.region_name_drawn.take();
+        self.commit_typed_region_name(region);
     }
 
     /// The probe name field's typing, when the field now shows `showing`
@@ -251,7 +260,11 @@ impl Playground {
         else {
             return;
         };
-        if name.is_empty() || name.len() > 64 || probe.name == name {
+        if name.is_empty() || probe.name == name {
+            return;
+        }
+        if name.len() > PROBE_NAME_LIMIT {
+            self.notify(format!("Probe names are at most {PROBE_NAME_LIMIT} bytes"));
             return;
         }
         probe.name = name.to_owned();
@@ -296,24 +309,33 @@ impl Playground {
             self.probe_name_edit = Some((id, probe.name.clone()));
             self.probe_name_typed = false;
         }
+        self.probe_name_drawn = Some(id);
         let mut commit_name = None;
         if let Some((_, name)) = self.probe_name_edit.as_mut() {
             let response = ui.add(
                 egui::TextEdit::singleline(name)
                     .id(field)
-                    .hint_text("Probe name"),
+                    .hint_text("Probe name")
+                    .char_limit(PROBE_NAME_LIMIT),
             );
             self.probe_name_typed |= response.changed();
-            if response.lost_focus() && !name.trim().is_empty() && name.len() <= 64 {
+            if response.lost_focus() && !name.trim().is_empty() {
                 commit_name = Some(name.trim().to_owned());
             }
         }
         if let Some(name) = commit_name
             && name != probe.name
         {
-            probe.name = name;
-            if let Err(error) = self.editor.update_probe(probe.clone()) {
-                self.notify(error);
+            // Measured trimmed, in the bytes the document holds, and refused
+            // aloud: a longer name was dropped without a word (UI-34 of the
+            // 2026-10-20 review).
+            if name.len() > PROBE_NAME_LIMIT {
+                self.notify(format!("Probe names are at most {PROBE_NAME_LIMIT} bytes"));
+            } else {
+                probe.name = name;
+                if let Err(error) = self.editor.update_probe(probe.clone()) {
+                    self.notify(error);
+                }
             }
         }
         ui.horizontal(|ui| {
@@ -1141,6 +1163,62 @@ mod tests {
         state.selected_probe = None;
         frame(&mut state, vec![]);
         assert_eq!(name(&state, second), "Second too");
+
+        // UI-27 of the 2026-10-20 review: the inspector's tab switched or
+        // closed with the probe still selected, so the field was not drawn
+        // and never let go, and the commit waited on the selection changing:
+        // the typing was lost. A frame that does not draw the field commits
+        // it.
+        state.selected_probe = Some(second);
+        frame(&mut state, vec![]);
+        focus(second);
+        frame(&mut state, vec![]);
+        frame(&mut state, vec![egui::Event::Text(" again".into())]);
+        let input = egui::RawInput {
+            time: Some(99.0),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(480.0, 2000.0),
+            )),
+            ..Default::default()
+        };
+        let _ = context.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.label("another tab");
+            });
+        });
+        state.commit_typed_names();
+        assert_eq!(name(&state, second), "Second too again");
+
+        // UI-34 of the 2026-10-20 review: a name over 64 bytes was dropped
+        // without a word. The field stops at 64 characters, and a name that
+        // fits them but not the 64 bytes the document holds - accented
+        // letters take two - is refused aloud.
+        state.selected_probe = Some(second);
+        frame(&mut state, vec![]);
+        focus(second);
+        frame(&mut state, vec![]);
+        frame(&mut state, vec![egui::Event::Text("é".repeat(40))]);
+        state.selected_probe = None;
+        frame(&mut state, vec![]);
+        assert_eq!(name(&state, second), "Second too again");
+        assert!(
+            state.message.contains("64"),
+            "the refusal is said: {:?}",
+            state.message
+        );
+        // A paste past the field's limit is cut there, and fits.
+        state.selected_probe = Some(second);
+        frame(&mut state, vec![]);
+        focus(second);
+        frame(&mut state, vec![]);
+        frame(&mut state, vec![egui::Event::Text("x".repeat(70))]);
+        state.selected_probe = None;
+        frame(&mut state, vec![]);
+        assert_eq!(
+            name(&state, second),
+            format!("Second too again{}", "x".repeat(48))
+        );
     }
 
     /// Reported: a click on empty canvas undid an Undo of a probe's rename.

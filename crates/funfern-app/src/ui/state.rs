@@ -208,6 +208,12 @@ pub struct Playground {
     /// Whether `probe_name_edit` was typed into since it was last taken from
     /// the document, as `region_name_typed`.
     pub(super) probe_name_typed: bool,
+    /// The probe whose name field this frame drew, so a frame that did not
+    /// draw it - the tab switched or closed - commits the typing (UI-27 of
+    /// the 2026-10-20 review).
+    pub(super) probe_name_drawn: Option<ProbeId>,
+    /// The region whose name field this frame drew, likewise.
+    pub(super) region_name_drawn: Option<RegionId>,
     pub(super) probe_history_seconds: f64,
     pub(super) far_field_view: ProbeViewState,
     pub(super) probe_readback: u64,
@@ -493,6 +499,8 @@ impl Default for Playground {
             probe_metadata_token: None,
             probe_name_edit: None,
             probe_name_typed: false,
+            probe_name_drawn: None,
+            region_name_drawn: None,
             probe_history_seconds: 10.0,
             far_field_view: ProbeViewState::new(crate::document::ProbeReadout::default()),
             probe_readback: 0,
