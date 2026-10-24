@@ -117,18 +117,38 @@ pub(super) fn with_fired_drive(
             };
             target.drive = source.drive.clone();
             target.gate = source.gate;
+            // The Divide flag is the editor's too: left behind, the drive
+            // multiplied where the editor divided (UI-23 of the 2026-10-20
+            // review).
+            target.inverted = source.inverted;
             source.drive.parameter_names().map(str::to_owned).collect()
         }
         FiredDrive::Loss(row) => {
             material.damping = edited.damping.clone();
-            let channel = row_channel(&mut edited, physics, row).clone();
-            let names = edited
+            // The edit moved a legacy damping into the primary row's channel
+            // (`adopt_legacy_damping`); committed without it, firing the other
+            // row's drive dropped the primary loss from the solver and Revert
+            // lost it for good (UI-7 of the 2026-10-20 review).
+            let primary = legacy_damping_row(physics);
+            let mut rows = vec![row];
+            if primary != row && applied.damping != ScalarField::constant(0.0) {
+                rows.push(primary);
+            }
+            let mut names: BTreeSet<String> = edited
                 .damping
                 .parameter_names()
-                .chain(channel.iter().flat_map(LossChannel::parameter_names))
                 .map(str::to_owned)
                 .collect();
-            *row_channel(&mut material, physics, row) = channel;
+            for row in rows {
+                let channel = row_channel(&mut edited, physics, row).clone();
+                names.extend(
+                    channel
+                        .iter()
+                        .flat_map(LossChannel::parameter_names)
+                        .map(str::to_owned),
+                );
+                *row_channel(&mut material, physics, row) = channel;
+            }
             names
         }
     };
@@ -1293,6 +1313,10 @@ mod tests {
             phase_radians: ScalarField::constant(0.0),
         };
         edited.stiffness_law.gate = gate;
+        // The row's Divide flag is what its editor shows too; left behind,
+        // the fired drive multiplied where the editor divided (UI-23 of the
+        // 2026-10-20 review).
+        edited.stiffness_law.inverted = true;
         let fired = with_fired_drive(
             &applied,
             &edited,
@@ -1303,6 +1327,51 @@ mod tests {
         assert_eq!(fired.damping, applied.damping);
         assert_eq!(fired.magnetic_loss, applied.magnetic_loss);
         assert_eq!(fired.mass_density, applied.mass_density);
+    }
+
+    /// UI-7 of the 2026-10-20 review: editing a loss of a legacy-damping
+    /// material moves the damping into the primary row's channel, and firing
+    /// the other row's drive committed the zeroed damping with only that
+    /// row's channel: the primary loss left the solver, and Revert lost it
+    /// for good. The adopted channel is committed with the fired one.
+    #[test]
+    fn firing_the_other_rows_loss_keeps_the_adopted_primary_channel() {
+        let physics = PhysicsModel::Mechanical;
+        let mut applied = Scene::initial().materials[0].clone();
+        applied.damping = ScalarField::constant(0.2);
+        let mut edited = applied.clone();
+        adopt_legacy_damping(&mut edited, physics);
+        let primary = legacy_damping_row(physics);
+        let other = match primary {
+            LawPresetRow::Mass => LawPresetRow::Stiffness,
+            _ => LawPresetRow::Mass,
+        };
+        *row_channel(&mut edited, physics, other) = Some(LossChannel {
+            base_rate: ScalarField::constant(0.1),
+            law: DampingLaw {
+                rate: RateLaw::Constant,
+                drive: TimeDrive::ParametricPump {
+                    depth: ScalarField::constant(0.5),
+                    frequency_hz: ScalarField::constant(0.0),
+                    phase_radians: ScalarField::constant(0.0),
+                },
+                gate: None,
+            },
+        });
+        let fired = with_fired_drive(&applied, &edited, physics, FiredDrive::Loss(other));
+        assert!(fired.valid());
+        assert_eq!(fired.damping, ScalarField::constant(0.0));
+        assert_eq!(
+            row_channel(&mut fired.clone(), physics, primary)
+                .as_ref()
+                .map(|channel| channel.base_rate.clone()),
+            Some(ScalarField::constant(0.2)),
+            "the primary loss stays, in its channel"
+        );
+        assert_eq!(
+            row_channel(&mut fired.clone(), physics, other),
+            row_channel(&mut edited, physics, other)
+        );
     }
 
     fn edits() -> (Texts, Texts) {

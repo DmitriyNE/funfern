@@ -28713,3 +28713,28 @@ the spacing in the lattice key rather than clearing the filter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: "Fire now" keeps the adopted primary loss and the Divide flag (UI-7, UI-23)
+
+One commit for the two, both in `with_fired_drive`, which commits a drive
+the moment it is fired and leaves the rest of the edit pending. The user
+chose to fix UI-7 now rather than leave it to the legacy-damping phase-out,
+which will take `adopt_legacy_damping` with it.
+
+- **UI-7.** Editing a loss of a legacy-damping material moves the damping
+  into the primary row's channel; firing the other row's loss drive then
+  committed the zeroed damping with only that row's channel, so the
+  primary loss left the solver, and Revert lost it for good. Test:
+  `firing_the_other_rows_loss_keeps_the_adopted_primary_channel`, a v22
+  material with damping 0.2 whose stiffness-row loss is fired - before the
+  fix the committed material had damping 0 and no primary channel. Fix:
+  when the applied material carried a damping, the primary row's channel
+  is committed with the fired one, parameters and all.
+- **UI-23.** The Coefficient arm copied the drive and its gate and not the
+  row's Divide flag, so a fired drive multiplied where the editor divided.
+  `a_fired_drive_takes_what_its_editor_shows_and_nothing_else` sets Divide
+  on the edited row and holds the fired law equal to the edited one; the
+  flag is copied with the drive.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
