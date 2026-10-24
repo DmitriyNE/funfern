@@ -563,9 +563,19 @@ struct VectorOverlayLayoutPoint {
 
 /// The filter key of a lattice cell. The high bit keeps the cells apart
 /// from the element keys the arrows use, so a style change cannot hand a
-/// cell an element's history.
-fn lattice_cell_key(column: i64, row: i64) -> u64 {
-    (1 << 63) | (u64::from(column as i32 as u32) << 32) | u64::from(row as i32 as u32)
+/// cell an element's history; fifteen bits of the spacing keep one
+/// lattice's cells apart from another's, so a zoom step cannot hand a cell
+/// another location's average (UI-6 of the 2026-10-20 review). Column and
+/// row keep 24 bits each.
+fn lattice_cell_key(column: i64, row: i64, spacing: f64) -> u64 {
+    let bits = spacing.to_bits();
+    let folded = bits ^ (bits >> 32);
+    let folded = folded ^ (folded >> 16);
+    let spacing_bits = folded & 0x7FFF;
+    (1 << 63)
+        | (spacing_bits << 48)
+        | ((u64::from(column as i32 as u32) & 0x00FF_FFFF) << 24)
+        | (u64::from(row as i32 as u32) & 0x00FF_FFFF)
 }
 
 struct VectorOverlayLayout {
@@ -2394,7 +2404,7 @@ fn streamline_layout(
                 stiffness: coefficients.stiffness,
             };
             Some(VectorOverlayLayoutPoint {
-                key: lattice_cell_key(column, row),
+                key: lattice_cell_key(column, row, world_spacing),
                 point: center,
                 stencil,
             })

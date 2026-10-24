@@ -815,12 +815,16 @@ impl Playground {
     /// simulation speed.
     ///
     /// A key without history would take the whole settle time to grow in
-    /// from silence, and every key is new when the spacing changes, so it
-    /// seeds instead from the nearest arrow updated at the previous readback
-    /// within `remap_radius`: a changed spacing or a pan keeps the picture,
-    /// and the seed converges from there. With no such neighbour it starts
-    /// silent and grows in as the average forms, which is the honest
-    /// picture of a first enable.
+    /// from silence, and every key is new when the spacing changes, since
+    /// the spacing is in the key, so it seeds instead from the nearest arrow
+    /// updated at the previous readback within `remap_radius`: a changed
+    /// spacing or a pan keeps the picture, and the seed converges from
+    /// there. With no such neighbour it starts silent and grows in as the
+    /// average forms, which is the honest picture of a first enable. A key
+    /// that left the lattice and came back is seeded the same way: its
+    /// history is of the flow when it left, and advanced across the gap in
+    /// one jump it flashed at nearly the raw flow (UI-22 of the 2026-10-20
+    /// review).
     pub(super) fn low_pass_vector_samples(
         &mut self,
         samples: &mut [(u64, Pos2, Point2, Point2)],
@@ -846,7 +850,11 @@ impl Playground {
         );
         let seeded = samples
             .iter()
-            .filter(|(key, ..)| !self.vector_overlay_filter_state.contains_key(key))
+            .filter(|(key, ..)| {
+                self.vector_overlay_filter_state
+                    .get(key)
+                    .is_none_or(|state| state.step != previous_step)
+            })
             .map(|(key, origin, value, _)| {
                 let seed = live.nearest(*origin).copied().unwrap_or_default();
                 (
@@ -1850,7 +1858,10 @@ mod tests {
             let row = (point.point.y / world_spacing).floor();
             assert!((point.point.x / world_spacing - column - 0.5).abs() < 1.0e-9);
             assert!((point.point.y / world_spacing - row - 0.5).abs() < 1.0e-9);
-            assert_eq!(point.key, lattice_cell_key(column as i64, row as i64));
+            assert_eq!(
+                point.key,
+                lattice_cell_key(column as i64, row as i64, world_spacing)
+            );
             assert_eq!(
                 point.stencil.value_weights,
                 enriched_quadratic_basis(weights)
@@ -2265,9 +2276,31 @@ mod tests {
         assert!((0.9..0.91).contains(&settled), "{settled}");
     }
 
+    /// UI-6 of the 2026-10-20 review: a lattice cell's key named its column
+    /// and row only, so after a zoom step the inner cells of the new lattice
+    /// carried on other locations' averages and the old flow pattern showed
+    /// scaled by √2, never relaxing while paused. The spacing is in the key.
+    #[test]
+    fn a_lattice_cells_key_is_its_spacings() {
+        let coarse = lattice_cell_key(3, -4, 0.1);
+        assert_eq!(coarse, lattice_cell_key(3, -4, 0.1));
+        assert_ne!(
+            coarse,
+            lattice_cell_key(3, -4, 0.1 * std::f64::consts::SQRT_2)
+        );
+        assert_ne!(coarse, lattice_cell_key(3, -4, 0.2));
+        assert_ne!(coarse, lattice_cell_key(4, -4, 0.1));
+        assert_ne!(coarse, lattice_cell_key(3, -3, 0.1));
+        assert_ne!(coarse >> 63, 0, "a cell is kept apart from an element");
+    }
+
     /// A key without history takes the average of the nearest arrow updated
     /// at the previous readback, so a changed spacing keeps the picture. A
-    /// stale or distant one does not count, and the arrow starts silent.
+    /// stale or distant one does not count, and the arrow starts silent. A
+    /// key that left and came back is seeded again the same way: advanced
+    /// from its stale history instead, a band of arrows flashed at about 95%
+    /// of the raw flow after a pan away and back (UI-22 of the 2026-10-20
+    /// review).
     #[test]
     fn a_new_flow_arrow_seeds_from_a_live_neighbour_or_starts_silent() {
         let mut state = Playground::default();
@@ -2306,14 +2339,21 @@ mod tests {
         assert_eq!(appeared[3], Point2::default(), "seeded from nothing near");
         assert!(appeared[0].x > settled.x, "the live arrow stopped");
 
-        // The seed is a start, not a copy: each converges on its own.
+        // The seed is a start, not a copy: each converges on its own. Key 7
+        // returns beside key 92, live and still near silent: it takes that
+        // seed, not its own stale history advanced across the gap.
         let later = at(
             &mut state,
-            &[(3, near), (91, Pos2::new(43.0, 48.0))],
+            &[(3, near), (91, Pos2::new(43.0, 48.0)), (7, far)],
             130,
             2.3,
         );
         assert!(later[1].x > settled.x && later[1].x < 1.0);
+        assert!(
+            later[2].x < settled.x,
+            "the returning arrow ran on from its stale history: {}",
+            later[2].x
+        );
     }
 
     /// Rewinding the steps is a reset: the averages are dropped, not carried
@@ -2464,7 +2504,7 @@ mod tests {
             .flat_map(|column| {
                 rows.clone().map(move |row| {
                     let center = Point2::new(column as f64 + 0.5, row as f64 + 0.5) * world_spacing;
-                    (lattice_cell_key(column, row), center)
+                    (lattice_cell_key(column, row, world_spacing), center)
                 })
             })
             .map(|(key, center)| {

@@ -28759,3 +28759,31 @@ which will take `adopt_legacy_damping` with it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: lattice keys carry their spacing and a returning key is seeded afresh (UI-6, UI-22)
+
+One commit for the two, both in the streamline lattice's low-pass filter.
+
+- **UI-6.** A lattice cell's filter key named its column and row and not
+  the spacing, and the filter's owner left the spacing out too, so after
+  one zoom step the inner cells of the new lattice continued other
+  locations' averages: the old flow pattern appeared scaled by √2, and
+  while the run was paused it never relaxed. The user chose putting the
+  spacing in the key over clearing the filter on a spacing change.
+  `a_lattice_cells_key_is_its_spacings` holds cells of two spacings apart;
+  before the fix the keys were equal. The key keeps the high bit for the
+  cells, fifteen bits of the spacing and 24 each of column and row.
+- **UI-22.** A key that left the lattice and came back kept its entry, and
+  the low-pass advanced that stale history across the gap in one jump, so
+  after a pan away and back a band of arrows flashed at about 95% of the
+  raw flow. A key not updated at the previous readback is seeded again, as
+  a new key is, from a live neighbour or silence;
+  `a_new_flow_arrow_seeds_from_a_live_neighbour_or_starts_silent` brings
+  key 7 back beside a near-silent live arrow and requires it to take that
+  seed; before the fix it ran on from its stale history to 0.070, past
+  the near-silent neighbour it should have started from. The key's
+  spacing bits fold every bit of the spacing in: a first fold of the two
+  words alone let 0.1 and 0.2, apart by one exponent bit, collide.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
