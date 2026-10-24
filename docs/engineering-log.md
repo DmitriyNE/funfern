@@ -28932,3 +28932,20 @@ One commit for the three, all in the scalar editor and the preset sliders.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: the weld dots show the dragged curve's own breakpoints (UI-20)
+
+- **The defect.** While a loose end is dragged, gold dots mark the nodes
+  it may be welded onto; for the dragged curve only its other end was
+  marked, while `weld_hit` accepts the curve's own vertex-less breakpoints
+  and the weld snaps to them, so the end landed where no dot had been. The
+  doc of `weld_hit` still said the whole curve was skipped, which the code
+  had stopped doing.
+- **Test first.** `the_dragged_curves_own_breakpoints_are_shown_as_targets`
+  on the rule `weld_target_shown`: every node but the dragged end itself;
+  before the fix the dragged curve's breakpoints were not shown.
+- **Fix.** The dots follow the rule `weld_hit` applies, and both docs say
+  what the code does.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

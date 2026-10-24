@@ -11,6 +11,13 @@ use funfern_core::*;
 
 use super::*;
 
+/// Whether the vertex-less node `index` of `curve` is drawn as a weld target
+/// while `dragged` is on the move: every node but the dragged end itself,
+/// which is what `weld_hit` accepts.
+fn weld_target_shown(dragged: Option<(CurveId, usize)>, curve: CurveId, index: usize) -> bool {
+    !matches!(dragged, Some((dragged_curve, dragged_node)) if dragged_curve == curve && dragged_node == index)
+}
+
 impl Playground {
     pub(super) fn draw_attachment_hit(
         &self,
@@ -76,8 +83,10 @@ impl Playground {
         }
     }
     /// Gold dots on every loose end and vertex-less breakpoint a curve may be
-    /// welded onto. `dragged` is the end on the move: only its own other end
-    /// stays eligible on that curve.
+    /// welded onto, its own included: `dragged` is the end on the move, the
+    /// one node that is no target. Drawn for the dragged curve's other end
+    /// only, the dots left out its own breakpoints, which `weld_hit` accepts
+    /// and the weld snaps to (UI-20 of the 2026-10-20 review).
     pub(super) fn draw_vertexless_nodes(
         &self,
         painter: &egui::Painter,
@@ -89,12 +98,7 @@ impl Playground {
             let count = candidate.nodes.len();
             for (index, node) in candidate.nodes.iter().enumerate() {
                 let is_end = open && (index == 0 || index + 1 == count);
-                let eligible = match dragged {
-                    Some((curve, dragged_node)) if curve == candidate.id => {
-                        is_end && index != dragged_node
-                    }
-                    _ => true,
-                };
+                let eligible = weld_target_shown(dragged, candidate.id, index);
                 if node.vertex.is_some() || !eligible {
                     continue;
                 }
@@ -298,6 +302,31 @@ impl Playground {
         }
         self.notify(parts.join(" · "));
         true
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+
+    /// UI-20 of the 2026-10-20 review: the weld target dots left out the
+    /// dragged curve's own breakpoints, which `weld_hit` accepts and the weld
+    /// snaps to, so the user saw no target where the end would land. Every
+    /// node but the dragged end is shown.
+    #[test]
+    fn the_dragged_curves_own_breakpoints_are_shown_as_targets() {
+        let dragged = Some((CurveId(3), 0));
+        assert!(
+            !weld_target_shown(dragged, CurveId(3), 0),
+            "the dragged end"
+        );
+        assert!(
+            weld_target_shown(dragged, CurveId(3), 1),
+            "its own breakpoint"
+        );
+        assert!(weld_target_shown(dragged, CurveId(3), 2), "its other end");
+        assert!(weld_target_shown(dragged, CurveId(4), 0), "another curve");
+        assert!(weld_target_shown(None, CurveId(3), 0), "no drag");
     }
 }
 

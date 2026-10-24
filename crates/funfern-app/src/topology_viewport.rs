@@ -744,8 +744,9 @@ pub fn hit_attachment(
 /// junction, another loose end, a vertex-less breakpoint, then a compiled edge.
 /// Point targets come from the authored `geometry`, which is current mid-drag
 /// when the compiled scene is not. `exclude` is the dragged end: it never snaps
-/// to itself, and its whole curve is skipped for breakpoints and edges because
-/// self-attachment is not supported.
+/// to itself, and its own end span is no target, since it always lies under
+/// the cursor; the rest of its curve, breakpoints and spans, is a target like
+/// any other.
 pub fn weld_hit(
     scene: &CompiledTopologyScene,
     geometry: &TopologyGeometry,
