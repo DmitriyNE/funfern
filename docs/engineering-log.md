@@ -28382,3 +28382,20 @@ is a line.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: the van der Pol map runs backward with its linear rate (NUM-14)
+
+- **The defect.** `bernoulli_map`, the closed form of a node's van der Pol
+  loss over one duration, takes a linear path when the linear rate over the
+  duration is negligible, and read that as `|β|·τ < 1e-12`: true for every
+  negative duration, so a backward step of a generation whose only loss is
+  van der Pol dropped `β` and returned Ok with a state that was not the
+  forward map's inverse.
+- **Test first.** `the_van_der_pol_map_runs_backward_with_its_linear_rate`
+  maps a flux of 0.4 forward over 0.3 under `β = −0.8` and `k = 1.5`, then
+  back over −0.3, and requires the start to within 1e-12; before the fix
+  the round trip came back at 0.521.
+- **Fix.** The guard reads `|β·τ|`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

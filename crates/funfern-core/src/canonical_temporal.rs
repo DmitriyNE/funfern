@@ -6032,7 +6032,10 @@ type ActiveLossCoefficients = (Vec<f64>, Vec<f64>, Vec<f64>);
 /// A van der Pol node has `β < 0` (gain below threshold) and `k > 0`.
 fn bernoulli_map(flux: f64, beta: f64, k: f64, duration: f64) -> f64 {
     let y = flux * flux;
-    let next = if beta.abs() * duration < 1.0e-12 {
+    // The rate over the duration either way: read as `|β|·τ`, every
+    // backward map took the guard and dropped `β` (NUM-14 of the 2026-10-20
+    // review).
+    let next = if (beta * duration).abs() < 1.0e-12 {
         y / (1.0 + 2.0 * k * y * duration)
     } else {
         let decay = (-2.0 * beta * duration).exp();
@@ -10417,6 +10420,17 @@ mod tests {
         assert_eq!(stable_difference(1.1e-16, 1.0e-16), 1.1e-16 - 1.0e-16);
         assert_eq!(stable_difference(0.3 * (1.0 + f64::EPSILON), 0.3), 0.0);
         assert_eq!(stable_difference(3.0 * (1.0 + f64::EPSILON), 3.0), 0.0);
+    }
+
+    /// NUM-14 of the 2026-10-20 review: `bernoulli_map`'s guard for a small
+    /// linear rate read `β·τ < 1e-12`, true for every negative duration, so a
+    /// backward map dropped `β` and was not the forward one's inverse.
+    #[test]
+    fn the_van_der_pol_map_runs_backward_with_its_linear_rate() {
+        let (flux, beta, k, duration) = (0.4, -0.8, 1.5, 0.3);
+        let forward = bernoulli_map(flux, beta, k, duration);
+        let back = bernoulli_map(forward, beta, k, -duration);
+        assert!((back - flux).abs() < 1.0e-12, "{back} against {flux}");
     }
 
     #[test]
