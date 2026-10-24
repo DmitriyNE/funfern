@@ -28558,3 +28558,25 @@ host; that rerun is owed.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 7: a curve from a loose end back to itself is refused (ED-4)
+
+- **The defect.** `create_open_curve` welds a drawn curve's loose-end
+  attachments after the curve exists, the start's curve keeping its
+  identity, and when the end's attachment names that same surviving curve
+  the join closes it into a loop. Nothing checked that the two attachments
+  named different ends, so a curve drawn from a loose end back to the same
+  loose end either closed the existing curve into a loop that was neither
+  the drawing nor the original, or was refused as "Both curve ends must be
+  free to close the loop", which was not the problem. `weld_endpoint`
+  refuses the same end with "Choose a different end to weld to".
+- **Test first.** `drawing_from_a_loose_end_back_to_itself_is_refused`
+  draws from a baffle's end back to it: before the fix the edit returned
+  Ok and committed the baffle closed into a loop. It requires that
+  refusal, the draft untouched and no history entry.
+- **Fix.** The check is made before any edit, in the weld's words. The
+  review's other option, closing the drawn curve on itself, would leave a
+  loop hanging off the other curve's tip, which no single curve represents.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

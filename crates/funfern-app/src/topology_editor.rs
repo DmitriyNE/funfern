@@ -1088,6 +1088,26 @@ impl TopologyEditor {
             .compiled_draft
             .clone()
             .ok_or("Finish the current invalid topology edit before drawing a new open curve")?;
+        // Both ends on one loose end would close the drawn curve onto the
+        // other curve's tip, a loop no single curve represents; the join
+        // took its closing branch there and left a loop of neither shape,
+        // or refused for the wrong reason (ED-4 of the 2026-10-20 review).
+        // The weld refuses the same end in these words.
+        if let (
+            Some(TopologyAttachment::LooseEnd {
+                curve: start_curve,
+                endpoint: start_end,
+            }),
+            Some(TopologyAttachment::LooseEnd {
+                curve: end_curve,
+                endpoint: end_end,
+            }),
+        ) = (start, end)
+            && start_curve == end_curve
+            && start_end == end_end
+        {
+            return Err("Choose a different end to weld to".into());
+        }
         let source_face = open_curve_face(&compiled, &spline, start, end)?;
         let source_region = compiled
             .assignments
@@ -11609,6 +11629,41 @@ mod tests {
                 .any(|candidate| candidate.id == vertex)
         );
         assert_eq!(geometry.curves.len(), 2);
+    }
+
+    /// ED-4 of the 2026-10-20 review: an open curve drawn from a loose end
+    /// back to the same loose end took the join's closing branch and left a
+    /// loop of neither the drawn nor the original shape, or was refused as
+    /// "Both curve ends must be free to close the loop"; `weld_endpoint`
+    /// already refuses the same end in its own words. The model is untouched.
+    #[test]
+    fn drawing_from_a_loose_end_back_to_itself_is_refused() {
+        let mut editor = TopologyEditor::default();
+        let (a, _) = two_baffles(&mut editor);
+        let before = editor.document.model.draft.clone();
+        let history = editor.history_len();
+        let refusal = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.1, 0.0),
+                    Point2::new(0.2, 0.2),
+                    Point2::new(-0.05, 0.05),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(TopologyAttachment::LooseEnd {
+                    curve: a,
+                    endpoint: 1,
+                }),
+                Some(TopologyAttachment::LooseEnd {
+                    curve: a,
+                    endpoint: 1,
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(refusal, "Choose a different end to weld to");
+        assert_eq!(editor.document.model.draft, before);
+        assert_eq!(editor.history_len(), history);
     }
 
     /// Drawing from one loose end to another dissolves the new curve into the
