@@ -28787,3 +28787,22 @@ One commit for the two, both in the streamline lattice's low-pass filter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: a replaced scene drops the outgoing arrow lattices (UI-12)
+
+- **The defect.** A scene replacement drops the generation and clears the
+  exposures, but left both vector-overlay layouts, whose `matches` checks
+  the generation, revision and point count and not the scene; the old
+  arrows were drawn over the new scene until a layout of its generation
+  replaced them, and fed the overlay's exposure peak meanwhile, so a
+  quieter scene's arrows stayed faded for 16 s or more, or vanished past a
+  ratio of about 500.
+- **Test first.** `a_replaced_scene_starts_its_scales_from_nothing` gives
+  the outgoing scene both layouts and requires them gone after the drop;
+  before the fix both survived.
+- **Fix.** `drop_generation` clears the current and the previous layout and
+  the failed layout's key with the generation. With no layout nothing is
+  drawn, so the display's stale samples feed nothing.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

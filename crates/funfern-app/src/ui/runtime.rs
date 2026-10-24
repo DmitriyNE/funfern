@@ -79,6 +79,14 @@ impl Playground {
         self.probe_upload = None;
         self.restart_probe_traces();
         self.clear_exposures();
+        // The arrow lattices are the outgoing scene's: kept, they were drawn
+        // over the new scene and fed its exposure peak until a layout of the
+        // new generation replaced them, so a quieter scene's arrows stayed
+        // faded for 16 s or more, or vanished (UI-12 of the 2026-10-20
+        // review). A failed layout was the old scene's too.
+        self.vector_overlay_layout = None;
+        self.vector_overlay_previous_layout = None;
+        self.vector_overlay_failed = None;
         self.reset_adaptation();
     }
 

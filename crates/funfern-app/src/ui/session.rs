@@ -886,12 +886,35 @@ mod tests {
         let mut state = Playground::default();
         state.field_exposure.update(34.8, 0.016);
         state.vector_overlay_exposure.update(2.0, 0.016);
+        // The outgoing scene's arrow lattices: drawn over the new scene and
+        // re-seeding the exposure peak until they were replaced, so a
+        // quieter scene's arrows stayed faded for 16 s or vanished (UI-12 of
+        // the 2026-10-20 review).
+        let layout = || VectorOverlayLayout {
+            key: VectorOverlayLayoutKey {
+                mesh_revision: 1,
+                generation: 1,
+                physics: PhysicsModel::Mechanical,
+                style: VectorOverlayStyle::Arrows,
+                world_spacing: 0.1,
+                visible_bins: [0, 0, 0, 0],
+            },
+            revision: 1,
+            points: vec![],
+            submitted_at: Instant::now(),
+        };
+        state.vector_overlay_layout = Some(layout());
+        state.vector_overlay_previous_layout = Some(layout());
         let example = &crate::topology_examples::catalog()[0];
         state
             .set_document(example.document.clone(), true, true)
             .unwrap();
         state.coordinator.drop_requested = false;
         state.drop_generation();
+        assert!(
+            state.vector_overlay_layout.is_none() && state.vector_overlay_previous_layout.is_none(),
+            "the outgoing scene's lattices are dropped with its generation"
+        );
         let quiet = 5.0e-3;
         assert_eq!(state.field_exposure.update(quiet, 0.016), Some(quiet));
         assert_eq!(state.field_exposure.visibility(quiet), 1.0);
