@@ -1257,6 +1257,21 @@ fn integrated_field_labels(physics: PhysicsModel) -> (&'static str, &'static str
     }
 }
 
+/// The most a constant coefficient's field accepts, the drag's ceiling.
+const SCALAR_CEILING: f64 = 1.0e6;
+
+/// A constant as a formula's source: plainly where that is short, and with
+/// an exponent where it is not, so that no constant prints past the formula
+/// limit (UI-17 of the 2026-10-20 review).
+fn constant_formula_source(value: f64) -> String {
+    let plain = value.to_string();
+    if plain.len() <= 24 {
+        plain
+    } else {
+        format!("{value:e}")
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn material_scalar_editor(
     ui: &mut egui::Ui,
@@ -1281,10 +1296,20 @@ fn material_scalar_editor(
     });
     if formula_mode != was_formula {
         if formula_mode {
-            let source = field.constant_value().unwrap_or(1.0).to_string();
-            *field = ScalarField::formula(source.clone()).unwrap();
-            edits.insert(key, source);
-            errors.remove(&key);
+            let source = constant_formula_source(field.constant_value().unwrap_or(1.0));
+            // The source is at most a few dozen bytes, so this cannot fail;
+            // written as `unwrap`, 1e-300 printed as 300 zeros and crashed
+            // the app (UI-17 of the 2026-10-20 review).
+            match ScalarField::formula(source.clone()) {
+                Ok(formula) => {
+                    *field = formula;
+                    edits.insert(key, source);
+                    errors.remove(&key);
+                }
+                Err(error) => {
+                    errors.insert(key, error.to_string());
+                }
+            }
         } else {
             let coordinates = MaterialCoordinates {
                 x: 0.0,
@@ -1293,13 +1318,16 @@ fn material_scalar_editor(
                 theta: 0.0,
             };
             match field.evaluate(coordinates, parameters) {
-                Ok(value) if value >= minimum => {
+                Ok(value) if value >= minimum && value <= SCALAR_CEILING => {
                     *field = ScalarField::constant(value);
                     edits.remove(&key);
                     errors.remove(&key);
                 }
-                Ok(_) => {
+                Ok(value) if value < minimum => {
                     errors.insert(key, format!("Value must be at least {minimum}"));
+                }
+                Ok(_) => {
+                    errors.insert(key, format!("Value must be at most {SCALAR_CEILING:e}"));
                 }
                 Err(error) => {
                     errors.insert(key, error.to_string());
@@ -1309,10 +1337,14 @@ fn material_scalar_editor(
     }
     match field {
         ScalarField::Constant(value) => {
+            // The range binds what is dragged or typed, not what is shown: a
+            // loaded value outside it was rewritten the moment its region
+            // was selected (UI-18 of the 2026-10-20 review).
             ui.add(
                 egui::DragValue::new(value)
                     .speed(if minimum == 0.0 { 0.005 } else { 0.01 })
-                    .range(minimum..=1.0e6)
+                    .range(minimum..=SCALAR_CEILING)
+                    .clamp_existing_to_range(false)
                     .update_while_editing(false),
             );
         }

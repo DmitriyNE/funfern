@@ -28905,3 +28905,30 @@ One commit for the three, all in the gallery.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: the constant editor neither crashes nor rewrites (UI-17, UI-18, UI-21)
+
+One commit for the three, all in the scalar editor and the preset sliders.
+
+- **UI-17.** Constant → Formula printed the constant with `Display`, which
+  writes no exponent, so 1e-300 printed as three hundred zeros, past the
+  256-byte formula limit, and the switch unwrapped the refusal and crashed
+  the app. `constant_formula_source` prints a long constant with an
+  exponent, and the switch reports a refusal instead of unwrapping.
+  `a_constant_turned_formula_prints_within_the_limit` round-trips 1e-300,
+  7e300 and ordinary values; before the fix 1e-300 panicked.
+- **UI-18.** The constant field's `range` clamped the value as the field
+  was drawn, so a loaded source profile of −1 read 0 the moment its region
+  was selected; `clamp_existing_to_range(false)` leaves a value the user
+  did not touch, and the Formula → Constant switch checks the ceiling it
+  never checked. `the_constant_field_leaves_an_out_of_range_value_alone`;
+  before the fix −1 read 0 after one frame.
+- **UI-21.** The simple view's preset sliders clamped the same way, so a
+  φ⁴ bound of 0.8 became 1.0 when the user left Advanced, Apply and Revert
+  lit up, and the next Apply committed the 1.0.
+  `a_preset_slider_leaves_an_out_of_range_value_alone` draws a slider over
+  a value past its maximum and requires it unchanged; before the fix 40
+  read 32, the edge slider's maximum.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

@@ -1322,10 +1322,14 @@ fn preset_variable(
     };
     ui.horizontal(|ui| {
         ui.label(variable.label);
+        // The range binds the drag, not the value shown: a φ⁴ bound of 0.8
+        // became 1.0 the moment Advanced was left (UI-21 of the 2026-10-20
+        // review).
         ui.add(
             egui::DragValue::new(&mut parameter.value)
                 .speed(0.005)
                 .range(variable.minimum..=variable.maximum)
+                .clamp_existing_to_range(false)
                 .update_while_editing(false),
         );
         if variable.parameter == "pump_hz" {
@@ -1793,6 +1797,33 @@ mod tests {
         assert!(edits.contains_key(&(material.id.0 + 1, 0)));
         assert!(delete_parameter(&mut material, 0, &mut edits).is_err());
         assert_eq!(material.parameters.len(), 1);
+    }
+
+    /// UI-21 of the 2026-10-20 review: a preset slider's range clamped the
+    /// value as it was drawn, so a φ⁴ bound of 0.8 became 1.0 when the user
+    /// left Advanced, Apply and Revert lit up and the next Apply committed
+    /// the 1.0. Drawn, the value stays; the range binds the drag.
+    #[test]
+    fn a_preset_slider_leaves_an_out_of_range_value_alone() {
+        let crystal = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Time crystal")
+            .expect("the catalogue's time crystal");
+        let variable = crystal
+            .variables
+            .iter()
+            .find(|variable| variable.parameter == "edge")
+            .expect("its edge sharpness");
+        let mut material = Scene::initial().materials[0].clone();
+        material.parameters.push(MaterialParameter {
+            name: "edge".into(),
+            value: variable.maximum + 8.0,
+        });
+        let context = egui::Context::default();
+        let _ = context.run_ui(egui::RawInput::default(), |ui| {
+            preset_variable(ui, &mut material, variable, "edge", &[]);
+        });
+        assert_eq!(material.parameters[0].value, variable.maximum + 8.0);
     }
 
     /// Only rows whose law follows the field are read out, in the skin's

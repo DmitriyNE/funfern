@@ -1378,6 +1378,56 @@ mod tests {
         (BTreeMap::new(), BTreeMap::new())
     }
 
+    /// UI-17 of the 2026-10-20 review: Constant → Formula printed the
+    /// constant with `Display`, which has no exponent, so 1e-300 printed as
+    /// three hundred zeros, past the 256-byte formula limit, and the switch
+    /// unwrapped the refusal and crashed the app. The source carries an
+    /// exponent where it is long, and parses.
+    #[test]
+    fn a_constant_turned_formula_prints_within_the_limit() {
+        for value in [1.0e-300, 2.5, 1.0e6, 0.000_123_456_789, 7.0e300] {
+            let source = super::super::constant_formula_source(value);
+            let formula = ScalarField::formula(source.clone())
+                .unwrap_or_else(|error| panic!("{value}: {source} does not parse: {error}"));
+            let at = MaterialCoordinates {
+                x: 0.3,
+                y: -0.2,
+                r: 0.0,
+                theta: 0.0,
+            };
+            let read = formula.evaluate(at, &[]).unwrap();
+            assert!(
+                ((read - value) / value).abs() < 1.0e-12,
+                "{value} came back as {read}"
+            );
+        }
+        assert_eq!(super::super::constant_formula_source(2.5), "2.5");
+    }
+
+    /// UI-18 of the 2026-10-20 review: the constant field's range clamped
+    /// the value as it was drawn, so a loaded source profile of −1 read 0 the
+    /// moment its region was selected. Drawn, an out-of-range value stays;
+    /// the range binds the drag.
+    #[test]
+    fn the_constant_field_leaves_an_out_of_range_value_alone() {
+        let context = egui::Context::default();
+        let mut field = ScalarField::constant(-1.0);
+        let (mut edits, mut errors) = edits();
+        let _ = context.run_ui(egui::RawInput::default(), |ui| {
+            super::super::material_scalar_editor(
+                ui,
+                (7, 4),
+                "Profile",
+                &mut field,
+                &[],
+                0.0,
+                &mut edits,
+                &mut errors,
+            );
+        });
+        assert_eq!(field, ScalarField::constant(-1.0));
+    }
+
     /// Opening Advanced shows `s₀` without touching `k₀`: rendering the
     /// editor with no input leaves the material exactly as it was.
     #[test]
