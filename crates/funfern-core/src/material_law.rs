@@ -1950,6 +1950,18 @@ impl CoefficientLawValues {
         }
     }
 
+    /// The field law's departure from one at amplitude `u`, as the
+    /// coefficient's factor sees it: `ḡ(u) − 1`, or `1/ḡ(u) − 1` where the
+    /// row divides by its multiplier. Negative where the coefficient falls.
+    pub fn field_departure(self, u: f64) -> f64 {
+        let multiplier = self.field.multiplier(u);
+        if self.inverted {
+            multiplier.recip() - 1.0
+        } else {
+            multiplier - 1.0
+        }
+    }
+
     /// The range of `d(coefficient·u)/du` over the field's amplitude, the
     /// drive's cycle and both switch states, in units of the base coefficient
     /// — or `None` when the field law is not monotone. The step bound scales
@@ -2544,6 +2556,32 @@ mod tests {
             pumped.stiffness_speed_ratio_range(),
             pumped.mass_speed_ratio_range()
         );
+    }
+
+    /// UI-5 of the 2026-10-20 review: the strength readout took `ḡ − 1`
+    /// whatever the row's Divide flag, where a Divide row's coefficient is
+    /// `1/ḡ`, so it would read the wrong sign; the solver gates such a row
+    /// (Gate C), so the departure is checked on the law.
+    #[test]
+    fn a_divide_rows_departure_is_its_reciprocals() {
+        let kerr = CoefficientLawValues {
+            field: FieldLawValues::Polynomial {
+                chi1: 0.0,
+                chi2: 0.8,
+                amplitude_bound: Some(1.0),
+            },
+            drive: TimeDriveValues::None,
+            gate: None,
+            alternate: None,
+            inverted: false,
+        };
+        assert!((kerr.field_departure(0.5) - 0.2).abs() < 1.0e-12);
+        let divided = CoefficientLawValues {
+            inverted: true,
+            ..kerr
+        };
+        assert!((divided.field_departure(0.5) - (1.0 / 1.2 - 1.0)).abs() < 1.0e-12);
+        assert!(divided.field_departure(0.5) < 0.0);
     }
 
     /// NUM-17 of the 2026-10-20 review: a φ⁴ well depth, a Klein-Gordon

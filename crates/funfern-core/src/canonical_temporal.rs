@@ -2206,9 +2206,12 @@ pub struct CanonicalTemporalLossSample {
 }
 
 /// How far one field-dependent material has moved from its small-signal
-/// response: the largest `ḡ(|field|) − 1` over its sites on each row. For Kerr
-/// that is `χ|u|²`, the relative change of the coefficient itself; a row
-/// without a field law reads zero.
+/// response: the signed departure of the coefficient's factor from one with
+/// the largest magnitude over its sites on each row, `ḡ(|field|) − 1`, or
+/// `1/ḡ − 1` on a Divide row. For Kerr that is `χ|u|²`, the relative change
+/// of the coefficient itself, negative for a defocusing law; a row without a
+/// field law reads zero. Seeded at zero and raised with `max`, a defocusing
+/// law or a Divide row read zero (UI-5 of the 2026-10-20 review).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CanonicalNonlinearStrength {
     pub material: MaterialId,
@@ -2811,9 +2814,11 @@ impl CanonicalTemporalWaveOperator {
                 if coefficient.law.field == FieldLawValues::Linear {
                     continue;
                 }
-                let response = coefficient.law.field.multiplier(value.abs()) - 1.0;
+                let response = coefficient.law.field_departure(value.abs());
                 let found = slot(&mut strengths, coefficient.material);
-                found.primary = found.primary.max(response);
+                if response.abs() > found.primary.abs() {
+                    found.primary = response;
+                }
             }
         }
         let fields = self.complementary_field_at(complementary_flux, time, runtime)?;
@@ -2822,9 +2827,11 @@ impl CanonicalTemporalWaveOperator {
             if coefficient.law.field == FieldLawValues::Linear {
                 continue;
             }
-            let response = coefficient.law.field.multiplier(value.norm()) - 1.0;
+            let response = coefficient.law.field_departure(value.norm());
             let found = slot(&mut strengths, coefficient.material);
-            found.complementary = found.complementary.max(response);
+            if response.abs() > found.complementary.abs() {
+                found.complementary = response;
+            }
         }
         Ok(strengths)
     }
@@ -13325,6 +13332,35 @@ mod tests {
         );
         assert!(strength.complementary > 0.1, "{strength:?}");
         assert!(strength.complementary < 6.0 * 0.3 * 0.3, "{strength:?}");
+
+        // A defocusing law lowers its coefficient: the readout is the signed
+        // departure of largest magnitude. Seeded at zero and raised with max,
+        // it read +0.00% (UI-5 of the 2026-10-20 review). A Divide row's
+        // departure, 1/ḡ − 1, is checked on the law itself, since the solver
+        // gates a reciprocal field response (Gate C).
+        let mut scene = Scene::initial();
+        scene.materials[0].mass_law.field = bounded_kerr(-0.2, 1.0);
+        let operator = compile(&scene).unwrap();
+        let runtime = operator.initial_runtime();
+        let (terms, _) = operator.primary_terms_at(0.0, &runtime).unwrap();
+        let primary = (0..operator.base().degrees_of_freedom())
+            .map(|node| {
+                operator
+                    .primary_flux_and_energy_of_field(&terms, node, field, &runtime)
+                    .unwrap()
+                    .0
+            })
+            .collect::<Vec<_>>();
+        let (_, complementary) = strong_fluxes(&operator, 0.5);
+        let strengths = operator
+            .nonlinear_strength(&primary, &complementary, 0.0, &runtime)
+            .unwrap();
+        let strength = strengths[0];
+        assert!(
+            (strength.primary + 0.2 * field * field).abs() < 1e-12,
+            "a defocusing Kerr departs by -χu²: {strength:?}"
+        );
+        assert_eq!(strength.complementary, 0.0, "a linear row departs nowhere");
 
         // A linear generation has nothing to report.
         let linear = compile(&Scene::initial()).unwrap();

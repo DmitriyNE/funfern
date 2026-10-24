@@ -28690,3 +28690,26 @@ the spacing in the lattice key rather than clearing the filter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: the nonlinear-strength readout is signed (UI-5)
+
+- **The defect.** `CanonicalNonlinearStrength` was seeded at zero and only
+  ever raised with `max`, from `ḡ(|field|) − 1` with the Divide flag
+  ignored, so a defocusing law whose coefficient fell by 50% read "+0.00%",
+  and a Divide row, whose coefficient is the reciprocal of its multiplier,
+  read the wrong sign or nothing. The readout's text hard-coded the "+".
+- **Tests first.** `nonlinear_strength_reads_each_rows_coefficient_change`
+  gains a defocusing Kerr on the mass row, which must read −χu²; before
+  the fix it read 0. `the_strength_readout_names_each_nonlinear_row` gains
+  a departure of −50%, which must read "down to -50.0%"; before the fix
+  the text read "+-50.00%". A Divide row cannot reach the solver yet - a
+  reciprocal field response is gated (Gate C) - so its sign is checked on
+  the law: `a_divide_rows_departure_is_its_reciprocals`, added with the
+  departure it checks.
+- **Fix.** `CoefficientLawValues::field_departure` is `ḡ − 1`, or
+  `1/ḡ − 1` on a Divide row; the strength keeps the signed departure of
+  largest magnitude per row, and the readout prints it with its sign,
+  "up to" or "down to".
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

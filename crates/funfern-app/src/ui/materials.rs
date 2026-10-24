@@ -1363,14 +1363,17 @@ fn nonlinear_strength_line(
     if law.field == FieldLaw::Linear {
         return None;
     }
+    // Signed: a defocusing law or a Divide row departs downward (UI-5 of the
+    // 2026-10-20 review).
     let percent = 100.0 * value;
-    let percent = if percent < 0.1 {
-        format!("{percent:.2}%")
+    let direction = if percent < 0.0 { "down to" } else { "up to" };
+    let percent = if percent.abs() < 0.1 {
+        format!("{percent:+.2}%")
     } else {
-        format!("{percent:.1}%")
+        format!("{percent:+.1}%")
     };
     Some(format!(
-        "Now: {} up to +{percent} from its small-signal value",
+        "Now: {} {direction} {percent} from its small-signal value",
         law_row_label(physics, row)
     ))
 }
@@ -1797,6 +1800,21 @@ mod tests {
             )
             .as_deref(),
             Some("Now: Reciprocal stiffness s₀ up to +0.04% from its small-signal value")
+        );
+        // A departure downward reads with its sign; the "+" was fixed in the
+        // text (UI-5 of the 2026-10-20 review).
+        let defocusing = CanonicalNonlinearStrength {
+            material: material.id,
+            primary: -0.5,
+            complementary: -0.0004,
+        };
+        assert_eq!(
+            nonlinear_strength_line(&material, &defocusing, tm, LawPresetRow::Mass).as_deref(),
+            Some("Now: Permittivity ε down to -50.0% from its small-signal value")
+        );
+        assert_eq!(
+            nonlinear_strength_line(&material, &defocusing, tm, LawPresetRow::Stiffness).as_deref(),
+            Some("Now: Permeability μ down to -0.04% from its small-signal value")
         );
         // TE carries μ on the primary row: the ε law's departure is the
         // complementary row's. Paired by row position it read the primary's
