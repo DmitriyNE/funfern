@@ -28294,3 +28294,21 @@ is a line.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: the trace factor's estimate counts its dense inverse (NUM-11)
+
+- **The defect.** `CanonicalTraceFactor::estimated_bytes` summed the
+  diagonal, the modal correction and the eliminated auxiliaries and left
+  out `direct`, the dense trace inverse with its trace mass, which is
+  O(T²): at 1,042 trace nodes 8.7 MB read as kilobytes. The assertion that
+  the backend's factor "skipped the inverse" compared its estimate to the
+  stepping factor's, and the two were always equal.
+- **Test first.** The assertion now requires the difference between the two
+  estimates to be exactly the inverse and its trace mass, `(T² + T)` f64s,
+  576 bytes at the test's 8 trace nodes; before the fix it was 0. The skip itself is checked where it was, by the
+  export's `direct_inverse` being absent.
+- **Fix.** The estimate adds `direct`'s inverse and trace mass when the
+  factor holds one.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

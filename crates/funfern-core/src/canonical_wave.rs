@@ -4470,6 +4470,9 @@ impl CanonicalOutgoingMidpointFactor {
                 .iter()
                 .map(|_| std::mem::size_of::<CachedAuxiliaryElimination>())
                 .sum::<usize>()
+            + self.direct.as_ref().map_or(0, |direct| {
+                (direct.inverse.len() + direct.trace_mass.len()) * std::mem::size_of::<f64>()
+            })
     }
 
     /// Exports a backend-neutral parallel-solve representation. Preparation is
@@ -8159,11 +8162,13 @@ mod tests {
                 .is_none()
         );
 
-        // And the one that skipped it really did skip it, rather than the two
-        // having quietly converged on the same construction.
-        assert!(
-            backend_factor.estimated_bytes() <= stepping_factor.estimated_bytes(),
-            "the backend factor carries no more than the stepping one"
+        // The estimate counts the dense inverse and its trace mass, which it
+        // left out: at 1,042 trace nodes 8.7 MB read as kilobytes, and the two
+        // estimates were always equal (NUM-11 of the 2026-10-20 review). The
+        // skip itself is the export's `direct_inverse` above.
+        assert_eq!(
+            stepping_factor.estimated_bytes() - backend_factor.estimated_bytes(),
+            (trace_count * trace_count + trace_count) * std::mem::size_of::<f64>()
         );
 
         // Stepping a backend state is correct; it takes the sweep instead.
