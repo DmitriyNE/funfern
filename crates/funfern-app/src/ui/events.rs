@@ -53,8 +53,11 @@ pub(super) struct EventEntry {
 }
 
 pub(super) fn event_line(entry: &EventEntry) -> String {
-    let minutes = (entry.time / 60.0).floor().max(0.0);
-    let seconds = entry.time - minutes * 60.0;
+    // Rounded to the tenth shown before the minutes are split off: split
+    // first, 59.96 s read "0:60.0" (UI-33 of the 2026-10-20 review).
+    let tenths = (entry.time * 10.0).round().max(0.0) / 10.0;
+    let minutes = (tenths / 60.0).floor();
+    let seconds = tenths - minutes * 60.0;
     format!(
         "{minutes:.0}:{seconds:04.1} · {} · {}{}",
         entry.source.tag(),
@@ -71,6 +74,34 @@ pub(super) fn event_line(entry: &EventEntry) -> String {
 mod tests {
     use super::super::*;
     use super::*;
+
+    /// UI-33 of the 2026-10-20 review: the seconds were rounded to tenths
+    /// after the minutes were split off, so a time just under a minute read
+    /// "0:60.0". Rounded first, it reads "1:00.0".
+    #[test]
+    fn a_time_just_under_a_minute_reads_as_the_minute() {
+        let line = |time: f64| {
+            event_line(&EventEntry {
+                time,
+                source: EventSource::Adaptation,
+                text: "Invalid adaptation source".into(),
+                repeats: 1,
+            })
+        };
+        assert_eq!(
+            line(59.96),
+            "1:00.0 · adaptation · Invalid adaptation source"
+        );
+        assert_eq!(
+            line(59.94),
+            "0:59.9 · adaptation · Invalid adaptation source"
+        );
+        assert_eq!(line(8.0), "0:08.0 · adaptation · Invalid adaptation source");
+        assert_eq!(
+            line(119.97),
+            "2:00.0 · adaptation · Invalid adaptation source"
+        );
+    }
 
     /// The ring drops its oldest rather than growing without bound.
     #[test]

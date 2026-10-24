@@ -28949,3 +28949,23 @@ One commit for the three, all in the scalar editor and the preset sliders.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: a merged repeat relights the marker, and log times round first (UI-24, UI-33)
+
+One commit for the two, both in the diagnostics log.
+
+- **UI-24.** An error repeated straight after the same one merges into
+  that entry, and `push_event` returned from the merge before setting
+  `unseen_error`, so an error seen once and then repeated left the marker
+  dark. `a_merged_repeat_relights_the_marker`; before the fix the marker
+  stayed dark after the repeat. The merge sets the marker as a new entry
+  does.
+- **UI-33.** `event_line` split the minutes off and then printed the
+  seconds to a tenth, so a time just under a minute read "0:60.0". The
+  time is rounded to the tenth first:
+  `a_time_just_under_a_minute_reads_as_the_minute` holds 59.96 s to
+  "1:00.0" and 59.94 s to "0:59.9"; before the fix the first read
+  "0:60.0".
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

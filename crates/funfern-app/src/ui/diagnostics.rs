@@ -146,6 +146,11 @@ impl Playground {
         {
             last.repeats += 1;
             last.time = now;
+            // A repeat is the error again: merged into its entry, it left
+            // the marker dark (UI-24 of the 2026-10-20 review).
+            if source.error() {
+                self.unseen_error = true;
+            }
             return;
         }
         if self.events.len() == EVENT_LOG_ENTRIES {
@@ -1470,6 +1475,29 @@ mod tests {
     /// and returning without anything in between counts a repeat rather than
     /// filling the ring, and an error keeps the status marker lit until the
     /// window is opened on it.
+    /// UI-24 of the 2026-10-20 review: an error repeated straight after
+    /// the same one merged into that entry and returned before the marker
+    /// was lit, so an error seen once and then repeated stayed dark.
+    #[test]
+    fn a_merged_repeat_relights_the_marker() {
+        let mut state = Playground::default();
+        state.push_event(
+            1.0,
+            EventSource::Adaptation,
+            "Invalid adaptation source".into(),
+        );
+        assert!(state.unseen_error);
+        state.unseen_error = false;
+        state.push_event(
+            2.0,
+            EventSource::Adaptation,
+            "Invalid adaptation source".into(),
+        );
+        assert_eq!(state.events.len(), 1, "the repeat merges");
+        assert_eq!(state.events[0].repeats, 2);
+        assert!(state.unseen_error, "the merged repeat left the marker dark");
+    }
+
     #[test]
     fn the_log_keeps_one_entry_per_change_of_a_transient_channel() {
         let mut state = Playground::default();
