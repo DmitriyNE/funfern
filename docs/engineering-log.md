@@ -28861,3 +28861,24 @@ One commit for the two, both in the streamline lattice's low-pass filter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: a painted field's fallback is reported (UI-19)
+
+- **The defect.** A field-dependent medium's field is the inverse of its
+  map, not `Q/M`; where the inversion failed the display painted the linear
+  `Q/M` in its place, a different field from the one the solver steps, and
+  nothing was reported. The review's skeptic held that a Kerr or saturable
+  law cannot reach the failure; a bounded law can, past its amplitude
+  bound, and the fallback stays for whatever reaches it.
+- **Test first.** `a_field_laws_fallback_is_reported`: a bounded defocusing
+  Kerr medium read at fifty times its bound falls back, the fallback is
+  reported, and the diagnostics log carries it as a display error that
+  lights the marker; a field inside the bound maps and reports nothing.
+  Before the fix the fallback was silent.
+- **Fix.** `primary_field` says whether a map applied and failed, the
+  display refresh carries that to the frame, and `record_events` logs it
+  under a new `Display` source, red in the window; repeats merge into one
+  entry as other repeated errors do.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

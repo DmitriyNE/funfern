@@ -113,6 +113,16 @@ impl Playground {
         for text in std::mem::take(&mut self.pending_repairs) {
             self.push_event(now, EventSource::Repair, text);
         }
+        // The frame's painted field fell back to the linear `Q/M`, a
+        // different field from the one the solver steps; nothing said so
+        // (UI-19 of the 2026-10-20 review). Repeats merge into one entry.
+        if std::mem::take(&mut self.display_fell_back) {
+            self.push_event(
+                now,
+                EventSource::Display,
+                "The painted field fell back to the linear Q/M: its field-law map failed".into(),
+            );
+        }
         self.note_background_failure(now, browser_background_failure());
     }
 
@@ -835,7 +845,8 @@ impl Playground {
                             match entry.source {
                                 EventSource::Preparation
                                 | EventSource::Adaptation
-                                | EventSource::Worker => ui.colored_label(RED, line),
+                                | EventSource::Worker
+                                | EventSource::Display => ui.colored_label(RED, line),
                                 EventSource::Repair => ui.colored_label(GOLD, line),
                                 EventSource::Status => ui.small(line),
                             };

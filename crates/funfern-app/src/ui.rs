@@ -2536,22 +2536,27 @@ pub(crate) fn field_law_view(
 }
 
 /// `held` is the last runtime a snapshot and the clock agreed on, which the
-/// fields are read through where they do not agree (UI-3).
+/// fields are read through where they do not agree (UI-3). Answers whether a
+/// painted field fell back to the linear `Q/M` because its map failed, for
+/// the diagnostics log (UI-19).
 fn refresh_canonical_wave_display(
     active: Option<&Arc<PreparedTopology>>,
     canonical: &CanonicalGpuDisplay,
     request: &CanonicalGpuRequest,
     held: Option<&funfern_core::CanonicalMaterialRuntimeState>,
     display: &mut WaveDisplay,
-) {
-    let Some(active) = active else { return };
+) -> bool {
+    let mut fell_back = false;
+    let Some(active) = active else {
+        return fell_back;
+    };
     let operator = &active.canonical_operator;
     if canonical.generation != request.generation()
         || canonical.primary_flux.len() != operator.degrees_of_freedom()
         || canonical.previous_primary_flux.len() != operator.degrees_of_freedom()
         || canonical.constitutive_force.len() != operator.degrees_of_freedom()
     {
-        return;
+        return fell_back;
     }
     if display.generation != canonical.generation {
         display.picture.clear();
@@ -2561,13 +2566,15 @@ fn refresh_canonical_wave_display(
         && copy.values.len() == operator.degrees_of_freedom()
         && copy.serial != display.picture_serial
     {
-        display.picture = primary_field(
+        let (picture, fallen) = primary_field(
             active,
             canonical,
             held,
             &copy.values,
             latest_clock(canonical),
         );
+        display.picture = picture;
+        fell_back |= fallen;
         display.picture_serial = copy.serial;
     }
     display.picture_integrated.clear();
@@ -2590,7 +2597,7 @@ fn refresh_canonical_wave_display(
         display.live_integrated_readbacks = canonical.live_integrated_readbacks;
     }
     if display.generation == canonical.generation && display.readbacks == canonical.readbacks {
-        return;
+        return fell_back;
     }
     if display.generation != canonical.generation {
         display.complementary_flux.clear();
@@ -2600,25 +2607,29 @@ fn refresh_canonical_wave_display(
     }
     display.generation = canonical.generation;
     display.completed_steps = request.stats().completed_steps();
-    display.current = primary_field(
+    let (current, fallen) = primary_field(
         active,
         canonical,
         held,
         &canonical.primary_flux,
         latest_clock(canonical),
     );
+    display.current = current;
+    fell_back |= fallen;
     if canonical.full_readback_at == canonical.readbacks {
         // The snapshot's own field, through the maps at its own step, as
         // the rest of its AMR estimate is read; the live field above is
         // read at the latest clock, which a pumped medium's mass has moved
         // on from by a snapshot's lag.
-        display.snapshot_current = primary_field(
+        let (snapshot, fallen) = primary_field(
             active,
             canonical,
             held,
             &canonical.primary_flux,
             canonical.full_snapshot_seconds(),
         );
+        display.snapshot_current = snapshot;
+        fell_back |= fallen;
         display.snapshot_completed_steps = canonical.full_snapshot_completed_steps();
         display.snapshot_integrated.clear();
         display
@@ -2630,6 +2641,7 @@ fn refresh_canonical_wave_display(
             .extend(canonical.complementary_flux.iter().copied());
     }
     display.readbacks = canonical.readbacks;
+    fell_back
 }
 
 /// The latest clock's time, at which the live field is read: a played-out
@@ -2642,31 +2654,38 @@ fn latest_clock(canonical: &CanonicalGpuDisplay) -> Option<f64> {
 /// field-dependent medium's field is the inverse of its map, not `Q/M`: read
 /// at 30% amplitude departure, the linear division would paint a different
 /// field from the one the solver steps. A switched or pumped medium divides
-/// by its mass at that time, not the authored one.
+/// by its mass at that time, not the authored one. The second part says that
+/// a map applied and failed, so the linear `Q/M` was painted in its place: a
+/// different field from the solver's, which went unreported (UI-19 of the
+/// 2026-10-20 review).
 fn primary_field(
     active: &Arc<PreparedTopology>,
     canonical: &CanonicalGpuDisplay,
     held: Option<&funfern_core::CanonicalMaterialRuntimeState>,
     flux: &[f32],
     time: Option<f64>,
-) -> Vec<f32> {
+) -> (Vec<f32>, bool) {
+    let mut fell_back = false;
     let mapped_field = primary_field_view(active, canonical, held, time).and_then(
         |(temporal, runtime, time, _)| {
             let flux = flux
                 .iter()
                 .map(|value| f64::from(*value))
                 .collect::<Vec<_>>();
-            temporal.primary_field_at(&flux, time, &runtime).ok()
+            let mapped = temporal.primary_field_at(&flux, time, &runtime).ok();
+            fell_back = mapped.is_none();
+            mapped
         },
     );
-    match mapped_field {
+    let field = match mapped_field {
         Some(field) => field.into_iter().map(|value| value as f32).collect(),
         None => flux
             .iter()
             .zip(active.canonical_operator.primary_mass())
             .map(|(flux, mass)| (f64::from(*flux) / mass) as f32)
             .collect(),
-    }
+    };
+    (field, fell_back)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2723,7 +2742,7 @@ pub fn frame(
         &mut commands,
         time.delta_secs_f64(),
     );
-    refresh_canonical_wave_display(
+    state.display_fell_back |= refresh_canonical_wave_display(
         state.runtime.active(),
         &canonical_display,
         &request,

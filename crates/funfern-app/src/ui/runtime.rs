@@ -2365,11 +2365,53 @@ mod tests {
             .map(|mass| *mass as f32)
             .collect::<Vec<_>>();
         let clock = super::super::latest_clock(&display);
-        let field = super::super::primary_field(&active, &display, None, &flux, clock);
-        assert!(!field.is_empty());
+        let (field, fell_back) = super::super::primary_field(&active, &display, None, &flux, clock);
+        assert!(!field.is_empty() && !fell_back);
         for value in field {
             assert!((value - 0.5).abs() < 1.0e-6, "painted {value}");
         }
+    }
+
+    /// UI-19 of the 2026-10-20 review: where a field-law map could not be
+    /// inverted the painted field fell back to the linear `Q/M`, a different
+    /// field from the one the solver steps, and nothing was reported. The
+    /// fallback is reported, and the log carries it as a display error.
+    #[test]
+    fn a_field_laws_fallback_is_reported() {
+        let mut state = Playground::default();
+        let mut material = state.editor.document.model.draft.materials[0].clone();
+        material.mass_law.field = FieldLaw::Polynomial {
+            chi1: ScalarField::constant(0.0),
+            chi2: ScalarField::constant(-0.2),
+            amplitude_bound: Some(ScalarField::constant(1.0)),
+        };
+        state.editor.update_material(material).unwrap();
+        settle(&mut state.editor);
+        let active = activate(&mut state);
+        let temporal = active.canonical_temporal_operator.as_ref().unwrap();
+        assert!(temporal.has_field_laws());
+        let mut display = CanonicalGpuDisplay::default();
+        display.hold_switched_snapshot(1, temporal.initial_runtime().records().len());
+        let clock = super::super::latest_clock(&display);
+        let mass = active.canonical_operator.primary_mass();
+        let gentle = mass
+            .iter()
+            .map(|mass| (0.1 * mass) as f32)
+            .collect::<Vec<_>>();
+        let (_, fell_back) = super::super::primary_field(&active, &display, None, &gentle, clock);
+        assert!(!fell_back, "a field inside its bound maps");
+        let wild = mass
+            .iter()
+            .map(|mass| (50.0 * mass) as f32)
+            .collect::<Vec<_>>();
+        let (field, fell_back) = super::super::primary_field(&active, &display, None, &wild, clock);
+        assert!(fell_back, "a flux past the bound has no field");
+        assert!(field.iter().all(|value| (*value - 50.0).abs() < 1.0e-3));
+        state.display_fell_back = fell_back;
+        state.record_events(1.0);
+        assert_eq!(state.events.len(), 1, "{:?}", state.events);
+        assert_eq!(state.events[0].source, EventSource::Display);
+        assert!(state.diagnostics_warning());
     }
 
     /// UI-3 of the 2026-10-20 review: after every generation change, and
@@ -2405,7 +2447,7 @@ mod tests {
         let (_, _, _, aligned) = super::super::stored_energy_view(&active, &display, Some(&held))
             .expect("a switched medium's energy is read through a runtime");
         assert!(!aligned, "a disagreement must be reported");
-        let field = super::super::primary_field(&active, &display, Some(&held), &flux, clock);
+        let (field, _) = super::super::primary_field(&active, &display, Some(&held), &flux, clock);
         assert!(!field.is_empty());
         for value in field {
             assert!(
@@ -2414,7 +2456,7 @@ mod tests {
             );
         }
         // Nothing agreed on yet: the authored runtime is all there is.
-        let authored = super::super::primary_field(&active, &display, None, &flux, clock);
+        let (authored, _) = super::super::primary_field(&active, &display, None, &flux, clock);
         assert!(authored.iter().all(|value| (value - 1.0).abs() < 1.0e-6));
     }
 

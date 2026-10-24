@@ -299,6 +299,9 @@ pub struct Playground {
     pub(super) exposure_restart_at_generation: Option<u64>,
     /// A browser background worker aborted, and the log has it.
     pub(super) background_failed: bool,
+    /// This frame's painted field fell back to the linear `Q/M`, for the log
+    /// (UI-19 of the 2026-10-20 review).
+    pub(super) display_fell_back: bool,
     /// Presentation-only per-arrow filter state: the complementary field's
     /// DC blocker or the energy flow's low-pass, whichever is drawn. It never
     /// feeds the canonical solver or physical consumers.
@@ -545,6 +548,7 @@ impl Default for Playground {
             display_material_runtime: None,
             exposure_restart_at_generation: None,
             background_failed: false,
+            display_fell_back: false,
             vector_overlay_filter_state: BTreeMap::new(),
             vector_overlay_filter_owner: None,
             vector_overlay_filter_step: u64::MAX,

@@ -14,6 +14,9 @@ pub(super) enum EventSource {
     Adaptation,
     /// A browser background worker aborted.
     Worker,
+    /// The painted field fell back to the linear `Q/M` because a field-law
+    /// map could not be inverted (UI-19 of the 2026-10-20 review).
+    Display,
 }
 
 impl EventSource {
@@ -24,13 +27,17 @@ impl EventSource {
             Self::Preparation => "preparation",
             Self::Adaptation => "adaptation",
             Self::Worker => "worker",
+            Self::Display => "display",
         }
     }
     /// Whether an entry from here lights the status marker until the
     /// diagnostics are opened. A repair fallback explains a rebuild that
     /// succeeded, so it is worth keeping but not worth interrupting for.
     pub(super) const fn error(self) -> bool {
-        matches!(self, Self::Preparation | Self::Adaptation | Self::Worker)
+        matches!(
+            self,
+            Self::Preparation | Self::Adaptation | Self::Worker | Self::Display
+        )
     }
 }
 
