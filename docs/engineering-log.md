@@ -29041,3 +29041,17 @@ One commit for the two, both in the signal editor.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: a disabled probe is drawn grey (UI-30)
+
+- **The defect.** A probe switched off compiles as `Disabled`, which files
+  a "Recording is off" status for its readout, and `probe_color` read the
+  status before the enabled flag, so every disabled probe was drawn in the
+  failure red.
+- **Test first.** `a_disabled_probe_is_grey_not_red`: a disabled probe
+  with that status reads grey, an enabled one with a failure reads red;
+  before the fix the disabled one read red.
+- **Fix.** Off is checked first.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

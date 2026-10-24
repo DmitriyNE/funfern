@@ -53,13 +53,15 @@ impl Playground {
         );
         Some(Rect::from_min_max(min, max))
     }
-    /// Colour rule shared by markers and labels: a probe that failed to compile
-    /// reads red, one that is not recording reads grey.
+    /// Colour rule shared by markers and labels: a probe that is not recording
+    /// reads grey, one that failed to compile reads red. Off first: a disabled
+    /// probe carries a "Recording is off" status too, and read as red behind
+    /// it (UI-30 of the 2026-10-20 review).
     pub(super) fn probe_color(&self, probe: &TopologyProbeDefinition) -> Color32 {
-        if self.probe_status.contains_key(&probe.id) {
-            RED
-        } else if !probe.enabled {
+        if !probe.enabled {
             Color32::from_rgb(112, 130, 143)
+        } else if self.probe_status.contains_key(&probe.id) {
+            RED
         } else {
             Color32::from_rgb(probe.color[0], probe.color[1], probe.color[2])
         }
@@ -417,6 +419,30 @@ impl Playground {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// UI-30 of the 2026-10-20 review: a disabled probe compiles as
+    /// `Disabled`, which files a "Recording is off" status, and the colour
+    /// rule read the status before the flag, so a probe switched off was drawn
+    /// in the failure red. Off is grey; only a probe that failed is red.
+    #[test]
+    fn a_disabled_probe_is_grey_not_red() {
+        let mut state = Playground::default();
+        let probe = TopologyProbeDefinition {
+            id: ProbeId(7),
+            name: "off".into(),
+            color: [10, 200, 30],
+            enabled: false,
+            target: TopologyProbeTarget::AreaRegion(BACKGROUND_REGION),
+        };
+        state
+            .probe_status
+            .insert(probe.id, "Recording is off".into());
+        assert_eq!(state.probe_color(&probe), Color32::from_rgb(112, 130, 143));
+        let mut failed = probe.clone();
+        failed.enabled = true;
+        state.probe_status.insert(failed.id, "no such span".into());
+        assert_eq!(state.probe_color(&failed), RED);
+    }
     use crate::topology_editor::{
         ClosedCurvePurpose, TopologyAcceptance, TopologyBoundaryProbeTarget, TopologyProbeTarget,
     };
