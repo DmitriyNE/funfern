@@ -1149,6 +1149,28 @@ pub fn reserved_identifier(name: &str) -> bool {
 
 /// `source` with every identifier `old` written `new`, as a parameter
 /// rename rewrites a formula; any text, whether or not it parses.
+/// Where the numeric literal starting at `offset` ends: its digits and
+/// point, then an exponent where one follows with digits.
+fn number_end(source: &str, mut offset: usize) -> usize {
+    let bytes = source.as_bytes();
+    while offset < bytes.len() && (bytes[offset].is_ascii_digit() || bytes[offset] == b'.') {
+        offset += 1;
+    }
+    if offset < bytes.len() && matches!(bytes[offset], b'e' | b'E') {
+        let mut exponent = offset + 1;
+        if exponent < bytes.len() && matches!(bytes[exponent], b'+' | b'-') {
+            exponent += 1;
+        }
+        if exponent < bytes.len() && bytes[exponent].is_ascii_digit() {
+            offset = exponent;
+            while offset < bytes.len() && bytes[offset].is_ascii_digit() {
+                offset += 1;
+            }
+        }
+    }
+    offset
+}
+
 pub fn replace_identifier(source: &str, old: &str, new: &str) -> String {
     let mut result = String::with_capacity(source.len() + new.len().saturating_sub(old.len()));
     let mut offset = 0;
@@ -1167,6 +1189,13 @@ pub fn replace_identifier(source: &str, old: &str, new: &str) -> String {
             }
             let identifier = &source[start..offset];
             result.push_str(if identifier == old { new } else { identifier });
+        } else if character.is_ascii_digit() || character == '.' {
+            // A number is one token, its exponent with it: read from its `e`,
+            // the exponent was an identifier a rename could rewrite, `1e1`
+            // into `1e3` (NUM-23 of the 2026-10-20 review).
+            let start = offset;
+            offset = number_end(source, offset);
+            result.push_str(&source[start..offset]);
         } else {
             result.push(character);
             offset += character.len_utf8();
@@ -1178,6 +1207,16 @@ pub fn replace_identifier(source: &str, old: &str, new: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NUM-23 of the 2026-10-20 review: a rename read an identifier from any
+    /// letter, one straight after a digit too, so renaming `e1` to `e3` turned
+    /// the literal `1e1` into `1e3`. A number is one token, exponent and all.
+    #[test]
+    fn a_rename_leaves_a_numbers_exponent_alone() {
+        assert_eq!(replace_identifier("1e1 + e1", "e1", "e3"), "1e1 + e3");
+        assert_eq!(replace_identifier("2.5E-1*e1", "e1", "k"), "2.5E-1*k");
+        assert_eq!(replace_identifier("x2 + 2x", "x2", "y"), "y + 2x");
+    }
 
     /// The mechanical Advanced view shows `s₀ = 1/k₀` and writes an edited
     /// `s₀` back as `k₀ = 1/s₀`. Round trips must not grow the expression.

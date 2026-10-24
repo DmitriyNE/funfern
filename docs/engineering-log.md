@@ -28414,3 +28414,20 @@ is a line.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: a rename leaves a number's exponent alone (NUM-23)
+
+- **The defect.** `replace_identifier`, which a parameter rename runs over
+  every formula, read an identifier from any letter, one straight after a
+  digit too, so renaming `e1` to `e3` rewrote the literal `1e1` into `1e3`
+  without a word.
+- **Test first.** `a_rename_leaves_a_numbers_exponent_alone`: `1e1 + e1`
+  renamed `e1` → `e3` reads `1e1 + e3`, where it read `1e3 + e3`;
+  `2.5E-1*e1` keeps its exponent; `x2 + 2x` renamed `x2` → `y` leaves the
+  `2x` alone.
+- **Fix.** A numeric literal is one token, its digits and point and then an
+  exponent where an `e` or `E`, an optional sign and digits follow:
+  `number_end` finds its end and the rename copies it whole.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
