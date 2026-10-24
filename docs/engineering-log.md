@@ -28312,3 +28312,34 @@ is a line.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: the reference's gradient guard is relative (NUM-12)
+
+- **The defect.** `stable_difference`, which the CPU reference reads a
+  field difference through before the element's curl so that a constant
+  read through two masses gives exactly nothing, dropped every difference
+  under `8ε · max(|value|, |reference|, 1)`: the floor of 1 made that
+  1.8e-15 in absolute terms, so in a scene authored at small amplitude real
+  gradients went with the roundoff and the reference stood still where the
+  f32 device propagated. The copy in `canonical_temporal.rs` had the same
+  floor.
+- **Test first.** `a_small_field_keeps_its_gradient`, in both modules:
+  `stable_difference(1.1e-16, 1.0e-16)` is the difference itself, where it
+  read 0, and a value one ulp from its reference, at 0.3 or at 3, still
+  reads 0.
+- **Fix.** The guard is `8ε · max(|value|, |reference|)`, the values' own
+  roundoff, in both copies. The reference's output moves only where a
+  field under 1 differs by less than 1.8e-15 across an element, far inside
+  the device tolerances; the device shader has no such guard at all. The
+  targeted device suite ran after the commit.
+- **One test followed.** `the_short_wave_viscosity_damps_the_mesh_ceiling_and_spares_long_waves`
+  held a uniform oscillation bit for bit alone under the viscosity, at an
+  amplitude of 1e-3 where the floor was 1e3 times the values' roundoff and
+  swallowed the few ulps the nodes drift apart over the run. Under the
+  relative guard the viscosity reads that drift: the primary flux moved by
+  under 1e-15 of its scale and the gradient stayed at 7.7e-18 on 1.1e-4.
+  The test now holds the flux to 1e-14 of its scale and the gradient of
+  either run to 1e-12 of it, which is the property a relative guard keeps.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

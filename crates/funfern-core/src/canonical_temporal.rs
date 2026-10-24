@@ -6958,7 +6958,10 @@ fn validate_finite(values: &[f64]) -> Result<(), WaveError> {
 
 fn stable_difference(value: f64, reference: f64) -> f64 {
     let difference = value - reference;
-    let roundoff = 8.0 * f64::EPSILON * value.abs().max(reference.abs()).max(1.0);
+    // Relative to the values themselves: with a floor of 1 every difference
+    // under 1.8e-15 went, in a scene at small amplitude real gradients with
+    // them (NUM-12 of the 2026-10-20 review).
+    let roundoff = 8.0 * f64::EPSILON * value.abs().max(reference.abs());
     if difference.abs() <= roundoff {
         0.0
     } else {
@@ -10362,6 +10365,19 @@ mod tests {
         )
         .expect("the state is held under the carried runtime");
         assert_eq!(handed.state.runtime, runtime);
+    }
+
+    /// NUM-12 of the 2026-10-20 review: the roundoff `stable_difference`
+    /// suppresses had a floor of 1, so in a scene authored at small amplitude
+    /// every difference under 1.8e-15 was dropped and the CPU reference stood
+    /// still where the device propagated. Only a difference at the values'
+    /// own roundoff goes: a constant read through two masses still gives
+    /// nothing.
+    #[test]
+    fn a_small_field_keeps_its_gradient() {
+        assert_eq!(stable_difference(1.1e-16, 1.0e-16), 1.1e-16 - 1.0e-16);
+        assert_eq!(stable_difference(0.3 * (1.0 + f64::EPSILON), 0.3), 0.0);
+        assert_eq!(stable_difference(3.0 * (1.0 + f64::EPSILON), 3.0), 0.0);
     }
 
     #[test]
@@ -14646,7 +14662,12 @@ mod tests {
 
     /// Gate O: the short-wave viscosity turns the mesh's ceiling from growing
     /// to decaying under a van der Pol gain, costs a smooth mode almost
-    /// nothing, and leaves a uniform oscillation bit for bit alone.
+    /// nothing, and leaves a uniform oscillation alone to roundoff: the
+    /// reference's gradient guard drops a difference at the values' own
+    /// roundoff, and the nodes drift apart by a few ulps over the run, which
+    /// the viscosity then reads. It left the oscillation bit for bit alone
+    /// while the guard had an absolute floor (NUM-12 of the 2026-10-20
+    /// review), at this amplitude 1e3 times the values' roundoff.
     #[test]
     fn the_short_wave_viscosity_damps_the_mesh_ceiling_and_spares_long_waves() {
         // A threshold far above the field keeps the gain linear: `γ₀` on
@@ -14731,10 +14752,31 @@ mod tests {
         );
         let (_, bare_uniform) = run(&bare, &uniform);
         let (_, damped_uniform) = run(&operator, &uniform);
-        assert_eq!(bare_uniform.primary_flux(), damped_uniform.primary_flux());
-        assert_eq!(
-            bare_uniform.complementary_flux(),
-            damped_uniform.complementary_flux()
+        let scale = bare_uniform
+            .primary_flux()
+            .iter()
+            .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+        let apart = bare_uniform
+            .primary_flux()
+            .iter()
+            .zip(damped_uniform.primary_flux())
+            .map(|(bare, damped)| (bare - damped).abs())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            apart <= 1.0e-14 * scale,
+            "the uniform oscillation's flux moved by {apart:e} on {scale:e}"
+        );
+        // Neither run gives the uniform oscillation a gradient beyond the
+        // roundoff the guard lets through.
+        let gradient = bare_uniform
+            .complementary_flux()
+            .iter()
+            .chain(damped_uniform.complementary_flux())
+            .map(|flux| flux.norm())
+            .fold(0.0_f64, f64::max);
+        assert!(
+            gradient <= 1.0e-12 * scale,
+            "the uniform oscillation has a gradient of {gradient:e} on {scale:e}"
         );
     }
 

@@ -6236,7 +6236,10 @@ fn dot(left: &[f64], right: &[f64]) -> f64 {
 /// Suppress only that roundoff-sized difference before applying a gradient.
 fn stable_difference(value: f64, reference: f64) -> f64 {
     let difference = value - reference;
-    let roundoff = 8.0 * f64::EPSILON * value.abs().max(reference.abs()).max(1.0);
+    // Relative to the values themselves: with a floor of 1 every difference
+    // under 1.8e-15 went, in a scene at small amplitude real gradients with
+    // them (NUM-12 of the 2026-10-20 review).
+    let roundoff = 8.0 * f64::EPSILON * value.abs().max(reference.abs());
     if difference.abs() <= roundoff {
         0.0
     } else {
@@ -6536,6 +6539,19 @@ mod tests {
             (tm_rate - mechanical_rate).abs() <= 0.02 * mechanical_rate,
             "Mechanical decays at {mechanical_rate}, TM at {tm_rate}"
         );
+    }
+
+    /// NUM-12 of the 2026-10-20 review: the roundoff `stable_difference`
+    /// suppresses had a floor of 1, so in a scene authored at small amplitude
+    /// every difference under 1.8e-15 was dropped and the CPU reference stood
+    /// still where the device propagated. Only a difference at the values'
+    /// own roundoff goes: a constant read through two masses still gives
+    /// nothing.
+    #[test]
+    fn a_small_field_keeps_its_gradient() {
+        assert_eq!(stable_difference(1.1e-16, 1.0e-16), 1.1e-16 - 1.0e-16);
+        assert_eq!(stable_difference(0.3 * (1.0 + f64::EPSILON), 0.3), 0.0);
+        assert_eq!(stable_difference(3.0 * (1.0 + f64::EPSILON), 3.0), 0.0);
     }
 
     fn configured_scene(physics: PhysicsModel) -> Scene {
