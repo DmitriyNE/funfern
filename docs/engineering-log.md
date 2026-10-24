@@ -28534,3 +28534,27 @@ host; that rerun is owed.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 7: a junction moved along its side carries the side's anchors (ED-3)
+
+- **The defect.** A face on the outer boundary is anchored by a side and a
+  fraction along it, between the side's breakpoints: its corners and the
+  junctions on it. `resize_outer_domain` carried those anchors with the
+  breakpoints, but a junction dragged or moved along its side,
+  `apply_transform_updates_to_during_edit`'s Vertex arm, rewrote the
+  vertex's fraction and nothing else. A separator's foot moved from 0.3 to
+  0.7 along the bottom passed the background's anchor at 0.5, which then
+  named the subdomain's face: DuplicateFace, "two anchors claim the same
+  subdomain", and an invalid draft.
+- **Test first.** `moving_an_outer_junction_along_its_side_carries_the_sides_anchors`
+  draws a bottom-to-top separator at 0.3, moves its bottom junction to 0.7
+  and requires a valid draft with the background's anchor carried to
+  0.7857, its place between the junction and the corner.
+- **Fix.** The resize's anchor carry is `carry_outer_anchors`, over the
+  (side, from, to) moves of a side's vertices, and the Vertex arm calls it
+  with the moves from where the draft's vertices stand to where the
+  transform takes them, so a drag that applies its whole transform to its
+  start geometry each frame carries the anchors once per frame.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

@@ -2586,6 +2586,33 @@ impl TopologyEditor {
                 region.frame = frame;
             }
         }
+        // From where the draft's vertices stand to where they go, so a drag
+        // applying its whole transform to its start geometry each frame
+        // carries the anchors once per frame, not once per frame from the
+        // start.
+        let moves = geometry
+            .vertices
+            .iter()
+            .filter_map(|vertex| {
+                let TopologyVertexLocation::Outer { side, fraction: to } = vertex.location else {
+                    return None;
+                };
+                let from = draft
+                    .geometry
+                    .vertices
+                    .iter()
+                    .find(|previous| previous.id == vertex.id)?;
+                let TopologyVertexLocation::Outer {
+                    side: previous_side,
+                    fraction: from,
+                } = from.location
+                else {
+                    return None;
+                };
+                (previous_side == side && from != to).then_some((side, from, to))
+            })
+            .collect::<Vec<_>>();
+        carry_outer_anchors(&mut draft.face_assignments, &moves);
         draft.geometry = geometry;
         self.changed();
         Ok(())
@@ -4053,6 +4080,46 @@ fn existing_curve_vertex(
     })
 }
 
+/// Carries each Outer face anchor along with the breakpoints of its side -
+/// the corners and the vertices on it - as `moves` take a vertex from one
+/// fraction to another, so the anchor keeps its place between them and
+/// names the same face. A domain resize moves every vertex this way; a
+/// junction dragged along its side moves one, and left where it was, an
+/// anchor the junction passed over named the face on the other side,
+/// DuplicateFace and an invalid draft (ED-3 of the 2026-10-20 review).
+fn carry_outer_anchors(
+    assignments: &mut [AuthoredFaceAssignment],
+    moves: &[(OuterSide, f64, f64)],
+) {
+    const END: f64 = 1.0e-12;
+    let mut breakpoints = OuterSide::ALL.map(|_| vec![(0.0, 0.0), (1.0, 1.0)]);
+    for (side, from, to) in moves {
+        breakpoints[side.index()].push((*from, *to));
+    }
+    for points in &mut breakpoints {
+        points.sort_by(|left, right| left.0.total_cmp(&right.0));
+    }
+    for assignment in assignments {
+        let FaceAnchor::Outer { side, fraction } = &mut assignment.anchor else {
+            continue;
+        };
+        let points = &breakpoints[side.index()];
+        let Some(pair) = points
+            .windows(2)
+            .find(|pair| (pair[0].0..=pair[1].0).contains(fraction))
+        else {
+            continue;
+        };
+        let [(start, start_moved), (end, end_moved)] = [pair[0], pair[1]];
+        let within = if end - start > END {
+            (*fraction - start) / (end - start)
+        } else {
+            0.0
+        };
+        *fraction = start_moved + within * (end_moved - start_moved);
+    }
+}
+
 fn outer_attachment_point(
     domain: DomainRect,
     side: OuterSide,
@@ -4095,8 +4162,7 @@ fn fraction_along(domain: DomainRect, side: OuterSide, point: Point2) -> f64 {
 fn resize_outer_domain(scene: &mut TopologyScene, domain: DomainRect) -> Result<(), String> {
     const END: f64 = 1.0e-12;
     let previous = scene.geometry.domain;
-    // Each side's breakpoints, where they were and where they go.
-    let mut breakpoints = OuterSide::ALL.map(|_| vec![(0.0, 0.0), (1.0, 1.0)]);
+    let mut moves = vec![];
     for vertex in &mut scene.geometry.vertices {
         let TopologyVertexLocation::Outer { side, fraction } = &mut vertex.location else {
             continue;
@@ -4109,31 +4175,10 @@ fn resize_outer_domain(scene: &mut TopologyScene, domain: DomainRect) -> Result<
                 side.label().to_lowercase()
             ));
         }
-        breakpoints[side.index()].push((*fraction, moved));
+        moves.push((*side, *fraction, moved));
         *fraction = moved;
     }
-    for points in &mut breakpoints {
-        points.sort_by(|left, right| left.0.total_cmp(&right.0));
-    }
-    for assignment in &mut scene.face_assignments {
-        let FaceAnchor::Outer { side, fraction } = &mut assignment.anchor else {
-            continue;
-        };
-        let points = &breakpoints[side.index()];
-        let Some(pair) = points
-            .windows(2)
-            .find(|pair| (pair[0].0..=pair[1].0).contains(fraction))
-        else {
-            continue;
-        };
-        let [(start, start_moved), (end, end_moved)] = [pair[0], pair[1]];
-        let within = if end - start > END {
-            (*fraction - start) / (end - start)
-        } else {
-            0.0
-        };
-        *fraction = start_moved + within * (end_moved - start_moved);
-    }
+    carry_outer_anchors(&mut scene.face_assignments, &moves);
     scene.geometry.domain = domain;
     scene
         .geometry
@@ -6508,6 +6553,92 @@ mod tests {
         assert!(
             (landed - dot).norm() < 1.0e-9,
             "the end landed at {landed:?}, dot 3 is at {dot:?}"
+        );
+    }
+
+    /// ED-3 of the 2026-10-20 review: a separator's outer junction moved
+    /// along its side left that side's Outer face anchors where they were,
+    /// so a junction carried past the background's anchor left the anchor
+    /// naming the face on the other side, DuplicateFace and an invalid
+    /// draft. A domain resize already carried the anchors between a side's
+    /// breakpoints; a junction move carries them the same way.
+    #[test]
+    fn moving_an_outer_junction_along_its_side_carries_the_sides_anchors() {
+        let mut editor = TopologyEditor::default();
+        let glass = editor.add_material().unwrap();
+        settle(&mut editor);
+        let domain = editor.document.model.draft.geometry.domain;
+        let bottom_at =
+            |fraction: f64| outer_attachment_point(domain, OuterSide::Bottom, fraction).unwrap();
+        editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    bottom_at(0.3),
+                    outer_attachment_point(domain, OuterSide::Top, 0.3).unwrap(),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator { material: glass },
+                Some(outer(OuterSide::Bottom, 0.3)),
+                Some(outer(OuterSide::Top, 0.3)),
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let bottom_anchor = |editor: &TopologyEditor| {
+            editor
+                .document
+                .model
+                .draft
+                .face_assignments
+                .iter()
+                .find_map(|assignment| match assignment.anchor {
+                    FaceAnchor::Outer {
+                        side: OuterSide::Bottom,
+                        fraction,
+                    } => Some((assignment.region, fraction)),
+                    _ => None,
+                })
+                .expect("the background is anchored on the bottom side")
+        };
+        let (region, before) = bottom_anchor(&editor);
+        assert!(
+            before > 0.3,
+            "the anchor starts past the junction, at {before}"
+        );
+        let junction = editor
+            .document
+            .model
+            .draft
+            .geometry
+            .vertices
+            .iter()
+            .find(|vertex| {
+                matches!(
+                    vertex.location,
+                    TopologyVertexLocation::Outer {
+                        side: OuterSide::Bottom,
+                        ..
+                    }
+                )
+            })
+            .map(|vertex| vertex.id)
+            .unwrap();
+        editor
+            .apply_transform_updates(&[TopologyTransformUpdate::Vertex {
+                vertex: junction,
+                point: bottom_at(0.7),
+            }])
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        let (region_after, after) = bottom_anchor(&editor);
+        assert_eq!(region_after, region);
+        // Carried between the moved junction and the corner, where it was
+        // between the junction and the corner before.
+        let expected = 0.7 + (before - 0.3) / 0.7 * 0.3;
+        assert!(
+            (after - expected).abs() < 1.0e-9,
+            "the anchor sits at {after}, not {expected}"
         );
     }
 
