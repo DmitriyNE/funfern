@@ -28645,3 +28645,25 @@ the spacing in the lattice key rather than clearing the filter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: a switch to Pulse fires at the handoff time (UI-10)
+
+- **The defect.** The signal editor fired a source's new pulse at the live
+  time, as a source's drive edit is a live patch; but a pulsed flag that
+  changes changes the forcing's sparse layout, `forcing_sparse_layout_eq`
+  requires the same flag on both sides, and the switch always takes a
+  full handoff. Switching a continuous source to Pulse therefore cut the
+  start of its first burst. The editor test asserted the live time, while
+  the core's `a_source_turning_into_a_pulse_takes_a_handoff_and_a_pulse_edit_patches`
+  asserted the handoff.
+- **Test first.** `the_editor_turns_a_source_into_a_pulse_and_fires_it`
+  requires "Pulse" to start the burst at the handoff time, 13.0 s against
+  the live 12.5 s, and "Fire now" on the pulse that exists to keep the live
+  time, a patch of the running generation; before the fix "Pulse" gave
+  12.5.
+- **Fix.** The editor carries both fire times: a switch to Pulse uses the
+  handoff time whatever the signal's use, and "Fire now" the time the use
+  takes, live for a source, the handoff for a pinned field or a flux (UI-2).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

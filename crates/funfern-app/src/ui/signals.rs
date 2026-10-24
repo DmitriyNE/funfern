@@ -202,13 +202,8 @@ pub(super) fn edit_time_signal(
     fire: FireTimes,
     preview: &mut PulsePreview,
 ) -> SignalControls {
-    let fire_at = if role.takes_handoff() {
-        fire.handoff
-    } else {
-        fire.live
-    };
     ui.push_id(("time-signal", role), |ui| {
-        edit_time_signal_in(ui, signal, role, fire_at, preview)
+        edit_time_signal_in(ui, signal, role, fire, preview)
     })
     .inner
 }
@@ -224,7 +219,7 @@ fn edit_time_signal_in(
     ui: &mut egui::Ui,
     signal: &mut TimeSignal,
     role: SignalUse,
-    fire_at: f64,
+    fire: FireTimes,
     preview: &mut PulsePreview,
 ) -> SignalControls {
     let editor = ui.id();
@@ -236,12 +231,24 @@ fn edit_time_signal_in(
         })
         .inner;
     if pulsed != signal.is_pulsed() {
+        // A pulsed flag that changes changes the forcing's sparse layout
+        // (`forcing_sparse_layout_eq`), so the switch takes a new generation
+        // whatever the use, and the pulse starts at the handoff; fired at the
+        // live time it lost the start of its first burst (UI-10 of the
+        // 2026-10-20 review).
         *signal = if pulsed {
-            pulse_from(*signal, role, fire_at)
+            pulse_from(*signal, role, fire.handoff)
         } else {
             continuous_from(*signal, role)
         };
     }
+    // "Fire now" on a pulse that exists moves its start: a live patch for a
+    // source, a new generation for a pinned field or a flux.
+    let fire_at = if role.takes_handoff() {
+        fire.handoff
+    } else {
+        fire.live
+    };
     let (offset, amplitude, frequency, phase) = signal.carrier_mut();
     ui.horizontal(|ui| {
         ui.add(egui::DragValue::new(offset).speed(0.02).prefix("Offset "));
@@ -754,8 +761,9 @@ mod tests {
             ..egui::RawInput::default()
         };
         let output = context.run_ui(input, |ui| {
-            // A source's edit patches the running generation, so it fires
-            // at the live time.
+            // A source's drive patches the running generation and fires at
+            // the live time; a switch to Pulse changes the forcing's sparse
+            // layout and takes a generation, so it fires at the handoff.
             let fire = FireTimes {
                 live: 12.5,
                 handoff: 13.0,
@@ -823,8 +831,12 @@ mod tests {
         );
     }
 
-    /// "Pulse" turns a continuous source into a pulse fired at the time it
-    /// is handed, and "Fire now" moves an existing pulse's start there.
+    /// "Pulse" turns a continuous source into a pulse fired at the handoff
+    /// time, since a pulsed flag that changes takes a new generation
+    /// (`forcing_sparse_layout_eq`), and "Fire now" moves an existing pulse's
+    /// start to the live time, a patch of the running one. The switch fired
+    /// at the live time and cut the start of the first burst, and this test
+    /// asserted it (UI-10 of the 2026-10-20 review).
     #[test]
     fn the_editor_turns_a_source_into_a_pulse_and_fires_it() {
         let context = egui::Context::default();
@@ -840,12 +852,18 @@ mod tests {
         };
         press(&context, &mut signal, &mut preview, "Pulse");
         assert!(signal.is_pulsed(), "{signal:?}");
-        assert!(matches!(signal, TimeSignal::Pulsed { start: 12.5, .. }));
+        assert!(
+            matches!(signal, TimeSignal::Pulsed { start: 13.0, .. }),
+            "the switch takes a generation: {signal:?}"
+        );
         if let TimeSignal::Pulsed { start, .. } = &mut signal {
             *start = 1.0;
         }
         press(&context, &mut signal, &mut preview, "Fire now");
-        assert!(matches!(signal, TimeSignal::Pulsed { start: 12.5, .. }));
+        assert!(
+            matches!(signal, TimeSignal::Pulsed { start: 12.5, .. }),
+            "a fire patches the running generation: {signal:?}"
+        );
         // "Shape" opens the window on this pulse, which then follows it.
         assert!(!preview.open && preview.shown.is_none());
         press(&context, &mut signal, &mut preview, "Shape");
