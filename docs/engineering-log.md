@@ -28266,3 +28266,31 @@ its own test.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: the material laws' deferred checks and the stiffness row's speed ratio (NUM-17, NUM-18)
+
+One commit for the two, as planned: both are in `material_law.rs` and each
+is a line.
+
+- **NUM-17.** A φ⁴ well depth, a Klein-Gordon cutoff or a van der Pol
+  threshold that varies in space passes the editor's validation on the
+  promise, in `passes`, that its sign is checked "at the node points during
+  assembly", and nothing made that check: `λ = 16·x` evaluated at
+  `x = −0.5` as a negative well depth, which runs the field out to its
+  amplitude bound, and a threshold reaching 0 evaluated to an infinite
+  gain. `evaluate_at`, which every node goes through when a generation
+  compiles, holds each to its check now, `checked(value, test)`: `λ ≥ 0`,
+  `ω₀ ≥ 0`, threshold `> 0`, finite. The test
+  `a_varying_well_depth_or_threshold_is_checked_where_it_is_evaluated`
+  passes each of the three at edit time and refuses it at the node where
+  its sign fails.
+- **NUM-18.** `stiffness_speed_ratio_range` returned `(√low, √high)` where
+  a law on the stiffness row multiplies μ, or the reciprocal stiffness, so
+  it slows the wave as the mass row does and the ratio is `1/√ĥ`: the
+  pumped, switched and inverted law of the existing range test read
+  (0.837, 1.442) where the mass row, under the same factor, reads
+  (0.693, 1.195). It returns `(1/√high, 1/√low)`, and that test holds the
+  two rows' ranges equal. The function has no callers yet.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

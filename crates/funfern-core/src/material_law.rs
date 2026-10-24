@@ -702,7 +702,7 @@ impl RateLaw {
                 threshold,
                 amplitude_bound,
             } => RateLawValues::VanDerPol {
-                threshold: threshold.evaluate(coordinates, parameters)?,
+                threshold: checked(threshold.evaluate(coordinates, parameters)?, |t| t > 0.0)?,
                 amplitude_bound: amplitude_bound.evaluate_constant(parameters)?,
             },
         })
@@ -798,16 +798,16 @@ impl RestoringLaw {
         Ok(match self {
             Self::None => RestoringLawValues::None,
             Self::KleinGordon { omega0 } => RestoringLawValues::KleinGordon {
-                omega0: omega0.evaluate(coordinates, parameters)?,
+                omega0: checked(omega0.evaluate(coordinates, parameters)?, |w| w >= 0.0)?,
             },
             Self::SineGordon { omega0 } => RestoringLawValues::SineGordon {
-                omega0: omega0.evaluate(coordinates, parameters)?,
+                omega0: checked(omega0.evaluate(coordinates, parameters)?, |w| w >= 0.0)?,
             },
             Self::Phi4 {
                 lambda,
                 amplitude_bound,
             } => RestoringLawValues::Phi4 {
-                lambda: lambda.evaluate(coordinates, parameters)?,
+                lambda: checked(lambda.evaluate(coordinates, parameters)?, |l| l >= 0.0)?,
                 amplitude_bound: amplitude_bound.evaluate_constant(parameters)?,
             },
         })
@@ -871,6 +871,19 @@ fn passes(
         return true;
     }
     field.evaluate_constant(parameters).is_ok_and(check)
+}
+
+/// A value that varies in space, held where it is evaluated to the check
+/// [`passes`] defers to the nodes: every node is evaluated through here when
+/// a generation compiles. Nothing made that check, so `λ = 16·x` ran its
+/// negative half out to the amplitude bound and a threshold reaching 0 gave an
+/// infinite gain (NUM-17 of the 2026-10-20 review).
+fn checked(value: f64, check: impl Fn(f64) -> bool) -> Result<f64, MaterialError> {
+    if value.is_finite() && check(value) {
+        Ok(value)
+    } else {
+        Err(MaterialError::InvalidValue)
+    }
 }
 
 /// A coefficient that must not vary in space: a drive parameter, an alternate
@@ -1966,10 +1979,12 @@ impl CoefficientLawValues {
         Some((1.0 / high.sqrt(), 1.0 / low.sqrt()))
     }
 
-    /// The same for a law on the stiffness row: `c/c₀ = √ĥ`.
+    /// The same for a law on the stiffness row: `c/c₀ = 1/√ĥ`, since the row
+    /// multiplies μ, or the reciprocal stiffness, as the mass row multiplies
+    /// the density. It read `√ĥ` (NUM-18 of the 2026-10-20 review).
     pub fn stiffness_speed_ratio_range(self) -> Option<(f64, f64)> {
         let (low, high) = self.tangent_range()?;
-        Some((low.sqrt(), high.sqrt()))
+        Some((1.0 / high.sqrt(), 1.0 / low.sqrt()))
     }
 }
 
@@ -2522,6 +2537,47 @@ mod tests {
         let (slow, fast) = pumped.mass_speed_ratio_range().unwrap();
         assert!((slow - 1.0 / (1.3 * 1.6f64).sqrt()).abs() < 1.0e-12);
         assert!((fast - 1.0 / 0.7f64.sqrt()).abs() < 1.0e-12);
+        // NUM-18 of the 2026-10-20 review: a stiffness-row law multiplies μ,
+        // or the reciprocal stiffness, so it slows the wave as the mass row
+        // does, `c/c₀ = 1/√ĥ`; the range was `√ĥ`.
+        assert_eq!(
+            pumped.stiffness_speed_ratio_range(),
+            pumped.mass_speed_ratio_range()
+        );
+    }
+
+    /// NUM-17 of the 2026-10-20 review: a φ⁴ well depth, a Klein-Gordon
+    /// cutoff or a van der Pol threshold that varies in space is accepted at
+    /// edit time on the promise that its sign is checked at the nodes, and
+    /// nothing checked it: `λ = 16·x` ran its negative half out to the
+    /// amplitude bound, and a threshold reaching 0 gave an infinite gain.
+    #[test]
+    fn a_varying_well_depth_or_threshold_is_checked_where_it_is_evaluated() {
+        let parameters = &[][..];
+        let at = |x: f64| MaterialCoordinates {
+            x,
+            y: 0.0,
+            r: x.abs(),
+            theta: 0.0,
+        };
+        let phi4 = RestoringLaw::Phi4 {
+            lambda: ScalarField::formula("16*x").unwrap(),
+            amplitude_bound: ScalarField::constant(1.6),
+        };
+        assert!(phi4.valid(parameters));
+        assert!(phi4.evaluate_at(at(0.5), parameters).is_ok());
+        assert!(phi4.evaluate_at(at(-0.5), parameters).is_err());
+        let cutoff = RestoringLaw::KleinGordon {
+            omega0: ScalarField::formula("x").unwrap(),
+        };
+        assert!(cutoff.evaluate_at(at(-0.5), parameters).is_err());
+        let oscillating = RateLaw::VanDerPol {
+            threshold: ScalarField::formula("x").unwrap(),
+            amplitude_bound: ScalarField::constant(10.0),
+        };
+        assert!(oscillating.valid(parameters));
+        assert!(oscillating.evaluate_at(at(0.5), parameters).is_ok());
+        assert!(oscillating.evaluate_at(at(0.0), parameters).is_err());
     }
 
     #[test]
