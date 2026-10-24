@@ -29018,3 +29018,26 @@ field shares the first.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: a pulse's offset is dropped where it would integrate, and a long pulse's spectrum does not alias (UI-28, UI-29)
+
+One commit for the two, both in the signal editor.
+
+- **UI-28.** Pulse → Continuous carried the pulse's offset over unchanged;
+  for a source or a flux the continuous signal is a rate the solver
+  integrates, so a flash with offset 0.4 became a flux of 24 at T = 60 s,
+  growing without bound. `continuous_from` drops the offset for an
+  integrating use and keeps it for a pinned field, and the use's text says
+  so. `a_waveform_change_keeps_what_the_consumer_imposes` holds the flash's
+  offset dropped for Flux and Source and kept for Field; before the fix it
+  came through.
+- **UI-29.** The shape window's spectrum sampled a pulse sixteen times per
+  period of the resolved ceiling, capped at 2¹⁴ samples, and with the cap
+  binding a 1,000 s pulse on a 10 Hz carrier was sampled under its Nyquist
+  rate: its peak showed at about 6.4 Hz. With the cap binding the window
+  is shortened to what the samples resolve, the start of the pulse.
+  `a_long_pulses_spectrum_does_not_alias` requires that pulse's peak within
+  0.5 Hz of 10 Hz; before the fix it showed at 6.38 Hz.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

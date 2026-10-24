@@ -60,13 +60,17 @@ impl SignalUse {
     fn units(self, pulsed: bool) -> &'static str {
         match (self, pulsed) {
             (Self::Source, false) => {
-                "An acceleration: the solver integrates it into the field rate the source drives."
+                "An acceleration: the solver integrates it into the field rate the source drives. \
+                 A pulse's offset is dropped here, since integrated it would grow without bound."
             }
             (Self::Source, true) => {
                 "The field rate the source drives, as authored: nothing is left driving once the \
                  pulse is over."
             }
-            (Self::Flux, false) => "The rate of the flux: the wall holds its time integral.",
+            (Self::Flux, false) => {
+                "The rate of the flux: the wall holds its time integral. A pulse's offset is \
+                 dropped here, since integrated it would grow without bound."
+            }
             (Self::Flux, true) => "The flux the wall holds, as authored.",
             (Self::Field, _) => "The field the wall pins.",
         }
@@ -165,6 +169,11 @@ pub(super) fn continuous_from(signal: TimeSignal, role: SignalUse) -> TimeSignal
     } else {
         amplitude
     };
+    // A pulse's offset is a level; continuous, an integrating use would
+    // take it as a rate and integrate it without bound - a flash with
+    // offset 0.4 became a flux of 24 at T = 60 s (UI-28 of the 2026-10-20
+    // review). It is dropped there, and the use's text says so.
+    let offset = if role.integrates() { 0.0 } else { offset };
     let phase = if role == SignalUse::Source {
         SWITCH_ON_PHASE
     } else {
@@ -450,9 +459,19 @@ fn relative_spectrum(value: impl Fn(f64) -> f64, train: PulseTrain, ceiling: f64
     if ceiling <= 0.0 {
         return Vec::new();
     }
-    let duration = train.envelope.duration();
-    let count = ((duration * SPECTRUM_SAMPLES_PER_PERIOD * ceiling).ceil() as usize + 1)
-        .clamp(2, MOST_SPECTRUM_SAMPLES);
+    // Sixteen samples a period of the ceiling over the pulse, and where the
+    // cap binds the window is shortened to what the samples resolve rather
+    // than the samples spread under the Nyquist rate: a 1,000 s pulse on a
+    // 10 Hz carrier showed its peak at about 6.4 Hz (UI-29 of the 2026-10-20
+    // review).
+    let whole = train.envelope.duration();
+    let wanted = (whole * SPECTRUM_SAMPLES_PER_PERIOD * ceiling).ceil() as usize + 1;
+    let count = wanted.clamp(2, MOST_SPECTRUM_SAMPLES);
+    let duration = if wanted > MOST_SPECTRUM_SAMPLES {
+        (count - 1) as f64 / (SPECTRUM_SAMPLES_PER_PERIOD * ceiling)
+    } else {
+        whole
+    };
     let interval = duration / (count - 1) as f64;
     let samples = (0..count)
         .map(|index| value(train.start + index as f64 * interval))
@@ -728,6 +747,43 @@ mod tests {
         );
         assert!(flash.valid());
         assert_eq!(flash.carrier()[0], 0.4);
+        // Turned continuous, the flash's offset would be a flux rate the
+        // wall integrates without bound, 24 by T = 60 s; it is dropped for
+        // an integrating use and kept for a pinned field (UI-28 of the
+        // 2026-10-20 review).
+        assert_eq!(continuous_from(flash, SignalUse::Flux).carrier()[0], 0.0);
+        assert_eq!(continuous_from(flash, SignalUse::Source).carrier()[0], 0.0);
+        assert_eq!(continuous_from(flash, SignalUse::Field).carrier()[0], 0.4);
+    }
+
+    /// UI-29 of the 2026-10-20 review: the spectrum sampled a pulse sixteen
+    /// times per period of the resolved ceiling, capped at 2¹⁴ samples, and
+    /// with the cap binding a 1,000 s pulse on a 10 Hz carrier was sampled
+    /// under its Nyquist rate: its peak showed at about 6.4 Hz. With the cap
+    /// binding, the window is shortened to what the samples resolve.
+    #[test]
+    fn a_long_pulses_spectrum_does_not_alias() {
+        let carrier = 10.0;
+        let train = PulseTrain {
+            envelope: PulseEnvelope::FlatTop {
+                duration: 1000.0,
+                edge: 100.0,
+            },
+            start: 0.0,
+            repeat: 0.0,
+        };
+        let value = |time: f64| (std::f64::consts::TAU * carrier * time).cos();
+        let spectrum = relative_spectrum(value, train, carrier);
+        let peak = spectrum
+            .iter()
+            .copied()
+            .max_by(|a, b| a[1].total_cmp(&b[1]))
+            .expect("a spectrum");
+        assert!(
+            (peak[0] - carrier).abs() < 0.5,
+            "the peak shows at {} Hz for a {carrier} Hz carrier",
+            peak[0]
+        );
     }
 
     /// Every shape converts into every other over the same duration, and each
