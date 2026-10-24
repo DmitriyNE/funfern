@@ -28233,3 +28233,36 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: three spline-patch defects (NUM-19, NUM-20, NUM-21)
+
+One commit for the three, as planned: each is one line of the patch and
+its own test.
+
+- **NUM-19.** `project` solved its load against the density-weighted mass
+  but weighed the load by the quadrature stencil alone, so on a patch of
+  density 4 the constant 1 projected to 0.25. The load is weighed by the
+  density now, as `project_parametric` already did.
+  `projection_on_a_dense_patch_keeps_its_values` projects 1 on such a patch
+  and holds every coefficient within 1e-9 of it.
+- **NUM-20.** A condensed corner's degree of freedom gathers several basis
+  functions, and `frequency_bounds` squared each function's gradient on its
+  own where the stiffness's diagonal squares their sum, dropping the cross
+  terms; on a 2 × 3 quadratic patch with its corners condensed over three
+  functions the corner bound read 8.28 for a diagonal of 2.45, so
+  `--condense 3 --scale 4` over-scaled the corners. The gradients of one
+  node sum before squaring.
+  `a_condensed_corners_frequency_bound_is_its_stiffness_diagonal` compares
+  every node's bound times its lumped mass to the stiffness's diagonal,
+  read through a unit vector.
+- **NUM-21.** `refined` rebuilt each basis from its degree, span count and
+  end condition and dropped a C0 knot, so a field with a kink there, in the
+  coarse space, was not in the fine one: refined, it stood 0.028 off, and
+  nothing said so. The user chose to carry the knot rather than refuse the
+  patch: `UniformBasis::c0_span` finds the repeated knot, and `refined`
+  repeats it at twice its span, so the coarse space lies in the fine one.
+  `refining_keeps_a_c0_knot` refines a kinked separable field, clamped and
+  unclamped, and holds it to 1e-8 at 200 points.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

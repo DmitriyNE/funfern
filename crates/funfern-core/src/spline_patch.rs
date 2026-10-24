@@ -172,6 +172,11 @@ impl UniformBasis {
         self.periodic
     }
 
+    /// The span a C0 knot starts, if [`Self::with_c0_knot`] repeated one.
+    pub fn c0_span(&self) -> Option<usize> {
+        (0..self.spans).find(|span| self.intervals[*span] != span + self.degree)
+    }
+
     /// Whether the end knots are repeated (an open knot vector).
     pub fn is_clamped(&self) -> bool {
         !self.periodic && self.knots[0] == self.knots[self.degree]
@@ -960,8 +965,19 @@ impl SplinePatch {
         let mut stiffness = vec![0.0; self.degrees_of_freedom()];
         self.for_each_sample(|index, stencil| {
             let weight = stencil.weight * self.stiffness[index];
+            // A condensed corner takes several functions, whose gradients sum
+            // before squaring, as on the stiffness's diagonal; squared one by
+            // one they over-scaled the corners (NUM-20 of the 2026-10-20
+            // review).
+            let mut summed: Vec<(usize, Point2)> = Vec::new();
             for (node, g) in stencil.nodes().iter().zip(stencil.gradients()) {
-                stiffness[*node] += weight * g.dot(*g);
+                match summed.iter_mut().find(|(found, _)| found == node) {
+                    Some((_, total)) => *total = *total + *g,
+                    None => summed.push((*node, *g)),
+                }
+            }
+            for (node, g) in summed {
+                stiffness[node] += weight * g.dot(g);
             }
         });
         stiffness
@@ -1251,6 +1267,17 @@ impl SplinePatch {
             let spacing = 0.5 * basis.spacing();
             if basis.is_periodic() {
                 UniformBasis::periodic(basis.degree(), spans, spacing)
+            } else if let Some(at_span) = basis.c0_span() {
+                // The repeated knot stays repeated where its span is split, so
+                // the coarse space lies in the fine one; dropped, a field with
+                // a kink there left it (NUM-21 of the 2026-10-20 review).
+                UniformBasis::with_c0_knot(
+                    basis.degree(),
+                    spans,
+                    spacing,
+                    2 * at_span,
+                    !basis.is_clamped(),
+                )
             } else if basis.is_clamped() {
                 UniformBasis::open(basis.degree(), spans, spacing)
             } else {
@@ -1589,7 +1616,10 @@ impl SplinePatch {
     pub fn project(&self, f: impl Fn(Point2) -> f64) -> Vec<f64> {
         let mut right = vec![0.0; self.degrees_of_freedom()];
         self.for_each_sample(|index, stencil| {
-            let value = f(self.points[index]) * stencil.weight;
+            // Weighted by the density, as the mass it is solved against is:
+            // without it a patch of density 4 projected 1 to 0.25 (NUM-19 of
+            // the 2026-10-20 review).
+            let value = f(self.points[index]) * stencil.weight * self.density[index];
             for (node, basis) in stencil.nodes().iter().zip(stencil.values()) {
                 right[*node] += value * basis;
             }
@@ -2438,6 +2468,79 @@ mod tests {
                     .sum();
                 assert!((value - (t - 1.0).abs()).abs() < 1.0e-12, "{t}: {value}");
             }
+        }
+    }
+
+    /// NUM-19 of the 2026-10-20 review: `project` left the density out of
+    /// the right-hand side it solves against the density-weighted mass, so on
+    /// a patch of density 4 the constant 1 projected to 0.25.
+    #[test]
+    fn projection_on_a_dense_patch_keeps_its_values() {
+        let patch = small_patch(2, 3).with_material(|_| 4.0, |_| 1.0);
+        let ones = patch.project(|_| 1.0);
+        assert!(
+            ones.iter().all(|value| (value - 1.0).abs() < 1.0e-9),
+            "{:?}",
+            &ones[..4]
+        );
+    }
+
+    /// NUM-20 of the 2026-10-20 review: a condensed corner's degree of
+    /// freedom takes several functions, and its frequency bound squared each
+    /// function's gradient on its own, where the stiffness's diagonal squares
+    /// their sum, so `--condense 3 --scale 4` over-scaled the corners.
+    #[test]
+    fn a_condensed_corners_frequency_bound_is_its_stiffness_diagonal() {
+        let patch = small_patch(2, 3).with_condensed_corners(3);
+        let bounds = patch.frequency_bounds();
+        let mut wrong = vec![];
+        for node in 0..patch.degrees_of_freedom() {
+            let mut unit = vec![0.0; patch.degrees_of_freedom()];
+            unit[node] = 1.0;
+            let diagonal = patch.divergence(&patch.gradient(&unit))[node];
+            let bound = bounds[node] * patch.lumped()[node];
+            if (bound - diagonal).abs() > 1.0e-10 * diagonal.abs().max(1.0) {
+                wrong.push((node, bound, diagonal));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:?}");
+    }
+
+    /// NUM-21 of the 2026-10-20 review: `refined` rebuilt each basis from its
+    /// degree, span count and end condition and dropped a C0 knot, so a field
+    /// with a kink there, in the coarse space, was not in the fine one and
+    /// `refine_field` stopped being exact without a word.
+    #[test]
+    fn refining_keeps_a_c0_knot() {
+        for unclamped in [false, true] {
+            let kinked = UniformBasis::with_c0_knot(2, 8, 0.25, 4, unclamped);
+            let smooth = UniformBasis::open(2, 8, 0.25);
+            let cx = kinked
+                .greville()
+                .iter()
+                .map(|greville| (greville - 1.0).abs())
+                .collect::<Vec<_>>();
+            let cy = vec![1.0; smooth.functions()];
+            let patch = SplinePatch::from_bases_public(
+                kinked,
+                smooth,
+                GeometryMap::Affine {
+                    origin: Point2::new(0.0, 0.0),
+                },
+                3,
+            )
+            .unwrap();
+            let u = patch.separable(&cx, &cy);
+            let fine = patch.refined().unwrap();
+            let refined = patch.refine_field(&fine, &u);
+            let worst = (0..200)
+                .map(|step| {
+                    let parameter = Point2::new(2.0 * (step as f64 + 0.5) / 200.0, 0.37);
+                    (fine.evaluate_field(&refined, parameter) - patch.evaluate_field(&u, parameter))
+                        .abs()
+                })
+                .fold(0.0, f64::max);
+            assert!(worst < 1.0e-8, "unclamped {unclamped}: {worst}");
         }
     }
 
