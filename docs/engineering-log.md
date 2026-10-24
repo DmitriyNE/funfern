@@ -28399,3 +28399,18 @@ is a line.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: the edge-sharpness slider stops above zero (NUM-22)
+
+- **The defect.** The time crystal's "Edge sharpness" slider ran from 0,
+  which the law's validator refuses, so a slider dragged to its end made
+  Apply fail with a generic error; the Advanced editor's field for the same
+  value already stopped at 1e-6.
+- **Test first.** `every_slider_end_is_a_valid_material` applies every
+  medium in TM, sets each of its sliders to its minimum and to its maximum
+  in turn, and requires the material valid at each end; before the fix the
+  time crystal's edge at 0 was the one refusal, on each of its two rows.
+- **Fix.** The slider's minimum is 1e-6, as the Advanced field's.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

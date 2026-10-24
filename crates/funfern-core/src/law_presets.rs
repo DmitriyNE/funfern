@@ -114,11 +114,13 @@ const PHASE: LawPresetVariable = LawPresetVariable {
     minimum: -std::f64::consts::TAU,
     maximum: std::f64::consts::TAU,
 };
+// Above 0, which the validator refuses, as the Advanced editor's field does
+// (NUM-22 of the 2026-10-20 review).
 const EDGE: LawPresetVariable = LawPresetVariable {
     parameter: "edge",
     label: "Edge sharpness",
     default: 3.0,
-    minimum: 0.0,
+    minimum: 1.0e-6,
     maximum: 32.0,
 };
 const WAVENUMBER: LawPresetVariable = LawPresetVariable {
@@ -1717,6 +1719,39 @@ mod tests {
             };
             assert_eq!(other, &None, "a gain left on the other row");
         }
+    }
+
+    /// NUM-22 of the 2026-10-20 review: a slider's end is a value the
+    /// validator accepts. The time crystal's "Edge sharpness" went down to 0,
+    /// which the validator refuses, so dragging it to its end made Apply fail
+    /// with a generic error.
+    #[test]
+    fn every_slider_end_is_a_valid_material() {
+        let physics = skins()[1];
+        let mut refused = vec![];
+        for entry in MEDIA {
+            let applied = apply_medium_preset(entry, &Material::default_medium(), physics).unwrap();
+            let found = identify_medium_preset(&applied, physics).unwrap();
+            for (name, variable) in found.parameters().zip(entry.variables()) {
+                for end in [variable.minimum, variable.maximum] {
+                    let mut material = applied.clone();
+                    material
+                        .parameters
+                        .iter_mut()
+                        .find(|parameter| parameter.name == *name)
+                        .unwrap()
+                        .value = end;
+                    if !material.valid() {
+                        refused.push(format!(
+                            "{}: {} at {end}",
+                            entry.response().name,
+                            variable.label
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(refused.is_empty(), "{refused:#?}");
     }
 
     /// A material composed by hand is not a medium, and so reads Custom in
