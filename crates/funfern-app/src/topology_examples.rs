@@ -267,11 +267,12 @@ pub fn catalog() -> &'static [TopologyExample] {
             example(
                 ExampleGroup::GuidesAndCrystals,
                 "Disordered crystal",
-                "The photonic crystal's fifty rods scattered at random, a fixed seed, and lit at \
-                 2.5 Hz, where the ordered crystal lets 80% of the power through: scattered from \
-                 rod to rod, about an eighth gets through, nearly all of it thrown off the \
-                 straight path. A slab this thin cannot show Anderson localization itself; this \
-                 is the scattering that leads to it.",
+                "Fifty rods like the photonic crystal's, twice its number, scattered at \
+                 random with a fixed seed and lit at 2.5 Hz, where the ordered crystal lets 82% \
+                 of the field through: scattered from rod to rod, about an eighth of the power \
+                 gets through, nearly all of it thrown off the straight path. A slab this thin \
+                 cannot show Anderson localization itself; this is the scattering that leads \
+                 to it.",
                 disordered_crystal(),
             ),
             example(
@@ -335,10 +336,10 @@ pub fn catalog() -> &'static [TopologyExample] {
                 ExampleGroup::Resonators,
                 "Ring resonator",
                 "A glass ring beside a glass fiber, driven at 3.975 Hz, one of the ring's \
-                 resonances: over half a minute the ring fills to ten times its field between \
-                 resonances, and past it the fiber keeps under a fifth of its power, the rest \
-                 shed from the ring's bend. Tune the source to 3.885 Hz, between resonances, \
-                 and the wave runs past.",
+                 resonances: over half a minute the ring fills to ten times the energy it \
+                 holds between resonances, and past it the fiber keeps under a fifth of its \
+                 power, the rest shed from the ring's bend. Tune the source to 3.885 Hz, \
+                 between resonances, and the wave runs past.",
                 ring_resonator(),
             ),
             example(
@@ -1464,7 +1465,10 @@ fn material_lens_with(lens: bool) -> TopologyDocument {
 fn biconvex(radius: f64, half_aperture: f64) -> PeriodicCubicSpline {
     const PIECES: usize = 3;
     let offset = (radius * radius - half_aperture * half_aperture).sqrt();
-    let half_angle = half_aperture.atan2(offset);
+    // Portable, as every gallery angle is: the platform's `atan2` could
+    // mesh the lens differently in the browser (UI-16 of the 2026-10-20
+    // review). `asin(h/r)` is `acos(offset/r)`.
+    let half_angle = portable_acos(offset / radius);
     let step = 2.0 * half_angle / PIECES as f64;
     let reach = 4.0 / 3.0 * portable_tan(step / 4.0) * radius;
     let mut controls = Vec::with_capacity(6 * PIECES);
@@ -4400,7 +4404,7 @@ fn disordered_sites() -> Vec<Point2> {
 }
 
 /// The photonic crystal's pass frequency above its gap, where the ordered
-/// crystal lets 80% of the power through.
+/// gallery crystal lets 82% of the field through.
 const DISORDER_HZ: f64 = 2.5;
 
 fn disordered_crystal() -> TopologyDocument {

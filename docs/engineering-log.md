@@ -28882,3 +28882,26 @@ One commit for the two, both in the streamline lattice's low-pass filter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: the gallery's texts say what is measured, and the lens is portable (UI-14, UI-15, UI-16)
+
+One commit for the three, all in the gallery.
+
+- **UI-14.** The ring resonator's description said the ring "fills to ten
+  times its field"; the test behind it sums `a² + b²` round the ring, an
+  energy, and measures about 11× (a field ratio of about 3.3). It says ten
+  times the energy.
+- **UI-15.** The disordered crystal's description said "the photonic
+  crystal's fifty rods" and "80% of the power": the gallery's crystal has
+  25 rods (the disordered slab draws 50) and passes 0.82 of the field at
+  2.5 Hz. The description and `DISORDER_HZ`'s doc say so.
+- **UI-16.** The biconvex lens took its half-angle from the platform's
+  `atan2`, against the rule that gallery geometry is portable so every
+  platform meshes the same; `asin(h/r)` is `acos(offset/r)`, and
+  `portable_acos` gives it. Whether the browser's `atan2` ever differed
+  for this input is not proven; the rule is. Every regression and gallery
+  scene's mesh hash was recorded before and after: all 92 are unchanged on
+  this platform, where `portable_acos` gives the lens the bits `atan2` did.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
