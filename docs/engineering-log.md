@@ -28343,3 +28343,42 @@ is a line.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: the runtime layout names the loss lanes (NUM-13)
+
+- **The defect.** A material's runtime record has four lanes, the two
+  coefficient rows and the two loss channels, and a handoff carries each
+  lane's carrier by the layout's rule, a lane keeping the carrier of the
+  source lane that holds the same drive. `CanonicalRuntimeLayout::of`
+  named the drives of the coefficient samples only, so a loss channel's
+  drive was in no layout, on the host or read back from the device's
+  packed plan, and no handoff carried it: a frequency edit on an
+  electric-loss pump restarted its carrier at the authored phase while a
+  coefficient pump's ran on. Measured on the host, TM, an electric loss
+  pumped at 1 Hz edited to 2.5 Hz and handed over at t = 1 s: the carrier
+  stood at 2π before, 0 modulo a turn, and restarted at 5π, π modulo a
+  turn, half a turn apart.
+- **Tests first.** `a_handoff_keeps_a_loss_drives_carrier_across_a_frequency_edit`
+  (core) carries that runtime onto the edited generation and holds the
+  loss lane's carrier phase to 1e-9 across it.
+  `a_loss_channels_drive_is_in_the_layout_read_from_the_plan` (app) packs
+  a generation whose electric channel is pumped and whose magnetic one is
+  constant, and requires the layout read off the operator to equal the one
+  read back from the plan, with the electric lane named and the magnetic
+  one not; before the fix neither named the lane, after the host's fix
+  alone the two disagreed.
+- **Fix.** The layout, and the drive table `carried_onto` resolves a
+  carried lane's drive from, take the loss samples too. An undriven
+  channel has no carrier, and the device packs it as it packs a site no
+  channel reaches, on the electric lane under no drive, so neither names
+  a lane: the host skips a loss sample whose drive is `None`, and the
+  device's `packed_runtime_layout` reads the two loss record ranges,
+  which mirror the coefficient records, and skips a record whose drive
+  kind is `None`. The handoff shader already loops over the four lanes
+  under the mapping word the host builds from the layouts, so it carries
+  a loss lane's carrier with no change of its own.
+- **Device check.** `scripts/device-suite.sh 'handoff|temporal'` after
+  the commit.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

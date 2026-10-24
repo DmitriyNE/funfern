@@ -3402,6 +3402,30 @@ fn packed_runtime_layout(
             layout.set_drive(metadata.x as usize, metadata.y as usize, signature)?;
         }
     }
+    // The loss records name the driven loss lanes, as the host's layout does
+    // (NUM-13 of the 2026-10-20 review). An undriven record is a channel
+    // with no carrier or a site no channel reaches, packed alike on the
+    // electric lane, and names none.
+    let losses = plan.tables[manifest.header_offset + 2].data;
+    let loss_ranges = [
+        (losses.x as usize, manifest.primary_record_count),
+        (losses.y as usize, manifest.complementary_record_count),
+    ];
+    for (start, count) in loss_ranges {
+        for record in temporal_coefficient_range(plan, start, count)? {
+            let metadata = record[0].data;
+            let kind = temporal_drive_kind_of_code(metadata.z).ok_or(
+                CanonicalGpuBuildError::InvalidLayout(
+                    "a temporal loss names an invalid runtime drive",
+                ),
+            )?;
+            if kind == CanonicalDriveKind::None {
+                continue;
+            }
+            let signature = CanonicalDriveSignature::new(kind, f32::from_bits(record[2].data.z))?;
+            layout.set_drive(metadata.x as usize, metadata.y as usize, signature)?;
+        }
+    }
     Ok(layout)
 }
 
@@ -11116,6 +11140,49 @@ mod tests {
 
         naga::front::wgsl::parse_str(include_str!("canonical_transfer.wgsl")).unwrap();
         naga::front::wgsl::parse_str(include_str!("canonical_transfer_runtime.wgsl")).unwrap();
+    }
+
+    /// Reported by the 2026-10-20 review (NUM-13): the layout read off an
+    /// operator and the one read back from its packed plan named the two
+    /// coefficient lanes only, so a loss channel's drive was carried by
+    /// neither side of a handoff. Both name it now, alike; an undriven
+    /// channel has no carrier and names no lane.
+    #[test]
+    fn a_loss_channels_drive_is_in_the_layout_read_from_the_plan() {
+        use funfern_core::{DampingLaw, LossChannel, RateLaw};
+        let (_, _, _, operator, _, plan) = temporal_plan_with(|material| {
+            material.electric_loss = Some(LossChannel {
+                base_rate: ScalarField::constant(0.3),
+                law: DampingLaw {
+                    rate: RateLaw::Constant,
+                    drive: TimeDrive::ParametricPump {
+                        depth: ScalarField::constant(0.2),
+                        frequency_hz: ScalarField::constant(1.3),
+                        phase_radians: ScalarField::constant(0.4),
+                    },
+                    gate: None,
+                },
+            });
+            material.magnetic_loss = Some(LossChannel {
+                base_rate: ScalarField::constant(0.1),
+                law: DampingLaw::constant(),
+            });
+        });
+        let layout =
+            CanonicalGpuGenerationLayout::of_generation(operator.base(), Some(&operator)).unwrap();
+        assert_eq!(layout, plan.layout().unwrap());
+        let drives = layout.runtime.records()[0].drives;
+        assert_eq!(
+            drives[temporal_drive_index(CanonicalMaterialDrive::ElectricLoss) as usize]
+                .map(CanonicalDriveSignature::kind),
+            Some(CanonicalDriveKind::ParametricPump),
+            "the pumped electric channel names its lane"
+        );
+        assert_eq!(
+            drives[temporal_drive_index(CanonicalMaterialDrive::MagneticLoss) as usize],
+            None,
+            "the constant magnetic channel has no carrier"
+        );
     }
 
     /// A physics skin change swaps the mass and stiffness rows, so a drive

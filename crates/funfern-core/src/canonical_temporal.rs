@@ -243,6 +243,16 @@ impl CanonicalMaterialRuntimeState {
             let record = self.record_index(sample.material)?;
             drives[record][sample.drive.index()] = Some(sample.law.drive);
         }
+        for sample in source
+            .primary_loss_samples()
+            .chain(source.complementary_loss_samples())
+        {
+            let Some(lane) = sample.drive else {
+                continue;
+            };
+            let record = self.record_index(sample.material)?;
+            drives[record][lane.index()] = Some(sample.law.drive);
+        }
         let mut carried = target.initial_runtime();
         for (record, carry) in carried
             .records
@@ -427,6 +437,35 @@ impl CanonicalRuntimeLayout {
             layout.set_drive(
                 record,
                 sample.drive.index(),
+                CanonicalDriveSignature::of(sample.law.drive)?,
+            )?;
+        }
+        // A loss channel's drive lives on a loss lane, and a handoff carries
+        // its carrier as it does a coefficient's; named by the coefficient
+        // samples alone, a frequency edit on an electric-loss pump restarted
+        // its carrier while a coefficient pump's ran on (NUM-13 of the
+        // 2026-10-20 review). An undriven channel has no carrier to carry and
+        // packs as a site no channel reaches does, so neither names a lane.
+        for sample in temporal
+            .primary_loss_samples()
+            .chain(temporal.complementary_loss_samples())
+        {
+            let Some(lane) = sample.drive else {
+                continue;
+            };
+            if sample.law.drive == TimeDriveValues::None {
+                continue;
+            }
+            let record = layout
+                .records
+                .iter()
+                .position(|record| record.material == sample.material)
+                .ok_or(WaveError::Unsupported(
+                    "a temporal loss has no material runtime record",
+                ))?;
+            layout.set_drive(
+                record,
+                lane.index(),
                 CanonicalDriveSignature::of(sample.law.drive)?,
             )?;
         }
@@ -15505,6 +15544,61 @@ mod tests {
             checked += 1;
         }
         assert_eq!(checked, 2, "both rows are pumped");
+    }
+
+    /// Reported by the 2026-10-20 review (NUM-13): the runtime layout named
+    /// the two coefficient lanes only, so a loss channel's drive was carried
+    /// by no handoff, and a frequency edit on an electric-loss pump restarted
+    /// its carrier at the authored phase while a coefficient pump's ran on.
+    /// Carried onto the edited generation, the loss lane keeps the phase it
+    /// had reached, as the coefficient lanes do.
+    #[test]
+    fn a_handoff_keeps_a_loss_drives_carrier_across_a_frequency_edit() {
+        let mut scene = Scene {
+            physics: PhysicsModel::Electromagnetic {
+                polarization: ElectromagneticPolarization::Tm,
+            },
+            ..Scene::default()
+        };
+        scene.materials[0].electric_loss = Some(LossChannel {
+            base_rate: ScalarField::constant(0.4),
+            law: crate::DampingLaw {
+                rate: crate::RateLaw::Constant,
+                drive: pump(0.25, 1.0, 0.0),
+                gate: None,
+            },
+        });
+        let source = compile(&scene).unwrap();
+        let mut edited = scene.clone();
+        edited.materials[0]
+            .electric_loss
+            .as_mut()
+            .unwrap()
+            .law
+            .drive = pump(0.25, 2.5, 0.0);
+        let target = compile(&edited).unwrap();
+        let lane = CanonicalMaterialDrive::ElectricLoss;
+        let drive_of = |operator: &CanonicalTemporalWaveOperator| {
+            operator
+                .primary_loss_samples()
+                .find(|sample| sample.drive == Some(lane))
+                .map(|sample| sample.law.drive)
+                .expect("TM's primary loss is the electric channel")
+        };
+        let runtime = source.initial_runtime();
+        let time = 1.0;
+        let carried = runtime.carried_onto(&source, &target, time).unwrap();
+        let before = runtime.records[0].drives[lane.index()]
+            .carrier_phase(drive_of(&source), time)
+            .unwrap();
+        let after = carried.records[0].drives[lane.index()]
+            .carrier_phase(drive_of(&target), time)
+            .unwrap();
+        let apart = (before - after).rem_euclid(std::f64::consts::TAU);
+        assert!(
+            apart.min(std::f64::consts::TAU - apart) < 1.0e-9,
+            "the loss carrier stood at {before} rad before the edit and {after} after"
+        );
     }
 
     /// The handoff's runtime rule: a record carries on from its material's,
