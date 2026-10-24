@@ -234,6 +234,13 @@ fn main() -> AppExit {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
         material.restoring = RestoringLaw::None;
+        // The static assembly refuses a loss law too; the rate stays.
+        for loss in [&mut material.electric_loss, &mut material.magnetic_loss]
+            .into_iter()
+            .flatten()
+        {
+            loss.law = DampingLaw::constant();
+        }
     }
     let mesh = mesh_scene(
         &fixed_scene,

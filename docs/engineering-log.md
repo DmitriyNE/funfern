@@ -28461,3 +28461,47 @@ is a line.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: the Scene path reads materials and outer edges as the topology path does (NUM-15, NUM-16)
+
+One commit for the two, as planned: both are in the legacy `Scene`
+assembly path, which the plan's Maintenance item phases out after the
+review's fixes; until then it has to agree with the topology path the app
+runs.
+
+- **NUM-15.** `CoefficientProvider::Scene` sampled a material's four base
+  fields itself, so a constant loss channel was dropped and a material with
+  a law was assembled as a static medium, where the topology path reads
+  `Material::evaluate_static`: the primary channel's rate stands in for
+  `damping`, a law is refused. It reads that evaluator now; where it
+  refuses, the field-by-field pass still names the coefficient and the
+  point when one of them is what failed, so the message a bad formula gets
+  is unchanged, and a refused law is reported under "material laws".
+  `the_scene_path_reads_materials_as_the_static_evaluator_does` assembles
+  the two-material square with its damping moved into a constant magnetic
+  channel and requires the lumped damping of the legacy and the channel
+  scenes equal, 1.0 in all over the square's 11 nodes, where the channel
+  scene read zero everywhere; a pumped mass law must be refused, where it
+  assembled. `ordinary_production_compiler_still_rejects_a_driven_material`
+  builds its static operator from the law-stripped scene now, as production
+  does, so the refusal it checks stays the compiler's own. The app's temporal fixture strips its loss laws before the
+  static assembly as it strips the coefficient laws, since the Scene path
+  now refuses a driven one; so do `a_van_der_pol_plan_marks_its_records_and_nodes`
+  and the three examples whose static scene carried a van der Pol channel,
+  `canonical_gpu_oscillator`, `canonical_gpu_temporal_timing` and
+  `temporal_amr_calibration`. Their
+  static operators carry the channel's base rate as damping now, as the
+  topology path's do for the same material.
+- **NUM-16.** The Scene path's outer boundary sampled the background
+  material along every outer edge, so a side another region met absorbed
+  with the background's impedance. Each edge now reads the region of the
+  triangle it belongs to, kept from the numbering pass in `edge_regions`;
+  the topology path already read its plan.
+  `an_outgoing_side_reads_the_region_that_meets_it` puts region 2 on the
+  triangle that owns the top and left sides of the square and requires
+  each side's midpoint to absorb with its own material: √28 · 2/3 = 3.53
+  on the top and left, √6 · 2/3 = 1.63 on the bottom and right, where the
+  top and left read 1.63.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

@@ -10481,10 +10481,16 @@ mod tests {
     fn ordinary_production_compiler_still_rejects_a_driven_material() {
         let mut scene = Scene::initial();
         scene.materials[0].mass_law.drive = pump(0.2, 1.0, 0.0);
-        let mesh = mesh_scene(&scene, 1, MeshingOptions::default()).unwrap();
+        // The static assembly reads the medium with its laws stripped, as
+        // production does: the Scene path refuses a law as well (NUM-15 of
+        // the 2026-10-20 review), and the refusal under test is the
+        // compiler's own.
+        let mut base_scene = scene.clone();
+        strip_temporal_laws(&mut base_scene.materials);
+        let mesh = mesh_scene(&base_scene, 1, MeshingOptions::default()).unwrap();
         let quadratic = QuadraticWaveOperator::assemble_scene(
             &mesh,
-            &scene,
+            &base_scene,
             OuterBoundaryCondition::Reflecting,
         )
         .unwrap();

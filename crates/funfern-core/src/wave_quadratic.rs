@@ -1155,7 +1155,27 @@ impl CoefficientProvider<'_> {
                     .ok_or(WaveError::Unsupported(
                         "a region names a material the scene does not hold",
                     ))?;
-                evaluate_directional_material(scene.physics, material, *region, point)?
+                // What the topology path reads: the primary channel's rate
+                // for `damping`, a law refused. Sampling the base fields
+                // here dropped a constant loss channel and assembled a law
+                // as a static medium (NUM-15 of the 2026-10-20 review).
+                match material.evaluate_static(scene.physics, region.frame, point) {
+                    Ok(properties) => scene
+                        .physics
+                        .directional_wave_coefficients(properties, region.frame),
+                    // The evaluator says only that a value is invalid; the
+                    // field-by-field pass names the coefficient and the
+                    // point when one of them is what failed.
+                    Err(error) => {
+                        evaluate_directional_material(scene.physics, material, *region, point)?;
+                        return Err(WaveError::MaterialEvaluation {
+                            material: material.name.clone(),
+                            coefficient: "material laws",
+                            point,
+                            reason: error.to_string(),
+                        });
+                    }
+                }
             }
             Self::Topology(model) => {
                 model.directional_material_at(region, point).map_err(|_| {
@@ -1812,6 +1832,9 @@ struct QuadraticAssemblyWork {
     outer_boundaries: OuterBoundaryConditions,
     node_points: Vec<Point2>,
     edge_nodes: BTreeMap<(usize, usize), usize>,
+    /// The region of the last triangle numbered along each edge: for an
+    /// outer edge, the one triangle it belongs to.
+    edge_regions: BTreeMap<(usize, usize), RegionId>,
     local_nodes: Vec<[usize; 7]>,
     rows: Vec<BTreeMap<usize, f64>>,
     auxiliary_rows: Vec<BTreeMap<usize, f64>>,
@@ -1853,6 +1876,7 @@ impl QuadraticAssemblyWork {
             },
             node_points: Vec::new(),
             edge_nodes: BTreeMap::new(),
+            edge_regions: BTreeMap::new(),
             local_nodes: Vec::new(),
             rows: Vec::new(),
             auxiliary_rows: Vec::new(),
@@ -1960,6 +1984,7 @@ impl QuadraticAssemblyWork {
             } else {
                 (pair[1], pair[0])
             };
+            self.edge_regions.insert(key, mesh.triangles[index].region);
             let node_points = &mut self.node_points;
             edge[slot] = *self.edge_nodes.entry(key).or_insert_with(|| {
                 let index = node_points.len();
@@ -2077,10 +2102,16 @@ impl QuadraticAssemblyWork {
                 ));
             }
             let nodes = [a, b, midpoint];
+            // The Scene path reads the region of the triangle the edge
+            // belongs to; it read the background's along every side, so a
+            // side another region met absorbed with the background's
+            // impedance (NUM-16 of the 2026-10-20 review).
             let region = if let Some(plan) = topology {
                 topology_outer_region(plan, side, boundary.parameters)?
             } else {
-                BACKGROUND_REGION
+                *self.edge_regions.get(&key).ok_or(WaveError::InvalidMesh(
+                    "an outer boundary edge does not belong to a triangle",
+                ))?
             };
             let node_coefficients = [
                 coefficients.at(region, self.node_points[nodes[0]])?,
@@ -3135,6 +3166,84 @@ mod tests {
             .apply_stiffness(&vec![1.0; operator.degrees_of_freedom()])
             .unwrap();
         assert!(constant.iter().all(|value| value.abs() < 5.0e-12));
+    }
+
+    /// Reported by the 2026-10-20 review (NUM-15): the Scene path sampled a
+    /// material's four base fields itself, so a constant loss channel was
+    /// dropped and a material with a law was assembled as a static medium,
+    /// where the topology path reads `Material::evaluate_static`. It reads
+    /// the same now: the primary channel's rate stands in for `damping`, and
+    /// a law is refused.
+    #[test]
+    fn the_scene_path_reads_materials_as_the_static_evaluator_does() {
+        let mut legacy = two_material_scene();
+        let mut channel = legacy.clone();
+        for material in &mut channel.materials {
+            let rate = std::mem::replace(&mut material.damping, crate::ScalarField::constant(0.0));
+            material.magnetic_loss = Some(crate::LossChannel {
+                base_rate: rate,
+                law: crate::DampingLaw::constant(),
+            });
+        }
+        let mut mesh = square();
+        mesh.triangles[1].region = RegionId(2);
+        let assemble = |scene: &Scene| {
+            QuadraticWaveOperator::assemble_scene(&mesh, scene, OuterBoundaryCondition::Reflecting)
+        };
+        let legacy_operator = assemble(&legacy).unwrap();
+        let channel_operator = assemble(&channel).unwrap();
+        assert_eq!(
+            channel_operator.lumped_damping(),
+            legacy_operator.lumped_damping()
+        );
+        assert!((legacy_operator.lumped_damping().iter().sum::<f64>() - 1.0).abs() < 1.0e-13);
+        legacy.materials[0].mass_law.drive = crate::TimeDrive::ParametricPump {
+            depth: crate::ScalarField::constant(0.1),
+            frequency_hz: crate::ScalarField::constant(1.0),
+            phase_radians: crate::ScalarField::constant(0.0),
+        };
+        assert!(assemble(&legacy).is_err(), "a law is not a static medium");
+    }
+
+    /// Reported by the 2026-10-20 review (NUM-16): the Scene path sampled
+    /// the background material along every outer edge, so a side another
+    /// region meets absorbed with the background's impedance. Each outer
+    /// edge reads the region of the triangle it belongs to.
+    #[test]
+    fn an_outgoing_side_reads_the_region_that_meets_it() {
+        let mut mesh = square_with_outer_boundary();
+        mesh.triangles[1].region = RegionId(2);
+        let operator = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &two_material_scene(),
+            OuterBoundaryCondition::FirstOrderOutgoing,
+        )
+        .unwrap();
+        let midpoint = |x: f64, y: f64| {
+            operator
+                .node_points()
+                .iter()
+                .position(|point| (point.x - x).abs() < 1.0e-12 && (point.y - y).abs() < 1.0e-12)
+                .unwrap()
+        };
+        // Triangle 1, (0, 2, 3), owns the top and left sides and triangle 0
+        // the bottom and right; a side's midpoint node is reached by that
+        // side alone, two thirds of its unit length times the impedance.
+        let damping = operator.first_order_boundary_damping();
+        for (x, y, mass, stiffness) in [
+            (0.5, 1.0, 4.0_f64, 7.0_f64),
+            (0.0, 0.5, 4.0, 7.0),
+            (0.5, 0.0, 2.0, 3.0),
+            (1.0, 0.5, 2.0, 3.0),
+        ] {
+            let node = midpoint(x, y);
+            let expected = 2.0 / 3.0 * (mass * stiffness).sqrt();
+            assert!(
+                (damping[node] - expected).abs() < 1.0e-12,
+                "the side midpoint ({x}, {y}) absorbs {} for {expected}",
+                damping[node]
+            );
+        }
     }
 
     #[test]

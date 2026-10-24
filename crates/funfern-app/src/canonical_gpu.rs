@@ -9980,6 +9980,12 @@ mod tests {
         for material in &mut fixed_scene.materials {
             material.mass_law = CoefficientLaw::linear();
             material.stiffness_law = CoefficientLaw::linear();
+            for loss in [&mut material.electric_loss, &mut material.magnetic_loss]
+                .into_iter()
+                .flatten()
+            {
+                loss.law = funfern_core::DampingLaw::constant();
+            }
         }
         let mesh = mesh_scene(
             &fixed_scene,
@@ -10592,6 +10598,9 @@ mod tests {
         });
         let mut fixed_scene = scene.clone();
         fixed_scene.materials[0].restoring = funfern_core::RestoringLaw::None;
+        // The static assembly refuses the van der Pol law too; its rate stays.
+        fixed_scene.materials[0].magnetic_loss.as_mut().unwrap().law =
+            funfern_core::DampingLaw::constant();
         let mesh = mesh_scene(
             &fixed_scene,
             1,
