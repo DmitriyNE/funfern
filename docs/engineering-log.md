@@ -28431,3 +28431,33 @@ is a line.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: a chord through two rim vertices is blocked (NUM-24)
+
+- **The defect.** `point_source_squared_distances` decides which nodes a
+  point source reaches by whether the segment to each node crosses a wall,
+  a crossing counted only with strict signs on both sides, and a rim vertex
+  is one node rather than a split point, so a segment that enters a hole
+  through one of its vertices and leaves through another crossed no wall
+  properly and the node in the hole's shadow was driven: on the reviewed
+  scene at about 1.8% of the peak. It needs exact collinearity, which a
+  source on a hole's diagonal gives. The host computes the reach and the
+  device reads it, so the two agreed on the leak.
+- **Test first.** `a_chord_through_two_rim_vertices_is_blocked` builds a
+  square hole inside two square rings and puts the source on the diagonal
+  at (−1.5, −1.5): the node at (2, 2), behind the hole along the chord
+  through its corners (−1, −1) and (1, 1), must read unreachable, and the
+  two nodes in sight finite. Before the fix the shadowed node read its
+  plain squared distance, 24.5.
+- **Fix.** The walls are read in the order that has their element on the
+  left, so each rim vertex knows the wall that reaches it and the one that
+  leaves it. A vertex with exactly one of each, not already a split point
+  and not the source, is a corner; filed in the direction bins like the
+  splits, a corner strictly between the source and the target blocks the
+  segment when the direction onward from the vertex leaves the domain,
+  `leaves_the_domain`: the domain's wedge at the vertex is the
+  counterclockwise turn from the leaving wall to the arriving one, with
+  the walls themselves inside, so a segment grazing the rim is still seen.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

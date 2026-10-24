@@ -62,6 +62,8 @@ pub(crate) fn point_source_squared_distances(
     let mut walls = Vec::new();
     let mut on_wall = vec![false; node_points.len()];
     let mut wall_nodes = Vec::new();
+    // Each wall's ends in the order that has its element on the left.
+    let mut rim = HashMap::<(u64, u64), (Vec<Point2>, Vec<Point2>)>::new();
     for &(count, key) in edges.values() {
         if count != 1 {
             continue;
@@ -70,6 +72,15 @@ pub(crate) fn point_source_squared_distances(
         let nodes = element_nodes[element];
         let (a, b) = (nodes[edge], nodes[(edge + 1) % 3]);
         walls.push((point(a), point(b)));
+        let (from, to) = if orient2d(point(nodes[0]), point(nodes[1]), point(nodes[2]))
+            == PredicateSign::Negative
+        {
+            (point(b), point(a))
+        } else {
+            (point(a), point(b))
+        };
+        rim.entry(bits(from)).or_default().1.push(to);
+        rim.entry(bits(to)).or_default().0.push(from);
         for node in [a, nodes[3 + edge], b] {
             if !on_wall[node as usize] {
                 on_wall[node as usize] = true;
@@ -90,6 +101,22 @@ pub(crate) fn point_source_squared_distances(
         .map(|pair| point(pair[0]))
         .collect::<Vec<_>>();
     splits.dedup();
+    // A rim vertex one wall reaches and one leaves, where a segment may pass
+    // from the domain into what the walls exclude without crossing either:
+    // a chord of a hole through two of its vertices drove the hole's shadow
+    // (NUM-24 of the 2026-10-20 review). A split point is blocked already.
+    let corners = rim
+        .iter()
+        .filter_map(|(key, (previous, next))| {
+            let vertex = Point2::new(f64::from_bits(key.0), f64::from_bits(key.1));
+            match (previous.as_slice(), next.as_slice()) {
+                ([previous], [next]) if !splits.contains(&vertex) && vertex != position => {
+                    Some((vertex, *previous, *next))
+                }
+                _ => None,
+            }
+        })
+        .collect::<Vec<_>>();
     let directions = Directions::new(position, walls.len());
     // A wall in line with the source crosses no segment from it properly.
     let wall_bins = directions.file(
@@ -105,6 +132,12 @@ pub(crate) fn point_source_squared_distances(
             .enumerate()
             .filter(|(_, split)| **split != position)
             .map(|(index, split)| (index, directions.span(*split, *split))),
+    );
+    let corner_bins = directions.file(
+        corners
+            .iter()
+            .enumerate()
+            .map(|(index, (vertex, _, _))| (index, directions.span(*vertex, *vertex))),
     );
 
     // The elements holding each wall node, with its place in them.
@@ -138,6 +171,11 @@ pub(crate) fn point_source_squared_distances(
             .get(bin)
             .iter()
             .any(|&split| strictly_between(position, target, splits[split as usize]))
+            && !corner_bins.get(bin).iter().any(|&corner| {
+                let (vertex, previous, next) = corners[corner as usize];
+                strictly_between(position, target, vertex)
+                    && leaves_the_domain(vertex, previous, next, target)
+            })
     };
 
     let mut squared = vec![f64::INFINITY; node_points.len()];
@@ -249,6 +287,25 @@ fn faces_towards(node_points: &[Point2], nodes: [u32; 7], place: usize, source: 
         }
         3..=5 => agrees(orient2d(vertex(place - 3), vertex(place - 2), source)),
         _ => true,
+    }
+}
+
+/// A point's coordinates as a key, with -0 and 0 alike.
+fn bits(point: Point2) -> (u64, u64) {
+    ((point.x + 0.0).to_bits(), (point.y + 0.0).to_bits())
+}
+
+/// Whether the direction from `vertex` towards `target` leaves the domain,
+/// whose rim runs `previous`, `vertex`, `next` with the domain on its left:
+/// the domain's wedge there is the counterclockwise turn from `next` to
+/// `previous`. Along a wall is inside, so a segment grazing the rim is seen.
+fn leaves_the_domain(vertex: Point2, previous: Point2, next: Point2, target: Point2) -> bool {
+    let positive = |a: Point2, b: Point2| orient2d(vertex, a, b) == PredicateSign::Positive;
+    let negative = |a: Point2, b: Point2| orient2d(vertex, a, b) == PredicateSign::Negative;
+    if positive(next, previous) {
+        negative(next, target) || negative(target, previous)
+    } else {
+        positive(previous, target) && positive(target, next)
     }
 }
 
@@ -440,6 +497,72 @@ mod tests {
             }
         }
         assert!(beyond > 0 && outside > 0);
+    }
+
+    /// NUM-24 of the 2026-10-20 review: a square hole in two square rings,
+    /// with the source on the diagonal. The segment to the node at `(2, 2)`
+    /// enters the hole through its corner `(-1, -1)` and leaves through
+    /// `(1, 1)`, two rim vertices, single nodes which no wall properly
+    /// crosses there, so the node in the hole's shadow was driven.
+    #[test]
+    fn a_chord_through_two_rim_vertices_is_blocked() {
+        let square = |half: f64| {
+            [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                .map(|(x, y)| Point2::new(half * x, half * y))
+        };
+        let (hole, middle, outer) = (square(1.0), square(2.0), square(3.0));
+        let mut triangles = vec![];
+        for (inner, outer) in [(hole, middle), (middle, outer)] {
+            for side in 0..4 {
+                let next = (side + 1) % 4;
+                triangles.push([inner[side], outer[side], outer[next]]);
+                triangles.push([inner[side], outer[next], inner[next]]);
+            }
+        }
+        let mut node_points = Vec::<Point2>::new();
+        let mut node = |point: Point2| {
+            let index = node_points
+                .iter()
+                .position(|existing| *existing == point)
+                .unwrap_or_else(|| {
+                    node_points.push(point);
+                    node_points.len() - 1
+                });
+            index as u32
+        };
+        let element_nodes = triangles
+            .iter()
+            .map(|[a, b, c]| {
+                [
+                    node(*a),
+                    node(*b),
+                    node(*c),
+                    node((*a + *b) * 0.5),
+                    node((*b + *c) * 0.5),
+                    node((*c + *a) * 0.5),
+                    node((*a + *b + *c) / 3.0),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let position = Point2::new(-1.5, -1.5);
+        let distances = point_source_squared_distances(
+            &node_points,
+            &element_nodes,
+            &vec![true; element_nodes.len()],
+            position,
+            1.0,
+        );
+        let at = |point: Point2| node_points.iter().position(|node| *node == point).unwrap();
+        assert_eq!(
+            distances[at(middle[2])],
+            f64::INFINITY,
+            "the shadow is driven"
+        );
+        assert!(
+            distances[at(middle[1])].is_finite(),
+            "a node in sight is not driven"
+        );
+        assert!(distances[at(middle[0])].is_finite());
     }
 
     /// A hole's rim is a wall: the source does not drive what lies behind it.
