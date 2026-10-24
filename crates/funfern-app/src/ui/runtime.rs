@@ -364,7 +364,7 @@ impl Playground {
 
     pub(super) fn commit_in_place(&mut self, token: TopologyToken, message: &'static str) {
         match self.runtime.commit_ready(token) {
-            Ok(active) => {
+            Ok(_) => {
                 if let Some(worker) = &mut self.background_amr {
                     worker.cancel_kind(BackgroundAmrKind::Indicator);
                 }
@@ -374,7 +374,15 @@ impl Playground {
                 self.amr_indicator_result = None;
                 self.amr_last_analyzed_step = None;
                 self.message = message.into();
-                self.record_handoff(&active);
+                // No generation was installed, so the last handoff's record
+                // stands: recorded here, with next to no pack and upload, it
+                // shortened the lead `fire_times` gives the next fire that
+                // takes a generation (UI-11 of the 2026-10-20 review). The
+                // timeline this commit began is over.
+                self.handoff_requested = None;
+                self.handoff_ready = None;
+                self.handoff_packed = None;
+                self.handoff_upload = None;
             }
             Err(error) => self.message = error,
         }
@@ -521,8 +529,6 @@ impl Playground {
             let mut needs_gpu_pack = false;
             match carry(self.coordinator.uploaded_time_step > 0.0, same_step, update) {
                 Route::InPlace => {
-                    self.handoff_packed = self.handoff_ready;
-                    self.handoff_upload = self.handoff_ready;
                     self.commit_in_place(token, "Simulation measurements committed");
                 }
                 Route::Patch => {
@@ -1989,6 +1995,80 @@ mod tests {
             Some(&true)
         );
         assert!(request.live_event_pending());
+    }
+
+    /// UI-11 of the 2026-10-20 review: `fire_times` leads a fire that takes
+    /// a new generation by the last handoff's wall time, and `commit_in_place`
+    /// recorded one for a live source patch or a measurements commit, with
+    /// next to no pack and upload, so the next gate or Dirichlet fire started
+    /// 0.1 to 0.5 s early. A commit that installs no generation leaves the
+    /// record of the last one that did.
+    #[test]
+    fn an_in_place_commit_leaves_the_last_handoffs_record_alone() {
+        let mut state = Playground::default();
+        settle(&mut state.editor);
+        activate(&mut state);
+        // The record of a handoff that took its time, as in the fire-time test.
+        state.last_handoff = Some(HandoffRecord {
+            prepare_ms: 250.0,
+            pack_ms: 60.0,
+            drain_ms: 30.0,
+            upload_ms: 60.0,
+            timing: TopologyPreparationTiming::default(),
+            action: TopologyMeshUpdateAction::Reuse,
+            operator_reused: true,
+            adapted: false,
+            transferred: false,
+            exact_nodes: 0,
+            fresh: false,
+            degrees_of_freedom: 0,
+            triangles: 0,
+            carve: None,
+            repair_fallback: None,
+        });
+        // A probe is a measurement: the runtime commits its candidate in
+        // place, installing no generation.
+        state
+            .editor
+            .create_probe(
+                "area".into(),
+                [91, 220, 194],
+                crate::topology_editor::TopologyProbeTarget::AreaRegion(BACKGROUND_REGION),
+            )
+            .unwrap();
+        settle(&mut state.editor);
+        let token = state
+            .runtime
+            .request(
+                state.editor.revision,
+                &state.editor.document,
+                state.editor.compiled_accepted.clone(),
+                funfern_core::MeshingOptions {
+                    target_edge_length: 0.18,
+                    ..funfern_core::MeshingOptions::default()
+                },
+                false,
+            )
+            .unwrap();
+        for _ in 0..1_000_000 {
+            if let Some(result) = state.runtime.advance(4096) {
+                result.unwrap();
+                break;
+            }
+        }
+        state.commit_in_place(token, "Simulation measurements committed");
+        assert_eq!(state.message, "Simulation measurements committed");
+        let after = state.last_handoff.clone().unwrap();
+        assert_eq!(
+            (
+                after.prepare_ms,
+                after.pack_ms,
+                after.drain_ms,
+                after.upload_ms
+            ),
+            (250.0, 60.0, 30.0, 60.0),
+            "the in-place commit rewrote the last handoff's record"
+        );
     }
 
     /// Reported: Switch pressed on one material and then on another while

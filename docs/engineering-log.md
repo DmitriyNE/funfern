@@ -28599,3 +28599,28 @@ host; that rerun is owed.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: an in-place commit leaves the last handoff's record alone (UI-11)
+
+Area 8 is the review's UI, display and gallery section: 11 mediums and 21
+lows, UI-1, UI-8 and UI-32 having gone earlier. The user's calls for the
+plan: UI-7 is fixed now rather than left to the legacy-damping phase-out,
+UI-2 is timed at the handoff rather than made a live patch, and UI-6 puts
+the spacing in the lattice key rather than clearing the filter.
+
+- **The defect.** `fire_times` leads a fire that takes a new generation by
+  the last handoff's wall time, from `last_handoff`. `commit_in_place`,
+  which commits a live source patch or a measurements-only candidate
+  without installing a generation, recorded a handoff too, with next to
+  no pack and upload, so after a source patch or a probe toggle the next
+  gate or Dirichlet fire started 0.1 to 0.5 s early.
+- **Test first.** `an_in_place_commit_leaves_the_last_handoffs_record_alone`
+  sets a record of 250, 60, 30 and 60 ms, prepares a probe's candidate and
+  commits it in place; before the fix the record read 0, 0, 0 and 0 ms.
+- **Fix.** `commit_in_place` records nothing and ends the timeline the
+  commit began; the in-place route no longer sets the pack and upload
+  instants it set to make that record read as zero. Only a commit that
+  installs a generation records, where it did.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
