@@ -1048,9 +1048,16 @@ impl Playground {
 
 /// What sets a time-driven generation's step ceiling, in the skin's names.
 fn time_step_bound_line(bound: CanonicalTimeStepBound, physics: PhysicsModel) -> String {
+    // The floors are the solver's rows; the skin says which authored row each
+    // is (UI-9 of the 2026-10-20 review).
+    let primary = funfern_core::primary_coefficient_row(physics);
+    let complementary = match primary {
+        LawPresetRow::Mass => LawPresetRow::Stiffness,
+        _ => LawPresetRow::Mass,
+    };
     let mut lowered = [
-        (LawPresetRow::Mass, bound.primary_floor),
-        (LawPresetRow::Stiffness, bound.complementary_floor),
+        (primary, bound.primary_floor),
+        (complementary, bound.complementary_floor),
     ]
     .into_iter()
     .filter(|(_, floor)| *floor < 1.0)
@@ -1337,6 +1344,27 @@ mod tests {
             time_step_bound_line(sine_gordon, physics),
             "Step ceiling 1.000e-3 s, 0.50× the fixed medium's: the restoring law's curvature \
              V″ reaches 9.000"
+        );
+        // TE carries μ on the primary row, so an ε pump lowers the
+        // complementary floor and is named as ε; paired by row position the
+        // line read "Permeability μ" (UI-9 of the 2026-10-20 review).
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let te_epsilon_pump = CanonicalTimeStepBound {
+            primary_floor: 1.0,
+            complementary_floor: 0.8,
+            ..pumped
+        };
+        assert_eq!(
+            time_step_bound_line(te_epsilon_pump, te),
+            "Step ceiling 1.789e-3 s, 0.89× the fixed medium's: Permittivity ε falls to \
+             0.80× at its lowest"
+        );
+        assert_eq!(
+            time_step_bound_line(pumped, te),
+            "Step ceiling 1.789e-3 s, 0.89× the fixed medium's: Permeability μ falls to \
+             0.80× at its lowest"
         );
     }
 

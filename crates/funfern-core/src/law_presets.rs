@@ -55,6 +55,22 @@ pub enum LawPresetRow {
     Both,
 }
 
+/// The authored row the solver's primary coefficient comes from in `physics`:
+/// the mass row, except in TE, which carries the medium's permeability on the
+/// primary row, so the authored mass and stiffness laws swap places there.
+/// The solver compiles by this (`coefficient_for`), and a readout naming a
+/// row by the solver's primary and complementary must read it too: paired by
+/// position, the step-ceiling line and the strength readout named ε's law
+/// "Permeability μ" in TE (UI-9 of the 2026-10-20 review).
+pub fn primary_coefficient_row(physics: PhysicsModel) -> LawPresetRow {
+    match physics {
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => LawPresetRow::Stiffness,
+        _ => LawPresetRow::Mass,
+    }
+}
+
 /// One value a preset exposes, stored as a material parameter that its law
 /// slots refer to by name.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -229,14 +229,9 @@ pub(super) fn row_is_electric(physics: PhysicsModel, row: LawPresetRow) -> bool 
 }
 
 /// The row legacy `damping` acts on: the primary one, which is ε in TM, μ in
-/// TE and the density in Mechanical.
+/// TE and the density in Mechanical - the skin's primary coefficient row.
 pub(super) fn legacy_damping_row(physics: PhysicsModel) -> LawPresetRow {
-    match physics {
-        PhysicsModel::Electromagnetic {
-            polarization: ElectromagneticPolarization::Te,
-        } => LawPresetRow::Stiffness,
-        _ => LawPresetRow::Mass,
-    }
+    funfern_core::primary_coefficient_row(physics)
 }
 
 fn row_channel(

@@ -1344,9 +1344,21 @@ fn nonlinear_strength_line(
     physics: PhysicsModel,
     row: LawPresetRow,
 ) -> Option<String> {
-    let (law, value) = match row {
-        LawPresetRow::Stiffness => (&material.stiffness_law, strength.complementary),
-        _ => (&material.mass_law, strength.primary),
+    let law = match row {
+        LawPresetRow::Stiffness => &material.stiffness_law,
+        _ => &material.mass_law,
+    };
+    // The strengths are the solver's rows; the skin says which authored row
+    // is primary (UI-9 of the 2026-10-20 review).
+    let primary = matches!(
+        (row, funfern_core::primary_coefficient_row(physics)),
+        (LawPresetRow::Mass, LawPresetRow::Mass)
+            | (LawPresetRow::Stiffness, LawPresetRow::Stiffness)
+    );
+    let value = if primary {
+        strength.primary
+    } else {
+        strength.complementary
     };
     if law.field == FieldLaw::Linear {
         return None;
@@ -1785,6 +1797,25 @@ mod tests {
             )
             .as_deref(),
             Some("Now: Reciprocal stiffness s₀ up to +0.04% from its small-signal value")
+        );
+        // TE carries μ on the primary row: the ε law's departure is the
+        // complementary row's. Paired by row position it read the primary's
+        // +0.04% (UI-9 of the 2026-10-20 review).
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let swapped = CanonicalNonlinearStrength {
+            material: material.id,
+            primary: 0.0004,
+            complementary: 0.0534,
+        };
+        assert_eq!(
+            nonlinear_strength_line(&material, &swapped, te, LawPresetRow::Mass).as_deref(),
+            Some("Now: Permittivity ε up to +5.3% from its small-signal value")
+        );
+        assert_eq!(
+            nonlinear_strength_line(&material, &swapped, te, LawPresetRow::Stiffness).as_deref(),
+            Some("Now: Permeability μ up to +0.04% from its small-signal value")
         );
     }
 

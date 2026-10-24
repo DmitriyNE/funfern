@@ -28667,3 +28667,26 @@ the spacing in the lattice key rather than clearing the filter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: the readouts name the solver's rows through the skin (UI-9)
+
+- **The defect.** The step-ceiling line pairs the solver's primary floor
+  with the mass row and the complementary floor with the stiffness row, and
+  the nonlinear-strength readout reads the primary strength for the mass
+  row; TE carries the medium's permeability on the primary row, so the
+  authored mass and stiffness laws swap places there (`coefficient_for`).
+  In TE an ε pump read "Permeability μ falls to 0.80×", and an ε Kerr law
+  read the other row's +0.00%.
+- **Tests first.** `the_step_ceiling_line_names_the_row_that_lowers_it`
+  gains TE: a lowered complementary floor names Permittivity ε and a
+  lowered primary floor Permeability μ; before the fix the two were
+  swapped. `the_strength_readout_names_each_nonlinear_row` gains TE with
+  the strengths swapped and requires ε's +5.3% and μ's +0.04%; before the
+  fix ε read +0.04%.
+- **Fix.** `primary_coefficient_row(physics)` in the core is the one
+  mapping: `coefficient_for` compiles by it, the two readouts read by it,
+  and the editor's `legacy_damping_row`, which was the same match written
+  again, delegates to it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

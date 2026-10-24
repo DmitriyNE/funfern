@@ -6718,8 +6718,9 @@ fn temporal_material_sample(
 }
 
 /// Which authored coefficient law drives one solver row. The physics skin
-/// decides: the TE skin carries the medium's permeability on the primary row,
-/// so the authored mass and stiffness laws swap places there.
+/// decides, through [`primary_coefficient_row`]: the TE skin carries the
+/// medium's permeability on the primary row, so the authored mass and
+/// stiffness laws swap places there.
 pub(crate) fn coefficient_for(
     physics: PhysicsModel,
     material: &Material,
@@ -6730,21 +6731,14 @@ pub(crate) fn coefficient_for(
         CanonicalMaterialDrive::StiffnessCoefficient,
         &material.stiffness_law,
     );
-    match (physics, primary) {
-        (PhysicsModel::Mechanical, true)
-        | (
-            PhysicsModel::Electromagnetic {
-                polarization: ElectromagneticPolarization::Tm,
-            },
-            true,
-        )
-        | (
-            PhysicsModel::Electromagnetic {
-                polarization: ElectromagneticPolarization::Te,
-            },
-            false,
-        ) => mass,
-        _ => stiffness,
+    let primary_is_mass = matches!(
+        crate::primary_coefficient_row(physics),
+        crate::LawPresetRow::Mass
+    );
+    if primary == primary_is_mass {
+        mass
+    } else {
+        stiffness
     }
 }
 
