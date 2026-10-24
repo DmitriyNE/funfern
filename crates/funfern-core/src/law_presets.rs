@@ -11,8 +11,9 @@
 //! one constructor, so a preset cannot be applied in a shape its own matcher
 //! would not recognise.
 //!
-//! Only laws that run are listed. Kerr and saturable response (M-F1, M-F2)
-//! run on the device since Stage 9, self-focusing only: a defocusing law needs
+//! Only laws that run are listed. Kerr and saturable response (M-F1, M-F2,
+//! and K-F1, K-F2 on the stiffness row a skin change moves them to) run on
+//! the device since Stage 9, self-focusing only: a defocusing law needs
 //! an authored amplitude bound, which a preset slider cannot promise to keep
 //! valid. Signed χ₁ is an authored type with no solver behind it, and section
 //! 11 of the material-laws plan asks for a preset behind an open design gate
@@ -259,6 +260,27 @@ const PRESETS: &[LawPreset] = &[
         name: "Saturable medium",
         phenomenon: "Kerr that levels off, so a focusing beam narrows without collapsing",
         row: LawPresetRow::Mass,
+        variables: SATURABLE_VARIABLES,
+        shape: LawPresetShape::Saturable,
+    },
+    // The field presets on the stiffness row, which a skin change moves them
+    // to: without them a Kerr medium switched between Mechanical and an
+    // electromagnetic skin read Custom (NUM-10 of the 2026-10-20 review). A
+    // stiffness-row law multiplies μ, or the reciprocal stiffness, so it
+    // slows a strong wave as the mass-row one does.
+    LawPreset {
+        id: "K-F1",
+        name: "Kerr medium",
+        phenomenon: "the wave slows where it is strong: self-focusing and self-phase modulation",
+        row: LawPresetRow::Stiffness,
+        variables: KERR_VARIABLES,
+        shape: LawPresetShape::Kerr,
+    },
+    LawPreset {
+        id: "K-F2",
+        name: "Saturable medium",
+        phenomenon: "Kerr that levels off, so a focusing beam narrows without collapsing",
+        row: LawPresetRow::Stiffness,
         variables: SATURABLE_VARIABLES,
         shape: LawPresetShape::Saturable,
     },
@@ -738,6 +760,8 @@ const MEDIA: &[MediumPreset] = &[
     medium(9, 0, false),
     medium(10, 0, false),
     medium(11, 0, false),
+    medium(12, 0, false),
+    medium(13, 0, false),
     // Gate O, on linear rows: the three restoring laws, a medium that
     // self-oscillates, and the lattice of van der Pol oscillators a
     // Klein-Gordon cutoff makes of it.
@@ -1898,7 +1922,10 @@ mod tests {
 
     /// A preset's laws are the ones a physics skin change can carry, so
     /// switching skins in the preset view keeps working rather than reporting
-    /// a material the user cannot see into.
+    /// a material the user cannot see into. The converted material is the
+    /// same preset on the other row: a Kerr medium switched from TM to
+    /// Mechanical read Custom, its χ slider only in Advanced, because the field
+    /// presets had no stiffness row (NUM-10 of the 2026-10-20 review).
     #[test]
     fn every_preset_survives_a_skin_change() {
         use crate::ElectromagneticPolarization;
@@ -1916,6 +1943,12 @@ mod tests {
                 applied,
                 "{} did not survive a round trip",
                 entry.name
+            );
+            assert_eq!(
+                identify_law_preset(&converted).map(|found| found.preset.name),
+                Some(entry.name),
+                "{} is not recognised after a skin change",
+                entry.id
             );
         }
     }

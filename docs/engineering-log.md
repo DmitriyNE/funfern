@@ -28205,3 +28205,31 @@ The carve's lows were to go in one commit; MESH-14 is left out of it, below.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 6: the field presets on the stiffness row (NUM-10)
+
+- **The defect.** A switch between Mechanical and an electromagnetic skin
+  moves each law to the other row, correctly: the stored slots hold different
+  physical quantities in each skin. Every time-driven preset has a twin on
+  each row, but Kerr and saturable existed on the mass row only, so a Kerr
+  medium switched from TM to Mechanical read Custom and its χ slider was
+  only in Advanced. The skin-change test checked the conversion and the round
+  trip, never that the preset was recognised.
+- **Test first.** `every_preset_survives_a_skin_change` requires each preset,
+  converted, to be recognised as the preset of the same name. Before the fix
+  M-F1 was not.
+- **Fix.** K-F1 and K-F2, Kerr and saturable on the stiffness row, with a
+  medium each in the simple view. A stiffness-row law multiplies μ, or the
+  reciprocal stiffness, so it slows a strong wave as the mass row's does and
+  keeps its phenomenon. `docs/material-law-catalogue.md` lists them under
+  slot K.
+- **The media list scrolls.** The simple view's Response list grows from 17
+  to 19 entries, past the 17 a combo shows whole at 800 px (60% of the
+  window, 3 October), so there it ends halfway through an entry and scrolls.
+  The user chose that over one either-row entry per field law, which would
+  break the twins the time-driven media have, or a taller share for every
+  combo. `a_combo_list_shows_whole_or_ends_halfway_through_an_entry` now
+  names the media as the list that scrolls at 800 px.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

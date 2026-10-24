@@ -82,7 +82,8 @@ now measured: `a_constant_impedance_modulation_sends_nothing_back` sends
 impedance-only pairing.
 
 The field-driven half follows slot M's: Kerr and saturable run on this row
-too, on the CPU reference and the device. They act on the direct coefficient `s₀` (ε in TE),
+too, on the CPU reference and the device, and K-F1 and K-F2 are M-F1 and M-F2
+on this row, the presets a skin change moves them to (since 2026-10-24). They act on the direct coefficient `s₀` (ε in TE),
 at quadrature, on the magnitude of the independent complementary field, which
 is the field argument the constitutive map needs. There is no symmetric nodal
 flux argument like `h((u_i + u_j)/2)`. An anisotropic medium refuses a

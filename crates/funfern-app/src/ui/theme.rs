@@ -371,8 +371,11 @@ mod tests {
                     );
                     assert!(rows > shown + 1, "{rows} rows cut to hide only half of one");
                 }
-                // Every list the app has fits whole in an ordinary window:
-                // 480 px holds 16.8 entries, so up to 17 show whole.
+                // Every list the app has but the simple view's media fits
+                // whole in an ordinary window: 480 px holds 16.8 entries, so
+                // up to 17 show whole. The media are 19 since the field
+                // presets gained their stiffness-row twins (NUM-10), and
+                // scroll there, as the user chose.
                 if window == 800.0 {
                     assert_eq!(cut, 24 - 17, "the 800 px window cut {cut} of 24");
                     for physics in [
@@ -385,7 +388,8 @@ mod tests {
                         assert_eq!(combo_list_height(ui, rows), tall[rows - 1]);
                     }
                     let media = medium_presets().len();
-                    assert_eq!(combo_list_height(ui, media), tall[media - 1]);
+                    assert!(media > 17, "{media} media now fit whole");
+                    assert!(combo_list_height(ui, media) < tall[media - 1]);
                 } else {
                     assert!(cut > 0);
                 }
