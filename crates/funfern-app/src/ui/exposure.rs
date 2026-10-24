@@ -445,32 +445,6 @@ mod tests {
         assert_eq!(state.vector_overlay_filter_owner, None);
     }
 
-    /// Asking for a new field leaves the scale alone. A reset zeroes the field
-    /// on the GPU, but the outgoing field stays on display until the
-    /// replacement arrives, a few frames; a scale cleared at the request
-    /// measures that residue and paints it at full brightness: measured at
-    /// 0.09 % before, 100 % after, for a tenth of a second. A loaded scene
-    /// clears the scales only where it drops the outgoing generation, when
-    /// nothing of the old field is left on display.
-    #[test]
-    fn asking_for_a_new_field_does_not_magnify_the_outgoing_one() {
-        let mut state = Playground::default();
-        state.field_exposure.update(3.0e-2, 0.016);
-        let residue = 3.8e-6;
-        let held = state.field_exposure.update(residue, 0.016).unwrap();
-        assert!(residue / held < 0.01, "the residue was not already dark");
-
-        state.coordinator.reset_requested = true;
-        let document = state.editor.document.clone();
-        state.set_document(document, false, true).unwrap();
-        let after = state.field_exposure.update(residue, 0.016).unwrap();
-        assert!(
-            residue / after < 0.01,
-            "the outgoing field was magnified to {:.0}%",
-            100.0 * residue / after
-        );
-    }
-
     /// The integrated field and the field are measured apart: showing one
     /// after the other starts the scale again, and asking for the same one
     /// again, as every frame does, keeps it.

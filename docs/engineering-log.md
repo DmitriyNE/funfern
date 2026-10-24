@@ -28806,3 +28806,28 @@ One commit for the two, both in the streamline lattice's low-pass filter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: a Reset restarts the exposure when the new picture arrives (UI-13)
+
+- **The defect.** A Reset zeroes the field on the GPU and restarted the
+  exposure scale as it installed the zeroed generation, while the outgoing
+  field stayed on display until that generation's first picture arrived,
+  a few frames later. The restarted scale measured the residue and painted
+  it at full brightness: a field at 6% of its peak repainted at about 76%
+  for a tenth of a second. The test meant to guard this set the Reset flag
+  and loaded a document, and never ran the Reset path.
+- **Test first.** `asking_for_a_new_field_does_not_magnify_the_outgoing_one`
+  moves to the runtime's tests and goes through `refresh_runtime` with
+  the Reset flag: after the install the residue must still paint dark and
+  the restart must be waiting, and once the display shows the new
+  generation the restart must have fired; before the fix the residue, held
+  under 1% of the scale, read above it right after the install, the
+  restart having let the scale fall onto it. A residue reads about 1% after
+  a restart too, since the remembered peak holds the quiet floor above
+  dust, so the restart's timing is what the test reads.
+- **Fix.** The Reset branch notes the installed generation in
+  `exposure_restart_at_generation`, and the frame restarts the exposures
+  when the display's generation has reached it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

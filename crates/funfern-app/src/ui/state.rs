@@ -288,6 +288,9 @@ pub struct Playground {
     pub(super) vector_overlay_previous_layout: Option<VectorOverlayLayout>,
     /// The lattice whose upload failed, not built again.
     pub(super) vector_overlay_failed: Option<VectorOverlayLayoutKey>,
+    /// A Reset installed this generation: the exposures restart when its
+    /// first picture is on display, not while the outgoing field still is.
+    pub(super) exposure_restart_at_generation: Option<u64>,
     /// A browser background worker aborted, and the log has it.
     pub(super) background_failed: bool,
     /// Presentation-only per-arrow filter state: the complementary field's
@@ -533,6 +536,7 @@ impl Default for Playground {
             vector_overlay_layout: None,
             vector_overlay_previous_layout: None,
             vector_overlay_failed: None,
+            exposure_restart_at_generation: None,
             background_failed: false,
             vector_overlay_filter_state: BTreeMap::new(),
             vector_overlay_filter_owner: None,

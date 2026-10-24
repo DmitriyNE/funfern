@@ -452,6 +452,12 @@ impl Playground {
             self.drop_generation();
         }
         request.set_grid_scale_filter(self.editor.document.presentation.grid_scale_filter);
+        if let Some(generation) = self.exposure_restart_at_generation
+            && display.generation >= generation
+        {
+            self.exposure_restart_at_generation = None;
+            self.restart_exposures_after_handoff(true);
+        }
         self.finish_source_commit(request);
         self.supervise_solver_fault(request, assets, commands);
         self.refresh_switch_states(display, request);
@@ -906,7 +912,13 @@ impl Playground {
                         self.amr_last_started = None;
                         self.amr_energy_peak = 0.0;
                         self.restart_probe_traces();
-                        self.restart_exposures_after_handoff(true);
+                        // The outgoing field stays on display until the zeroed
+                        // generation's first picture arrives; the scale
+                        // restarted here measured that residue, a field at 6%
+                        // of its peak repainted at about 76% for a tenth of a
+                        // second (UI-13 of the 2026-10-20 review). It restarts
+                        // when the picture does.
+                        self.exposure_restart_at_generation = Some(request.generation());
                     }
                     // A zero state the running generation cannot be compiled
                     // for is a defect's failure. Unreported, Reset did nothing,
@@ -2076,6 +2088,79 @@ mod tests {
             ),
             (250.0, 60.0, 30.0, 60.0),
             "the in-place commit rewrote the last handoff's record"
+        );
+    }
+
+    /// A Reset zeroes the field on the GPU, but the outgoing field stays on
+    /// display until the zeroed generation's first picture arrives, a few
+    /// frames; a scale restarted at the request measured that residue and
+    /// painted it at full brightness, a field at 6% of its peak repainted at
+    /// about 76% for a tenth of a second. The scale restarts when the new
+    /// picture is on display. The guard this replaces set the Reset flag and
+    /// never ran the Reset path (UI-13 of the 2026-10-20 review).
+    #[test]
+    fn asking_for_a_new_field_does_not_magnify_the_outgoing_one() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let mut display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame = |state: &mut Playground,
+                         request: &mut CanonicalGpuRequest,
+                         display: &CanonicalGpuDisplay| {
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+            });
+        };
+        let mut state = Playground::default();
+        settle(&mut state.editor);
+        activate(&mut state);
+        state.field_exposure.update(3.0e-2, 0.016);
+        let residue = 3.8e-6;
+        let held = state.field_exposure.update(residue, 0.016).unwrap();
+        assert!(residue / held < 0.01, "the residue was not already dark");
+
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut state, &mut request, &display);
+        assert!(
+            !state.coordinator.reset_requested,
+            "the Reset was installed: {}",
+            state.message
+        );
+        // The outgoing field is still what the display shows.
+        let after = state.field_exposure.update(residue, 0.016).unwrap();
+        assert!(
+            residue / after < 0.01,
+            "the outgoing field was magnified to {:.0}%",
+            100.0 * residue / after
+        );
+        // The restart waits for the zeroed generation's picture; a frame with
+        // it on display restarts the scale. The residue reads about 1% either
+        // way, since the remembered peak holds the quiet floor above dust, so
+        // the mechanism is what is checked.
+        assert!(
+            state.exposure_restart_at_generation.is_some(),
+            "the restart waits for the picture"
+        );
+        display.generation = request.generation();
+        frame(&mut state, &mut request, &display);
+        assert!(
+            state.exposure_restart_at_generation.is_none(),
+            "the picture arrived and the scale restarted"
         );
     }
 
