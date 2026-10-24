@@ -28969,3 +28969,24 @@ One commit for the two, both in the diagnostics log.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: Delete waits for the gesture, and a pulse with no generation says so (UI-25, UI-26)
+
+One commit for the two, both in the drawing tools.
+
+- **UI-25.** `delete_selection`, which the Delete key and the inspector's
+  Delete button call, had no guard against a gesture under way while
+  `deletion_offer` had one, so Delete during a control drag removed the
+  control under the pointer and the drag went on moving its neighbour.
+  `delete_during_a_drag_removes_nothing` deletes a selected control under a
+  drag of it and requires the geometry and history untouched, and the
+  deletion once the drag is over; before the fix the control went
+  mid-gesture. The guard is `interaction_in_progress`, as the offer's.
+- **UI-26.** A pulse clicked while no generation was active - the tool
+  armed while a new scene prepared - was dropped without a word, where a
+  click outside a subdomain sets "Pulse must be inside an active
+  subdomain". `a_pulse_with_no_generation_says_so`; it now sets "No
+  simulation is running yet to pulse".
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

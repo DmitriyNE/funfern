@@ -323,6 +323,13 @@ impl Playground {
         }
     }
     pub(super) fn delete_selection(&mut self) {
+        // Nothing is deleted while a gesture is under way, as `deletion_offer`
+        // already says: Delete during a control drag removed the control and
+        // the drag went on moving its neighbour (UI-25 of the 2026-10-20
+        // review).
+        if self.interaction_in_progress() {
+            return;
+        }
         if let Some(probe) = self.selected_probe {
             match self.editor.delete_probe(probe) {
                 Ok(()) => {
@@ -464,6 +471,9 @@ impl Playground {
     }
     pub(super) fn place_pulse(&mut self, point: Point2) {
         let Some(active) = self.runtime.active() else {
+            // Said, as the other refusal is: dropped without a word while a
+            // new scene prepared (UI-26 of the 2026-10-20 review).
+            self.message = "No simulation is running yet to pulse".into();
             return;
         };
         let region = active.bundle.snapshot.face_at(point).and_then(|face| {
@@ -544,6 +554,62 @@ mod tests {
     /// curve asked about the first one only, closed the history entry to ask,
     /// and then returned - so the rest of the selection was never deleted and
     /// nothing said so. One question over the whole deletion, one entry.
+    /// UI-25 of the 2026-10-20 review: Delete during a control drag removed
+    /// the control under the pointer, and the drag went on moving its
+    /// neighbour. `deletion_offer` already refuses while a gesture is under
+    /// way; `delete_selection`, which the Delete key and the inspector's
+    /// button call, does the same now.
+    #[test]
+    fn delete_during_a_drag_removes_nothing() {
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let curve = state
+            .editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(-0.5, 0.0),
+                    Point2::new(-0.3, 0.1),
+                    Point2::new(-0.1, 0.0),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                None,
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut state.editor);
+        let handle = TopologyHandle::Control { curve, control: 1 };
+        state.selection = TopologySelection::Handle(handle);
+        state.drag = Some(super::super::gesture::DragGesture::Handle { handle });
+        let before = state.editor.document.model.draft.geometry.clone();
+        let history = state.editor.history_len();
+        state.delete_selection();
+        assert_eq!(state.editor.document.model.draft.geometry, before);
+        assert_eq!(state.editor.history_len(), history);
+        assert!(state.drag.is_some(), "the gesture goes on");
+        state.drag = None;
+        state.delete_selection();
+        assert_ne!(
+            state.editor.document.model.draft.geometry, before,
+            "released, the control is deleted"
+        );
+    }
+
+    /// UI-26 of the 2026-10-20 review: a pulse clicked while no generation
+    /// was active, as when the tool is armed while a new scene prepares, was
+    /// dropped without a word; the other refusal sets a status message.
+    #[test]
+    fn a_pulse_with_no_generation_says_so() {
+        let mut state = Playground::default();
+        assert!(state.runtime.active().is_none());
+        state.place_pulse(Point2::new(0.0, 0.0));
+        assert_eq!(state.message, "No simulation is running yet to pulse");
+        assert!(state.coordinator.pending_pulses.is_empty());
+    }
+
     #[test]
     fn a_multi_curve_deletion_asks_once_and_takes_everything() {
         let mut state = Playground {
