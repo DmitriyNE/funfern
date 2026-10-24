@@ -28624,3 +28624,24 @@ the spacing in the lattice key rather than clearing the filter.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-24 — Step 3, area 8: a flux pulse fires at the handoff time (UI-2)
+
+- **The defect.** "Fire now" and a switch to Pulse start a signal's burst
+  at the live time when the edit patches the running generation, and at
+  the handoff time when it takes a new one; `SignalUse::takes_handoff` said
+  only a pinned Field does. A Neumann signal is stored in the boundary data
+  `operator_scene_eq` compares, so every Neumann edit forces a full
+  handoff: on a 34k-DOF scene 0.4 to 0.8 s, so the new generation joined
+  0.15 to 0.55 s into a burst fired at the live time, and the pulse was
+  truncated. The user chose timing the fire at the handoff over making
+  Neumann signal edits a live patch.
+- **Test first.** `a_flux_pulse_fires_at_the_handoff_time` presses "Pulse"
+  and then "Fire now" on a flux signal with the live time at 12.5 s and the
+  handoff at 13.0 s and requires both starts at 13.0; before the fix both
+  were 12.5. The editor-pass helper takes the signal's use now, shared with
+  the source test.
+- **Fix.** `takes_handoff` is true for Field and Flux.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

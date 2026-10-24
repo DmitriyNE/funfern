@@ -48,9 +48,13 @@ impl SignalUse {
     }
 
     /// Whether an edit of a signal here takes a new generation rather than a
-    /// live patch: a pinned field is part of the generation's layout.
+    /// live patch: a pinned field is part of the generation's layout, and a
+    /// Neumann signal is in the boundary data the operator is compared by
+    /// (`operator_scene_eq`), so its edit forces a full handoff too; fired at
+    /// the live time it joined the burst partway in (UI-2 of the 2026-10-20
+    /// review). A source's drive patches the running generation.
     const fn takes_handoff(self) -> bool {
-        matches!(self, Self::Field)
+        matches!(self, Self::Field | Self::Flux)
     }
 
     fn units(self, pulsed: bool) -> &'static str {
@@ -733,10 +737,11 @@ mod tests {
         }
     }
 
-    /// One pass of the editor over `signal`, with `events`.
+    /// One pass of the editor over `signal` in `role`, with `events`.
     fn editor_pass(
         context: &egui::Context,
         signal: &mut TimeSignal,
+        role: SignalUse,
         preview: &mut PulsePreview,
         events: Vec<egui::Event>,
     ) -> Vec<LaidOut> {
@@ -755,9 +760,67 @@ mod tests {
                 live: 12.5,
                 handoff: 13.0,
             };
-            edit_time_signal(ui, signal, SignalUse::Source, fire, preview);
+            edit_time_signal(ui, signal, role, fire, preview);
         });
         laid_out(&output)
+    }
+
+    /// Presses the widget labelled `label` in one pass of the editor and
+    /// runs the next.
+    fn press(
+        context: &egui::Context,
+        signal: &mut TimeSignal,
+        role: SignalUse,
+        preview: &mut PulsePreview,
+        label: &str,
+    ) {
+        let widgets = editor_pass(context, signal, role, preview, vec![]);
+        let widget = widgets
+            .iter()
+            .find(|widget| widget.label == label)
+            .unwrap_or_else(|| panic!("no {label} among {:?}", widgets));
+        let events = click(widget);
+        editor_pass(context, signal, role, preview, events);
+    }
+
+    /// UI-2 of the 2026-10-20 review: a Neumann signal is in the boundary
+    /// data the operator is compared by, so its edit takes a full handoff,
+    /// 0.4 to 0.8 s on a 34k-DOF scene, while its "Fire now" and pulse
+    /// started at the live time: the new generation joined 0.15 to 0.55 s
+    /// into the burst and the pulse was truncated. A flux pulse starts at the
+    /// handoff time, as a pinned field's does.
+    #[test]
+    fn a_flux_pulse_fires_at_the_handoff_time() {
+        let context = egui::Context::default();
+        theme::apply(&context);
+        context.enable_accesskit();
+        let mut signal = TimeSignal::harmonic(0.0, 6.0, 3.0, 0.0);
+        let mut preview = PulsePreview::default();
+        press(
+            &context,
+            &mut signal,
+            SignalUse::Flux,
+            &mut preview,
+            "Pulse",
+        );
+        assert!(
+            matches!(signal, TimeSignal::Pulsed { start: 13.0, .. }),
+            "{signal:?}"
+        );
+        if let TimeSignal::Pulsed { start, .. } = &mut signal {
+            *start = 1.0;
+        }
+        press(
+            &context,
+            &mut signal,
+            SignalUse::Flux,
+            &mut preview,
+            "Fire now",
+        );
+        assert!(
+            matches!(signal, TimeSignal::Pulsed { start: 13.0, .. }),
+            "{signal:?}"
+        );
     }
 
     /// "Pulse" turns a continuous source into a pulse fired at the time it
@@ -773,13 +836,7 @@ mod tests {
                      signal: &mut TimeSignal,
                      preview: &mut PulsePreview,
                      label: &str| {
-            let widgets = editor_pass(context, signal, preview, vec![]);
-            let widget = widgets
-                .iter()
-                .find(|widget| widget.label == label)
-                .unwrap_or_else(|| panic!("no {label} among {:?}", widgets));
-            let events = click(widget);
-            editor_pass(context, signal, preview, events);
+            press(context, signal, SignalUse::Source, preview, label);
         };
         press(&context, &mut signal, &mut preview, "Pulse");
         assert!(signal.is_pulsed(), "{signal:?}");
