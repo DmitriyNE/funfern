@@ -29201,3 +29201,36 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the timing example times what it divides by, and hashes the whole state (VER-7, VER-35)
+
+- **VER-7, the defect.** `canonical_gpu_temporal_timing` asked for 64
+  warm-up steps every frame until a readback's clock showed 32, so an
+  unknown number queued; it then started the clock, asked for `steps` more
+  and stopped at the first frame whose count reached `steps + 32`, dividing
+  by `steps`. With temporary prints, six runs of the driven fixture started
+  their window at completed step 192 and ended it at 3,392 to 9,216 steps,
+  each divided by 2,000: 1.3 to 19.3 ms a step. The review measured 0.77 to
+  1.02 times the true cost on a quiet host; on this one, loaded at the
+  time, the error ran to 4.5 times.
+- **Fix.** One warm-up request of 64, waited out in full, then the clock
+  starts at the device's completed count and the figure divides by the
+  steps completed since; the printout names them ("over 2000 steps"). Six
+  runs now time exactly 2,000 steps each. On the loaded host they read 1.3
+  to 3.9 ms a step and the fixed fixture slower than the driven one, so the
+  example's recorded figures were not measured again here; the doc's note
+  on `--steps` says the spreads it quotes were read with the error.
+- **VER-35, the defect.** `--checksum` hashed on the first frame past 2,000
+  steps whose primary stream had landed: the temporary prints read "primary
+  15264 of 15264, complementary 0, integrated 0, full readbacks 0", so `b`,
+  `r` and every snapshot-only lane were never in it, and `Q` was the stream's,
+  not a snapshot's. The "same bits" the log records for this example (step
+  throughput, 2026-10-04, and the trapezoid wall step, 2026-10-11) rested on
+  `Q` alone.
+- **Fix.** The hash waits for a full snapshot taken at 2,000 steps
+  themselves, asked for again until one is, with every lane at its length,
+  as `canonical_gpu_cavity_modes` waits. Two runs hash 4f572c0186ef7841
+  each; the old hash, 63e8e9be06a3e5f4, is not comparable.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

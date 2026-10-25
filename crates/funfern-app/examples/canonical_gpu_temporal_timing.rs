@@ -49,7 +49,9 @@
 //! can end before the device's clock settles, and then two runs of the same
 //! build read apart by a sixth; at 20,000 repeat runs agreed to about 2%,
 //! with an occasional slow first run after a heavy scene, so compare medians
-//! of runs whose order rotates.
+//! of runs whose order rotates. Those spreads were read before 25 October,
+//! while the window timed held another number of steps than it was divided
+//! by (VER-7 of the 2026-10-20 review), and carry that error.
 //!
 //! `--checksum` times nothing: it runs exactly `STEPS` steps, reads the whole
 //! state back and prints a hash of its bits, `Q`, `b`, `r` and the accounting
@@ -73,6 +75,8 @@ use funfern_core::{
 };
 
 const STEPS: u64 = 2_000;
+/// Steps run, and waited out, before the clock starts.
+const WARMUP_STEPS: u64 = 64;
 const EDGE: f64 = 0.06;
 
 #[derive(Resource)]
@@ -87,8 +91,12 @@ struct Timing {
     checksum: bool,
     steps: u64,
     nodes: usize,
+    samples: usize,
+    integrated: usize,
     time_step: f64,
-    started: Option<Instant>,
+    warmed: bool,
+    /// When the clock started, and the steps the device had completed then.
+    started: Option<(Instant, u64)>,
     deadline: Instant,
     finished: bool,
     /// The run timed out or the device failed, which exits with an error: a
@@ -266,6 +274,7 @@ fn main() -> AppExit {
         plan.node_count, plan.sample_count
     );
 
+    let (samples, integrated) = (plan.sample_count, plan.integrated_count);
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
@@ -287,7 +296,10 @@ fn main() -> AppExit {
         checksum,
         steps,
         nodes: base.degrees_of_freedom(),
+        samples,
+        integrated,
         time_step,
+        warmed: false,
         started: None,
         deadline: check::deadline(300),
         finished: false,
@@ -339,9 +351,22 @@ fn drive(
         return;
     }
     if timing.checksum {
-        if request.stats().completed_steps() < STEPS
-            || (!request.request_full_state_readback() && display.full_readbacks == 0)
-            || display.primary_flux.len() != timing.nodes
+        // A full snapshot taken at `STEPS` itself, every lane landed: the
+        // first primary stream past `STEPS` came before `b` and `r` did, so
+        // the hash held `Q` alone (VER-35 of the 2026-10-20 review).
+        if request.stats().completed_steps() < STEPS {
+            return;
+        }
+        if display.full_readbacks == 0
+            || display.full_readback_at != display.readbacks
+            || display.full_snapshot_completed_steps() != STEPS
+        {
+            request.request_full_state_readback();
+            return;
+        }
+        if display.primary_flux.len() != timing.nodes
+            || display.complementary_flux.len() != timing.samples
+            || display.integrated_field().len() != timing.integrated
         {
             return;
         }
@@ -353,25 +378,33 @@ fn drive(
         timing.finished = true;
         return;
     }
-    if timing.started.is_none() {
+    let Some((started, first)) = timing.started else {
         // Let the first frames settle before the clock starts, so pipeline
-        // creation and the first buffer upload are not charged to stepping.
-        if display.clock.is_none_or(|clock| clock.accepted_steps < 32) {
-            request.request_steps(64);
-            return;
+        // creation and the first buffer upload are not charged to stepping:
+        // one warm-up request, waited out, so the clock starts from a known
+        // count. Asked for again every frame until a readback showed it, the
+        // warm-up queued an unknown number of steps, and the figure divided
+        // the window by `steps` while it held 0.77 to 1.02 times as many
+        // (VER-7 of the 2026-10-20 review).
+        if !timing.warmed {
+            request.request_steps(WARMUP_STEPS);
+            timing.warmed = true;
+        } else if request.caught_up() {
+            timing.started = Some((Instant::now(), request.stats().completed_steps()));
+            request.request_steps(timing.steps);
         }
-        timing.started = Some(Instant::now());
-        request.request_steps(timing.steps);
+        return;
+    };
+    let completed = request.stats().completed_steps();
+    if completed < first + timing.steps {
         return;
     }
-    if request.stats().completed_steps() < timing.steps + 32 {
-        return;
-    }
-    let elapsed = timing.started.expect("started").elapsed().as_secs_f64();
-    let per_step = elapsed * 1.0e6 / timing.steps as f64;
-    let simulated = timing.time_step * timing.steps as f64;
+    let elapsed = started.elapsed().as_secs_f64();
+    let timed = completed - first;
+    let per_step = elapsed * 1.0e6 / timed as f64;
+    let simulated = timing.time_step * timed as f64;
     println!(
-        "gpu {}: {} DOFs, {per_step:.1} us/step, {:.1} simulated s per wall s",
+        "gpu {}: {} DOFs, {per_step:.1} us/step over {timed} steps, {:.1} simulated s per wall s",
         timing.label,
         timing.nodes,
         simulated / elapsed
