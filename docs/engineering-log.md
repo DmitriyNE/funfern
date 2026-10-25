@@ -29536,3 +29536,29 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: gallery physics checks, second part (VER-46, VER-51)
+
+- **VER-46.** The self-sustained emitter's seed check read the 2.5 Hz seed
+  over a 4 s rectangular window, where the 2.99 Hz tone, 1.96 bins away,
+  leaks about 2% of itself on its own - the bound - so the reading told
+  where the tone fell on the bins rather than what was left of the seed.
+  It now reads over a whole number of beats against the tone, where the
+  window's null falls on 2.5 Hz, and prints both: 4.58e-3 over whole beats
+  against 2.31e-3 over 4 s, of the tone's 0.323. The old window had the
+  tone's leakage partly cancelling the seed; read clean, the seed is 1.4%
+  of the tone, still under the claim's 2%.
+- **VER-51.** PH-12's per-order filter weighed each order by `|α_n|` times
+  `|H_n|` at the inner ring, which grows without bound for an order past
+  `kr`, so at ka 0.5 it favoured the orders that met least field. It now
+  weighs by the field the order met, `|α_n J_n(kr)|` at its largest over
+  the fit radii (one radius alone would drop order 0 at ka 2, where `kr`
+  sits on `J_0`'s zero). With both filters printed through the nightly
+  run: the TM `ε` 4 and `ε` 10 cases at ka 0.5 read orders ±2 to ±4 under
+  the old filter, without 0 and ±1, the orders that scatter, and -3 to 3
+  under the new; the other ka 0.5 cases drop ±4, which met little; every
+  case at ka 2 and 5 reads the same orders as before. The gate test and the
+  nightly run pass their bounds as they stand.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

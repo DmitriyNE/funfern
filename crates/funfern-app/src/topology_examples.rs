@@ -7557,7 +7557,18 @@ mod tests {
             "the centre oscillates at {centre:.3}"
         );
         let radiated = magnitude(&far, frequency);
-        let seed = magnitude(&far, 2.5);
+        // The seed read over whole beats against the tone, where the window's
+        // null falls on 2.5 Hz: over 4 s the tone, 1.96 bins away, leaked 2%
+        // there on its own, the bound itself, so the reading told where the
+        // tone fell on the bins and not what was left of the seed (VER-46 of
+        // the 2026-10-20 review).
+        let beat = 1.0 / (frequency - 2.5);
+        let (re, im) = phasor(&far, dt, 2.5, (window / beat).round() * beat);
+        let seed = re.hypot(im);
+        eprintln!(
+            "the seed {seed:.3e} over whole beats, {:.3e} over {window} s, of {radiated:.3}",
+            magnitude(&far, 2.5)
+        );
         assert!(
             seed < 0.02 * radiated,
             "the seed {seed:.4} against {radiated:.3}"
@@ -17787,22 +17798,33 @@ mod tests {
             let polygon =
                 ratio - Phasor::new(order.slope[0], order.slope[1]).scale(case.ka * deficit);
             let inner = basis(0)[1].norm();
-            fits.push((fitted[0], fitted[1], ratio, polygon, inner, misfit));
+            // The field the order met, `|α_n J_n(kr)|` at its largest over
+            // the fit radii. Weighed by `|H_n|` at the inner ring instead,
+            // which grows without bound for an order past `kr`, the filter at
+            // ka 0.5 kept orders 2 to 4 and dropped 0 and 1, the ones that
+            // scatter (VER-51 of the 2026-10-20 review); one radius alone
+            // would drop order 0 at ka 2, where `kr` sits on `J_0`'s zero.
+            let reach = order
+                .radii
+                .iter()
+                .map(|radius| radius.h[0].abs())
+                .fold(0.0, f64::max);
+            fits.push((fitted[0], fitted[1], ratio, polygon, inner, reach, misfit));
         }
         let (mut circle, mut error, mut scattered) = (0.0, 0.0, 0.0);
         let met = fits
             .iter()
-            .map(|(regular, _, _, _, inner, _)| regular.norm() * inner)
+            .map(|(regular, _, _, _, _, reach, _)| regular.norm() * reach)
             .fold(0.0, f64::max);
         let (mut order_error, mut unitarity, mut misfit) = (0.0_f64, 0.0_f64, 0.0_f64);
-        for (regular, outgoing, ratio, polygon, inner, fit) in &fits {
+        for (regular, outgoing, ratio, polygon, inner, reach, fit) in &fits {
             circle += ((*outgoing - *ratio * *regular).norm() * inner).powi(2);
             let predicted = *polygon * *regular;
             error += ((*outgoing - predicted).norm() * inner).powi(2);
             scattered += (predicted.norm() * inner).powi(2);
             // An order that met a field a hundredth of the strongest's has
             // its own ratio and fit read.
-            if regular.norm() * inner > 1.0e-2 * met {
+            if regular.norm() * reach > 1.0e-2 * met {
                 misfit = misfit.max(*fit);
                 let read = *outgoing / *regular;
                 order_error = order_error.max((read - *polygon).norm());
