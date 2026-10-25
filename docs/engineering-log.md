@@ -29417,3 +29417,35 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: four editor tests that could not fail (VER-21, VER-22, VER-23, VER-53)
+
+Each was run as it stood under a temporary break of what it guards, and
+passed; the strengthened test fails under the same break and passes
+without it.
+
+- **VER-21.** `the_weld_survivor_decides_which_material_is_left` welded a
+  divider drawn as a baffle, whose face inherits its parent's material, so
+  both candidates carried the same one and any survivor read right. It now
+  gives one of them another material first, answers with each candidate in
+  turn and asserts the weld, its acceptance and the one region left. Break:
+  `settle_merge` no longer copies the survivor's material.
+- **VER-22.** "A refused command must not spend a region id" was checked
+  with a missing subdomain, refused before any id is drawn. It now also
+  points the allocator at an id already in use, which the compile refuses,
+  and asserts the allocator and the model unchanged. Break: the allocator
+  moves before the compile instead of after it.
+- **VER-23.** `boundary_probes_follow_the_surviving_piece` deleted an end
+  span, which never makes a second piece. A new test,
+  `boundary_probes_follow_their_piece_of_a_cut_curve`, cuts a four-span
+  baffle at its second span: each probe goes to the piece with more of its
+  path, the new curve included, trimmed to it, and one over the cut span
+  alone is removed. Break: a remapped probe keeps the old curve's id.
+- **VER-53.** "Undo takes the frame back with the curve" compared a world
+  frame with itself, which a move cannot change. It now checks the curve's
+  controls come back with the world frame, and that undo and redo of the
+  turn earlier in the test take a moving frame back and forth with its
+  curve. Break: that last undo skipped.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

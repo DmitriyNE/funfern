@@ -7135,35 +7135,51 @@ mod tests {
         assert_eq!(editor.history_len(), (history.0 + 1, history.1));
     }
 
-    /// The same weld, answered with the other candidate. Region 1 keeps the
+    /// The same weld, answered with each candidate. Region 1 keeps the
     /// exterior identity either way, so the answer decides the material rather
-    /// than the id.
+    /// than the id. The divider is a baffle, whose face takes its parent's
+    /// material, so one of the two is given another first: with one material
+    /// on both, any survivor read right (VER-21 of the 2026-10-20 review).
     #[test]
     fn the_weld_survivor_decides_which_material_is_left() {
-        let (mut editor, divider, onto) = divider_welded_onto_a_free_baffle();
-        let TopologyWeldOutcome::NeedsSurvivor(choices) =
-            editor.weld_endpoint(divider, 1, onto, None).unwrap()
-        else {
-            panic!("the weld went ahead");
-        };
-        let materials = choices
-            .iter()
-            .map(|region| {
-                editor
-                    .document
-                    .model
-                    .draft
-                    .region(*region)
-                    .unwrap()
-                    .material
-            })
-            .collect::<Vec<_>>();
-        editor
-            .weld_endpoint(divider, 1, onto, Some(choices[1]))
-            .unwrap();
-        settle(&mut editor);
-        let left = editor.document.model.draft.regions[0];
-        assert_eq!(left.material, materials[1], "the chosen material survived");
+        for answer in 0..2 {
+            let (mut editor, divider, onto) = divider_welded_onto_a_free_baffle();
+            let TopologyWeldOutcome::NeedsSurvivor(choices) =
+                editor.weld_endpoint(divider, 1, onto, None).unwrap()
+            else {
+                panic!("the weld went ahead");
+            };
+            let material = editor.add_material().unwrap();
+            editor.set_region_material(choices[1], material).unwrap();
+            settle(&mut editor);
+            let materials = choices
+                .iter()
+                .map(|region| {
+                    editor
+                        .document
+                        .model
+                        .draft
+                        .region(*region)
+                        .unwrap()
+                        .material
+                })
+                .collect::<Vec<_>>();
+            assert_ne!(materials[0], materials[1]);
+            let TopologyWeldOutcome::Welded(_) = editor
+                .weld_endpoint(divider, 1, onto, Some(choices[answer]))
+                .unwrap()
+            else {
+                panic!("the answered weld still asks");
+            };
+            settle(&mut editor);
+            assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+            assert_eq!(editor.document.model.draft.regions.len(), 1);
+            let left = editor.document.model.draft.regions[0];
+            assert_eq!(
+                left.material, materials[answer],
+                "the chosen material survived"
+            );
+        }
     }
 
     /// An anchor on the middle of a span, naming the side whose face is - or is
@@ -8926,6 +8942,97 @@ mod tests {
         );
     }
 
+    /// Deleting an interior span cuts the curve in two: each probe follows the
+    /// piece that keeps more of its path, which may be the new curve, trimmed
+    /// to that piece. The test above deletes an end run, which never makes a
+    /// second piece (VER-23 of the 2026-10-20 review).
+    #[test]
+    fn boundary_probes_follow_their_piece_of_a_cut_curve() {
+        let mut editor = TopologyEditor::default();
+        let domain = editor.document.model.draft.geometry.domain;
+        let curve = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.0, domain.min_y),
+                    Point2::new(0.0, -0.5),
+                    Point2::new(0.0, -0.1),
+                    Point2::new(0.0, 0.2),
+                    Point2::new(0.0, 0.5),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::BoundaryBaffle,
+                Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                    side: OuterSide::Bottom,
+                    fraction: 0.5,
+                })),
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let spans = span_ids(&editor, curve);
+        assert_eq!(spans.len(), 4);
+        let probe = |editor: &mut TopologyEditor, name: &str, covered: Vec<CurveSpanId>| {
+            editor
+                .create_probe(
+                    name.to_owned(),
+                    [248, 196, 112],
+                    TopologyProbeTarget::Boundary(TopologyBoundaryProbeTarget {
+                        curve,
+                        spans: covered,
+                        side: CurveTraceSide::Left,
+                        reversed: false,
+                        preset: ProbeSamplingPreset::Medium,
+                    }),
+                )
+                .unwrap()
+        };
+        let lower = probe(&mut editor, "Lower", vec![spans[0], spans[1]]);
+        let upper = probe(&mut editor, "Upper", vec![spans[1], spans[2], spans[3]]);
+        let whole = probe(&mut editor, "Whole", spans.clone());
+        let doomed = probe(&mut editor, "Doomed", vec![spans[1]]);
+        settle(&mut editor);
+
+        let selected = [spans[1]].into_iter().collect::<BTreeSet<_>>();
+        let removal = editor.remove_spans(&selected, None).unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(removal.pieces.len(), 2, "{:?}", removal.pieces);
+        assert_eq!(removal.removed_probes, vec![doomed]);
+        let piece_of = |span: CurveSpanId| {
+            removal
+                .pieces
+                .iter()
+                .copied()
+                .find(|piece| span_ids(&editor, *piece).contains(&span))
+                .expect("a piece keeps the span")
+        };
+        assert_ne!(piece_of(spans[0]), piece_of(spans[2]));
+        let target = |id: ProbeId| {
+            let probe = editor
+                .document
+                .model
+                .probes
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .expect("the probe survives");
+            let TopologyProbeTarget::Boundary(target) = &probe.target else {
+                panic!("expected a boundary probe")
+            };
+            (target.curve, target.spans.clone())
+        };
+        assert_eq!(target(lower), (piece_of(spans[0]), vec![spans[0]]));
+        assert_eq!(
+            target(upper),
+            (piece_of(spans[2]), vec![spans[2], spans[3]])
+        );
+        assert_eq!(
+            target(whole),
+            (piece_of(spans[2]), vec![spans[2], spans[3]]),
+            "two spans of its path against one"
+        );
+    }
+
     /// One deletion is one history entry, and undo restores the geometry it cut.
     #[test]
     fn partial_deletion_is_one_undoable_action() {
@@ -9310,8 +9417,23 @@ mod tests {
         );
 
         // A refused command must not spend a region id, so the allocator only
-        // moves once the candidate has compiled.
+        // moves once the candidate has compiled. The refusal has to reach the
+        // compile to test that: an id already in use, which the compile
+        // refuses, where a missing subdomain is refused before any id is
+        // drawn (VER-22 of the 2026-10-20 review).
         let before_allocator = editor.next_region;
+        let before = editor.document.model.clone();
+        let taken = editor
+            .assignment_region(editor.enclosed_assignment(right).unwrap())
+            .unwrap();
+        editor.next_region = taken.0;
+        assert!(
+            editor.set_face_disposition(face, Some(material)).is_err(),
+            "a region id already in use"
+        );
+        assert_eq!(editor.next_region, taken.0, "the refusal spent no id");
+        assert_eq!(editor.document.model, before);
+        editor.next_region = before_allocator;
         assert!(
             editor
                 .set_face_disposition(usize::MAX, Some(material))
@@ -9777,6 +9899,7 @@ mod tests {
 
         let turn = 0.6_f64;
         let shift = Point2::new(0.3, -0.25);
+        let authored_controls = controls(&editor);
         let pivot = controls(&editor)
             .iter()
             .copied()
@@ -9811,6 +9934,15 @@ mod tests {
         );
         assert!((moved.angle_radians - (authored.angle_radians + turn)).abs() < 1.0e-9);
         assert_eq!(moved.attachment, MaterialFrameAttachment::FollowRegion);
+        // Undo takes a frame that moved back with its curve, and redo brings
+        // both again.
+        let turned = controls(&editor);
+        assert!(editor.undo());
+        assert_eq!(frame(&editor), authored);
+        assert_eq!(controls(&editor), authored_controls);
+        assert!(editor.redo());
+        assert_eq!(frame(&editor), moved);
+        assert_eq!(controls(&editor), turned);
 
         // A drag applies its whole transform so far to the geometry it began
         // with every frame. The frame must land where one transform puts it,
@@ -9880,6 +10012,7 @@ mod tests {
         let mut world = moved;
         world.attachment = MaterialFrameAttachment::World;
         editor.set_region_frame(region, world).unwrap();
+        let before_world_move = controls(&editor);
         let updates = controls(&editor)
             .iter()
             .enumerate()
@@ -9892,11 +10025,12 @@ mod tests {
         editor.apply_transform_updates(&updates).unwrap();
         assert_eq!(frame(&editor), world);
 
-        // Undo takes the frame back with the curve.
-        let mut before_world = moved;
-        before_world.attachment = MaterialFrameAttachment::World;
+        // Undo takes the curve back and the world frame stays with it. The
+        // frame alone is the same before and after, so compared alone the
+        // check could not fail (VER-53 of the 2026-10-20 review).
         assert!(editor.undo());
-        assert_eq!(frame(&editor), before_world);
+        assert_eq!(controls(&editor), before_world_move);
+        assert_eq!(frame(&editor), world);
     }
 
     /// A region-local profile is unusable if its frame starts at the world    /// A region-local profile is unusable if its frame starts at the world
