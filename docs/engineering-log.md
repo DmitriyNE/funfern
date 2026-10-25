@@ -29116,3 +29116,32 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the suite runs the variants it never ran (VER-3, VER-31)
+
+- **The gap.** `scripts/device-suite.sh` ran the temporal consumer gate only
+  bare, never with `CONSUMER_NONLINEAR`, `CONSUMER_OSCILLATOR` or
+  `CONSUMER_GATED`, and the nonlinear gate never with `NONLINEAR_GAP` or
+  `NONLINEAR_FILTER`, so the resident filter never ran beside a field law;
+  the oscillator handoff ran its `remesh` mode twice, once by name and once
+  by default, and never `identity`, `from-linear`, `to-linear`, `reject` or
+  `opened`, which docs/checks.md describes as checked.
+- **Fix.** Eleven runs added in place of the duplicate. On the M1 Max, all
+  pass:
+  - the nonlinear gate with a thin gap: Q 5.5e-7, b 9.3e-7; with the
+    resident filter, 12 filters removing 1.1e-3 of the energy: Q 7.4e-7,
+    b 7.7e-7; the driven linear filter: Q 5.1e-7, b 5.0e-7;
+  - the oscillator handoff: identity Q 2.6e-7, b 3.0e-6, r 1.2e-6;
+    from a linear medium Q 7.5e-7, b 5.4e-7, r 1.5e-7; to one Q 3.3e-7,
+    b 2.4e-6 with its edit lane at 1.9e-8 of the energy; an opened hole
+    Q 2.9e-6, b 5.2e-5, r 3.8e-7, edit lane 2.0e-8; and `reject` refused
+    with status 6 while the source kept stepping;
+  - the consumer gate's three modes: the worst point, line, area and arrow
+    errors 2.3e-6, 1.4e-6 and 1.9e-6.
+- **Left out.** Further variants the examples accept and the suite does not
+  run, outside this finding: `FORCED_GAP` and `FORCED_BARE` on the forced
+  gate, `DRIVEN_LAW=sine-gordon`, and most of the oscillator gate's
+  media-by-composition grid.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
