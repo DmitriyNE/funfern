@@ -29874,3 +29874,23 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Step 3, area 9: the Safari runner refuses a stale or unstamped page at once (VER-28)
+
+- **The defect.** `browser-tests/safari-e2e.mjs` threw on a page whose
+  build stamp was not this checkout's inside the `until` wait, whose catch
+  reads every error as "not up yet", so a stale page failed only at the
+  deadline, as a page that gave no verdict; and a page with no stamp at all
+  was accepted.
+- **Shown first.** Run by hand in Safari against the bundle in `dist-e2e`
+  with `FUNFERN_EXPECT_BUILD=000000000000` and a 30 s deadline: "cavity gave
+  no verdict within 90 s", after 91 s.
+- **Fix.** A mismatched stamp ends the wait as a failure naming both
+  builds, a verdict from a page without a stamp fails as such, and the
+  expected id is read once per run rather than from git every half second.
+  The same run now fails in 1 s, "the page runs build da83bc0b2dbe, not
+  000000000000". The unstamped path is not exercised: the app stamps its
+  root at startup.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

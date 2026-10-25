@@ -83,6 +83,7 @@ try {
     args: [],
   });
   console.log(`Safari: ${version}`);
+  const expected = expectedBuildId();
   for (const fixture of fixtures) {
     const started = Date.now();
     await webdriver("POST", `/session/${session}/url`, {
@@ -96,11 +97,18 @@ try {
             "return [root.getAttribute('data-funfern-e2e'), root.getAttribute('data-funfern-e2e-summary'), root.getAttribute('data-funfern-build')];",
           args: [],
         });
-        // The bundle served is the one built from this checkout.
-        if (state[2] !== null && state[2] !== expectedBuildId()) {
-          throw new Error(`the page runs build ${state[2]}, not ${expectedBuildId()}`);
+        // The bundle served is the one built from this checkout. A stale one
+        // ends the wait at once, and a verdict from a page that never stamped
+        // its build is no proof of this one; thrown inside `until`, the
+        // mismatch read as "not up yet" until the deadline, and a page with
+        // no stamp passed (VER-28 of the 2026-10-20 review).
+        if (state[2] !== null && state[2] !== expected) {
+          return ["fail", `the page runs build ${state[2]}, not ${expected}`];
         }
-        return state[0] === "pass" || state[0] === "fail" ? state : null;
+        if (state[0] !== "pass" && state[0] !== "fail") {
+          return null;
+        }
+        return state[2] === null ? ["fail", "the page carries no build stamp"] : state;
       },
       deadline + 60,
       `${fixture} gave no verdict`,
