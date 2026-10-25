@@ -1,4 +1,4 @@
 about: a material frame's angle never reaches its tensor, so an anisotropic layer turned across the channel reads as one along it and reflects the opposite way
 test: cargo test --release -p funfern-app --lib -- planar_interfaces_scatter_as_fresnel_says
-expect: Mechanical axis across, 30° on 0\.1 at 1: (misfit|R|T|power|field jump|flux jump) 
+expect: Mechanical axis across, 30° on 0\.1 at 1: (misfit |(R|T|power|field jump|flux jump) [^ ,]+ off)
 needs: cpu

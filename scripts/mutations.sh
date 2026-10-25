@@ -15,11 +15,20 @@
 # failing output must match>`, `needs: cpu|device` and `about: <one line>`.
 # A run past MUTATION_TIMEOUT seconds (default 1800) is stopped. The tree
 # must be clean to start, and is left clean. Exits 1 if any mutation is not
-# detected.
+# detected, and 2 if no mutation matches the pattern.
 set -u
 cd "$(dirname "$0")/.."
 pattern=${1:-}
 limit=${MUTATION_TIMEOUT:-1800}
+matched=0
+for folder in tests/mutations/*/; do
+  name=$(basename "$folder")
+  [[ -z $pattern || $name =~ $pattern ]] && matched=$((matched + 1))
+done
+if [[ $matched -eq 0 ]]; then
+  echo "no mutation matches '$pattern'" >&2
+  exit 2
+fi
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "the tree is not clean; commit or stash first" >&2
   exit 2

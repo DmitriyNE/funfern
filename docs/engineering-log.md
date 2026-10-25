@@ -29145,3 +29145,34 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: mutation patterns and script lows (VER-32, VER-29, VER-30, VER-27)
+
+- **VER-32.** `scripts/mutations.sh` with a pattern that matches nothing
+  reported "0 of 0 detected" and exited 0 under a current bash; under this
+  Mac's bash 3.2 it died on an unbound array, "results[@]: unbound
+  variable", exit 1. It now counts the matches first and exits 2 with "no
+  mutation matches", as the device suite does, before the clean-tree check.
+- **VER-29.** frame-rotation-dropped expected `…at 1: (misfit|R|T|power|field
+  jump|flux jump) `, which the test's own diagnostic line ("…at 1: R
+  1.23e-2, T …") matches before any assertion, so a failure in a later case
+  counted as detected. The pattern is now the assertions' own wording,
+  `…at 1: (misfit |(R|T|power|field jump|flux jump) [^ ,]+ off)`. Against
+  the lines the test prints: the old pattern matched the diagnostic and
+  the assertions, the new one the assertions alone.
+- **VER-30.** component-totals-dropped expected the bare word "beyond",
+  which the clock check's failure also carries. The pattern is now the
+  endpoint check's report, `e2e Remesh failed: Q …, b …, r … after N
+  steps, beyond 5e-6`; the old one matched a clock failure, the new one
+  does not. Its message reports the worst of Q, b and r, so it cannot single
+  out Q.
+- **VER-27.** docs/checks.md's sweep command used `--bins`, which runs no
+  test since the sequences moved into the library ("running 0 tests"); it
+  now uses `--lib` ("running 1 test").
+- **Both still detected**, each patch applied and its test run against the
+  new pattern: frame-rotation-dropped fails at "Mechanical axis across, 30°
+  on 0.1 at 1: misfit …", component-totals-dropped at "e2e Remesh failed:
+  Q 2.475e-5, b 1.051e-6, r 0.000e0 after 256 steps, beyond 5e-6".
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

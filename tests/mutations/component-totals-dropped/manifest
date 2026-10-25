@@ -1,4 +1,4 @@
 about: a remesh of the same geometry no longer restores each component's flux total, so repeated adaptation drifts the constant part of the field
 test: scripts/e2e-fixture.sh remesh
-expect: beyond
+expect: e2e Remesh failed: Q [^,]+, b [^,]+, r [^,]+ after [0-9]+ steps, beyond 5e-6
 needs: device
