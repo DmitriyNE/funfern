@@ -1823,12 +1823,15 @@ fn advance(
             .iter()
             .any(|seen| *seen < time - 4.0 * reference.state.time_step());
             let behind = match &reference.far {
-                // The far field's last record stands its margin and a bucket
-                // or two behind the clock.
-                Some(far) => state.far_field_trace.last_time < time - far.margin() - 0.1,
+                // The far field's last record is the twin's last projection,
+                // which the judge holds it to.
+                Some(far) => far
+                    .span()
+                    .is_some_and(|(_, last)| state.far_field_trace.last_time < last - 1.0e-3),
                 None => behind,
             };
-            if behind && since.elapsed() < std::time::Duration::from_secs(1) {
+            // Many frames natively; served as Pages a frame can take a second.
+            if behind && since.elapsed() < std::time::Duration::from_secs(30) {
                 driver.phase = Phase::Observe {
                     reference,
                     run,

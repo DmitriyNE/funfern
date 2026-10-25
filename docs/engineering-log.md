@@ -29292,3 +29292,25 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the far field's records cover the run (VER-8)
+
+- **The defect.** `far_field::judge` held every record to the twin and the
+  records' spacing, and wanted 60 of them, but never where they started or
+  ended, so a recorder that dropped its head or its tail passed; the
+  Observe phase gave the tail one second and judged whatever had arrived.
+- **Shown first**, each a temporary filter on what the app's trace takes
+  in: records before 1.6 s of far time dropped — the judge passed 206
+  records "from 1.612 s"; records past 4.5 s dropped — it passed again.
+- **Fix.** The twin names the far times of the first and the last frame a
+  projection reaches, and the records must start and end on them within
+  the stamps' bound: the same runs now fail, "the far field's records
+  start at 1.612 s, where the twin's first projection stands at 1.239 s"
+  and "… end at 4.483 s, where the twin's last projection stands at
+  5.095 s". The Observe phase waits for that last record, up to 30 s
+  rather than 1, since a frame of a run served as Pages can take a second.
+  Without the filters both fixtures pass: 228 records from 1.239 s, and
+  `far-field-late` 228 from 129854.975 s.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

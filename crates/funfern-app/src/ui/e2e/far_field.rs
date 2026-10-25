@@ -88,6 +88,24 @@ pub(super) fn judge(
     if records.len() < 60 {
         return Err(format!("the far field holds {} records", records.len()));
     }
+    // The records cover the run, from the first frame the delay window lets
+    // through to the last the twin projects: spacing and agreement alone let
+    // a recorder that dropped its head or its tail pass (VER-8 of the
+    // 2026-10-20 review).
+    let (first, last) = twin.span().ok_or("the twin projects no frame")?;
+    let (head, tail) = (records[0].time, records[records.len() - 1].time);
+    if !within((head - first).abs(), stamp_bound) {
+        return Err(format!(
+            "the far field's records start at {head} s, where the twin's first projection \
+             stands at {first} s"
+        ));
+    }
+    if !within((tail - last).abs(), stamp_bound) {
+        return Err(format!(
+            "the far field's records end at {tail} s, where the twin's last projection \
+             stands at {last} s"
+        ));
+    }
     let (mut worst, mut largest, mut stamp) = (0.0_f64, 0.0_f64, 0.0_f64);
     for record in records {
         let now = record.time + twin.margin();
@@ -341,6 +359,16 @@ impl FarFieldTwin {
                 })
                 .collect(),
         });
+    }
+
+    /// The far times of the first and the last frame a projection reaches,
+    /// which the recorder's records must run between.
+    pub(crate) fn span(&self) -> Option<(f64, f64)> {
+        let far = |frame: &Frame| self.projection(frame.time).map(|(far, _)| far);
+        Some((
+            self.frames.iter().find_map(far)?,
+            self.frames.iter().rev().find_map(far)?,
+        ))
     }
 
     /// The projection the recorder took at the frame nearest `now`, from
