@@ -3388,6 +3388,25 @@ mod tests {
         assert_eq!(report.new_samples, 0);
         assert_eq!(report.deleted_samples, 0);
 
+        // A lengthened gap: the part past the old one's end is new, starts at
+        // rest and is counted. Every target above lay inside a source
+        // segment, so a new sample was never made (VER-58 of the 2026-10-20
+        // review).
+        let lengthened = [(0.0, 0.5), (0.5, 1.0), (1.0, 1.5)]
+            .into_iter()
+            .flat_map(|(start, end)| (0..3).map(move |local| sample(start, end, local, 0.5)))
+            .collect::<Vec<_>>();
+        let longer = CanonicalThinGapHistoryTransferMap::prepare(&source, &lengthened).unwrap();
+        let (transferred, report) = longer.transfer(&memory).unwrap();
+        assert_eq!(report.new_samples, 2);
+        assert_eq!(
+            transferred
+                .iter()
+                .map(|entry| entry.jump)
+                .collect::<Vec<_>>(),
+            vec![0.0, 0.25, 0.5, 0.5, 0.75, 1.0, 1.0, 0.0, 0.0]
+        );
+
         let reversed = (0..3)
             .map(|local| sample(1.0, 0.0, local, 1.0))
             .collect::<Vec<_>>();
@@ -3436,7 +3455,9 @@ mod tests {
             CanonicalOutgoingHistoryTransferMap::prepare(&identity, &second, &second).unwrap();
         let normalized_map = map.normalized_matrix(&second, &second).unwrap();
         assert!(normalized_map.identity);
-        let mapped = normalized.clone();
+        // Applied: compared as a clone of itself, the check could not fail
+        // (VER-57 of the 2026-10-20 review).
+        let mapped = normalized_map.apply(&normalized).unwrap();
         assert!(
             mapped
                 .iter()
@@ -3675,8 +3696,8 @@ mod tests {
     /// the map builds for the shorter trace, the corners' pole currents go
     /// nowhere, and what is carried is exactly the rest, no more than it was.
     /// The way back lengthens the trace again: the corners are new trace
-    /// nodes and take their neighbours' memory, as a remesh's new nodes do,
-    /// and the energy that adds is the edit's.
+    /// nodes, with no donor on the pinned trace, and start at rest, as a
+    /// gap's new samples do; the rest takes back what the pinned trace held.
     #[test]
     fn outgoing_history_moves_onto_a_trace_that_pinned_sides_end() {
         let scene = Scene::default();
@@ -3768,10 +3789,29 @@ mod tests {
             report.source_energy, report.target_energy, report.edit_exchange
         );
         assert!(report.target_energy.is_finite());
-        assert!(
-            (report.target_energy - report.source_energy - report.edit_exchange).abs()
-                < 1.0e-9 * report.source_energy
-        );
+        // The corners, the two trace nodes only the free sides have, start at
+        // rest, and the rest of the trace takes back what the pinned one held,
+        // each from its own node. The energy compared against the edit's own
+        // definition could not fail (VER-18 of the 2026-10-20 review).
+        let corners = free_boundary
+            .trace_nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| !pinned_boundary.trace_nodes().contains(node))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(corners.len(), 2);
+        assert_eq!(report.new_samples, 2);
+        for (back, there) in returned.pole_currents.iter().zip(&moved.pole_currents) {
+            assert!(corners.iter().all(|corner| back[*corner] == 0.0));
+            let rest = back
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !corners.contains(index))
+                .map(|(_, value)| *value)
+                .collect::<Vec<_>>();
+            assert_eq!(&rest, there);
+        }
     }
 
     /// Meshes, assembles and compiles a scene at an edge sized for its domain.

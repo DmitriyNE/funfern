@@ -29591,3 +29591,32 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the history transfers' new samples, built and checked (VER-58, VER-57, VER-18)
+
+Each was run as it stood under a temporary break of what it guards, and
+passed; the strengthened test fails under the same break and passes
+without it.
+
+- **VER-58.** The thin-gap history test is named for split, reversed, new
+  and deleted samples, but every target lay inside a source segment, so it
+  only ever asserted `new_samples == 0`. It now lengthens the gap by half
+  past its end: the sample on the old end interpolates, the two past it are
+  new, start at rest and are counted (`new_samples == 2`). Break: the donor
+  range widened so a target past the end extrapolates - the count reads 0.
+- **VER-57.** The outgoing-history test checked its identity normalized map
+  by comparing a clone of the memory with itself. It now applies the map.
+  Break: `apply` without its identity short-circuit, which fails on the
+  empty matrix - the old line passed, the new one fails on the apply.
+- **VER-18.** The pinned-sides test checked the way back by asserting the
+  edit's exchange equals the target's energy less the source's, which is
+  how the exchange is defined. It now asserts the two corner nodes only the
+  free sides have start at rest, `new_samples == 2`, and every other node
+  takes back the pinned trace's own value. Its doc said the corners take
+  their neighbours' memory as a remesh's new nodes do; they have no donor
+  on the pinned trace and start at rest, and the doc now says so. Break: a
+  trace's new node takes 1.0 instead of rest (which the creation case of
+  the outgoing-history test also catches).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
