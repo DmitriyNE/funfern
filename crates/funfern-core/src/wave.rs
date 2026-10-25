@@ -2212,18 +2212,39 @@ mod tests {
             angle_radians: 0.41,
             ..MaterialFrame::world()
         };
-        for physics in [
-            PhysicsModel::Mechanical,
-            PhysicsModel::Electromagnetic {
-                polarization: ElectromagneticPolarization::Tm,
-            },
-            PhysicsModel::Electromagnetic {
-                polarization: ElectromagneticPolarization::Te,
-            },
+        // Each skin's scalar stiffness and mass, written by hand: the
+        // tensor's geometric mean, its determinant's root, is the scalar
+        // stiffness, which the ratio and the speeds alone never checked
+        // (VER-66 of the 2026-10-20 review).
+        for (physics, stiffness, mass) in [
+            (PhysicsModel::Mechanical, 9.0, 4.0),
+            (
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                },
+                1.0 / 9.0,
+                4.0,
+            ),
+            (
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Te,
+                },
+                1.0 / 4.0,
+                9.0,
+            ),
         ] {
             let coefficients = physics.directional_wave_coefficients(properties, frame);
             let eigenvalues = coefficients.stiffness.eigenvalues();
             assert!((eigenvalues[1] / eigenvalues[0] - 9.0).abs() < 1.0e-12);
+            assert!(
+                (coefficients.stiffness.determinant() - stiffness * stiffness).abs()
+                    < 1.0e-12 * stiffness * stiffness,
+                "{physics:?}"
+            );
+            assert!(
+                (coefficients.mass_density - mass).abs() < 1.0e-12,
+                "{physics:?}"
+            );
             assert!(coefficients.valid());
             assert!(
                 (coefficients.maximum_wave_speed() / coefficients.minimum_wave_speed() - 3.0).abs()

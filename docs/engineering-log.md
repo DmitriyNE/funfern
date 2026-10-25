@@ -29661,3 +29661,40 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: temporal and skin tests that read the solver's own answer (VER-13, VER-15, VER-16, VER-66, VER-54)
+
+Each of the first four was run as it stood under a temporary break of what
+it guards, and passed; the strengthened test fails under the same break and
+passes without it.
+
+- **VER-13.** The material-frame test built its expected mass from the
+  coordinates the compile had stored, so a frame ignored or misread moved
+  the expectation with the result. It now works the region frame's
+  coordinates and the travelling drive's factor out by hand at each node.
+  Break: every sample read in the world frame - node 0 reads 0.00186
+  against 0.00275.
+- **VER-15.** The nonlinear area-probe test claimed junction nodes on a
+  scene of one material. It now runs a disk of a second material with other
+  laws, asserts nodes owned by both, and holds the faces' sum to the
+  solver's energy. Break: every node's energy read through the first site's
+  law - the faces sum to 0.2976 against 0.2923.
+- **VER-16.** `temporal_tensor_scaling_keeps_the_base_anisotropy_shape`
+  divided a tensor of its own and called nothing of the solver's. It now
+  pumps the stiffness row of a turned anisotropic medium and holds each
+  sample's field from `complementary_field_at` to the base inverse over the
+  pump's factor, cross term included. Break: the drive scales the inverse's
+  diagonal alone.
+- **VER-66.** `directional_skin_keeps_ratio_and_geometric_mean` checked the
+  ratio and the speeds, never the mean. It now holds the tensor's
+  determinant to the square of each skin's scalar stiffness and the mass to
+  each skin's own slot. Break: the tensor built as `(s r², s)`, ratio and
+  speeds kept - Mechanical fails first.
+- **VER-54.** The Klein-Gordon continuum oracle used `k² = (π/2)²(m + n)`
+  where the mode is `(π/2)²(m² + n²)`; the modes it ran, of index 0 and 1,
+  cannot tell the two apart. Test first: mode (2, 1) added, on the old
+  oracle it read 17% off the continuum on correct code. With the oracle
+  fixed it reads 8.4e-6 off, held to 2e-5, its shift 7e-8.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

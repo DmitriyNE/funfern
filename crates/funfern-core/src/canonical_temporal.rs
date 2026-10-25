@@ -9766,9 +9766,33 @@ mod tests {
     /// the solver's energy, junction nodes included.
     #[test]
     fn a_nonlinear_area_probe_over_every_face_reports_the_solver_energy() {
-        let mut scene = Scene::initial();
+        // Two materials of different laws meeting on a disk's rim, so its
+        // nodes carry a share of each: the scene had one material, so no
+        // junction, and a split that read every node through one law summed
+        // right (VER-15 of the 2026-10-20 review).
+        let mut scene = Scene::default();
         scene.materials[0].mass_law.field = kerr(0.8);
         scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
+        let mut second = scene.materials[0].clone();
+        second.id = MaterialId(2);
+        second.name = "Second".into();
+        second.mass_density = ScalarField::constant(2.5);
+        second.mass_law.field = saturable_law(1.5, 0.3);
+        second.stiffness_law.field = saturable_law(3.0, 0.5);
+        scene.materials.push(second);
+        scene.regions.push(Region {
+            id: RegionId(2),
+            material: MaterialId(2),
+            frame: MaterialFrame::world(),
+        });
+        scene.obstacles.push(Obstacle::with_role(
+            ObstacleId(1),
+            PeriodicCubicSpline::rounded(Point2::new(0.4, 0.3), 0.35),
+            LoopRole::MaterialInterface {
+                exterior: BACKGROUND_REGION,
+                interior: RegionId(2),
+            },
+        ));
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
         let mesh = mesh_scene(
@@ -9788,6 +9812,17 @@ mod tests {
         .unwrap();
         let operator =
             CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let mut owners = vec![BTreeSet::new(); operator.base().degrees_of_freedom()];
+        for (contribution, sample) in operator
+            .base()
+            .primary_contributions()
+            .iter()
+            .zip(operator.primary.iter())
+        {
+            owners[contribution.node as usize].insert(sample.coefficient.material);
+        }
+        let junctions = owners.iter().filter(|owners| owners.len() == 2).count();
+        assert!(junctions >= 3, "{junctions} junction nodes");
         let runtime = operator.initial_runtime();
         let (primary, complementary) = strong_fluxes(&operator, 6.0);
         let expected = operator
@@ -10069,18 +10104,27 @@ mod tests {
         let temporal = compile(&scene).unwrap();
         let runtime = temporal.initial_runtime();
         let mass = temporal.primary_mass_at(0.0, &runtime).unwrap();
+        // The frame's coordinates worked out here, from its origin and angle,
+        // and the drive's factor from them: read from the coordinates the
+        // compile stored, a frame ignored or misread moved the expected mass
+        // with the actual one (VER-13 of the 2026-10-20 review).
+        let (sin, cos) = 0.37_f64.sin_cos();
         let mut expected = vec![0.0; temporal.base().degrees_of_freedom()];
-        for (contribution, sample) in temporal
-            .base()
-            .primary_contributions()
-            .iter()
-            .zip(temporal.primary.iter())
-        {
-            let factor = coefficient_factor(sample.coefficient, 0.0, &runtime).unwrap();
+        for contribution in temporal.base().primary_contributions() {
+            let point = temporal.base().node_points()[contribution.node as usize];
+            let (dx, dy) = (point.x - 0.2, point.y + 0.1);
+            let (x, y) = (cos * dx + sin * dy, -sin * dx + cos * dy);
+            let along = x * (-0.3_f64).cos() + y * (-0.3_f64).sin();
+            let factor = 1.0 + 0.25 * (0.2 - 4.0 * along).cos();
             expected[contribution.node as usize] +=
                 contribution.geometric_weight * contribution.reference_coefficient * factor;
         }
-        assert_eq!(mass, expected);
+        for (node, (actual, expected)) in mass.iter().zip(&expected).enumerate() {
+            assert!(
+                (actual - expected).abs() < 1.0e-12 * expected.abs(),
+                "node {node}: {actual} against {expected}"
+            );
+        }
         assert!(
             mass.iter()
                 .zip(temporal.base().primary_mass())
@@ -10852,21 +10896,41 @@ mod tests {
         assert!(CanonicalTemporalWaveState::zero(&open, 0.1 * open.maximum_time_step()).is_ok());
     }
 
+    /// A drive on the stiffness row scales an anisotropic medium's whole
+    /// inverse, so the field read back is the base inverse applied to the
+    /// flux, over the drive's factor, its cross term with the rest. The test
+    /// once divided a tensor of its own and called nothing of the solver's
+    /// (VER-16 of the 2026-10-20 review).
     #[test]
     fn temporal_tensor_scaling_keeps_the_base_anisotropy_shape() {
-        let tensor = SymmetricTensor2 {
-            xx: 2.0,
-            xy: 0.4,
-            yy: 1.0,
-        };
-        let factor = 1.7;
-        let scaled = SymmetricTensor2 {
-            xx: tensor.xx / factor,
-            xy: tensor.xy / factor,
-            yy: tensor.yy / factor,
-        };
-        assert!((scaled.xx / scaled.yy - tensor.xx / tensor.yy).abs() < 1.0e-12);
-        assert!((scaled.xy / scaled.yy - tensor.xy / tensor.yy).abs() < 1.0e-12);
+        let mut scene = Scene::initial();
+        scene.materials[0].axis_ratio = ScalarField::constant(1.6);
+        scene.regions[0].frame.angle_radians = 0.5;
+        // At zero frequency and phase the pump stands at 1 + 0.3 everywhere.
+        scene.materials[0].stiffness_law.drive = pump(0.3, 0.0, 0.0);
+        let operator = compile(&scene).unwrap();
+        let runtime = operator.initial_runtime();
+        let samples = operator.base().constitutive_samples();
+        assert!(
+            samples
+                .iter()
+                .all(|sample| sample.complementary_inverse.xy.abs()
+                    > 0.05 * sample.complementary_inverse.xx.abs()),
+            "the medium must be turned off its axes"
+        );
+        let flux = (0..samples.len())
+            .map(|index| Point2::new(0.3 + 0.01 * (index % 7) as f64, -0.2))
+            .collect::<Vec<_>>();
+        let field = operator
+            .complementary_field_at(&flux, 0.37, &runtime)
+            .unwrap();
+        for (index, (sample, read)) in samples.iter().zip(&field).enumerate() {
+            let expected = sample.complementary_inverse.apply(flux[index]) / 1.3;
+            assert!(
+                (*read - expected).norm() < 1.0e-12 * expected.norm(),
+                "sample {index}: {read:?} against {expected:?}"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -14075,14 +14139,17 @@ mod tests {
 
     /// A spatial mode's frequency moves by exactly the cutoff,
     /// `ω_KG² − ω_linear² = ω₀²`, and meets the continuum's `√(k² + ω₀²)`
-    /// (PH-16): the box's modes `(1, 0)` and `(1, 1)`, `k² = π²/4` and
-    /// `π²/2`, at an edge of 0.25 read their shifts 2e-10 and 3e-8 off and
-    /// their frequencies 2e-7 and 9e-7.
+    /// (PH-16): the box's modes `(1, 0)`, `(1, 1)` and `(2, 1)`,
+    /// `k² = (π/2)²(m² + n²)`, at an edge of 0.25 read their shifts 2e-10,
+    /// 3e-8 and 7e-8 off and their frequencies 2e-7, 9e-7 and 8e-6. The
+    /// oracle once summed `m + n`, which modes of index 0 and 1 cannot tell
+    /// from `m² + n²` (VER-54 of the 2026-10-20 review).
     #[test]
     fn klein_gordon_adds_its_cutoff_to_a_modes_frequency() {
         let omega0 = 2.5;
-        for mode in [(1, 0), (1, 1)] {
-            let k2 = (0.5 * std::f64::consts::PI).powi(2) * f64::from(mode.0 + mode.1);
+        for (mode, bound) in [((1, 0), 2.0e-6), ((1, 1), 2.0e-6), ((2, 1), 2.0e-5)] {
+            let k2 =
+                (0.5 * std::f64::consts::PI).powi(2) * f64::from(mode.0 * mode.0 + mode.1 * mode.1);
             let linear = box_mode_frequency(klein_gordon(0.0), 0.25, mode);
             let shifted = box_mode_frequency(klein_gordon(omega0), 0.25, mode);
             let ratio = (shifted * shifted - linear * linear) / (omega0 * omega0);
@@ -14091,8 +14158,12 @@ mod tests {
                 "{mode:?}: ω² moved by {ratio} ω₀²"
             );
             let continuum = (k2 + omega0 * omega0).sqrt();
+            eprintln!(
+                "{mode:?}: ω² moved by {ratio:.9} ω₀², {:+.1e} from the continuum",
+                shifted / continuum - 1.0
+            );
             assert!(
-                (shifted / continuum - 1.0).abs() < 2.0e-6,
+                (shifted / continuum - 1.0).abs() < bound,
                 "{mode:?}: {shifted} against the continuum's {continuum}"
             );
         }
