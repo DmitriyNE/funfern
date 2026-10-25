@@ -29495,3 +29495,44 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: gallery physics checks, first part (VER-47, VER-48, VER-49, VER-50)
+
+- **VER-47.** The bent fiber's `core_mode` bisected `u tan u = w` over
+  `[0, π/2]` whatever V, and a midpoint past V read its NaN as "too small",
+  so below V = π/4 (and between 1.11 and 1.18) the root ran to π/2 and the
+  mode came out NaN; the bent fiber's 4 Hz, at V 1.4, never went there.
+  Test first: `the_core_mode_solves_its_slab_at_any_v` reads `u` and `w`
+  back from the mode at 1 to 6 Hz and holds them to the slab's two
+  equations; before the fix it failed at 1 Hz, V 0.35. Fix: the bracket is
+  `[0, min(V, π/2)]`. The bent fiber's test passes as before.
+- **VER-48.** PH-01's box modes run at a speed set by the slots' product
+  alone, so a model that read its mass and stiffness slots the other way ran
+  every mode right. `box_modes_in` now asserts the primary mass sums to the
+  model's own slot over the box: the mass slot in Mechanical and TM, the
+  stiffness slot in TE. With TM's and TE's slots swapped as a temporary
+  edit, the box tests passed as they stood; they now fail, "the primary mass
+  sums to 5.6, not 0.5 over the box" in TE. (PH-11's Fresnel gate catches
+  the same swap through the impedances.)
+- **VER-49.** Three tests asserted that each integrator's stepped frequency
+  misses the semidiscrete one by its law to 1%, the semidiscrete one being
+  read back from the stepped one through that same law, so what the check
+  measured was the law's next term, set by `ω dt` alone: at `ω dt` 0.1 it
+  reads 1.1e-3 of the law for a run whose frequency is right and the same
+  for one 1% wrong. The assertions are dropped and the figures printed; the
+  doc comments now say the laws follow from the relations, and the spread
+  of the semidiscrete frequency over integrators and steps, 1e-8, is the
+  check.
+- **VER-50.** The slow near field drove the wall "as its third tangential
+  mode" with `cos(6.732 y)`, which on the box's Neumann modes
+  `cos(nπ(y + 0.7)/1.4)` projects on modes 0, 2 and 4 - the zeroth a plane
+  wave - and on the third not at all. Test first:
+  `the_slow_near_field_drives_the_third_tangential_mode_alone` projects the
+  fixture's own profile; before the fix it read mode 0 at -0.297 against the
+  third's 1.4e-16. Fix: `sin(6.732 y)`. Re-measured: the ledger test's
+  residual falls 2.2e-3, 5.7e-4, 1.5e-4 of the energy in Mechanical and TM,
+  the wall gives back in every run, and the nightly twenty-period run reads
+  its residual 2.2e-3; all pass their bounds as they stand.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

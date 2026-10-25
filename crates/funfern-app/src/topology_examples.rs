@@ -7956,7 +7956,8 @@ mod tests {
     fn core_mode(offset: f64, frequency: f64) -> f64 {
         let half = 0.5 * CORE_WIDTH;
         let v = std::f64::consts::TAU * frequency * half * (CORE_PERMITTIVITY - 1.0).sqrt();
-        let (mut low, mut high) = (0.0, std::f64::consts::FRAC_PI_2);
+        // The root lies under V as well as under π/2.
+        let (mut low, mut high) = (0.0, v.min(std::f64::consts::FRAC_PI_2));
         for _ in 0..60 {
             let u = 0.5 * (low + high);
             if u * u.tan() > (v * v - u * u).sqrt() {
@@ -7971,6 +7972,33 @@ mod tests {
             (u * offset / half).cos()
         } else {
             u.cos() * (-w * (offset.abs() - half) / half).exp()
+        }
+    }
+
+    /// The slab mode solves its dispersion relation at any V, a weakly
+    /// guiding one included: bisected over `[0, π/2]` whatever V, a midpoint
+    /// past V read a NaN as "too small" and the root ran off to π/2, a NaN
+    /// mode below V = π/4 and between 1.11 and 1.18 (VER-47 of the
+    /// 2026-10-20 review). The bent fiber's 4 Hz sits at V 1.4; 2 Hz is 0.7.
+    #[test]
+    fn the_core_mode_solves_its_slab_at_any_v() {
+        let half = 0.5 * CORE_WIDTH;
+        for frequency in [1.0, 2.0, 3.3, 4.0, 6.0] {
+            let v = std::f64::consts::TAU * frequency * half * (CORE_PERMITTIVITY - 1.0).sqrt();
+            let edge = core_mode(half, frequency);
+            let outside = core_mode(2.0 * half, frequency);
+            assert!(
+                edge.is_finite() && outside.is_finite(),
+                "{frequency} Hz: V {v}"
+            );
+            // `u` and `w` back from the mode: cos(u) at the core's edge, and
+            // the decay over one more half-width outside it.
+            let u = edge.acos();
+            let w = -(outside / edge).ln();
+            assert!(
+                (u * u.tan() - w).abs() < 1.0e-9 && (u * u + w * w - v * v).abs() < 1.0e-9,
+                "{frequency} Hz: u {u}, w {w}, V {v}"
+            );
         }
     }
 
@@ -11059,10 +11087,11 @@ mod tests {
     /// `cos(ω dt) = 1 − x²/2 + x⁴/24` at `x = ω_h dt`, so the semidiscrete
     /// frequency `ω_h` is read from each run without extrapolation, and the
     /// two must agree: at edge 0.08 they do to 1e-8, over three step sizes
-    /// each. Their stepped frequencies then miss `ω_h` as their laws say,
-    /// leapfrog by `ω_h³dt²/24` to 0.1% and the fourth-order step by
-    /// `−ω_h⁵dt⁴/720` to 0.2%, two orders of magnitude apart at the
-    /// recommended step. In space `ω_h` misses the exact `3π/√2` by 3.7e-5
+    /// each. Their stepped frequencies then miss `ω_h` by `ω_h³dt²/24` and
+    /// `−ω_h⁵dt⁴/720`, two orders of magnitude apart at the recommended step,
+    /// which follows from the relations and is printed, not asserted: the
+    /// inversion gives back its own law whatever a run reads (VER-49 of the
+    /// 2026-10-20 review), and the agreement is the check. In space `ω_h` misses the exact `3π/√2` by 3.7e-5
     /// at edge 0.16, 9.9e-7 at 0.08 and 1.1e-7 at 0.04: 339 times down over
     /// two halvings, the fourth order of the element. The mode's amplitude
     /// over ten periods holds to 1e-6 at the coarsest mesh and 2e-10 at the
@@ -11098,11 +11127,6 @@ mod tests {
                     run.envelope - 1.0,
                     run.excursion,
                     (run.stepped * dt).powi(2)
-                );
-                assert!(
-                    (run.stepped - inverted - law).abs() < 1.0e-2 * law.abs() + 1.0e-10,
-                    "{case}: {} against {law}",
-                    run.stepped - inverted
                 );
                 assert!(
                     (run.envelope - 1.0).abs() < 1.0e-6,
@@ -11592,6 +11616,26 @@ mod tests {
         let mut together = Vec::new();
         for edge in [0.16, 0.08, 0.04] {
             let prepared = mode_box(medium, 2.0, 1.4, edge);
+            // The medium in the primary mass the model's own law puts there:
+            // the mass slot in Mechanical and TM, the stiffness slot in TE.
+            // The modes run at a speed set by the slots' product alone, so a
+            // model that took its slots the other way ran every mode right
+            // (VER-48 of the 2026-10-20 review).
+            let slot = match physics {
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Te,
+                } => medium.stiffness,
+                _ => medium.mass,
+            };
+            let total = prepared
+                .canonical_operator
+                .primary_mass()
+                .iter()
+                .sum::<f64>();
+            assert!(
+                (total - slot * 2.0 * 1.4).abs() < 1.0e-9 * slot,
+                "{name}: the primary mass sums to {total}, not {slot} over the box"
+            );
             let dt = prepared.recommended_time_step();
             for (index, mode) in BOX_MODES.iter().enumerate() {
                 let run = mode_run(
@@ -11685,9 +11729,9 @@ mod tests {
         assert!(together[2].l2 < 3.0e-5 && together[2].linf < 6.0e-5);
         assert!(together[2].flux < 3.0e-5, "{name}: {}", together[2].flux);
 
-        // Time, at one mesh, on the fastest mode: each integrator's stepped
-        // frequency misses the semidiscrete one by its own law, and the
-        // semidiscrete frequency read through either agrees at every step.
+        // Time, at one mesh, on the fastest mode: the semidiscrete frequency
+        // read through either integrator's exact relation agrees at every
+        // step; each stepped one misses it by its own law, printed.
         let prepared = mode_box(medium, 2.0, 1.4, 0.08);
         let largest = prepared.canonical_operator.maximum_time_step();
         let mode = BOX_MODES[3];
@@ -11709,11 +11753,6 @@ mod tests {
                     "{case}: stepped − ω_h {:.3e} against {law:.3e}, phase off {:.2e}",
                     run.stepped - inverted,
                     run.phase - BOX_PHASE
-                );
-                assert!(
-                    (run.stepped - inverted - law).abs() < 1.0e-2 * law.abs() + 1.0e-10,
-                    "{case}: {} against {law}",
-                    run.stepped - inverted
                 );
                 assert!(
                     (run.phase - BOX_PHASE).abs() < 1.0e-3,
@@ -11900,11 +11939,12 @@ mod tests {
 
     /// PH-02 in time: mode (4,2) of the isotropic box on the 0.08 mesh, under
     /// leapfrog and under the fourth-order step at ¼, ½ and 1 of each one's
-    /// recommended step and just under its stability limit. Each misses the
-    /// semidiscrete frequency by its own law to 0.1% at every step,
-    /// `ω_h³dt²/24` and `−ω_h⁵dt⁴/720`, the limit included, where the energy
-    /// still wobbles by an eighth of `(ω dt)²`; the semidiscrete frequency
-    /// read through either agrees over the eight runs to 4e-9.
+    /// recommended step and just under its stability limit. The
+    /// semidiscrete frequency read through either's exact relation agrees
+    /// over the eight runs to 4e-9, the limit included, where the energy
+    /// still wobbles by an eighth of `(ω dt)²`. Each misses it by its own law,
+    /// `ω_h³dt²/24` and `−ω_h⁵dt⁴/720`, which follows from the relations and
+    /// is printed, not asserted (VER-49 of the 2026-10-20 review).
     #[test]
     fn plane_waves_keep_each_integrators_dispersion_up_to_its_stability_limit() {
         let medium = plane_medium(1.0);
@@ -11931,11 +11971,6 @@ mod tests {
                     inverted / medium.omega(mode) - 1.0,
                     run.stepped - inverted,
                     run.excursion
-                );
-                assert!(
-                    (run.stepped - inverted - law).abs() < 1.0e-2 * law.abs() + 1.0e-10,
-                    "{case}: {} against {law}",
-                    run.stepped - inverted
                 );
                 assert!(
                     run.excursion < 0.25 * (run.stepped * dt).powi(2),
@@ -14227,8 +14262,47 @@ mod tests {
         Ledgered {
             wall: Some(OuterBoundaryCondition::SecondOrderOutgoing),
             source: Some((0.3, 0.05)),
-            profile: "exp(-(x - 0.85) * (x - 0.85) / 0.01) * cos(6.732 * y)",
+            profile: "exp(-(x - 0.85) * (x - 0.85) / 0.01) * sin(6.732 * y)",
             ..Ledgered::plain("slow near field", physics)
+        }
+    }
+
+    /// The slow near field drives the wall's third tangential mode alone: its
+    /// profile along the wall, projected on the box's Neumann modes
+    /// `cos(nπ(y + 0.7)/1.4)`, holds nothing of the others. Written as
+    /// `cos(6.732 y)` it drove modes 0, 2 and 4, the zeroth a plane wave, and
+    /// none of the third (VER-50 of the 2026-10-20 review).
+    #[test]
+    fn the_slow_near_field_drives_the_third_tangential_mode_alone() {
+        let profile =
+            ScalarField::formula(slow_near_field(PhysicsModel::Mechanical).profile).unwrap();
+        let samples = 2000;
+        let mut projections = [0.0_f64; 7];
+        for index in 0..samples {
+            let (x, y) = (0.85, -0.7 + 1.4 * (index as f64 + 0.5) / samples as f64);
+            let value = profile
+                .evaluate(
+                    funfern_core::MaterialCoordinates {
+                        x,
+                        y,
+                        r: x.hypot(y),
+                        theta: y.atan2(x),
+                    },
+                    &[],
+                )
+                .unwrap();
+            for (n, projection) in projections.iter_mut().enumerate() {
+                *projection += value
+                    * (n as f64 * std::f64::consts::PI * (y + 0.7) / 1.4).cos()
+                    * (1.4 / samples as f64);
+            }
+        }
+        let third = projections[3].abs();
+        for (n, projection) in projections.iter().enumerate() {
+            assert!(
+                n == 3 || projection.abs() < 1.0e-3 * third,
+                "mode {n}: {projection:.3e} against the third's {third:.3e}"
+            );
         }
     }
 
