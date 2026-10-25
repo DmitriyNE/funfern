@@ -3542,7 +3542,11 @@ mod tests {
     /// share one chain per merged atom.
     #[test]
     fn coarsening_keeps_junctions_and_shared_transmitting_chains() {
-        let topology = t_junction_topology();
+        // Bowed spans, sampled in several segments each, so runs merge up to
+        // the junction: on the straight ones each span is one segment, and
+        // the coarsening had nothing to merge (VER-19 of the 2026-10-20
+        // review).
+        let topology = t_junction_topology_bowed(0.15);
         let assignments = assign_each_face(&topology);
         let fine = TopologyMeshPlan::new(&topology, &assignments).unwrap();
         let coarse = fine
@@ -3560,13 +3564,21 @@ mod tests {
             unused_authored_traces(&topology, &coarse),
             unused_authored_traces(&topology, &fine)
         );
-        assert!(coarse.boundaries.len() <= fine.boundaries.len());
+        assert!(coarse.boundaries.len() < fine.boundaries.len());
         assert_eq!(coarse.junctions, fine.junctions);
         for atom in &coarse.boundaries {
             if segments_in(&topology, atom) > 1 {
                 assert!((atom.points[1] - atom.points[0]).norm() <= 0.35 + 1.0e-12);
             }
         }
+        assert!(
+            coarse
+                .boundaries
+                .iter()
+                .any(|atom| segments_in(&topology, atom) > 1
+                    && atom.points.iter().any(|point| point.norm() < 1.0e-12)),
+            "no merged run ends at the junction"
+        );
         let mesh = mesh_topology_plan(&coarse, 80, mesh_options()).unwrap();
         assert!((mesh_area(&mesh) - 4.0).abs() < 1.0e-9);
         assert_eq!(
@@ -3745,20 +3757,45 @@ mod tests {
     /// A transmitting divider from the left to the right outer side with a
     /// branch from the bottom side meeting it at an authored junction.
     fn t_junction_topology() -> TopologySnapshot {
+        t_junction_topology_bowed(0.0)
+    }
+
+    /// The vertices joined by cubic spans whose middle controls stand `bow`
+    /// of the span's length off its chord, alternately to either side; at 0
+    /// the spans are `OpenCubicSpline::polyline`'s straight ones.
+    fn bowed(vertices: &[Point2], bow: f64) -> OpenCubicSpline {
+        let mut controls = vec![vertices[0]];
+        let mut intervals = Vec::new();
+        for (index, edge) in vertices.windows(2).enumerate() {
+            let [start, end] = [edge[0], edge[1]];
+            let along = end - start;
+            let sign = if index % 2 == 0 { 1.0 } else { -1.0 };
+            let off = Point2::new(-along.y, along.x) * (sign * bow);
+            controls.push(start.lerp(end, 1.0 / 3.0) + off);
+            controls.push(start.lerp(end, 2.0 / 3.0) + off);
+            controls.push(end);
+            intervals.push(along.norm());
+        }
+        let multiplicities = vec![3; intervals.len() - 1];
+        OpenCubicSpline::new_with_multiplicities(controls, intervals, multiplicities).unwrap()
+    }
+
+    /// The T-junction with its spans bowed by `bow`.
+    fn t_junction_topology_bowed(bow: f64) -> TopologySnapshot {
         let bottom = TopologyVertexId(10);
         let left = TopologyVertexId(11);
         let right = TopologyVertexId(12);
         let center = TopologyVertexId(13);
         let mut horizontal = TopologyCurve::new(
             CurveId(10),
-            CurveSpline::Open(
-                OpenCubicSpline::polyline(vec![
+            CurveSpline::Open(bowed(
+                &[
                     Point2::new(-1.0, 0.0),
                     Point2::new(0.0, 0.0),
                     Point2::new(1.0, 0.0),
-                ])
-                .unwrap(),
-            ),
+                ],
+                bow,
+            )),
             spans(100, 2, SpanBehavior::Transmitting),
         )
         .unwrap();
@@ -3767,10 +3804,7 @@ mod tests {
         horizontal.nodes[2].vertex = Some(right);
         let mut branch = TopologyCurve::new(
             CurveId(11),
-            CurveSpline::Open(
-                OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 0.0)])
-                    .unwrap(),
-            ),
+            CurveSpline::Open(bowed(&[Point2::new(0.0, -1.0), Point2::new(0.0, 0.0)], bow)),
             spans(102, 1, SpanBehavior::Transmitting),
         )
         .unwrap();
@@ -4882,14 +4916,17 @@ mod tests {
         }));
     }
 
+    /// The bottom side moved down half a unit takes the junction on it and
+    /// the curve's end with it, and the plan keeps that junction's traces
+    /// where the curve and both halves of the side meet. The test once
+    /// rewrote the point already there and kept the domain's size, so
+    /// nothing moved and no junction was looked at (VER-61 of the 2026-10-20
+    /// review).
     #[test]
     fn outer_resize_and_junction_trace_membership_survive_projection() {
         let junction = TopologyVertexId(1);
-        let mut spline =
+        let spline =
             OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)]).unwrap();
-        spline
-            .set_breakpoint_point(0, Point2::new(0.0, -1.0))
-            .unwrap();
         let mut curve = TopologyCurve::new(
             CurveId(1),
             CurveSpline::Open(spline),
@@ -4904,35 +4941,61 @@ mod tests {
                 vertex: Some(TopologyVertexId(2)),
             },
         ];
-        let topology = compile_topology(
-            &TopologyGeometry {
-                domain: DomainRect::UNIT,
-                curves: vec![curve],
-                vertices: vec![
-                    TopologyVertex {
-                        id: junction,
-                        location: TopologyVertexLocation::Outer {
-                            side: crate::OuterSide::Bottom,
-                            fraction: 0.5,
-                        },
+        let mut geometry = TopologyGeometry {
+            domain: DomainRect::UNIT,
+            curves: vec![curve],
+            vertices: vec![
+                TopologyVertex {
+                    id: junction,
+                    location: TopologyVertexLocation::Outer {
+                        side: crate::OuterSide::Bottom,
+                        fraction: 0.5,
                     },
-                    TopologyVertex {
-                        id: TopologyVertexId(2),
-                        location: TopologyVertexLocation::Outer {
-                            side: crate::OuterSide::Top,
-                            fraction: 0.5,
-                        },
+                },
+                TopologyVertex {
+                    id: TopologyVertexId(2),
+                    location: TopologyVertexLocation::Outer {
+                        side: crate::OuterSide::Top,
+                        fraction: 0.5,
                     },
-                ],
-            },
-            0,
-        )
-        .unwrap();
+                },
+            ],
+        };
+        geometry.domain.min_y = -1.5;
+        geometry.synchronize_vertices().unwrap();
+        let moved = Point2::new(0.0, -1.5);
+        let CurveSpline::Open(spline) = &geometry.curves[0].spline else {
+            unreachable!("the curve is open")
+        };
+        assert_eq!(spline.controls()[0], moved, "the curve's end followed");
+        let topology = compile_topology(&geometry, 0).unwrap();
         let plan = TopologyMeshPlan::new(&topology, &assign_each_face(&topology)).unwrap();
+        assert!(plan.vertices.iter().any(|vertex| vertex.point == moved));
         assert!(
-            plan.vertices
+            plan.junctions
                 .iter()
-                .any(|vertex| vertex.point == Point2::new(0.0, -1.0))
+                .any(|traces| traces.vertex == junction && traces.faces.len() == 2),
+            "{:?}",
+            plan.junctions
+        );
+        let at_junction = plan
+            .boundaries
+            .iter()
+            .filter(|atom| atom.points.contains(&moved))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            at_junction
+                .iter()
+                .filter(|atom| atom.source == PlannedBoundarySource::Outer(crate::OuterSide::Bottom))
+                .count(),
+            2,
+            "both halves of the bottom end at the junction"
+        );
+        assert!(
+            at_junction
+                .iter()
+                .any(|atom| matches!(atom.source, PlannedBoundarySource::Curve { .. })),
+            "the curve ends at the junction"
         );
     }
 

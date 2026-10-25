@@ -29731,3 +29731,32 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the mesh plan's coarsening and resize tests move something (VER-19, VER-61)
+
+Each was run as it stood under a temporary break of what it guards, and
+passed; the strengthened test fails under the same break and passes
+without it.
+
+- **VER-19.** The coarsening test's T-junction had straight two-point
+  spans, each sampled as one segment, so no run could merge and the plan
+  came back as it went in; `coarse ≤ fine` held with equality. The fixture
+  now takes a bow, its spans' middle controls off their chords (0 is the
+  old straight fixture, which its two other tests keep), and the test bows
+  them by 0.15: it asserts the coarse plan has fewer atoms and that a
+  merged run ends at the junction. Break: a coarsening that merges nothing
+  - the old test passed it, the new one fails, "coarse.boundaries.len() <
+  fine.boundaries.len()". On these spans the deviation tolerance stops a
+  merge before the 0.35 chord cap does, so dropping the cap is not seen
+  here.
+- **VER-61.** `outer_resize_and_junction_trace_membership_survive_projection`
+  rewrote a curve's end to the point already there, on a domain whose size
+  it never changed, and asserted the plan had a vertex there. It now moves
+  the bottom side down half a unit, synchronizes the vertices, and asserts
+  the curve's end followed, the junction keeps its two faces' traces, and
+  both halves of the bottom and the curve end there. Break:
+  `synchronize_vertices` silently skipping vertices on the outer sides - the
+  curve's end stays at y = -1.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
