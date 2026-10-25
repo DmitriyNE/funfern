@@ -152,9 +152,23 @@ fn main() {
     // The far edit: the pulse has not reached the edited region at the edit.
     let edit_time = 0.3;
     let end_time = 1.0;
-    let mut before =
-        PatchStepper::with_integrator(&base, treatment, integrator, dt, pulse(&base, pulse_center));
-    step_to(&mut before, edit_time);
+    // One step for the three runs, the smaller of the two, and whole counts,
+    // so the edited run's two legs add up to the reference's: each leg
+    // rounded on its own step, the two could miss the reference by a step,
+    // and the figure read the rounding (VER-39 of the 2026-10-20 review).
+    let shared = dt.min(edited_dt);
+    let at_edit = (edit_time / shared).round() as u64;
+    let at_end = (end_time / shared).round() as u64;
+    let mut before = PatchStepper::with_integrator(
+        &base,
+        treatment,
+        integrator,
+        shared,
+        pulse(&base, pulse_center),
+    );
+    while before.steps() < at_edit {
+        before.step();
+    }
     let centered = before.centered_flux();
     let energy_before = physical_energy(&base, before.field(), &centered);
     let (_, gradient_residual) = base.flux_potential(&centered);
@@ -164,19 +178,23 @@ fn main() {
         &edited,
         treatment,
         integrator,
-        edited_dt,
+        shared,
         before.field().to_vec(),
         Some(carried),
     );
-    step_to(&mut after, end_time - edit_time);
+    while after.steps() < at_end - at_edit {
+        after.step();
+    }
     let mut reference = PatchStepper::with_integrator(
         &edited,
         treatment,
         integrator,
-        edited_dt,
+        shared,
         pulse(&edited, pulse_center),
     );
-    step_to(&mut reference, end_time);
+    while reference.steps() < at_end {
+        reference.step();
+    }
     println!(
         "  Edit at t = {edit_time} with the pulse {:.2} from the moved point (flux is a gradient to {:.1e}): energy change {:+.2e}; at t = {end_time} the field differs from a run on the edited box from the start by {:.2e} (relative L2).",
         (moved_point - pulse_center).norm(),

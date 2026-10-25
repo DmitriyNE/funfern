@@ -42,8 +42,9 @@ struct Solved {
     /// Physical primary field and complementary field at the shared lattice.
     primary: Vec<f64>,
     complementary: Vec<Point2>,
-    /// Energy density at the lattice, for the norm's denominator.
-    density: Vec<f64>,
+    /// The medium at each lattice point, mass density and stiffness, which
+    /// weigh the energy norm.
+    weights: Vec<(f64, funfern_core::SymmetricTensor2)>,
     estimator: Option<f64>,
     breakdown: Option<funfern_core::SolutionIndicatorReport>,
     steps: u64,
@@ -758,10 +759,11 @@ fn solve(
     // Sample the solution where every mesh can be compared.
     let mut sampled_primary = Vec::with_capacity(lattice.len());
     let mut sampled_complementary = Vec::with_capacity(lattice.len());
-    let mut density = Vec::with_capacity(lattice.len());
+    let mut weights = Vec::with_capacity(lattice.len());
     for point in lattice {
         let stencil = QuadraticPointStencil::build(&mesh, &quadratic, &fixed, *point)
             .expect("lattice stencil");
+        weights.push((stencil.mass_density, stencil.stiffness));
         let consumer = CanonicalTemporalPointStencil::from_quadratic(stencil, &operator)
             .expect("lattice consumer");
         let sample = consumer
@@ -777,7 +779,6 @@ fn solve(
             .expect("lattice sample");
         sampled_primary.push(sample.primary);
         sampled_complementary.push(sample.complementary);
-        density.push(sample.energy_density);
     }
 
     // The estimator gets the authored scene, laws and all, which is what
@@ -802,7 +803,7 @@ fn solve(
         degrees_of_freedom: operator.base().degrees_of_freedom(),
         primary: sampled_primary,
         complementary: sampled_complementary,
-        density,
+        weights,
         estimator: breakdown.as_ref().map(|report| report.global_indicator),
         breakdown,
         steps,
@@ -942,18 +943,22 @@ fn estimate(
     }
 }
 
-/// Relative difference from the reference in a discrete energy norm over the
-/// shared lattice.
+/// Relative difference from the reference in an energy norm over the shared
+/// lattice: the primary field weighed by the local mass density, the
+/// complementary field by the local stiffness, as the stored energy weighs
+/// them. It summed plain squares, which on a unit medium is the same thing
+/// and anywhere else is not (VER-37 of the 2026-10-20 review).
 fn relative_error(solution: &Solved, reference: &Solved) -> f64 {
     let mut difference = 0.0;
     let mut scale = 0.0;
     for index in 0..solution.primary.len() {
+        let (mass, stiffness) = reference.weights[index];
         let primary = solution.primary[index] - reference.primary[index];
         let complementary = solution.complementary[index] - reference.complementary[index];
-        difference += primary * primary + complementary.dot(complementary);
-        scale += reference.primary[index] * reference.primary[index]
-            + reference.complementary[index].dot(reference.complementary[index]);
-        let _ = reference.density[index];
+        difference += mass * primary * primary + complementary.dot(stiffness.apply(complementary));
+        let field = reference.complementary[index];
+        scale += mass * reference.primary[index] * reference.primary[index]
+            + field.dot(stiffness.apply(field));
     }
     if scale <= 0.0 {
         return f64::NAN;

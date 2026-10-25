@@ -18,6 +18,13 @@ use funfern_core::{
 struct Geometry {
     name: &'static str,
     map: GeometryMap,
+    /// The parameter box the map is read over: an affine map and a surface
+    /// take their parameters as coordinates, so their 2 × 2 domains need a
+    /// 2 × 2 box, where a Coons map normalizes by it and takes the unit one.
+    /// Read over the unit box for every geometry, the affine box was its
+    /// lower-left quarter and the bulged box nearly flat (VER-38 of the
+    /// 2026-10-20 review).
+    size: Point2,
     /// A Neumann mode with an exactly known frequency, if the domain has one.
     mode: Option<DiskMode>,
 }
@@ -84,21 +91,25 @@ fn geometries() -> Vec<Geometry> {
             map: GeometryMap::Affine {
                 origin: Point2::new(-1.0, -1.0),
             },
+            size: Point2::new(2.0, 2.0),
             mode: None,
         },
         Geometry {
             name: "exact unit disk, Coons, corners on the diagonals; J1 mode",
             map: GeometryMap::coons_ellipse(Point2::default(), Point2::new(1.0, 1.0)),
+            size: Point2::new(1.0, 1.0),
             mode: Some(unit_disk(1, 1.84)),
         },
         Geometry {
             name: "exact unit disk, Coons; J3 third mode (17 spans per wavelength at side 64)",
             map: GeometryMap::coons_ellipse(Point2::default(), Point2::new(1.0, 1.0)),
+            size: Point2::new(1.0, 1.0),
             mode: Some(unit_disk(3, 11.35)),
         },
         Geometry {
             name: "exact 2:1 ellipse, Coons",
             map: GeometryMap::coons_ellipse(Point2::default(), Point2::new(1.0, 0.5)),
+            size: Point2::new(1.0, 1.0),
             mode: None,
         },
         Geometry {
@@ -111,6 +122,7 @@ fn geometries() -> Vec<Geometry> {
                     [1.0, 3.0, 5.0, 7.0].map(|knot| knot * period / 8.0),
                 )
             },
+            size: Point2::new(1.0, 1.0),
             mode: None,
         },
         Geometry {
@@ -131,6 +143,7 @@ fn geometries() -> Vec<Geometry> {
                     [0.5, 2.0, 3.5, 5.0].map(|t| t * period / 6.0),
                 )
             },
+            size: Point2::new(1.0, 1.0),
             mode: None,
         },
     ];
@@ -159,6 +172,7 @@ fn geometries() -> Vec<Geometry> {
         Geometry {
             name: "bulged box (right side pushed out by 0.4)",
             map: bulged,
+            size: Point2::new(2.0, 2.0),
             mode: None,
         },
     );
@@ -236,7 +250,7 @@ fn run(
     reach: usize,
     cap: f64,
 ) {
-    let size = Point2::new(1.0, 1.0);
+    let size = geometry.size;
     let Some(patch) = SplinePatch::curved(
         degree,
         geometry.map.clone(),

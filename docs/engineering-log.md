@@ -29810,3 +29810,36 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Step 3, area 9: three spike examples measured as they claim (VER-37, VER-38, VER-39)
+
+- **VER-38.** `iga_curved_patch` read every geometry over the unit
+  parameter box. A Coons map normalizes by its box and wants the unit one,
+  but an affine map and a surface take their parameters as coordinates, so
+  the "affine 2 × 2 box" was its 1 × 1 lower-left quarter and the bulged
+  box a nearly flat corner of itself. Each geometry now names its own box.
+  On their 2 × 2 domains the affine box keeps its step exactly, and the
+  bulged box, its Jacobian 1.0 to 1.8 rather than 1.15, keeps 0.52 of the
+  equal-area box's step clamped and 0.56 unclamped, 0.83 with its corners
+  condensed, where the spike recorded 0.82 and 0.87. The spike's table and
+  the sentences citing it are corrected and dated. docs/plan.md's IGA
+  paragraph states its single-patch decision on "a deformed box keeps 0.82
+  to 0.87 of the step"; that sentence is left for the user.
+- **VER-39.** `iga_patch_edits` rounded each leg of the edited run to its
+  own step count, at two steps, so the legs could miss the reference by a
+  step and the "4e-10" it recorded read the rounding. The three runs now
+  share the smaller step and whole counts: the edited run meets the
+  reference to 1.4e-15, the transfer exact to roundoff; the spike says so.
+- **VER-37.** `temporal_amr_calibration`'s "true error", described as an
+  energy norm, summed plain squares and read the energy density it
+  gathered for nothing. It now weighs the primary field by the local mass
+  density and the complementary field by the local stiffness, from the
+  lattice's point stencils. On unit media nothing moves, so every
+  single-medium row, the stage-8 report's table among them, reads as
+  before; the two-medium interface rows do: the plain interface's index
+  spreads 1.13× over the meshes against 1.09×, the pumped interface's 1.51×
+  against 1.38×, its index at h = 0.1 now 0.87, an underestimate, where it
+  read 0.97.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

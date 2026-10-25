@@ -459,8 +459,8 @@ structure. `iga_curved_patch` measures each geometry at 62 × 62 spans
 
 | geometry | det J min / median / max | lumped min / median | dt_max over an equal-area box's, clamped | unclamped |
 | --- | --- | --- | --- | --- |
-| affine 2 × 2 box | 1 / 1 / 1 | 7.2e-6 / 2.6e-4 | 1.00 | 1.00 |
-| bulged box, right side pushed out 0.4 | 1.00 / 1.07 / 1.15 | 7.2e-6 / 2.8e-4 | 0.82 | 0.87 |
+| affine 2 × 2 box | 1 / 1 / 1 | 2.9e-5 / 1.0e-3 | 1.00 | 1.00 |
+| bulged box, right side pushed out 0.4 | 1.00 / 1.10 / 1.80 | 2.9e-5 / 1.1e-3 | 0.52 | 0.56 |
 | exact unit disk, Coons, corners on the diagonals | 0.060 / 3.2 / 4.7 | 5.1e-7 / 8.2e-4 | 0.017 | 0.021 |
 | exact 2:1 ellipse, Coons | 0.030 / 1.6 / 2.3 | 2.6e-7 / 4.1e-4 | 0.016 | 0.019 |
 | gallery `rounded` circle (8 controls), Coons | 0.050 / 2.6 / 3.8 | 4.3e-7 / 6.6e-4 | 0.018 | 0.021 |
@@ -479,7 +479,15 @@ stable step to `t = 10`:
 per wavelength lands within 3e-6, where the box mode at 19 spans sits at
 7e-6. **The stable step is destroyed**: one to two percent of an equal-area
 box's on every smooth domain, fifty to a hundred times too small. A
-deformed box with its four corners kept is fine at 0.82 to 0.87.
+deformed box with its four corners kept, its side pushed out by a fifth of
+its width, keeps 0.52 to 0.56 of the step.
+
+(Corrected on 26 October: the affine and bulged rows were first read over
+the unit parameter box, which for these two maps is the lower-left quarter
+of their 2 × 2 domain, so the "2 × 2" box was 1 × 1 and the bulge nearly
+flat, and the step it kept read 0.82 to 0.87. On their own domains they read
+as the table now does; the bulged box's corners condensed to 3 keep 0.83.
+VER-38 of the 2026-10-20 review.)
 
 The cause is the map, not the domain. A single bijective patch of a smooth
 domain must put the square's four corners on a boundary without corners, so
@@ -598,7 +606,8 @@ whatever its step.
   components, `Jᵀ b` kept (`carry_flux`); the field at a sample moves with
   the geometry. With the pulse 1.9 away from the moved point the energy
   changed by 0 and the field at `t = 1` differed from a run on the edited
-  box from the start by 4e-10: no artifact. Under the pulse the energy
+  box from the start by 1.4e-15: no artifact (4e-10 as first recorded,
+  when each leg rounded its own step count). Under the pulse the energy
   changes linearly with the move, 1.7e-3, 3.5e-3, 6.9e-3 for 0.004, 0.008,
   0.016, as stretching the medium should.
 - **Knot refinement carries the state exactly.** The field is in the fine
@@ -614,8 +623,8 @@ whatever its step.
   transfer.
 - **The deformed box costs its step only.** Flat and deformed boxes of
   4,096 dofs step at 2.8 and 3.0 ms a step; the deformed one's stable step
-  is 0.65 of the flat one's for this strong bulge (0.82 to 0.87 for spike
-  3's milder one), so it runs at 8.2 against 14.0 simulated seconds per
+  is 0.65 of the flat one's for this bulge (0.52 to 0.56 for spike 3's
+  stronger one), so it runs at 8.2 against 14.0 simulated seconds per
   wall second. That folds spike 6 in: the cost tables of spike 1 scale by
   the Jacobian's effect on the step and by nothing else.
 
