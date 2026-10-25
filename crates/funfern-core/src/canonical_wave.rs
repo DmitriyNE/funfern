@@ -2780,16 +2780,21 @@ impl CanonicalWaveState {
         operator.validate_primary(&self.primary_flux)?;
         operator.validate_complementary(&self.complementary_flux)?;
         let prescribed_exchange = self.enforce_prescribed(operator, forcing, self.time())?;
-        let after = self.energy(operator)?;
-        let tolerance = 2.0e-12 * before.abs().max(after.abs()).max(1.0);
-        if after > before + tolerance {
+        // The filter's own change is the whole change less what the pins put
+        // in, each node's primary store its own. Read as the whole change,
+        // a pin set back onto its signal was booked twice, as its exchange
+        // and inside the removal, and a pin that gave energy made the filter
+        // refuse (VER-59 of the 2026-10-20 review).
+        let filtered = self.energy(operator)? - prescribed_exchange;
+        let tolerance = 2.0e-12 * before.abs().max(filtered.abs()).max(1.0);
+        if filtered > before + tolerance {
             self.primary_flux = old_primary;
             self.complementary_flux = old_complementary;
             return Err(WaveError::InvalidState);
         }
         Ok(CanonicalStepAccounting {
             prescribed_exchange,
-            filter_removed: (before - after).max(0.0),
+            filter_removed: (before - filtered).max(0.0),
             ..CanonicalStepAccounting::default()
         })
     }
@@ -8050,7 +8055,12 @@ mod tests {
         prescribed[0] = Some(signal);
         let forcing = CanonicalForcing::from_prescribed(&operator, prescribed).unwrap();
         let mut primary = test_potential(&operator);
-        primary[0] = signal.value(0.0);
+        // The pin starts off its signal, so holding it exchanges energy and
+        // the books have something to balance. On its signal, as it started,
+        // the exchange was zero, and a removal that read the whole change,
+        // the pin's exchange in it a second time, passed (VER-59 of the
+        // 2026-10-20 review).
+        primary[0] = 1.0;
         let potential = test_potential(&operator)
             .iter()
             .enumerate()
@@ -8059,13 +8069,27 @@ mod tests {
         let mut state =
             CanonicalWaveState::from_primary_and_potential(&operator, dt, &primary, &potential)
                 .unwrap();
+        let before = state.energy(&operator).unwrap();
         let accounting = state.apply_grid_filter(&operator, &forcing, 0.5).unwrap();
+        let after = state.energy(&operator).unwrap();
         assert_eq!(
             state.primary_flux()[0],
             operator.primary_mass()[0] * signal.value(0.0)
         );
-        assert!(accounting.filter_removed >= 0.0);
-        assert!(accounting.prescribed_exchange.is_finite());
+        let mass = operator.primary_mass()[0];
+        let exchange = 0.5 * mass * (signal.value(0.0).powi(2) - 1.0);
+        assert!(
+            (accounting.prescribed_exchange - exchange).abs() < 1.0e-12 * exchange.abs(),
+            "the pin exchanged {} for {exchange}",
+            accounting.prescribed_exchange
+        );
+        assert!(accounting.filter_removed > 0.0);
+        let booked = accounting.prescribed_exchange - accounting.filter_removed;
+        assert!(
+            (after - before - booked).abs() < 1.0e-12 * before,
+            "the energy moved {} where the books say {booked}",
+            after - before
+        );
     }
 
     #[test]

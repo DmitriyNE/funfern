@@ -29620,3 +29620,26 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the fixed path's grid filter books a pin's exchange once (VER-59)
+
+- **The defect.** `CanonicalWaveState::apply_grid_filter` sets pinned nodes
+  back on their signal after filtering and books what that exchanged, but
+  it took the filter's removal as the whole change, the pin's exchange in
+  it: the exchange was booked twice, and a pin that gave energy made the
+  filter refuse as if it had raised the energy itself. Its test started the
+  pin on its signal, where the exchange is zero, and asserted only that the
+  removal was non-negative and the exchange finite, neither of which can
+  fail. A host-path defect only: the device books no filter lane, and the
+  temporal filter skips pinned nodes and exchanges nothing.
+- **Test first.** The test starts the pin at 1.0 against its signal's
+  0.37, asserts the exchange is the pin's own, `½ m (0.37² − 1)`, and that
+  the energy's change is the exchange less the removal. Before the fix it
+  read "the energy moved -1.8134 where the books say -1.8350", the
+  difference the exchange, -0.0216.
+- **Fix.** The filter's own change is the whole change less the pins',
+  each node's primary store its own; the refusal reads it, not the whole.
+  The seventeen filter tests in the core pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
