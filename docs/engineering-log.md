@@ -29562,3 +29562,32 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the transfer tests see a flattened Q and a leaking stationary field (VER-10, VER-17, VER-56)
+
+Each was run as it stood under a temporary break of what it guards, and
+passed; the strengthened test fails under the same break and passes
+without it.
+
+- **VER-10.** The irregular-mesh handoff test held Q's error relative to
+  the whole field, `1 + 0.04 sin cos`, so a transfer that carried only the
+  mean scored 0.021, under both its bounds. It now also holds the error on
+  the field less its support-weighted mean (`fluctuation_error`), against
+  the fluctuation: 6.1e-4 after one handoff and 8.6e-4 after twelve
+  cycles, held to 1.5e-3 and 2e-3. Break: the primary transfer carries each
+  target's support alone, the mean, which the component totals then scale -
+  it reads 1.0.
+- **VER-17.** The stationary-leakage check carried its field through the
+  identity map, a copy, and read the projector's own refusal at 2e-10. It
+  now carries the stationary part of a smooth field coarse to fine and back
+  through the maps a handoff uses: 4.7e-4 and 3.1e-4 of force, held to
+  1e-3 (a rough field's stationary part is rough on both meshes and leaks
+  O(1) through any transfer). Break: an element's samples reconstructed by
+  their mean, which the b errors let through - 3.7e-3 carried and 5.2e-3
+  back.
+- **VER-56.** The nested-mesh cycle, a linear field the transfer and both
+  supports reproduce exactly, was held to 5%, which the flat Q met at 3.1e-2;
+  it reads 1.8e-15 and is held to 1e-12.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

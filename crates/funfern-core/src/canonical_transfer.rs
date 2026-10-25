@@ -2692,6 +2692,37 @@ mod tests {
         (error / scale).sqrt()
     }
 
+    /// The field's error against `expected` with each one's support-weighted
+    /// mean taken off, relative to the expected fluctuation: a transfer that
+    /// kept only the mean reads 1.
+    fn fluctuation_error(
+        flux: &[f64],
+        operator: &CanonicalWaveOperator,
+        expected: impl Fn(Point2) -> f64,
+    ) -> f64 {
+        let support = operator.geometric_support();
+        let total = support.iter().sum::<f64>();
+        let read_mean = flux.iter().sum::<f64>() / total;
+        let expected_mean = support
+            .iter()
+            .zip(operator.node_points())
+            .map(|(support, point)| support * expected(*point))
+            .sum::<f64>()
+            / total;
+        let (error, scale) = flux.iter().zip(support).zip(operator.node_points()).fold(
+            (0.0, 0.0),
+            |(error, scale), ((flux, support), point)| {
+                let read = flux / support - read_mean;
+                let want = expected(*point) - expected_mean;
+                (
+                    error + support * (read - want).powi(2),
+                    scale + support * want.powi(2),
+                )
+            },
+        );
+        (error / scale).sqrt()
+    }
+
     fn weighted_vector_error(
         values: &[Point2],
         operator: &CanonicalWaveOperator,
@@ -2981,7 +3012,10 @@ mod tests {
                 .map(|value| value * value)
                 .sum::<f64>()
                 .sqrt();
-        assert!(error < 0.05, "repeated scalar transfer error {error:e}");
+        // Nested meshes and a linear field, which the transfer and both
+        // supports reproduce exactly: roundoff, where 5% let a flat Q, at
+        // 0.036, through (VER-56 of the 2026-10-20 review).
+        assert!(error < 1.0e-12, "repeated scalar transfer error {error:e}");
         assert!((coarse_q.iter().sum::<f64>() - expected_total).abs() < 1.0e-11);
     }
 
@@ -3237,6 +3271,15 @@ mod tests {
         let q_error = weighted_nodal_error(&fine_q, &fine, q_field);
         let b_error = weighted_vector_error(&fine_b, &fine, b_field);
         assert!(q_error <= 0.03, "irregular Q handoff error {q_error:e}");
+        // Q's fluctuation about its mean, 4% of it, which the whole field's
+        // error hardly sees: a transfer that flattened Q to its mean read
+        // 0.021 there, under both bounds (VER-10 of the 2026-10-20 review).
+        let q_fluctuation = fluctuation_error(&fine_q, &fine, q_field);
+        // 6.1e-4 here; a flattened Q reads 1.
+        assert!(
+            q_fluctuation <= 1.5e-3,
+            "irregular Q handoff fluctuation error {q_fluctuation:e}"
+        );
         assert!(b_error <= 0.03, "irregular b handoff error {b_error:e}");
 
         let mut coarse_q = initial_q.clone();
@@ -3263,35 +3306,46 @@ mod tests {
         let q_error = weighted_nodal_error(&coarse_q, &coarse, q_field);
         let b_error = weighted_vector_error(&coarse_b, &coarse, b_field);
         assert!(q_error <= 0.05, "repeated irregular Q error {q_error:e}");
+        let q_fluctuation = fluctuation_error(&coarse_q, &coarse, q_field);
+        // 8.6e-4 here after twelve cycles.
+        assert!(
+            q_fluctuation <= 2.0e-3,
+            "repeated irregular Q fluctuation error {q_fluctuation:e}"
+        );
         assert!(b_error <= 0.05, "repeated irregular b error {b_error:e}");
 
-        let arbitrary = coarse
+        // A stationary field carried to the fine mesh and back through the
+        // maps a handoff uses stays force-free to the transfer's accuracy.
+        // Through the identity map, as it was, the field was copied and
+        // read against the projector's own refusal at 2e-10 (VER-17 of the
+        // 2026-10-20 review); a smooth field, since the stationary part of a
+        // rough one is itself rough on both meshes.
+        let smooth = coarse
             .constitutive_samples()
             .iter()
-            .enumerate()
-            .map(|(index, sample)| {
-                Point2::new(
-                    (0.17 * index as f64 + sample.point.x).sin(),
-                    (0.11 * index as f64 - sample.point.y).cos(),
-                )
-            })
+            .map(|sample| b_field(sample.point))
             .collect::<Vec<_>>();
-        let stationary = coarse
-            .stationary_complementary_component(&arbitrary)
-            .unwrap();
-        let identity =
-            CanonicalVectorTransferMap::prepare(&coarse_mesh, &coarse, &coarse_mesh, &coarse)
-                .unwrap();
-        let copied = identity.transfer(&stationary).unwrap().0;
-        let force = coarse.force(&copied).unwrap();
-        let leakage = force.iter().map(|value| value * value).sum::<f64>().sqrt();
-        let scale = stationary
-            .iter()
-            .map(|value| value.dot(*value))
-            .sum::<f64>()
-            .sqrt()
-            .max(1.0);
-        assert!(leakage / scale <= 1.0e-3);
+        let stationary = coarse.stationary_complementary_component(&smooth).unwrap();
+        let leakage = |operator: &CanonicalWaveOperator, field: &[Point2]| {
+            let force = operator.force(field).unwrap();
+            force.iter().map(|value| value * value).sum::<f64>().sqrt()
+                / field
+                    .iter()
+                    .map(|value| value.dot(*value))
+                    .sum::<f64>()
+                    .sqrt()
+                    .max(1.0)
+        };
+        let carried = b_to_fine.transfer(&stationary).unwrap().0;
+        let back = b_to_coarse.transfer(&carried).unwrap().0;
+        let (there, again) = (leakage(&fine, &carried), leakage(&coarse, &back));
+        // 4.7e-4 carried and 3.1e-4 back here; an element's samples
+        // reconstructed by their mean, which the errors above let through,
+        // leak 3.7e-3 and 5.2e-3.
+        assert!(
+            there <= 1.0e-3 && again <= 1.0e-3,
+            "a stationary field carried leaks {there:e}, and {again:e} back"
+        );
     }
 
     #[test]
