@@ -29087,3 +29087,32 @@ One commit for the two, both in the signal editor.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the device suite runs what it built (VER-4)
+
+Area 9 is the 2026-10-20 review's verification machinery, after the user's
+"Go" on the plan: VER-5 went in step 1, VER-69 and VER-70 went with their
+tests in area 5 (a3238eb), and VER-25 tests the legacy `Scene` validation
+the phase-out deletes, so it is left to that; 66 remain. Each strengthened
+check is shown to bite before it lands.
+
+- **The defect.** `scripts/device-suite.sh` linked each binary into its log
+  directory only as its own run began, and re-linked the fixtures app per
+  run over the link the driver check had validated; a build during the suite
+  changed what the later runs executed, while the verdict still named the
+  tree the suite started on.
+- **Shown first.** The suite on `canonical_gpu_live_events` then
+  `canonical_gpu_pulse`, with a stand-in script renamed over
+  `target/release/examples/canonical_gpu_pulse` during the first run, as a
+  cargo build renames its output in: the suite ran the stand-in as its
+  second run and reported "2 of 2 passed".
+- **Fix.** Every binary the selected runs name is linked as soon as the
+  build ends, and every run starts from its link; the run's words are parsed
+  by one function; the commit and the tree's changes as built go in
+  `00-tree.txt`. The same swap, with `canonical_gpu_pulse --long` added for
+  a run with flags: the second run is the pulse the suite built ("Q 1.296e-6,
+b 1.303e-6" after 1,732 steps), the third took its flag (68,536 steps),
+and `00-tree.txt` names 99d877d with the script's change.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

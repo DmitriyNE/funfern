@@ -11,11 +11,15 @@
 # The examples open a window and read the autosave, so each runs with HOME
 # pointed at a scratch directory of its own. They are built first with the
 # real HOME, or the toolchain would be fetched again into the scratch one.
-# Every binary the suite runs is hard-linked into its log directory first and
-# run from there: a build in the meantime, a plain `cargo run` beside the
-# suite, renames a new file into target/release/ and the link keeps the one
-# the suite built, where on 12 October a plain build replaced the e2e app
-# under the fixtures and they sat in the first-run tour until the timeout.
+# Every binary the selected runs name is hard-linked into its log directory
+# as soon as the build ends, and every run starts from its link: a build in
+# the meantime, a plain `cargo run` beside the suite, renames a new file into
+# target/release/ and the link keeps the one the suite built, where on 12
+# October a plain build replaced the e2e app under the fixtures and they sat
+# in the first-run tour until the timeout. Until 25 October each run was
+# linked only as it began, so a build during the suite changed what the
+# later runs executed while the verdict still named the tree it started on.
+# The commit and the tree's changes as built go in 00-tree.txt.
 # Before the fixtures the linked app is asked for a fixture that does not
 # exist, and must refuse it as the driver does, so an app without the driver
 # fails the suite rather than opening. Logs go to target/device-suite/<time>/.
@@ -148,17 +152,38 @@ if [[ ${#selected[@]} -eq 0 ]]; then
   exit 2
 fi
 
+# A run's words, quotes respected: its assignments, its example, its flags.
+parse_run() {
+  eval "set -- $1"
+  assignments=()
+  while [[ $# -gt 0 && $1 == *=* ]]; do
+    assignments+=("$1")
+    shift
+  done
+  example=$1
+  shift
+  flags=("$@")
+}
+
+tree="$(git rev-parse HEAD; git status --porcelain)"
 cargo build -p funfern-app --release --locked --examples || exit 1
 cargo build -p funfern-app --release --locked --bin funfern-fixtures || exit 1
 
 logs="target/device-suite/$(date +%Y%m%d-%H%M%S)"
 mkdir -p "$logs/bin"
+printf '%s\n' "$tree" >"$logs/00-tree.txt"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
-# The app the fixtures run, linked and asked for a fixture that does not
-# exist: the driver refuses by name and exits 2, where the plain app would
-# open and wait.
-ln -f target/release/funfern-fixtures "$logs/bin/funfern-fixtures"
+# Every binary as built, kept by a link whatever a later build renames in.
+ln -f target/release/funfern-fixtures "$logs/bin/funfern-fixtures" || exit 1
+for run in "${selected[@]}"; do
+  parse_run "$run"
+  if [[ ! -e $logs/bin/$example ]]; then
+    ln -f "target/release/examples/$example" "$logs/bin/$example" || exit 1
+  fi
+done
+# The app the fixtures run, asked for a fixture that does not exist: the
+# driver refuses by name and exits 2, where the plain app would open and wait.
 probe="$scratch/probe"
 mkdir -p "$probe/Library/Application Support/funfern"
 env HOME="$probe" FUNFERN_E2E=no-such-fixture \
@@ -173,19 +198,7 @@ failed=0
 index=0
 for run in "${selected[@]}"; do
   index=$((index + 1))
-  # The run's words, quotes respected: assignments, the example, its flags.
-  eval "set -- $run"
-  assignments=()
-  while [[ $# -gt 0 && $1 == *=* ]]; do
-    assignments+=("$1")
-    shift
-  done
-  example=$1
-  shift
-  binary="target/release/examples/$example"
-  [[ $example == funfern-fixtures ]] && binary=target/release/funfern-fixtures
-  # The binary as built, kept by a link whatever a later build renames in.
-  ln -f "$binary" "$logs/bin/$example"
+  parse_run "$run"
   binary="$logs/bin/$example"
   log="$logs/$(printf %02d "$index")-$example.log"
   home="$scratch/$index"
@@ -196,7 +209,7 @@ for run in "${selected[@]}"; do
   # where macOS has no `timeout`.
   env HOME="$home" ${assignments[@]+"${assignments[@]}"} \
     perl -e 'alarm shift @ARGV; exec @ARGV or die "$!\n"' "$limit" \
-    "$binary" "$@" >"$log" 2>&1
+    "$binary" ${flags[@]+"${flags[@]}"} >"$log" 2>&1
   status=$?
   if [[ $status -eq 142 ]]; then
     echo "stopped after ${limit} s" >>"$log"
