@@ -3472,7 +3472,37 @@ mod tests {
                 assert!((state.current()[node] - dirichlet.value(dt)).abs() < 1.0e-13);
             }
         }
-        assert!(state.current().iter().any(|value| *value != 0.0));
+        // The Neumann side's own effect, against a twin whose top carries
+        // nothing: alike otherwise, the two differ after the step by what the
+        // flux pushed in, `½ dt² a_N` at the top's undamped middle from rest,
+        // the Taylor start holding the other half. That some value had moved
+        // could not fail once the bottom took its Dirichlet data (VER-64 of
+        // the 2026-10-20 review).
+        let mut quiet = boundaries;
+        quiet.sides[OuterSide::Top.index()] = OuterBoundaryCondition::Neumann {
+            signal: crate::TimeSignal::ZERO,
+        };
+        let quiet_operator =
+            QuadraticWaveOperator::assemble_scene_with_boundaries(&mesh, &Scene::default(), quiet)
+                .unwrap();
+        let mut twin = QuadraticWaveState::zero(&quiet_operator, dt).unwrap();
+        twin.step(&quiet_operator, &[]).unwrap();
+        let middle = operator
+            .node_points()
+            .iter()
+            .enumerate()
+            .filter(|(_, point)| point.y == 1.0 && point.x > 0.0 && point.x < 1.0)
+            .min_by(|(_, a), (_, b)| (a.x - 0.5).abs().total_cmp(&(b.x - 0.5).abs()))
+            .expect("a node on the top")
+            .0;
+        assert_eq!(operator.lumped_damping[middle], 0.0);
+        let pushed = 0.5 * dt * dt * operator.neumann_acceleration(middle, 0.0);
+        assert!(pushed != 0.0);
+        let moved = state.current()[middle] - twin.current()[middle];
+        assert!(
+            (moved - pushed).abs() < 1.0e-12 * pushed.abs(),
+            "the top moved {moved} for the {pushed} the flux pushed in"
+        );
 
         let mut contradictory = boundaries;
         contradictory.sides[OuterSide::Right.index()] = OuterBoundaryCondition::Dirichlet {
@@ -4439,13 +4469,24 @@ mod tests {
     fn the_grid_scale_filter_leaves_a_constant_field_alone() {
         let operator = cavity(0.12, OuterBoundaryCondition::Reflecting);
         let count = operator.degrees_of_freedom();
+        // Two constants, so the filtered difference is a constant and not
+        // zero: with one constant on both levels the filter read all zeros,
+        // which any form of `L` leaves alone (VER-62 of the 2026-10-20
+        // review). The gather itself is held to exact zeros as well, which
+        // a product form misses by roundoff the second pass then squares away.
         let mut current = vec![2.5; count];
-        let mut previous = vec![2.5; count];
+        let mut previous = vec![1.0; count];
         operator
             .apply_grid_scale_filter(&mut current, &mut previous, GRID_SCALE_FILTER_LIMIT)
             .unwrap();
         assert_eq!(current, vec![2.5; count]);
-        assert_eq!(previous, vec![2.5; count]);
+        assert_eq!(previous, vec![1.0; count]);
+        assert!(
+            operator
+                .normalized_difference_product(&vec![1.5; count])
+                .iter()
+                .all(|value| *value == 0.0)
+        );
     }
 
     /// Only the difference between the levels is damped, and symmetrically, so

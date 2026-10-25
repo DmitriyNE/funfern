@@ -29698,3 +29698,36 @@ passes without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: quadratic, breakdown and sentence tests that could not fail (VER-62, VER-64, VER-67, VER-68)
+
+Each was run as it stood under a temporary break of what it guards, and
+passed; the strengthened test fails under the same break and passes
+without it.
+
+- **VER-62.** The constant-field grid-filter test set both levels to 2.5,
+  so the filtered difference was all zeros, which any form of `L` leaves
+  alone. The levels are now 2.5 and 1.0, a constant difference, and the
+  gather itself is held to exact zeros on it. Break: the product form
+  `K v` in place of the difference form, whose roundoff the filter's second
+  pass squares away - only the direct check sees it.
+- **VER-64.** The mixed-sides test's last check, that some value moved,
+  could not fail once the bottom took its Dirichlet data. It now steps a
+  twin whose top carries no flux and holds the difference at the top's
+  middle to what the flux pushed in, `½ dt² a_N` from rest - the Taylor
+  start holds the other half, which a first reading of `dt² a_N` missed by
+  exactly that factor. Break: the step's Neumann term dropped - the top
+  then moves -0.00625 for the 0.00625 pushed in.
+- **VER-67.** The energy-breakdown test "including auxiliaries" ran a
+  reflecting scene with none. It now runs a stiff thin gap across the box
+  inside its second-order outgoing walls for forty steps, asserts the gap's
+  and the walls' terms are positive, and holds the parts' sum to the
+  state's energy. Break: the gap's term without its stiffness - the parts
+  sum to 1.41463 against 1.41482.
+- **VER-68.** The sentence test named six error types and held two. It now
+  holds every variant of `FaceAnchorIssue`, `SeparatorAttachmentIssue`,
+  `TopologySceneIssue` and `TopologyMeshPlanError` to the same rules.
+  Break: one mesh-plan error printing its debug form.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

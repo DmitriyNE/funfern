@@ -1192,6 +1192,71 @@ fn user_facing_errors_read_as_sentences() {
         );
         messages.push(error.to_string());
     }
+    // The scene's own issues, its face anchors' and separators', and the mesh
+    // plan's, which the status bar reads as well: the test named six types and
+    // held two (VER-68 of the 2026-10-20 review).
+    let anchors = [
+        FaceAnchorIssue::InvalidParameter,
+        FaceAnchorIssue::UnknownCurve(CurveId(4)),
+        FaceAnchorIssue::UnknownSpan(CurveSpanId(9)),
+        FaceAnchorIssue::AtVertex,
+        FaceAnchorIssue::NotOnBoundary,
+        FaceAnchorIssue::Ambiguous,
+    ];
+    let plans = [
+        TopologyMeshPlanError::DuplicateFace(FaceId(2)),
+        TopologyMeshPlanError::MissingFace(FaceId(2)),
+        TopologyMeshPlanError::UnknownFace(FaceId(2)),
+        TopologyMeshPlanError::InvalidRegion(RegionId(3)),
+        TopologyMeshPlanError::DuplicateRegion(RegionId(3)),
+        TopologyMeshPlanError::NoActiveFaces,
+        TopologyMeshPlanError::MissingTrace(TraceVertexId(5)),
+        TopologyMeshPlanError::BrokenCycle(FaceId(2)),
+        TopologyMeshPlanError::MissingCurve(CurveSpanId(9)),
+        TopologyMeshPlanError::CoupledExcludedFace(CurveSpanId(9)),
+    ];
+    let mut readable = anchors.iter().map(ToString::to_string).collect::<Vec<_>>();
+    readable.extend(plans.iter().map(ToString::to_string));
+    for issue in anchors {
+        readable.push(SeparatorAttachmentIssue::Start(issue).to_string());
+        readable.push(SeparatorAttachmentIssue::End(issue).to_string());
+        readable.push(
+            TopologySceneIssue::FaceAnchor {
+                index: 2,
+                source: issue,
+            }
+            .to_string(),
+        );
+    }
+    readable.extend(
+        [
+            SeparatorAttachmentIssue::DifferentFaces {
+                start: FaceId(1),
+                end: FaceId(2),
+            },
+            SeparatorAttachmentIssue::ExcludedFace(FaceId(2)),
+        ]
+        .iter()
+        .map(ToString::to_string),
+    );
+    let scene = [
+        TopologySceneIssue::Structure,
+        TopologySceneIssue::Material,
+        TopologySceneIssue::Region(RegionId(3)),
+        TopologySceneIssue::VolumeSource(RegionId(3)),
+        TopologySceneIssue::OuterBoundaryCorner,
+        TopologySceneIssue::DirichletTraces,
+        TopologySceneIssue::RevisionMismatch,
+        TopologySceneIssue::DuplicateFace(FaceId(2)),
+        TopologySceneIssue::DuplicateRegion(RegionId(3)),
+        TopologySceneIssue::UnassignedFace(FaceId(2)),
+        TopologySceneIssue::UnassignedRegion(RegionId(3)),
+        TopologySceneIssue::Topology(TopologyIssue::TooManyFaces),
+    ]
+    .into_iter()
+    .chain(plans.iter().map(|plan| TopologySceneIssue::Plan(*plan)));
+    readable.extend(scene.map(|issue| issue.to_string()));
+    messages.extend(readable);
     for message in &messages {
         assert!(
             !message.contains(['{', '}', '"', '(']) && !message.contains("::"),

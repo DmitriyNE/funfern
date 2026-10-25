@@ -723,35 +723,78 @@ mod tests {
         );
     }
 
+    /// The breakdown's four parts against the state's own energy, on a
+    /// generation that carries every auxiliary: a stiff thin gap across the
+    /// box and its second-order outgoing walls, run until both hold memory.
+    /// On the reflecting fixture, as it ran, the gap's and the walls' terms
+    /// had nothing to sum (VER-67 of the 2026-10-20 review).
     #[test]
     fn energy_breakdown_matches_the_state_oracle_including_auxiliaries() {
-        let (operator, _) = fixture();
+        let mut scene = Scene::default();
+        scene.internal_boundaries.push(crate::InternalBoundary {
+            id: crate::InternalBoundaryId(1),
+            spline: crate::OpenCubicSpline::uniform(vec![
+                Point2::new(-0.65, 0.0),
+                Point2::new(-0.2, 0.0),
+                Point2::new(0.2, 0.0),
+                Point2::new(0.65, 0.0),
+            ])
+            .unwrap(),
+            region: BACKGROUND_REGION,
+            span_laws: vec![crate::InternalBoundaryLaw {
+                coupling: crate::InternalBoundaryCoupling::ThinGap {
+                    stiffness_ratio: 120.0,
+                },
+                ..crate::InternalBoundaryLaw::REFLECTING
+            }],
+        });
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.1,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let quadratic = QuadraticWaveOperator::assemble_scene_with_boundaries(
+            &mesh,
+            &scene,
+            scene.outer_boundaries,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let primary = operator
             .node_points()
             .iter()
-            .map(|point| 0.2 + 0.1 * point.x)
-            .collect::<Vec<_>>();
+            .zip(operator.primary_mass())
+            .map(|(point, mass)| mass * (1.4 * point.x - 0.9 * point.y).sin())
+            .collect();
         let potential = operator
             .node_points()
             .iter()
-            .map(|point| 0.03 * point.y)
+            .map(|point| 0.6 * (0.8 * point.x + 1.2 * point.y).cos())
             .collect::<Vec<_>>();
-        let state = CanonicalWaveState::from_primary_and_potential(
+        let complementary = operator.compatible_flux(&potential).unwrap();
+        let mut state = CanonicalWaveState::new(
             &operator,
-            0.5 * operator.maximum_time_step(),
-            &primary,
-            &potential,
+            0.4 * operator.maximum_time_step(),
+            primary,
+            complementary,
         )
         .unwrap();
-        let auxiliary = match state.auxiliaries() {
-            crate::CanonicalAuxiliaryState::None => vec![],
-            crate::CanonicalAuxiliaryState::Linear(values) => values
-                .thin_gap_jump()
-                .iter()
-                .chain(values.outgoing_z())
-                .copied()
-                .collect(),
+        for _ in 0..40 {
+            state.step(&operator).unwrap();
+        }
+        let crate::CanonicalAuxiliaryState::Linear(values) = state.auxiliaries() else {
+            panic!("a gapped, walled generation carries auxiliaries");
         };
+        let auxiliary = values
+            .thin_gap_jump()
+            .iter()
+            .chain(values.outgoing_z())
+            .copied()
+            .collect::<Vec<_>>();
         let breakdown = canonical_energy_breakdown(
             &operator,
             state.primary_flux(),
@@ -759,7 +802,13 @@ mod tests {
             &auxiliary,
         )
         .unwrap();
-        assert!((breakdown.total() - state.energy(&operator).unwrap()).abs() < 1.0e-12);
+        assert!(breakdown.thin_gap > 0.0 && breakdown.outgoing > 0.0);
+        let energy = state.energy(&operator).unwrap();
+        assert!(
+            (breakdown.total() - energy).abs() < 1.0e-12 * energy,
+            "the parts sum to {} against the state's {energy}",
+            breakdown.total()
+        );
     }
 
     // -----------------------------------------------------------------------
