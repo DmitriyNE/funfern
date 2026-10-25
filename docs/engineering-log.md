@@ -29055,3 +29055,18 @@ One commit for the two, both in the signal editor.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: a tap's release frame is still a touch (UI-31)
+
+- **The defect.** The viewport read `any_touches()` every frame for its
+  hit radii; on a tap's release frame no touch is active any more, so the
+  release used the mouse's radii, and a tap and a drag at the same spot
+  picked different things.
+- **Test first.** `a_taps_release_frame_is_still_a_touch` on the rule
+  `touch_still_active`: a release while a touch was active is the touch's,
+  the frame after is the mouse's again, and a mouse release stays the
+  mouse's; before the fix the release frame read as the mouse's.
+- **Fix.** The touch state is kept for a frame that releases the pointer.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

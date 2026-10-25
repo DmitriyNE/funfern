@@ -11,6 +11,14 @@ use funfern_core::*;
 
 use super::*;
 
+/// Whether the frame's input is a touch's. On a tap's release frame no touch
+/// is active any more, so the release read as the mouse's and a tap and a
+/// drag at the same spot picked different things (UI-31 of the 2026-10-20
+/// review): a release while a touch was active is the touch's.
+fn touch_still_active(was: bool, any_touches: bool, any_released: bool) -> bool {
+    any_touches || (was && any_released)
+}
+
 impl Playground {
     pub(super) fn handle_viewport_input(
         &mut self,
@@ -27,7 +35,13 @@ impl Playground {
         if !typing && ui.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::S)) {
             self.request_material_switch();
         }
-        let touch_active = ui.input(|input| input.any_touches());
+        let touch_active = ui.input(|input| {
+            touch_still_active(
+                self.touch_active,
+                input.any_touches(),
+                input.pointer.any_released(),
+            )
+        });
         self.touch_active = touch_active;
         let multi_touch = ui.input(|input| input.multi_touch());
         if !touch_active {
@@ -752,5 +766,23 @@ impl Playground {
         {
             self.delete_selection();
         }
+    }
+}
+
+#[cfg(test)]
+mod touch_tests {
+    use super::*;
+
+    /// UI-31 of the 2026-10-20 review: on a tap's release frame no touch is
+    /// active any more, so the release used the mouse's hit radii and a tap
+    /// and a drag at the same spot picked different things. The release of
+    /// an active touch is the touch's; the frame after is the mouse's again.
+    #[test]
+    fn a_taps_release_frame_is_still_a_touch() {
+        assert!(touch_still_active(true, true, false));
+        assert!(touch_still_active(true, false, true), "the release frame");
+        assert!(!touch_still_active(true, false, false), "the frame after");
+        assert!(!touch_still_active(false, false, true), "a mouse release");
+        assert!(touch_still_active(false, true, false), "a touch begins");
     }
 }
