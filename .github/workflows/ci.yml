@@ -167,7 +167,7 @@ jobs:
       - name: Sweep every scene at the slider's coarsest reach
         env:
           FUNFERN_WALL_SWEEP_ALL: 1
-          FUNFERN_WALL_SWEEP_EDGE: 0.2
+          FUNFERN_WALL_SWEEP_EDGE: 0.25
         run: cargo test --release -p funfern-app --test wall_sweep --locked -- --nocapture
 
   # Nightly: PH-04, the first- and second-order walls' reflection against
@@ -904,13 +904,19 @@ jobs:
     # runs, isolated and with service workers refused, the two in parallel.
     # The fixtures are split into parts that run in parallel, since the slower
     # hosting's state part alone takes 3 h 52 min to 5 h 54 min (2026-10-17 to
-    # 2026-10-20), close to the runner's six hours:
-    # - recorders: the recorders' fixtures and the late clocks' -
-    #   `observables`, `far-field`, `far-field-late` and
-    #   `handoff-memory-running-late` - about four hours served as Pages;
+    # 2026-10-20), close to the runner's six hours. Served as Pages each page
+    # runs cold and then warm, twice its time:
+    # - recorders: `observables` and `handoff-memory-running-late`, about
+    #   three and a half hours served as Pages;
+    # - far-field: `far-field` and `far-field-late`, about two and a half,
+    #   split from the recorders when the four together reached the six hours
+    #   (VER-1 of the 2026-10-20 review);
     # - handoffs: the handoffs added on 2026-10-20 and after,
     #   `handoff-driven`, `handoff-driven-pins` and `handoff-memory-flux`;
     # - state: the rest.
+    # A cell that runs long fails at 340 minutes, before the runner's own
+    # cancel, so it reports which page it stood at.
+    timeout-minutes: 340
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -918,7 +924,7 @@ jobs:
       fail-fast: false
       matrix:
         hosting: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["isolated", "pages-blocked"]' || '["isolated"]') }}
-        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "recorders", "handoffs"]' || '["state"]') }}
+        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "recorders", "far-field", "handoffs"]' || '["state"]') }}
     env:
       FULL: ${{ github.event_name == 'schedule' || inputs.browser == 'full' }}
     steps:
@@ -992,7 +998,7 @@ jobs:
         # and the slowest page, cavity-batches' four runs, 745 s.
         env:
           FUNFERN_EXPECT_BUILD: ${{ github.sha }}
-          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'recorders' && 'observables,far-field,far-field-late,handoff-memory-running-late' || matrix.part == 'handoffs' && 'handoff-driven,handoff-driven-pins,handoff-memory-flux' || '' }}
+          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'recorders' && 'observables,handoff-memory-running-late' || matrix.part == 'far-field' && 'far-field,far-field-late' || matrix.part == 'handoffs' && 'handoff-driven,handoff-driven-pins,handoff-memory-flux' || '' }}
           FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables,far-field,far-field-late,handoff-memory-running-late,handoff-driven,handoff-driven-pins,handoff-memory-flux' || '' }}
           FUNFERN_E2E_DEADLINE: ${{ env.FULL != 'true' && '600' || '1500' }}
           FUNFERN_E2E_HOSTING: ${{ matrix.hosting }}
@@ -1009,6 +1015,7 @@ jobs:
     needs: [native, web, kani, device, browser]
     runs-on: ubuntu-24.04
     permissions:
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -1018,6 +1025,24 @@ jobs:
       group: github-pages
       cancel-in-progress: false
     steps:
+      # A slower, older run that reaches its deploy after a newer one has
+      # deployed would publish over it, so only main's head deploys (VER-26
+      # of the 2026-10-20 review). The concurrency group above orders the
+      # deploys, so the head read here cannot race another deploy.
+      - name: Check the commit is still main's head
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
+          if [ "$head" = "${{ github.sha }}" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "main has moved on to $head; ${{ github.sha }} is not deployed"
+            echo "current=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Deploy GitHub Pages
+        if: steps.head.outputs.current == 'true'
         id: deployment
         uses: actions/deploy-pages@v5

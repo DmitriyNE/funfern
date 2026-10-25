@@ -1313,7 +1313,8 @@ side of every span and every outer side of every gallery scene, prepared
 through the app's own path at the Coarse preset, each case classed before it
 runs and the prepared ones' outgoing basis read back against its operator.
 It runs in the gate without the five arrays of one obstacle, which the
-nightly's `wall-sweep` job adds, at 0.16 and at 0.2. `FUNFERN_WALL_SWEEP=<name>`
+nightly's `wall-sweep` job adds, at 0.16 and at 0.25, the resolution
+slider's coarsest. `FUNFERN_WALL_SWEEP=<name>`
 runs one scene with its report, `FUNFERN_WALL_SWEEP_ALL=1` every scene,
 `FUNFERN_WALL_SWEEP_EDGE=<edge>` another edge, and
 `FUNFERN_WALL_SWEEP_PLAN=1` prints the case counts without preparing.

@@ -29843,3 +29843,34 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Step 3, area 9: the nightly's reach, the browser cells' length, and the deploy's head (VER-2, VER-1, VER-26)
+
+- **VER-2.** The nightly wall sweep's "coarsest reach" ran at 0.2, while
+  the resolution slider goes to 0.25, where mesher failures gather. It now
+  runs at 0.25. Run locally first: every wall law on every side of every
+  gallery scene at 0.25, 45 scenes, 44,654 cases prepared (11,147 twice,
+  bit for bit) and 1,733 refused by the rule that names them, in 33
+  minutes; nothing new failed. docs/checks.md and the sweep's own doc said
+  0.2.
+- **VER-1.** Served as Pages each fixture page runs cold and then warm, so
+  the nightly's recorders cell - `observables`, `far-field`,
+  `far-field-late` and `handoff-memory-running-late` - came to about five
+  and a half hours plus setup, at the runner's six-hour cancel, with no
+  limit of its own, and a `full` dispatch's deploy waits on it. The two
+  far-field fixtures move to a fourth cell, `far-field`, about two and a
+  half hours, leaving the recorders about three and a half; the browser
+  job stops itself at 340 minutes, before the runner's cancel, so a long
+  cell says which page it stood at. Its comment's hours follow.
+- **VER-26.** The Pages deploy was ordered only within its own job, so a
+  slower, older run reaching its deploy after a newer one had published
+  would publish over it. The deploy now reads main's head first and skips
+  itself, saying so, when its commit is no longer the head; the job's
+  concurrency group already orders deploys, so the read cannot race
+  another.
+- **Not verified here.** The workflow parses; the browser cells' timing and
+  the deploy's skip show only on the next nightly, a `full` dispatch, and
+  two pushes close together.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

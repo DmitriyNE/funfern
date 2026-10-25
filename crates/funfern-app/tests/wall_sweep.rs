@@ -1,7 +1,8 @@
 //! Every wall law on every side of every span of every gallery scene, and on
 //! every outer side, prepared the way the app prepares a document: the change
 //! through the editor's own setters, validation to acceptance, then
-//! `TopologyRuntime::request` at an edge of 0.2 sized for the domain. Each case
+//! `TopologyRuntime::request` at the Coarse preset's edge, 0.16, or the one
+//! `FUNFERN_WALL_SWEEP_EDGE` names, sized for the domain. Each case
 //! is classed before it runs, must succeed, or must be refused by the rule
 //! that names it, and the count of successes must equal the count of
 //! must-succeed cases, so a solver that politely refuses everything cannot
