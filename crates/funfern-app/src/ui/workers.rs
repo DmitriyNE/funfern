@@ -10,7 +10,7 @@ use crate::canonical_gpu::{
 };
 use crate::topology_runtime::{
     PreparedTopology, TopologyPreparationError, TopologyPreparationJob, TopologyPreparationPhase,
-    TopologyPreparationTiming, TopologyToken,
+    TopologyPreparationTiming, TopologyToken, corrects_component_totals,
 };
 #[cfg(any(
     not(target_arch = "wasm32"),
@@ -649,14 +649,6 @@ pub(super) fn spawn_amr_worker(
     _event_sender: Sender<BackgroundAmrEvent>,
 ) -> bool {
     false
-}
-
-/// Whether a handoff restores each component's flux total. A remesh of the same
-/// geometry does, so repeated adaptation cannot drift the constant part of the
-/// field; an edit to the geometry has no total to restore and takes what the
-/// interpolation carries.
-fn corrects_component_totals(candidate: &PreparedTopology, active: &PreparedTopology) -> bool {
-    candidate.mesh.geometry_revision == active.mesh.geometry_revision
 }
 
 /// Packs `candidate` for the device. A fresh generation starts its clock at

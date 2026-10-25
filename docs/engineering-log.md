@@ -29380,3 +29380,40 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: component totals, held as the app handles them (VER-11, VER-12)
+
+- **VER-11, the defect.** The "edits the field cannot tell" fixture
+  prepared each generation from a fresh editor, which compiles at revision
+  0, so every handoff read as the same geometry and the disc's edits had
+  their component totals restored, which the app's handoff does not do for
+  an edit of the geometry: its figures described another path than the
+  app's. The rule itself was copied into the fixture.
+- **Test first.** The rule moves into `topology_runtime` as
+  `corrects_component_totals`, which the app's upload and the fixture both
+  call, and the fixture asserts which handoffs it corrects: the disc drawn
+  and erased not, the remesh 1.4 times finer yes. Before the fix the disc's
+  edits read `[true, true]`.
+- **Fix.** `prepare_on` compiles each generation at its request's revision,
+  as the editor compiles each edit at its own; the runtime keeps the
+  earlier revision for a remesh of the same geometry (MESH-17). The figures
+  barely move: 6.9e-4 and 8.8e-4 at edge 0.16, 5.5e-5 and 1.0e-4 at 0.08,
+  now eight to twelve times less where the doc said nine; the remesh's are
+  unchanged. The other users of `prepare_on` - the two remesh ledger tests
+  and both thin-gap tests, the nightly one included - pass.
+- **VER-12, the defect.** The component-total test held the arrived totals
+  to the desired ones it built from the runtime transfer's shares, which
+  the transfer already refuses to miss, so a share gone wrong moved both
+  alike: with every share scaled by 0.9 as a temporary edit, it passed.
+- **Fix.** On the same geometry each component takes one source's whole
+  total, so what arrived is held to what departed; the same edit now fails,
+  "component 0: 1587.21 arrived of the 1763.57 that departed".
+- **The mutation that guards the rule.** `component-totals-dropped` patched
+  the rule where it stood in `ui/workers.rs`, and the gate's patch check
+  refused it once the rule moved. It now patches the app's call, which is
+  what it describes, leaving the e2e reference's own copy of the rule
+  alone, and on the device it is detected as before: "e2e Remesh failed:
+  Q 2.475e-5, b 1.051e-6, r 0.000e0 after 256 steps, beyond 5e-6".
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

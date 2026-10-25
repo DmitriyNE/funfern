@@ -273,6 +273,17 @@ pub enum PreparedSolverUpdate {
     MeasurementsOnly,
 }
 
+/// Whether a handoff restores each component's flux total. A remesh of the same
+/// geometry does, so repeated adaptation cannot drift the constant part of the
+/// field; an edit to the geometry has no total to restore and takes what the
+/// interpolation carries.
+pub(crate) fn corrects_component_totals(
+    candidate: &PreparedTopology,
+    active: &PreparedTopology,
+) -> bool {
+    candidate.mesh.geometry_revision == active.mesh.geometry_revision
+}
+
 #[derive(Clone, Debug)]
 pub struct PreparedCanonicalTransfer {
     pub primary: Arc<CanonicalPrimaryTransferMap>,
@@ -3008,6 +3019,29 @@ mod tests {
             assert!(
                 (arrived - desired).abs() <= 1.0e-9 * desired.abs().max(1.0),
                 "component {component}: {arrived} arrived against {desired} desired"
+            );
+        }
+        // And what arrived is what departed: on the same geometry each
+        // component takes one source's whole total. Held only to the totals
+        // the shares asked for, the check restated the transfer's own
+        // postcondition, and a share gone wrong moved both alike (VER-12 of
+        // the 2026-10-20 review).
+        assert_eq!(
+            target.canonical_operator.component_count(),
+            source.canonical_operator.component_count()
+        );
+        for (component, transfer) in runtime_transfer.components.iter().enumerate() {
+            let [(from, _)] = transfer.sources.as_slice() else {
+                panic!(
+                    "component {component} takes {} sources",
+                    transfer.sources.len()
+                );
+            };
+            let departed = totals[*from as usize];
+            assert!(
+                (arrived_totals[component] - departed).abs() <= 1.0e-9 * departed.abs().max(1.0),
+                "component {component}: {} arrived of the {departed} that departed",
+                arrived_totals[component]
             );
         }
         runtime.commit_ready(second).unwrap();

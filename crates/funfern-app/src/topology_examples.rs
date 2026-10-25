@@ -5096,11 +5096,14 @@ mod tests {
         let editor = TopologyEditor::from_document(document.clone()).unwrap();
         // Capped for the domain's area, as the application meshes it.
         let domain = document.model.accepted.geometry.domain;
+        // Compiled at the request's revision, as the editor compiles each
+        // edit at its own; the runtime keeps the earlier one for a remesh of
+        // the same geometry.
         let token = runtime
             .request(
                 revision,
                 &editor.document,
-                editor.compiled_accepted.clone(),
+                editor.document.model.accepted.compile(revision).unwrap(),
                 MeshingOptions {
                     target_edge_length: edge,
                     ..MeshingOptions::default()
@@ -12007,7 +12010,7 @@ mod tests {
             [0; 4],
         )
         .unwrap();
-        let runtime = if target.mesh.geometry_revision == source.mesh.geometry_revision {
+        let runtime = if crate::topology_runtime::corrects_component_totals(target, source) {
             runtime
         } else {
             runtime.without_total_correction()
@@ -12122,10 +12125,13 @@ mod tests {
     /// mode `cos(3π(x+1)/2) cos(3π(y+1)/2)` runs three periods; a disc of the
     /// box's own medium is then drawn in, the state carried onto the new
     /// mesh through the maps the runtime prepares for the edit, run three
-    /// periods more, and the disc erased the same way. Against the untouched
-    /// run at twenty-five points the edited one is off by 7e-4 right after the
-    /// disc is drawn and 9e-4 after it is erased and three more periods, at
-    /// edge 0.16; at 0.08 by 5e-5 and 1e-4, nine to twelve times less. A
+    /// periods more, and the disc erased the same way, each edit compiled at
+    /// its own revision as the editor's are, so that, as in the app, the
+    /// disc's edits take what the transfer carries and only the remesh keeps
+    /// each component's total. Against the untouched run at twenty-five
+    /// points the edited one is off by 7e-4 right after the disc is drawn and
+    /// 9e-4 after it is erased and three more periods, at edge 0.16; at 0.08
+    /// by 6e-5 and 1e-4, eight to twelve times less. A
     /// remesh 1.4 times finer mid-run is off by 1e-3 at once and 3e-3 three
     /// periods on at edge 0.16, 2e-4 and 4e-4 at 0.08: the carried field's
     /// error falls with the mesh, as a transfer's must. And a flux that
@@ -12161,8 +12167,9 @@ mod tests {
         plain.model.source.enabled = false;
         let with_disc = reflecting_box_with_disc();
         // Each run against the untouched one, right after the edit and
-        // `stage` steps on, for every stage of the sequence of edits.
-        let distances = |edits: &[(&TopologyDocument, f64)], edge: f64| -> Vec<f64> {
+        // `stage` steps on, for every stage of the sequence of edits, and
+        // whether each handoff kept the component totals.
+        let distances = |edits: &[(&TopologyDocument, f64)], edge: f64| -> (Vec<f64>, Vec<bool>) {
             let mut runtime = TopologyRuntime::default();
             let (first, _) = prepare_on(&mut runtime, &plain, 1, edge);
             let mut generations = vec![(first.clone(), None)];
@@ -12191,9 +12198,13 @@ mod tests {
                 edited.step(operator).unwrap();
             }
             let mut distances = Vec::new();
+            let mut corrected = Vec::new();
             for pair in generations.windows(2) {
                 let (source, _) = &pair[0];
                 let (target, maps) = &pair[1];
+                corrected.push(crate::topology_runtime::corrects_component_totals(
+                    target, source,
+                ));
                 edited = carry_over(&edited, source, target, maps.as_ref().unwrap());
                 distances.push(relative_distance(
                     &field_at(&edited, target, &points),
@@ -12208,10 +12219,16 @@ mod tests {
                     &field_at(&control, &first, &points),
                 ));
             }
-            distances
+            (distances, corrected)
         };
+        // The disc's edits change the geometry and take what the transfer
+        // carries; the remesh keeps each component's total, as the app does.
+        // Every generation compiled at revision 0, as it was, read as the same
+        // geometry, and the disc's edits had their totals restored, which the
+        // app's handoff does not (VER-11 of the 2026-10-20 review).
         let drawn_and_erased = [0.16, 0.08].map(|edge| {
-            let distances = distances(&[(&with_disc, 1.0), (&plain, 1.0)], edge);
+            let (distances, corrected) = distances(&[(&with_disc, 1.0), (&plain, 1.0)], edge);
+            assert_eq!(corrected, [false, false], "edge {edge}");
             eprintln!(
                 "edge {edge}: disc drawn {:.2e}, run {:.2e}, erased {:.2e}, run {:.2e}",
                 distances[0], distances[1], distances[2], distances[3]
@@ -12225,7 +12242,8 @@ mod tests {
             assert!(coarse / fine > 5.0, "{drawn_and_erased:?}");
         }
         let remeshed = [0.16, 0.08].map(|edge| {
-            let distances = distances(&[(&plain, 1.0 / 1.4)], edge);
+            let (distances, corrected) = distances(&[(&plain, 1.0 / 1.4)], edge);
+            assert_eq!(corrected, [true], "edge {edge}");
             eprintln!(
                 "edge {edge}: remeshed {:.2e}, run {:.2e}",
                 distances[0], distances[1]
