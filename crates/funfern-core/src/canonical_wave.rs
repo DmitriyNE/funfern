@@ -9420,9 +9420,10 @@ mod tests {
     /// trapezoid wall step stores there the mean of the drift instants around
     /// it, as the bulk does. A pulse from the inside crosses the walls while
     /// the step alternates between 1.2 and 0.9 of the bound every 25 steps, a
-    /// fresh state each time: what is left once it has gone exceeds the same
-    /// run without a handoff by 25% under the half kicks and 7% under the
-    /// trapezoid step (2.5e-7 of the pulse's 6.3e-2 without one). The spike's
+    /// fresh state each time: what is left once it has gone, both runs ending
+    /// together after whole cycles at 11.7 s, exceeds the same run without a
+    /// handoff by 43% under the half kicks and 13% under the trapezoid step
+    /// (1.5e-7 of the pulse's 6.3e-2 without one). The spike's
     /// caveat - a field started at the wall out of equilibrium - is not what
     /// a handoff hands over.
     #[test]
@@ -9457,26 +9458,34 @@ mod tests {
             let mut handed = steady.clone();
             let (mut steady_time, mut handed_time) = (0.0, 0.0);
             let mut fraction = 1.2;
-            while steady_time < end {
+            // Both runs end at the same instant: whole cycles of 25 steps at
+            // 1.2 and 25 at 0.9 of the bound, 210 bounds every 200 steps,
+            // against 175 steps at 1.2. Each run to `end`, they stopped up to
+            // a step apart while what was left still fell, and the surplus
+            // carried that (VER-60 of the 2026-10-20 review).
+            let cycles = (end / (210.0 * bound)).ceil() as usize;
+            for _ in 0..175 * cycles {
                 steady.step(&operator).unwrap();
                 steady_time += steady.time_step();
             }
-            let mut steps = 0;
-            while handed_time < end {
+            for steps in 0..200 * cycles {
                 if steps > 0 && steps % 25 == 0 {
                     fraction = if fraction == 1.2 { 0.9 } else { 1.2 };
                     handed = fresh(&handed, fraction);
                 }
                 handed.step(&operator).unwrap();
                 handed_time += handed.time_step();
-                steps += 1;
             }
+            assert!(
+                (steady_time - handed_time).abs() < 1.0e-9 * steady_time,
+                "the runs end at {steady_time} and {handed_time}"
+            );
             let (left, handed_left) = (
                 steady.energy(&operator).unwrap(),
                 handed.energy(&operator).unwrap(),
             );
             eprintln!(
-                "{wall_step:?}: left at t = {end}: steady {:.4e} ({:.3e} in the wall's memory), handed {:.4e} ({:.3e}); of {initial:.4e}; handed over steady {:+.3e}",
+                "{wall_step:?}: left at t = {steady_time:.3}: steady {:.4e} ({:.3e} in the wall's memory), handed {:.4e} ({:.3e}); of {initial:.4e}; handed over steady {:+.3e}",
                 left,
                 memory(&steady),
                 handed_left,

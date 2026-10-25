@@ -29643,3 +29643,21 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the handoff-surplus runs end at the same instant (VER-60)
+
+- **The defect.** `a_handoff_beside_a_wall_leaves_less_behind_under_the_trapezoid_step`
+  ran a steady run at 1.2 of the bound and a handed one alternating 1.2 and
+  0.9 every 25 steps each "until t ≥ 8", so the two stopped up to a step
+  apart while what was left still fell, and the surpluses it compared
+  (25% under the half kicks, 7% under the trapezoid step) carried that.
+- **Fix.** Both run whole cycles, 175 steps at 1.2 against 200 alternating,
+  210 bounds each, and the test asserts they end together; the first such
+  instant past 8 s is 11.7 s. There the surplus reads 43% under the half
+  kicks and 13% under the trapezoid step (1.5e-7 of the pulse's 6.3e-2
+  left without a handoff), and the trapezoid step still leaves under half
+  of the half kicks' surplus, as the test asserts; the doc comment's
+  figures are these.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
