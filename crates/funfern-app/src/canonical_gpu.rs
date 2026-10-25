@@ -4317,7 +4317,7 @@ fn finite_f32(value: f64, name: &'static str) -> Result<f32, CanonicalGpuBuildEr
 /// An epoch origin as the device keeps it: whole seconds in the first part,
 /// exact in f32 up to 2^24 s, and the fraction, in [0, 1), in the second, so
 /// that the device moves it on by exact sums (`advance_origin`).
-fn split_f64(value: f64) -> Result<[f32; 2], CanonicalGpuBuildError> {
+pub(crate) fn split_f64(value: f64) -> Result<[f32; 2], CanonicalGpuBuildError> {
     let whole = value.floor();
     let high = if whole.abs() < 16_777_216.0 {
         whole as f32

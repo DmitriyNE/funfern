@@ -3061,10 +3061,14 @@ mod tests {
     /// A record's stamp keeps the epoch-local time's precision however long
     /// the run, where one f32 summed on the device kept f32's spacing at the
     /// run's absolute time. The device's arithmetic is reproduced here: the
-    /// origin split into f32 parts, the local time `steps × dt` in f32, the
-    /// fine part their f32 sum. Up to 36 hours in, at the observables
-    /// fixture's step, every stamp is within 2e-5 s of the clock; the single
-    /// f32 was 3.9e-3 s off at 36 hours, 35% of a 120 Hz record's spacing.
+    /// origin split as the plan packs it, whole seconds and the fraction
+    /// (`split_f64`; split instead into a nearest f32 and its residual, the
+    /// test held another split than the device's, VER-45 of the 2026-10-20
+    /// review), the local time `steps × dt` in f32, the fine part their f32
+    /// sum. Up to 36 hours in, at the observables fixture's step, every stamp
+    /// is within 2e-5 s of the clock, inside the 3e-5 `stamp_seconds` states;
+    /// the single f32 was 3.9e-3 s off at 36 hours, 35% of a 120 Hz record's
+    /// spacing.
     #[test]
     fn probe_stamps_keep_their_precision_however_long_the_run() {
         let dt = 5.5416e-3_f64;
@@ -3074,7 +3078,7 @@ mod tests {
             // The epoch the device rebased onto last: its origin is a step
             // count's time, within 256 s of the clock.
             let origin = (start / dt).floor() * dt;
-            let (hi, lo) = (origin as f32, (origin - f64::from(origin as f32)) as f32);
+            let [hi, lo] = crate::canonical_gpu::split_f64(origin).unwrap();
             for step in (0..(256.0 / dt) as u32).step_by(97) {
                 let local = step as f32 * dt as f32;
                 let exact = origin + f64::from(step) * dt;
@@ -3246,12 +3250,41 @@ mod tests {
         assert!(!shader.contains("potential"));
     }
 
+    /// Each curve probe samples on its own solver-step stride, read back from
+    /// the recorder that stores it: the test once checked its own copy of the
+    /// formula (VER-20 of the 2026-10-20 review).
     #[test]
     fn curve_probe_presets_have_independent_solver_step_strides() {
-        let time_step = 0.001;
-        let strides =
-            [30.0, 60.0, 120.0].map(|rate| (1.0_f64 / (rate * time_step)).round().max(1.0) as u64);
-        assert_eq!(strides, [33, 17, 8]);
+        let operator = canonical_operator();
+        let world = World::new();
+        let mut assets = Assets::<ShaderBuffer>::default();
+        let mut request = WaveGpuRequest::default();
+        let mut queue = CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, &world);
+        let probes = [30.0, 60.0, 120.0]
+            .into_iter()
+            .zip(1..)
+            .map(|(sample_rate, id)| CurveProbeInput {
+                id,
+                sample_rate,
+                samples: vec![None; 3],
+            })
+            .collect::<Vec<_>>();
+        request
+            .update_canonical_curve_probes(
+                &mut assets,
+                &mut commands,
+                &operator,
+                &probes,
+                RecorderContext {
+                    time_step: 0.001,
+                    physics: PhysicsModel::Mechanical,
+                    history: RecorderHistory::Keep,
+                },
+            )
+            .unwrap();
+        let strides = request.recorder_strides().curves;
+        assert_eq!(strides, vec![33, 17, 8]);
         assert!(probe_sample_due(264, strides[0]));
         assert!(!probe_sample_due(264, strides[1]));
         assert!(probe_sample_due(264, strides[2]));

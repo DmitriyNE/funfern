@@ -29473,3 +29473,25 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the stamp and stride tests read the device's own arithmetic (VER-45, VER-20)
+
+Each was run as it stood under a temporary break of what it guards, and
+passed; the strengthened test fails under the same break and passes
+without it.
+
+- **VER-45.** `probe_stamps_keep_their_precision_however_long_the_run`
+  split the clock's origin into a nearest f32 and its residual, where the
+  plan packs it as whole seconds and the fraction (`split_f64`), so the
+  device's own split was never the one held to 2e-5. It now calls
+  `split_f64`, made visible to the crate. Break: `split_f64` splitting off
+  1,024-second wholes instead of seconds - the test now reads a stamp
+  3599.99518 s against 3599.99515, 2.9e-5 off, an hour in.
+- **VER-20.** `curve_probe_presets_have_independent_solver_step_strides`
+  computed the strides with its own copy of the formula. It now installs
+  three curve probes at 30, 60 and 120 Hz and reads the strides the
+  recorder stores, [33, 17, 8]. Break: every probe's stride from the first
+  one's rate - the test now reads [33, 33, 33].
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
