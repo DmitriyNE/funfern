@@ -29268,3 +29268,27 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the rejection fixture must refuse, and names the reference's verdict on the refused step (VER-9, VER-41)
+
+- **VER-9, the defect.** The rejection fixture's endpoint, step 4096, is a
+  ceiling the run must not reach, but reaching it ran an ordinary endpoint
+  comparison, so a drive or bound weakened on both sides could pass as a
+  plain run. With the drive cut from 10 to 1 as a stand-in, nothing refused
+  and the old fixture failed only because 4,096 steps of the Kerr medium
+  drifted past the endpoint tolerance ("Q 1.577e-6, b 4.715e-5 … beyond
+  5e-6"); a run that drifted less would have passed.
+- **Fix.** Reaching the ceiling is the fixture's failure, "reached step
+  4096 without a refusal", which the same stand-in now reads.
+- **VER-41, the defect.** On a refusal with the wrong code, the message
+  stated the reference's verdict on step 1, taken before the reference
+  was advanced. With the shader's inverse-domain code made the non-finite
+  one as a stand-in, the device refused after step 788 and the message
+  said "the reference takes that step".
+- **Fix.** The reference is advanced to the refused step first: the same
+  stand-in reads "the reference refuses it: … the field has left the law's
+  declared amplitude bound". Without either stand-in the fixture passes,
+  refusing after step 788 as the reference does.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

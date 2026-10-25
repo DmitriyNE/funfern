@@ -1264,6 +1264,12 @@ fn advance(
                     "the run went past its stop at {target}, to {completed}"
                 )));
             }
+            // The rejection's endpoint is a ceiling: reaching it with nothing
+            // refused is its failure, where it passed as a plain comparison
+            // when neither side refused (VER-9 of the 2026-10-20 review).
+            if matches!(driver.fixture, Fixture::Rejection) {
+                return Some(Err(format!("reached step {target} without a refusal")));
+            }
             if let Err(error) = reference.advance_to(target) {
                 return Some(Err(format!("the reference did not step: {error}")));
             }
@@ -1881,16 +1887,24 @@ fn advance(
             let hash = hash(&display.accepted_storage_bits());
             match first {
                 None => {
-                    let refusal = reference.state.clone().step(&reference.active);
                     if code != CANONICAL_FAILURE_INVERSE_DOMAIN {
-                        return Some(Err(format!(
-                            "the device refused the step after {step} with code {code} ({}), not \
-                             the inverse domain's; the reference {}",
-                            canonical_failure_description(code),
-                            match &refusal {
+                        // The reference's verdict on the same step, the one
+                        // after `step`: taken from where it stood, step 0, it
+                        // judged step 1 (VER-41 of the 2026-10-20 review).
+                        let verdict = match reference.advance_to(step) {
+                            Err(error) => format!(
+                                "refuses earlier, before step {}: {error}",
+                                reference.steps + 1
+                            ),
+                            Ok(()) => match reference.state.clone().step(&reference.active) {
                                 Ok(()) => "takes that step".to_owned(),
                                 Err(error) => format!("refuses it: {error}"),
-                            }
+                            },
+                        };
+                        return Some(Err(format!(
+                            "the device refused the step after {step} with code {code} ({}), not \
+                             the inverse domain's; the reference {verdict}",
+                            canonical_failure_description(code)
                         )));
                     }
                     // The reference takes every step the device accepted and
