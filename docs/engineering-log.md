@@ -29344,3 +29344,22 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: cavity-batches runs the schedules it names (VER-40)
+
+- **The defect.** `cavity-batches` compared the endpoint over batches of
+  1, 7, 128 and 256 steps, but a frame asks for at most
+  `MAX_STEPS_PER_FRAME`, 64, less what is still outstanding, so the last two
+  ran one and the same schedule.
+- **Test first.** The fixture now records the most steps any frame asked
+  for (`E2eSteps::most`, cleared as each batching starts) and fails a
+  batching whose frames never asked for its batch. With the old batches it
+  failed, "asked for batches of 128, the frames asked for at most 64".
+- **Fix.** The batches are 1, 7, 32 and 64 (the user's choice): half the
+  most a frame may ask and the most, which the app makes, where lifting the
+  cap for the fixture would have tested a schedule no frame of the app
+  runs. The four batchings end on the same bits, endpoint hash
+  cbdc03b9f734a1bb.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

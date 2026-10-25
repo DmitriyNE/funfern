@@ -1099,6 +1099,7 @@ impl Playground {
                     });
                     if admitted > 0 {
                         request.request_steps(admitted);
+                        self.e2e_steps.most = self.e2e_steps.most.max(admitted);
                     }
                     note.asked = batch.steps;
                     note.admitted = admitted;

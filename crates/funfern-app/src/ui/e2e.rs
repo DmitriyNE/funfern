@@ -46,11 +46,13 @@ use std::collections::{BTreeSet, VecDeque};
 
 /// Where an end-to-end fixture holds the run: the steps a running frame asks
 /// for stop at `limit`, counted on the running generation, and are `batch` a
-/// frame where it names a number, in place of the frame's pacing.
+/// frame where it names a number, in place of the frame's pacing. `most` is
+/// the most a frame has asked for since the fixture last cleared it.
 #[derive(Default)]
 pub(super) struct E2eSteps {
     pub(super) limit: Option<u64>,
     pub(super) batch: Option<u64>,
+    pub(super) most: u64,
 }
 
 /// Where a fixture starts a fresh generation's clock, if it says: the epoch
@@ -289,8 +291,10 @@ const CHANNEL_MESH: &str = "04a488da9d8b2953/5072aa0afe3822b5";
 const HOLE_MESH: &str = "f84998df08704d66/34b4ee47d28f53ae";
 
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
-/// time, a number that divides nothing, half the run, and the whole run.
-const BATCHES: [u64; 4] = [1, 7, 128, 256];
+/// time, a number that divides nothing, half the most a frame may ask for
+/// (`MAX_STEPS_PER_FRAME`), and the most. Half the run and the whole run, as
+/// it was, both ran 64 a frame.
+const BATCHES: [u64; 4] = [1, 7, 32, 64];
 
 /// What a fixture does at a step it holds the run at.
 #[derive(Clone, Copy, Debug)]
@@ -1137,6 +1141,7 @@ fn advance(
                 driver.start_time = reference.time();
                 state.e2e_steps.limit = Some(driver.base + stop(0));
                 state.e2e_steps.batch = driver.batches.front().copied().flatten();
+                state.e2e_steps.most = 0;
                 driver.phase = Phase::Run {
                     reference: Reference {
                         active,
@@ -1226,6 +1231,7 @@ fn advance(
             }
             state.e2e_steps.limit = Some(driver.base + stop(0));
             state.e2e_steps.batch = driver.batches.front().copied().flatten();
+            state.e2e_steps.most = 0;
             driver.phase = Phase::Run { reference, next: 0 };
             None
         }
@@ -1262,6 +1268,17 @@ fn advance(
             if completed > target {
                 return Some(Err(format!(
                     "the run went past its stop at {target}, to {completed}"
+                )));
+            }
+            // A batching the frames never asked for compares one schedule
+            // with itself: past what a frame may ask, 128 and 256 both ran 64
+            // a frame (VER-40 of the 2026-10-20 review).
+            if let Some(batch) = state.e2e_steps.batch
+                && state.e2e_steps.most != batch
+            {
+                return Some(Err(format!(
+                    "asked for batches of {batch}, the frames asked for at most {}",
+                    state.e2e_steps.most
                 )));
             }
             // The rejection's endpoint is a ceiling: reaching it with nothing
