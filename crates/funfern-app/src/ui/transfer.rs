@@ -159,6 +159,11 @@ impl TransferView {
         self.average.windows()
     }
 
+    /// The average's complex ratios, or `None` before its first window.
+    pub(super) fn transfer(&self) -> Option<TransferSpectrum> {
+        self.average.transfer()
+    }
+
     /// Takes the `segment` seconds of `response` ending at `end` against
     /// `input` into the average: Welch's estimate, over segments as long as
     /// the readout asks whatever span its plots show. A live view adds each

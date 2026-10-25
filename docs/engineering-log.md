@@ -29314,3 +29314,33 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the observables fixture checks the readouts' own length and transfer path (VER-42, VER-43)
+
+- **VER-42, the defect.** The fixture integrated each line record over the
+  twin's length, while the readout integrates over the length the record
+  was sampled over (`frame.length` since 7e02e32, the probe's standing one
+  without it), so a readout reading the wrong length passed. With each
+  record's length doubled at ingestion as a stand-in, the old judge read
+  the integrals 7.88e-6 off and passed.
+- **Fix.** The readout's rule is one function,
+  `Playground::curve_frame_length`, which the readout and the judge both
+  call; the judge integrates over its length and holds it to the twin's
+  within 1e-6. The same stand-in now fails: lengths 1.0 off, the integrals
+  2.03.
+- **VER-43, the defect.** The transfer check averaged its own windows of
+  the two records paired by index, bypassing `TransferView` and its
+  resampling, and read |H| of one tone through a pure delay, which is 1
+  however the two records are aligned. With the readout's reference
+  resampled one interval late as a stand-in, the old judge read |H|
+  0.99951 and passed.
+- **Fix.** The judge runs `TransferView::update` as the readout does,
+  downstream against the upstream probe over two-second segments across
+  the steady span, and holds the phase at 2 Hz to the delay of the points'
+  0.8 apart at c₀ = 1, within 1e-2 rad, beside |H| within 2e-3. The view
+  gains an accessor for its complex ratios. On the M1 Max the fixture
+  passes with |H| 0.99940 and the phase 1.1e-3 rad off; the same stand-in
+  fails, 0.138 rad off.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

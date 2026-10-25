@@ -5,8 +5,9 @@
 //! holds what the app's traces recorded on the device to it, and the tests
 //! below hold the twin to the wave.
 
+use super::super::transfer::{TransferInput, TransferSource, TransferView};
 use super::*;
-use crate::document::{LineProbeQuantity, ProbeSamplingPreset};
+use crate::document::{LineProbeQuantity, ProbeSamplingPreset, TransferReference};
 use crate::topology_editor::{
     TopologyBoundaryProbeTarget, TopologyProbeDefinition, TopologyProbeTarget,
 };
@@ -15,7 +16,7 @@ use crate::wave_gpu::PointProbeRecord;
 use funfern_core::{
     CanonicalAreaSample, CanonicalPointSample, CanonicalPointStencil, CanonicalWaveOperator,
     ElectromagneticPolarization, PhysicsModel, PulseEnvelope, QuadraticAreaStencil,
-    TransferAverage, sample_canonical_area,
+    sample_canonical_area,
 };
 
 /// The left side's drive: a 2 Hz sine of amplitude 0.5 under a flat top 8 s
@@ -41,6 +42,11 @@ pub(super) const OBSERVED_STEPS: u64 = 1440;
 /// Where the readouts' spectrum and transfer read the wave: from its front
 /// passing the far point to the drive's falling edge.
 const STEADY: (f64, f64) = (3.0, 7.5);
+/// The transfer readout's segment there.
+const TRANSFER_SEGMENT: f64 = 2.0;
+/// The transfer's phase against the wave's delay, in radians: the M1 Max
+/// reads 1.1e-3, a reference resampled one sample out of line 0.14.
+const PHASE: f64 = 1.0e-2;
 
 pub(super) const UPSTREAM: ProbeId = ProbeId(1);
 pub(super) const DOWNSTREAM: ProbeId = ProbeId(2);
@@ -473,6 +479,7 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
 
     let mut worst_line = 0.0_f64;
     let mut worst_integral = 0.0_f64;
+    let mut worst_length = 0.0_f64;
     let mut loop_flux = Vec::new();
     for (index, id) in LINES.iter().enumerate() {
         let trace = state
@@ -507,11 +514,22 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
                     grow(&mut worst_line, error);
                 }
             }
-            let (read, coverage) = Playground::curve_probe_integral(
+            // Over the length the readout integrates with, held to the
+            // twin's: the twin's own length let a readout that integrated
+            // over a wrong one pass (VER-42 of the 2026-10-20 review).
+            let length = Playground::curve_frame_length(
                 record,
-                twin.lines[index].1,
-                LineProbeQuantity::Flux,
+                state
+                    .probe_metrics
+                    .get(id)
+                    .map_or(0.0, |(length, _)| *length),
             );
+            grow(
+                &mut worst_length,
+                (length - twin.lines[index].1).abs() / twin.lines[index].1,
+            );
+            let (read, coverage) =
+                Playground::curve_probe_integral(record, length, LineProbeQuantity::Flux);
             let exact = twin.integral(index, line.iter().map(|point| point.flux));
             grow(
                 &mut worst_integral,
@@ -526,7 +544,8 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
         }
     }
     summary.push(format!(
-        "lines {worst_line:.2e}, their integrals {worst_integral:.2e}"
+        "lines {worst_line:.2e}, their integrals {worst_integral:.2e} over lengths \
+         {worst_length:.1e} off"
     ));
 
     let mut worst_area = 0.0_f64;
@@ -623,38 +642,57 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
             |best, line| if line[1] > best[1] { line } else { best },
         );
     summary.push(format!("spectrum {peak:.5} at {frequency:.3} Hz"));
-    let steady = |records: &VecDeque<PointProbeRecord>| {
-        records
-            .iter()
-            .filter(|record| record.time >= STEADY.0 && record.time <= STEADY.1)
-            .map(|record| record.displacement)
-            .collect::<Vec<_>>()
+    // The readout's own transfer, taken as the readout takes it, on the
+    // downstream probe against the upstream one over two-second segments
+    // across the steady span, and held in phase as well as in gain: one tone
+    // through a pure delay reads |H| = 1 however the two records are aligned,
+    // where its phase moves 0.1 rad a sample (VER-43 of the 2026-10-20
+    // review). The wave travels the points' x apart at c₀ = 1.
+    let (up, down) = (
+        upstream.iter().copied().collect::<Vec<_>>(),
+        downstream.iter().copied().collect::<Vec<_>>(),
+    );
+    let input = TransferInput {
+        reference: TransferReference::Probe(UPSTREAM),
+        label: String::new(),
+        data: None,
+        sources: None,
     };
-    let (up, down) = (steady(upstream), steady(downstream));
-    let interval = upstream[1].time - upstream[0].time;
-    let window = (2.0 / interval).round() as usize;
-    let mut average = TransferAverage::default();
-    let mut start = 0;
-    while start + window <= up.len().min(down.len()) {
-        average
-            .add(
-                &up[start..start + window],
-                &down[start..start + window],
-                interval,
-            )
-            .map_err(|error| format!("the transfer: {error:?}"))?;
-        start += window / 4;
+    let mut view = TransferView::default();
+    let mut end = STEADY.0 + TRANSFER_SEGMENT;
+    while end <= STEADY.1 {
+        view.update(
+            &down,
+            &input,
+            TransferSource::Probe(&up),
+            end,
+            TRANSFER_SEGMENT,
+            true,
+        );
+        end += TRANSFER_SEGMENT / 4.0;
     }
-    let transfer = average.transfer().ok_or("no transfer window")?;
+    let transfer = view.transfer().ok_or("no transfer window")?;
     let bin = (FREQUENCY / transfer.frequency_step_hz).round() as usize;
-    let gain = transfer.magnitude(bin).unwrap_or(f64::NAN);
-    summary.push(format!("transfer |H| {gain:.5}"));
+    let [re, im] = transfer
+        .ratios
+        .get(bin)
+        .copied()
+        .flatten()
+        .ok_or("no transfer at the drive's frequency")?;
+    let gain = re.hypot(im);
+    let delay = -std::f64::consts::TAU * FREQUENCY * (DOWNSTREAM_POINT.x - UPSTREAM_POINT.x);
+    let phase = (im.atan2(re) - delay + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+        - std::f64::consts::PI;
+    summary.push(format!(
+        "transfer |H| {gain:.5}, its phase {phase:+.1e} rad from the delay's"
+    ));
 
     let summary = summary.join(", ");
     for (what, value, bound) in [
         ("a point", worst_point, TOLERANCE),
         ("a line", worst_line, TOLERANCE),
         ("a line's integral", worst_integral, TOLERANCE),
+        ("a line's length", worst_length, 1.0e-6),
         ("an area", worst_area, TOLERANCE),
         ("a stamp", worst_stamp, STAMP),
         ("Poynting round the loop", worst_poynting, 1.0e-2),
@@ -666,6 +704,7 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
             1.0e-2,
         ),
         ("the transfer", (gain - 1.0).abs(), 2.0e-3),
+        ("the transfer's phase", phase.abs(), PHASE),
     ] {
         if !within(value, bound) {
             return Err(format!(

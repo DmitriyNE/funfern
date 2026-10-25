@@ -390,6 +390,16 @@ impl Playground {
         }
         (means, filled)
     }
+    /// The length a curve probe's frame was sampled over, or `standing`,
+    /// the probe's as it stands, for a frame ingested without one.
+    pub(super) fn curve_frame_length(frame: &CurveProbeRecord, standing: f64) -> f64 {
+        if frame.length.is_finite() {
+            frame.length
+        } else {
+            standing
+        }
+    }
+
     /// Trapezoidal integral along the sampled path, plus the fraction of the
     /// intervals that carried finite values. The samples run end to end, and
     /// round a closed loop both ends sit on its seam, so a loop has no
@@ -919,15 +929,7 @@ impl Playground {
                 .probe_metrics
                 .get(&id)
                 .map_or(0.0, |(length, _)| *length);
-            // Each frame over the length it was sampled over, and the
-            // probe's as it stands for one ingested without it.
-            let length_of = |frame: &CurveProbeRecord| {
-                if frame.length.is_finite() {
-                    frame.length
-                } else {
-                    length
-                }
-            };
+            let length_of = |frame: &CurveProbeRecord| Self::curve_frame_length(frame, length);
             // The averaged flux row can only look back as far as the trace
             // reaches, which at the faster presets is well short of the history
             // slider. Offering more than that would be a setting that shows
