@@ -149,6 +149,15 @@ Three things the table does not show directly:
   a continuously generated wave carries the bounded offset. The leapfrog's
   own pin has the same `h²/8` mismatch, and would gain from it too.
 
+  These figures were taken with both schemes at the leapfrog's 0.9 of the
+  bound. Measured again on 25 October at the steps the app takes, the
+  fourth-order step at 1.2 and the leapfrog at 0.9, both to the same
+  instant (VER-55 of the 2026-10-20 review): plain pins read 4.8e-3 and
+  1.07e-2, the expanded ones 3.8e-3 and 6.3e-3, against the leapfrog's
+  1.77e-2 - 4.6 and 2.8 times better, the offset worth 1.24 and 1.70 of it.
+  A source's error falls 7.1 and 3.7 times, and from rest the error is nine
+  times the leapfrog's (3.9e-5 against 3.5e-4), its order 4.4 and 4.1.
+
 ### Long runs
 
 Relative energy change at the app's step, no loss, from data with grid-scale

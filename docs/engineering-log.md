@@ -29760,3 +29760,30 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the fourth-order tests at the app's own steps, and what the pins' offset buys (VER-55, VER-14)
+
+- **VER-55, the defect.** `fourth_order_errors` ran both schemes at 0.9 of
+  the bound, the leapfrog's step, and its doc called that the app's step;
+  the app steps a linear generation's fourth-order step at 1.2.
+- **Fix.** Each scheme runs at its own recommended step, both to the same
+  instant (1 s), against the same Richardson reference. Measured there, the
+  fourth-order step does less than the old figures said: from rest its
+  error is nine times the leapfrog's (3.9e-5 against 3.5e-4, where the test
+  held ten), its order 4.4 and 4.1; a source's error falls 7.1 and 3.7
+  times in the drift and kick forms (held eight and four), a pinned
+  signal's 4.6 and 2.8 times (held five and three). The bounds are now 0.15,
+  6 and 3, 4 and 2.4, and the test docs and the fourth-order spike carry the
+  new figures beside its old ones.
+- **VER-14, the defect.** The prescribed case's drift gain of 5 passed with
+  the drift form's pin correction removed: plain pins already beat the
+  leapfrog 7.2 times at 0.9. Shown first: the correction removed from the
+  drift arm as a temporary edit, the old test passed.
+- **Fix.** A test-only switch reads the pins plainly in both forms, and the
+  prescribed case holds the expanded pins below the plain ones by a factor
+  of 1.15 in the drift form and 1.4 in the kick form; they read 1.24 and
+  1.70. The same edit now fails, the drift form's errors equal to the plain
+  pins' own.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

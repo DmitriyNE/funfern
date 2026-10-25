@@ -4943,7 +4943,9 @@ impl CanonicalTemporalWaveState {
                 // stands `h²/8 · ü` below the midpoint field; a pinned node
                 // reads its signal expanded the same way.
                 for (value, signal) in field.iter_mut().zip(forcing.prescribed()) {
-                    if let Some(signal) = signal {
+                    if let Some(signal) = signal
+                        && !pins_read_plainly()
+                    {
                         *value -= (signal.value(middle_time + duration) - 2.0 * *value
                             + signal.value(middle_time - duration))
                             / 8.0;
@@ -5300,10 +5302,14 @@ fn fourth_order_temporal_field(
             // node reads its signal expanded the same way.
             Some(signal) => {
                 let value = signal.value(middle_time);
-                value
-                    - (signal.value(middle_time + duration) - 2.0 * value
-                        + signal.value(middle_time - duration))
-                        / 24.0
+                if pins_read_plainly() {
+                    value
+                } else {
+                    value
+                        - (signal.value(middle_time + duration) - 2.0 * value
+                            + signal.value(middle_time - duration))
+                            / 24.0
+                }
             }
             None => field - scale * stiffness * inverse,
         })
@@ -6591,6 +6597,27 @@ fn forced_kick(
         Ok((source_work, prescribed_exchange, boundary_loss))
     } else {
         Err(WaveError::InvalidState)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: pinned nodes read their signal plainly in the fourth-order
+    /// step, without the offset the free nodes carry, so a test can measure
+    /// what that offset buys (VER-14 of the 2026-10-20 review).
+    static PLAIN_PINS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the fourth-order step reads pinned nodes plainly: only ever in a
+/// test that asks for it.
+fn pins_read_plainly() -> bool {
+    #[cfg(test)]
+    {
+        PLAIN_PINS.with(std::cell::Cell::get)
+    }
+    #[cfg(not(test))]
+    {
+        false
     }
 }
 
@@ -17140,23 +17167,35 @@ mod tests {
         (difference / norm).sqrt()
     }
 
-    /// The fourth-order step's field errors at the app's step, its half and
-    /// its quarter, for each form, beside the leapfrog's, against a
-    /// Richardson extrapolation of the leapfrog at 1/64 and 1/128 of the
-    /// step: a reference that does not depend on the scheme under test.
+    /// The fourth-order step's field errors at the app's step for it, its
+    /// half and its quarter, for each form, beside the leapfrog's at the
+    /// app's step for that, each to the same instant, against a Richardson
+    /// extrapolation of the leapfrog at 1/64 and 1/128 of its step: a
+    /// reference that does not depend on the scheme under test. Both
+    /// schemes once ran at the leapfrog's 0.9 of the bound, where the app
+    /// steps a linear generation's fourth-order step at 1.2 (VER-55 of the
+    /// 2026-10-20 review).
     fn fourth_order_errors(
         operator: &CanonicalTemporalWaveOperator,
         forcing: &CanonicalForcing,
         amplitude: f64,
     ) -> [(Option<FourthOrderForm>, [f64; 3]); 3] {
-        let coarse = 0.9 * operator.maximum_time_step();
-        let steps = (1.0 / coarse).ceil() as usize;
-        let run = |refinement: usize, form| {
+        let end = 1.0;
+        let step = |integrator: CanonicalIntegrator| {
+            let largest = integrator.recommended() * operator.maximum_time_step();
+            let steps = (end / largest).ceil();
+            (end / steps, steps as usize)
+        };
+        let run = |refinement: usize, form: Option<FourthOrderForm>| {
+            let (step, steps) = step(match form {
+                None => CanonicalIntegrator::Leapfrog,
+                Some(_) => CanonicalIntegrator::FourthOrder,
+            });
             fourth_order_field_from_rest(
                 operator,
                 forcing,
                 amplitude,
-                coarse / refinement as f64,
+                step / refinement as f64,
                 steps * refinement,
                 form,
             )
@@ -17192,13 +17231,18 @@ mod tests {
         let operator = compile(&Scene::default()).unwrap();
         let forcing = CanonicalForcing::none(operator.base());
         let [(_, leapfrog), drift, kick] = fourth_order_errors(&operator, &forcing, 1.0);
+        eprintln!(
+            "from rest: leapfrog {leapfrog:?}, drift {:?}, kick {:?}",
+            drift.1, kick.1
+        );
         for (form, errors) in [drift, kick] {
             for pair in errors.windows(2) {
                 let order = (pair[0] / pair[1]).log2();
                 assert!(order > 3.7, "{form:?}: order {order:.2} in {errors:?}");
             }
+            // Nine times the leapfrog's at its own step: 3.9e-5 against 3.5e-4.
             assert!(
-                errors[0] < 0.1 * leapfrog[0],
+                errors[0] < 0.15 * leapfrog[0],
                 "{form:?}: {errors:?} {leapfrog:?}"
             );
         }
@@ -17212,10 +17256,12 @@ mod tests {
 
     /// A source or a prescribed signal driving the box from rest. Both stay
     /// second order through the bounded offset a continuously generated wave
-    /// carries, but at the app's step the fourth-order kick quadrature takes
-    /// a source's error down an order of magnitude, and a pin read with the
-    /// free nodes' own offset (`h²/24` in the drift form, `h²/8` in the kick
-    /// form) takes a signal's down five to ten times.
+    /// carries, but at the app's steps, 1.2 of the bound against the
+    /// leapfrog's 0.9, the fourth-order kick quadrature takes a source's
+    /// error down 7.1 and 3.7 times (drift and kick form), and a pin read with
+    /// the free nodes' own offset (`h²/24` in the drift form, `h²/8` in the
+    /// kick form) takes a signal's down 4.6 and 2.8 times, the offset itself
+    /// worth 1.24 and 1.70 of that against pins read plainly.
     #[test]
     fn the_fourth_order_step_carries_sources_and_prescribed_signals() {
         let operator = compile(&Scene::default()).unwrap();
@@ -17242,11 +17288,29 @@ mod tests {
             .collect::<Vec<_>>();
         let pinned = CanonicalForcing::from_prescribed(base, prescribed).unwrap();
         for (label, forcing, drift_gain, kick_gain) in [
-            ("source", sourced, 8.0, 4.0),
-            ("prescribed", pinned, 5.0, 3.0),
+            ("source", sourced, 6.0, 3.0),
+            ("prescribed", pinned, 4.0, 2.4),
         ] {
             let [(_, leapfrog), (_, drift), (_, kick)] =
                 fourth_order_errors(&operator, &forcing, 0.0);
+            PLAIN_PINS.with(|plain| plain.set(true));
+            let [_, (_, plain_drift), (_, plain_kick)] =
+                fourth_order_errors(&operator, &forcing, 0.0);
+            PLAIN_PINS.with(|plain| plain.set(false));
+            eprintln!(
+                "{label}: leapfrog {leapfrog:?}, drift {drift:?} (plain pins {plain_drift:?}), \
+                 kick {kick:?} (plain pins {plain_kick:?})"
+            );
+            // What the pins' offset buys, read against pins read plainly: the
+            // drift form beat the leapfrog by more than its gain without it,
+            // so the gain alone could not see the offset go (VER-14 of the
+            // 2026-10-20 review).
+            if label == "prescribed" {
+                assert!(
+                    drift[0] * 1.15 < plain_drift[0] && kick[0] * 1.4 < plain_kick[0],
+                    "{drift:?} against {plain_drift:?}, {kick:?} against {plain_kick:?}"
+                );
+            }
             assert!(
                 drift[0] * drift_gain < leapfrog[0],
                 "{label}: {drift:?} {leapfrog:?}"
