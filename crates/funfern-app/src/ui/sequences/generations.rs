@@ -658,7 +658,12 @@ impl Session {
             Act::Frame(grant) => self.frame(*grant),
             Act::Readbacks(steps) => self.request.deliver_readbacks(&mut self.display, *steps),
             Act::Handoff(accept) => {
-                if self.request.handoff_outcome() != CanonicalGpuHandoffOutcome::Pending {
+                // The device admits a handoff by its handles, not by the
+                // host's outcome: guarded on the outcome, a withdrawal that
+                // set it and left the handles behind was never offered for
+                // admission, and "nothing was admitted" could not fail
+                // (VER-44 of the 2026-10-20 review).
+                if self.request.handoff_manifest().is_none() {
                     return;
                 }
                 if *accept {

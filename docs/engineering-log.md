@@ -29363,3 +29363,20 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the sequence harness admits a handoff by its handles (VER-44)
+
+- **The defect.** The runtime sequences' `Act::Handoff` returned unless the
+  host's handoff outcome read Pending, where the device admits a handoff by
+  its handles. In `a_fault_while_a_handoff_waits_withdraws_it` the outcome
+  had just been withdrawn, so "nothing was admitted" was checked after a
+  step that could not admit anything. With `withdraw_handoff` made to clear
+  the outcome and keep the handles as a temporary edit, the test passed.
+- **Fix.** The harness offers a handoff while the request holds its handles,
+  as the device's admission reads them. The same edit now fails: the
+  harness admits the handoff left behind and the generation changes with no
+  upload awaiting it ("the device published a handoff no upload waits
+  for"). Without the edit the twelve sequence tests pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
