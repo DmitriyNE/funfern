@@ -29070,3 +29070,20 @@ One commit for the two, both in the signal editor.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 8: a start past the timeout is a start all the same (UI-35)
+
+- **The defect.** `index.html`'s overlay fails its start at 30 s, setting
+  `failed`; the app, starting late, hid the overlay but nothing reset the
+  flag, so every later stop - a lost device, a rendering error - was worded
+  as "Unable to start WebGPU" instead of "funfern stopped".
+- **Fix.** A MutationObserver on the overlay's `hidden` attribute resets the
+  failed state and its class when the app hides it; the app's own code is
+  unchanged. Page logic, which no test in the suite runs: checked in node
+  against a minimal DOM (the overlay, its status line and an attribute
+  observer), timing the start out at 30 s, hiding the overlay as the app
+  does, then stopping - the page as it was read "Unable to start WebGPU",
+  the page now reads "funfern stopped.". The check is not committed.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

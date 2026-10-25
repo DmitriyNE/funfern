@@ -254,6 +254,16 @@
     // The app's own way to say it stopped: a lost GPU device, or a rendering
     // error, told in this overlay's words (src/stopped.rs).
     window.funfernStopped = fail;
+    // The app hides this overlay once it runs. A start that outlived the
+    // 30 s timeout had failed it already, and every later stop then read
+    // "Unable to start WebGPU" (UI-35 of the 2026-10-20 review): hidden by
+    // the app, the overlay is a running app's again.
+    new MutationObserver(() => {
+      if (startup.hidden) {
+        failed = false;
+        startup.classList.remove('failed');
+      }
+    }).observe(startup, { attributes: true, attributeFilter: ['hidden'] });
     if (!navigator.gpu) fail('This browser does not expose navigator.gpu.');
     addEventListener('error', e => fail(e.message));
     addEventListener('unhandledrejection', e => fail(String(e.reason)));
