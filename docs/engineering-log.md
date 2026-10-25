@@ -29234,3 +29234,37 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: three device gates' lows (VER-33, VER-34, VER-36)
+
+- **VER-33.** `canonical_gpu_nonlinear_failure` accepts a device that
+  refuses a step either side of the oracle, but a device one step late had
+  accepted the step the oracle refused, and the gate read the oracle's state
+  for it one past the end of its history. With the oracle's refusal moved a
+  step earlier as a stand-in, the gate panicked, "index out of bounds: the
+  len is 253 but the index is 253"; it now says there is no oracle state for
+  that step and goes on to check the refusal and the retry, which the
+  stand-in run passes.
+- **VER-34.** `canonical_gpu_temporal_amr` held the state after its eight
+  settle steps to 1e-3, a bound set by the oracle's since-fixed transfer
+  defect (2e-4), and waited on the clock's count against 8 when that count
+  is absolute and already past it, so which snapshot it read was left to
+  timing. It now waits for a full snapshot at the settle steps' end and
+  holds the state to 1e-5; on the M1 Max it reads 2.7e-7. With the
+  oracle's post-settle Q moved by 1e-4 as a stand-in, the old bound passed
+  (Q 9.996e-5) and the new one fails, "the transfer moved the state by
+  9.996e-5, beyond 1e-5".
+- **VER-36.** `CanonicalGpuPlan::table_differences` read a node's source
+  rows at the force rows' slice stride, but they are packed one entry after
+  another, so every entry past the first was some other word. Test first:
+  `a_differing_second_source_entry_is_found` packs two overlapping sources
+  and flips a bit of a node's second entry in a copy; before the fix the
+  comparison found nothing, now it names "source rows". The regression
+  scenes, its one caller, still pack both ways alike.
+- **Device:** the suite's seven runs of the two examples pass; the
+  post-settle state reads at most 5.9e-7 (`b`) over the three AMR runs, and
+  each failure gate's device refuses the step after the oracle's last
+  accepted one, its accepted state 1.2e-6 to 4.1e-6 from the oracle's.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

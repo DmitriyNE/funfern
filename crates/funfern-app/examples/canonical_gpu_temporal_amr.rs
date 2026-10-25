@@ -126,6 +126,9 @@ struct Expected {
     /// The device's own accepted state just before the handoff.
     departing: Option<(Vec<f64>, Vec<Point2>)>,
     readbacks_at_handoff: u64,
+    /// The device's step count once the settle steps after the handoff are
+    /// done, which the compared snapshot must be taken at.
+    settled_at: u64,
     scene: Scene,
     time: f64,
     target_time: f64,
@@ -444,6 +447,7 @@ fn main() -> AppExit {
         vector_map,
         departing: None,
         readbacks_at_handoff: 0,
+        settled_at: 0,
         source: Generation {
             mesh,
             quadratic,
@@ -765,16 +769,23 @@ fn drive(
                 .collect::<Vec<_>>(),
             );
             request.request_steps(SETTLE_STEPS);
+            expected.settled_at = request.requested_steps();
             expected.phase = Phase::Settled;
         }
         Phase::Settled => {
-            if display
-                .clock
-                .is_none_or(|clock| clock.accepted_steps < SETTLE_STEPS)
-            {
+            // A full snapshot taken once the settle steps are done: the
+            // clock's count is absolute, already past `SETTLE_STEPS` at the
+            // handoff, so waiting on it waited for nothing, and which
+            // snapshot was read was left to timing (VER-34 of the 2026-10-20
+            // review).
+            if request.stats().completed_steps() < expected.settled_at {
                 return;
             }
-            if !request.request_full_state_readback() {
+            if display.full_readbacks == 0
+                || display.full_readback_at != display.readbacks
+                || display.full_snapshot_completed_steps() != expected.settled_at
+            {
+                request.request_full_state_readback();
                 return;
             }
             let Some((device, lanes)) = read_estimate(&display, &expected, true) else {
@@ -784,9 +795,11 @@ fn drive(
             let ok = compare("after refinement", &device, &oracle, &expected, true);
             // The transferred state itself, which is what the rate-sensitive
             // terms are actually reporting on.
-            let carried = within(lanes, 1.0e-3);
+            // Measured at 2.5e-7 once the oracle's transfer was the device's;
+            // the 2e-4 this was once held to was that oracle's defect.
+            let carried = within(lanes, 1.0e-5);
             if !carried {
-                eprintln!("the transfer moved the state by {lanes:.3e}, beyond its measured 2e-4");
+                eprintln!("the transfer moved the state by {lanes:.3e}, beyond 1e-5");
             }
             // Refining where the estimate asked has to lower the estimate, or
             // the size field and the error term disagree about where the error

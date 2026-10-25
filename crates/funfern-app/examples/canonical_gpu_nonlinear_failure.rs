@@ -312,7 +312,28 @@ fn drive(
                 expected.phase = Phase::Done;
                 return;
             }
-            let (primary, complementary) = &expected.history[completed as usize - 1];
+            let description = funfern_app::canonical_gpu::canonical_failure_description(failure);
+            // A device a step late accepted the step the oracle refused, so
+            // there is no oracle state to hold that one to; the refusal and
+            // the retry after it are still checked. Read unguarded, the index
+            // ran one past the oracle's history and the gate panicked (VER-33
+            // of the 2026-10-20 review).
+            let Some((primary, complementary)) = expected.history.get(completed as usize - 1)
+            else {
+                println!(
+                    "device refused step {} with status {failure} ({description}), one past \
+                     the oracle's refusal; no oracle state for its accepted step {completed}",
+                    completed + 1
+                );
+                expected.failed_bits = Some(display.accepted_storage_bits());
+                expected.failed_readbacks = display.full_readbacks;
+                request
+                    .clear_failure(&mut assets, &mut commands)
+                    .expect("clear the domain failure");
+                request.request_steps(1);
+                expected.phase = Phase::Retry;
+                return;
+            };
             let error = worse(
                 relative_l2(
                     display.primary_flux.iter().map(|value| f64::from(*value)),
@@ -327,10 +348,9 @@ fn drive(
                 ),
             );
             println!(
-                "device refused step {} with status {failure} ({}); accepted state against the \
-                 oracle's step {completed}: {error:.3e}",
-                completed + 1,
-                funfern_app::canonical_gpu::canonical_failure_description(failure)
+                "device refused step {} with status {failure} ({description}); accepted state \
+                 against the oracle's step {completed}: {error:.3e}",
+                completed + 1
             );
             if !within(error, 3.0e-5) {
                 expected.failed = true;

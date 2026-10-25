@@ -1305,6 +1305,10 @@ impl CanonicalGpuPlan {
                 .map(|k| plan.tables[start as usize + k * ENTRY_SLICE])
                 .collect()
         };
+        // Source rows are packed one entry after another, not in slices.
+        let contiguous = |plan: &Self, start: u32, len: u32| -> Vec<GpuCanonicalTableWord> {
+            plan.tables[start as usize..(start + len) as usize].to_vec()
+        };
         let stiffness_row = |plan: &Self, node: &GpuCanonicalNode| -> Vec<(u32, f32)> {
             let mut row = entries(plan, node.stiffness.x, node.stiffness.y)
                 .into_iter()
@@ -1335,8 +1339,8 @@ impl CanonicalGpuPlan {
             {
                 forces = true;
             }
-            if entries(self, mine.ranges.z, mine.ranges.w)
-                != entries(other, theirs.ranges.z, theirs.ranges.w)
+            if contiguous(self, mine.ranges.z, mine.ranges.w)
+                != contiguous(other, theirs.ranges.z, theirs.ranges.w)
             {
                 sources = true;
             }
@@ -9868,6 +9872,59 @@ mod tests {
             float_word(gpu_pulse_window(pin, origin).unwrap().unwrap().window).data
         );
         assert_eq!(plan.control.table_offsets.x as usize, word + 1);
+    }
+
+    /// A node's source rows are compared as they are packed, one entry after
+    /// another: read at the force rows' slice stride, every entry past the
+    /// first was some other word, so two packers that disagreed on a second
+    /// overlapping source agreed (VER-36 of the 2026-10-20 review).
+    #[test]
+    fn a_differing_second_source_entry_is_found() {
+        let scene = Scene::initial();
+        let mesh = mesh_scene(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.24,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = QuadraticWaveOperator::assemble_scene(
+            &mesh,
+            &scene,
+            OuterBoundaryCondition::Reflecting,
+        )
+        .unwrap();
+        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 7).unwrap();
+        let dt = 0.8 * operator.maximum_time_step();
+        let state = CanonicalWaveState::zero(&operator, dt).unwrap();
+        let mut forcing = CanonicalForcing::none(&operator);
+        for frequency in [1.5, 2.5] {
+            forcing
+                .push_source(
+                    CanonicalSource::direct(
+                        &operator,
+                        operator.primary_mass().to_vec(),
+                        TimeSignal::harmonic(0.1, 0.2, frequency, 0.3),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let plan = CanonicalGpuPlan::compile(
+            &operator,
+            &state,
+            &forcing,
+            CanonicalGpuClock::initial(dt).unwrap(),
+        )
+        .unwrap();
+        let node = plan.nodes[0];
+        assert_eq!(node.ranges.w, 2, "each node carries both sources");
+        assert!(plan.table_differences(&plan.clone()).is_empty());
+        let mut edited = plan.clone();
+        edited.tables[node.ranges.z as usize + 1].data.z ^= 1;
+        assert_eq!(plan.table_differences(&edited), vec!["source rows"]);
     }
 
     /// `inverted` builds the state a fixed generation packs; without it, the
