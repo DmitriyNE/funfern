@@ -29176,3 +29176,28 @@ and `00-tree.txt` names 99d877d with the script's change.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: the consumer gate's switched mode (VER-6)
+
+- **The gap.** `canonical_gpu_temporal_consumer` put its travelling drive on
+  the mass row only, began no Switch and inverted no row, so the probe
+  shaders' stiffness-row spatial phase (a 3-word record stride there once
+  read the wrong words, the 9.1 regression), the Switch blend and the
+  inverted select were never read against the reference.
+- **Fix.** `CONSUMER_SWITCHED=1` puts a travelling drive on the stiffness
+  row as well, gives that row an alternate, divides the mass row's
+  multiplier, and begins a Switch a quarter of the run in that lasts the
+  run, so the compared state sits three quarters up the ramp. A divided row
+  takes no field law yet (Gate C), so the mode refuses `CONSUMER_NONLINEAR`.
+  The suite runs it. On the M1 Max it passes with the worst error 6.7e-6
+  (the point's rate), against 2e-4.
+- **Shown to bite**, each a temporary edit of `canonical_probe.wgsl`, the
+  example rebuilt and run in both modes: the 3-word stride restored in the
+  complementary branch of `probe_temporal_factor` — the default mode passes
+  unchanged, the switched mode reads the point's energy 5.4e-3 off; the
+  blend returning its target — 3.2e-2 on the point's field, 0.69 on its
+  rate; the inverted select dropped — 0.39 on the field and 0.65 on the
+  arrows' flow. The default mode passed all three.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

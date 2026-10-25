@@ -119,6 +119,7 @@ RUNS=(
   'CONSUMER_NONLINEAR=1 canonical_gpu_temporal_consumer'
   'CONSUMER_OSCILLATOR=1 canonical_gpu_temporal_consumer'
   'CONSUMER_GATED=1 canonical_gpu_temporal_consumer'
+  'CONSUMER_SWITCHED=1 canonical_gpu_temporal_consumer'
   'canonical_gpu_temporal_gate'
   'canonical_gpu_temporal_handoff'
   'canonical_gpu_temporal_live_source'

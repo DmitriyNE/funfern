@@ -113,6 +113,28 @@ fn main() -> AppExit {
             saturation: ScalarField::constant(0.03),
         };
     }
+    // `CONSUMER_SWITCHED=1` puts a travelling drive on the stiffness row as
+    // well, whose probe-point phase a 3-word record stride once read from
+    // the wrong words where the mass row's drive could not show it, gives
+    // the stiffness row an alternate, divides the mass row's multiplier, and
+    // begins a Switch the compared state sits inside (VER-6 of the
+    // 2026-10-20 review). A divided row takes no field law yet (Gate C).
+    let switched = std::env::var("CONSUMER_SWITCHED").is_ok_and(|value| value == "1");
+    if switched {
+        assert!(
+            !nonlinear,
+            "CONSUMER_SWITCHED divides a row, which a field law cannot share yet"
+        );
+        material.stiffness_law.drive = TimeDrive::TravellingModulation {
+            depth: ScalarField::constant(0.18),
+            frequency_hz: ScalarField::constant(0.53),
+            phase_radians: ScalarField::constant(-0.41),
+            wavenumber: ScalarField::constant(3.1),
+            angle_radians: ScalarField::constant(0.92),
+        };
+        material.stiffness_law.alternate = Some(ScalarField::constant(0.71));
+        material.mass_law.inverted = true;
+    }
 
     // `CONSUMER_OSCILLATOR=1` adds sine-Gordon (Gate O) with a seeded
     // integrated field, so the area readout's energy has to hold each
@@ -243,6 +265,16 @@ fn main() -> AppExit {
         state = state
             .with_integrated_field(&operator, integrated)
             .expect("temporal consumer integrated field");
+    }
+    if switched {
+        // Begun a quarter of the run in and as long as the run, so the
+        // compared state is three quarters up the ramp, where neither end's
+        // factor would read the same.
+        let span = steps as f64 * time_step;
+        state
+            .runtime_mut()
+            .begin_switch(scene.materials[0].id, true, 0.25 * span, span)
+            .expect("temporal consumer Switch");
     }
     let gpu_state = state.clone();
     for _ in 0..steps - 1 {
