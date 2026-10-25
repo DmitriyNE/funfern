@@ -5558,7 +5558,10 @@ mod tests {
         assert!(prepare(&mut runtime).is_err());
         assert_eq!(runtime.active().unwrap().bundle.token, active.bundle.token);
 
-        runtime
+        // The superseded request's own token, as issued: a hand-made one the
+        // runtime never issued is refused whatever the check compares
+        // (VER-52 of the 2026-10-20 review).
+        let superseded = runtime
             .request(
                 3,
                 &editor.document,
@@ -5576,16 +5579,9 @@ mod tests {
                 false,
             )
             .unwrap();
+        assert_ne!(superseded, newest);
         assert_eq!(prepare(&mut runtime).unwrap(), newest);
-        assert!(
-            runtime
-                .commit_ready(TopologyToken {
-                    document_revision: 3,
-                    topology_revision: 3,
-                    mesh_generation: 3,
-                })
-                .is_err()
-        );
+        assert!(runtime.commit_ready(superseded).is_err());
         assert_eq!(runtime.active().unwrap().bundle.token, active.bundle.token);
     }
 

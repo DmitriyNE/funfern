@@ -29449,3 +29449,27 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-25 — Step 3, area 9: three more checks that could not fail (VER-24, VER-65, VER-52)
+
+Each was run as it stood under a temporary break of what it guards, and
+passed; the strengthened test fails under the same break and passes
+without it.
+
+- **VER-24.** The guided tour's "the frequency alone" assertion checked
+  step 7 right after an edit that leaves acceptance Pending, which alone
+  keeps every step undone. It now settles first, as the other steps'
+  checks do. Break: step 7's test no longer asks for a pulse.
+- **VER-65.** The span-context test asserted only that the two sides of a
+  hole's span differ, which a swap of left and right keeps. It now finds
+  the outside by stepping off the span along its left normal and asserts
+  that side active and the background's, the hole's side inactive. Break:
+  `span_context` swaps its sides.
+- **VER-52.** The superseded-candidate check committed a token the runtime
+  never issued, refused whatever the comparison reads. It now commits
+  request 3's own token, issued and superseded by request 4's. Break:
+  `commit_ready` compares only the topology revision and the mesh
+  generation, which the two requests share.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

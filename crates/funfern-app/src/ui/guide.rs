@@ -1315,6 +1315,11 @@ mod tests {
             let mut source = state.editor.document.model.source;
             *source.signal.carrier_mut().2 += 6.0;
             state.editor.set_point_source(source).unwrap();
+            // Settled, as the other steps' checks are: left pending, the
+            // edit's acceptance alone kept the step undone, whatever its
+            // test said (VER-24 of the 2026-10-20 review).
+            settle(&mut state.editor);
+            state.guide_update(0.0);
             assert!(!state.guide_step_done(), "the frequency alone");
             source.signal = pulse_from(source.signal, SignalUse::Source, 0.0);
             state.editor.set_point_source(source).unwrap();

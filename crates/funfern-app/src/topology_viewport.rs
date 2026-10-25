@@ -1402,6 +1402,22 @@ mod tests {
         assert_eq!(context.behavior, SpanBehavior::REFLECTING);
         assert_ne!(context.left.active, context.right.active);
         assert!((context.direction.norm() - 1.0).abs() < 1.0e-12);
+        // Which side is which: the left of increasing parameter is where the
+        // left normal points, and the hole's side is the inactive one.
+        // Checked only as different, the two sides could swap (VER-65 of the
+        // 2026-10-20 review).
+        let normal = Point2::new(-context.direction.y, context.direction.x);
+        let beside = context.direction_origin + normal * 0.01;
+        let (outside, inside) = if beside.norm() > context.direction_origin.norm() {
+            (&context.left, &context.right)
+        } else {
+            (&context.right, &context.left)
+        };
+        assert!(outside.active && !inside.active);
+        assert_eq!(
+            outside.regions,
+            BTreeSet::from([funfern_core::BACKGROUND_REGION])
+        );
     }
 
     #[test]
