@@ -3539,12 +3539,25 @@ mod tests {
             vec![0.0; operator.degrees_of_freedom()],
         )
         .unwrap();
-        let initial_energy = state.energy(&operator).unwrap();
-        for _ in 0..10_000 {
+        // The interior's discrete energy, with its growth bounded: the state's
+        // `energy` adds the auxiliary memory's `½ψᵀK_auxψ`, an energy times a
+        // time, which no law conserves or dissipates, until the wall has an
+        // energy of its own (VER-63 of the 2026-10-20 review, docs/plan.md).
+        let interior = |state: &QuadraticWaveState| {
+            operator
+                .discrete_energy(state.current(), state.previous(), dt)
+                .unwrap()
+        };
+        let initial_energy = interior(&state);
+        let mut peak = initial_energy;
+        for step in 1..=10_000 {
             state.step(&operator, &[]).unwrap();
+            if step % 50 == 0 {
+                peak = peak.max(interior(&state));
+            }
         }
-        let final_energy = state.energy(&operator).unwrap();
-        assert!(final_energy.is_finite());
+        let final_energy = interior(&state);
+        assert!(peak <= initial_energy * (1.0 + 1.0e-9));
         assert!(final_energy < initial_energy * 1.0e-3);
         assert!(state.auxiliary().iter().all(|value| value.is_finite()));
     }
@@ -3645,17 +3658,25 @@ mod tests {
             vec![0.0; operator.degrees_of_freedom()],
         )
         .unwrap();
-        let initial_energy = state.energy(&operator).unwrap();
+        // The interior's discrete energy, its growth bounded, until the
+        // wall's auxiliary state has an energy of its own (VER-63 of the
+        // 2026-10-20 review, docs/plan.md).
+        let interior = |state: &QuadraticWaveState| {
+            operator
+                .discrete_energy(state.current(), state.previous(), dt)
+                .unwrap()
+        };
+        let initial_energy = interior(&state);
         let mut peak = initial_energy;
         for step in 1..=8_000 {
             state.step(&operator, &[]).unwrap();
             if step % 50 == 0 {
-                let energy = state.energy(&operator).unwrap();
+                let energy = interior(&state);
                 assert!(energy.is_finite(), "energy diverged at step {step}");
                 peak = peak.max(energy);
             }
         }
-        let final_energy = state.energy(&operator).unwrap();
+        let final_energy = interior(&state);
         assert!(
             peak <= initial_energy * (1.0 + 1.0e-9),
             "the absorbers added energy: peak {peak:e} against {initial_energy:e}"

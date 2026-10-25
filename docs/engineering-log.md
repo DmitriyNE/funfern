@@ -29787,3 +29787,26 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Step 3, area 9: the second-order wall's tests read the interior's energy, its own energy a plan item (VER-63)
+
+- **The defect.** `discrete_energy_with_auxiliary` adds the second-order
+  wall's memory as `½ψᵀK_auxψ`, `ψ` the time integral of `u` and `K_aux` a
+  stiffness over an impedance, so the term is an energy times a time; the
+  test that holds the wall's state to losing energy and the ignored
+  reproducer for the curved-span instability both read it.
+- **Interim fix (the user's choice).** Both tests read the interior's
+  discrete energy, which the step conserves away from the walls, and bound
+  its growth to 1e-9 of the start: in the first it never rises and ends at
+  4e-16 of it, in the reproducer it never rises and ends at 6.6e-3. A
+  proper energy for the Engquist-Majda memory goes into docs/plan.md, to be
+  derived after the review's fixes and the legacy phase-out.
+- **Found on the way.** The reproducer passes as it stands, ignored or not:
+  on the old functional it now ends at 6.7e-3 of its start, the field at
+  2.8e-2 and the memory at 1.3e-2 after 8,000 steps, where on 2026-09-15 it
+  grew eighteen orders of magnitude. The curved-span instability it was
+  written for does not reproduce at HEAD; it stays ignored, and the plan's
+  item stays open, until the user says otherwise.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
