@@ -1,8 +1,10 @@
+mod support;
+
 use std::time::Instant;
 
 use funfern_core::{
     MeshingOptions, OuterBoundaryCondition, Point2, QuadraticWaveOperator, QuadraticWaveState,
-    Scene, WaveCoefficients, mesh_scene,
+    TopologyScene, WaveCoefficients,
 };
 
 const TEMPORAL_FRACTION: f64 = 0.225;
@@ -24,8 +26,8 @@ fn main() {
 
     for (wavelength, parent_edge, width) in [(0.4, 0.08, 0.24), (0.2, 0.04, 0.18)] {
         let start = Instant::now();
-        let mesh = mesh_scene(
-            &Scene::default(),
+        let mesh = support::meshed(
+            &TopologyScene::default(),
             0,
             MeshingOptions {
                 curve_tolerance: (parent_edge * 0.02_f64).min(1.5e-3),
@@ -149,8 +151,8 @@ struct LongTimeMeasurement {
 }
 
 fn long_time_check() -> LongTimeMeasurement {
-    let mesh = mesh_scene(
-        &Scene::default(),
+    let mesh = support::meshed(
+        &TopologyScene::default(),
         1,
         MeshingOptions {
             curve_tolerance: 1.5e-3,

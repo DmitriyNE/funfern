@@ -1,8 +1,10 @@
+mod support;
+
 use std::time::Instant;
 
 use funfern_core::{
-    MeshingOptions, Point2, QuadraticWaveOperator, QuadraticWaveState, Scene, TriMesh,
-    WaveCoefficients, WaveOperator, WaveState, mesh_scene,
+    MeshingOptions, Point2, QuadraticWaveOperator, QuadraticWaveState, TopologyScene, TriMesh,
+    WaveCoefficients, WaveOperator, WaveState,
 };
 
 const WAVELENGTH: f64 = 0.4;
@@ -37,8 +39,8 @@ fn main() {
 
 fn make_mesh(requested_edge: f64) -> (TriMesh, f64) {
     let mesh_start = Instant::now();
-    let mesh = mesh_scene(
-        &Scene::default(),
+    let mesh = support::meshed(
+        &TopologyScene::default(),
         0,
         MeshingOptions {
             curve_tolerance: (requested_edge * 0.02_f64).min(1.5e-3),
@@ -49,7 +51,8 @@ fn make_mesh(requested_edge: f64) -> (TriMesh, f64) {
             max_refinement_steps: 50_000,
         },
     )
-    .unwrap_or_else(|error| panic!("h={requested_edge}: {error}"));
+    .unwrap_or_else(|error| panic!("h={requested_edge}: {error}"))
+    .mesh;
     (mesh, mesh_start.elapsed().as_secs_f64())
 }
 

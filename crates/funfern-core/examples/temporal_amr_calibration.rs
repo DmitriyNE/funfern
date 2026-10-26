@@ -20,14 +20,16 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+mod support;
+
 use funfern_core::{
-    BACKGROUND_REGION, CanonicalForcing, CanonicalIndicatorSnapshot, CanonicalTemporalPointStencil,
+    CanonicalForcing, CanonicalIndicatorSnapshot, CanonicalTemporalPointStencil,
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, DampingLaw,
-    FieldLaw, LoopRole, LossChannel, Material, MaterialFrame, MaterialId, MeshingOptions,
+    FieldLaw, LossChannel, Material, MaterialFrame, MaterialId, MeshingOptions,
     OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, Point2, QuadraticPointStencil,
     QuadraticSolutionSnapshot, QuadraticWaveOperator, RateLaw, Region, RegionId, RestoringLaw,
-    ScalarField, Scene, SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive, TimeSignal,
-    TriMesh, canonical_temporal_indicator_supplement, mesh_scene,
+    ScalarField, SolutionIndicatorJob, SolutionIndicatorOptions, TimeDrive, TimeSignal,
+    TopologyScene, TopologyWaveModel, canonical_temporal_indicator_supplement,
 };
 
 /// Coarse to fine; the last is the reference.
@@ -218,7 +220,13 @@ fn main() {
 /// times shorter: `s²` tiles of the first problem, so the true relative error
 /// is the same and an estimate that reads the error in its own units reads the
 /// same index. One whose index moves with `s` is weighting by frequency.
-fn self_similar_rows() -> Vec<(&'static str, Scene, bool, OuterBoundaryConditions, f64)> {
+fn self_similar_rows() -> Vec<(
+    &'static str,
+    TopologyScene,
+    bool,
+    OuterBoundaryConditions,
+    f64,
+)> {
     vec![
         (
             "static path, inert, s=2",
@@ -257,7 +265,7 @@ fn reflecting() -> OuterBoundaryConditions {
 /// no field, slope or curvature. Its wave barely reaches them in the run, so a
 /// channel with one absorbing end starts the bump 0.4 from that wall instead,
 /// and half of it arrives there.
-fn boundary_rows() -> Vec<(&'static str, Scene, bool, OuterBoundaryConditions)> {
+fn boundary_rows() -> Vec<(&'static str, TopologyScene, bool, OuterBoundaryConditions)> {
     let mut prescribed = reflecting();
     prescribed.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Dirichlet {
         signal: TimeSignal::harmonic(0.0, 0.08, 0.5, std::f64::consts::FRAC_PI_2),
@@ -354,7 +362,7 @@ fn boundary_rows() -> Vec<(&'static str, Scene, bool, OuterBoundaryConditions)> 
 /// endpoints - loss beside a restoring law, and a self-oscillating medium like
 /// the self-sustained emitter's, van der Pol gain beside Klein-Gordon with a
 /// complementary loss.
-fn loss_rows() -> Vec<(&'static str, Scene, bool)> {
+fn loss_rows() -> Vec<(&'static str, TopologyScene, bool)> {
     let constant_loss = |rate: f64| LossChannel {
         base_rate: ScalarField::constant(rate),
         law: DampingLaw {
@@ -364,11 +372,11 @@ fn loss_rows() -> Vec<(&'static str, Scene, bool)> {
         },
     };
     // The mechanical skin's complementary row carries the electric channel.
-    let primary_loss = |mut scene: Scene| {
+    let primary_loss = |mut scene: TopologyScene| {
         scene.materials[0].damping = ScalarField::constant(0.45);
         scene
     };
-    let complementary_loss = |mut scene: Scene| {
+    let complementary_loss = |mut scene: TopologyScene| {
         scene.materials[0].electric_loss = Some(constant_loss(5.0));
         scene
     };
@@ -449,8 +457,8 @@ fn saturable(chi: f64, saturation: f64) -> FieldLaw {
 }
 
 /// A field-dependent medium on either row.
-fn nonlinear(mass: Option<FieldLaw>, stiffness: Option<FieldLaw>) -> Scene {
-    let mut scene = Scene::default();
+fn nonlinear(mass: Option<FieldLaw>, stiffness: Option<FieldLaw>) -> TopologyScene {
+    let mut scene = TopologyScene::default();
     if let Some(law) = mass {
         scene.materials[0].mass_law.field = law;
     }
@@ -461,14 +469,14 @@ fn nonlinear(mass: Option<FieldLaw>, stiffness: Option<FieldLaw>) -> Scene {
 }
 
 /// A restoring law on the default medium.
-fn restoring(law: RestoringLaw) -> Scene {
-    let mut scene = Scene::default();
+fn restoring(law: RestoringLaw) -> TopologyScene {
+    let mut scene = TopologyScene::default();
     scene.materials[0].restoring = law;
     scene
 }
 
-fn inert_scene() -> Scene {
-    Scene::default()
+fn inert_scene() -> TopologyScene {
+    TopologyScene::default()
 }
 
 /// One driven row, optionally carrying a spatial pattern at `wavenumber`.
@@ -479,8 +487,8 @@ fn inert_scene() -> Scene {
 /// the row is isolated at a fixed pattern. Two wavenumbers on the same row
 /// then say whether what the estimator charges for scales with the pattern's
 /// own gradient.
-fn driven(mass: bool, wavenumber: Option<f64>) -> Scene {
-    let mut scene = Scene::default();
+fn driven(mass: bool, wavenumber: Option<f64>) -> TopologyScene {
+    let mut scene = TopologyScene::default();
     let (depth, frequency_hz, phase_radians) = if mass {
         (0.22, 0.9, 0.15)
     } else {
@@ -526,13 +534,10 @@ fn driven(mass: bool, wavenumber: Option<f64>) -> Scene {
 /// contaminated downward by the reference's own error. That inflates the
 /// efficiency index, which makes a low index conservative: it cannot be an
 /// artefact of the reference.
-fn interface_scene(driven: bool) -> Scene {
-    let mut scene = Scene::initial();
+fn interface_scene(driven: bool) -> TopologyScene {
+    let mut scene = support::initial();
     let interior = RegionId(2);
-    scene.obstacles[0].role = LoopRole::MaterialInterface {
-        exterior: BACKGROUND_REGION,
-        interior,
-    };
+    support::fill_hole(&mut scene, 1, interior);
     scene.materials.push(Material {
         id: MaterialId(2),
         name: "Interface interior".into(),
@@ -560,7 +565,7 @@ fn interface_scene(driven: bool) -> Scene {
     scene
 }
 
-fn both_scene() -> Scene {
+fn both_scene() -> TopologyScene {
     let mut scene = driven(true, Some(3.0));
     let stiffness = driven(false, Some(3.0));
     scene.materials[0].stiffness_law.drive = stiffness.materials[0].stiffness_law.drive.clone();
@@ -568,11 +573,11 @@ fn both_scene() -> Scene {
 }
 
 fn build(
-    scene: &Scene,
+    scene: &TopologyScene,
     edge: f64,
     walls: OuterBoundaryConditions,
 ) -> (
-    Arc<TriMesh>,
+    Arc<support::Meshed>,
     Arc<QuadraticWaveOperator>,
     CanonicalTemporalWaveOperator,
 ) {
@@ -590,7 +595,7 @@ fn build(
         }
     }
     let mesh = Arc::new(
-        mesh_scene(
+        support::meshed(
             &fixed,
             1,
             MeshingOptions {
@@ -605,12 +610,15 @@ fn build(
         )
         .expect("calibration mesh"),
     );
-    let quadratic = Arc::new(
-        QuadraticWaveOperator::assemble_scene_with_boundaries(&mesh, &fixed, walls)
-            .expect("calibration scalar operator"),
-    );
-    let temporal = CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1)
-        .expect("calibration temporal operator");
+    let quadratic =
+        Arc::new(support::assembled(&mesh, &fixed, walls).expect("calibration scalar operator"));
+    let temporal = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &quadratic,
+        TopologyWaveModel::from_topology_scene(scene),
+        1,
+    )
+    .expect("calibration temporal operator");
     (mesh, quadratic, temporal)
 }
 
@@ -713,7 +721,7 @@ fn lattice_points() -> Vec<Point2> {
 }
 
 fn solve(
-    scene: &Scene,
+    scene: &TopologyScene,
     edge: f64,
     time_step: f64,
     lattice: &[Point2],
@@ -761,8 +769,14 @@ fn solve(
     let mut sampled_complementary = Vec::with_capacity(lattice.len());
     let mut weights = Vec::with_capacity(lattice.len());
     for point in lattice {
-        let stencil = QuadraticPointStencil::build(&mesh, &quadratic, &fixed, *point)
-            .expect("lattice stencil");
+        let stencil = QuadraticPointStencil::build_topology(
+            &mesh,
+            &quadratic,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&fixed),
+            *point,
+        )
+        .expect("lattice stencil");
         weights.push((stencil.mass_density, stencil.stiffness));
         let consumer = CanonicalTemporalPointStencil::from_quadratic(stencil, &operator)
             .expect("lattice consumer");
@@ -814,9 +828,9 @@ fn solve(
 /// One estimate, by whichever of the two estimators the row names.
 #[allow(clippy::too_many_arguments)]
 fn estimate(
-    mesh: &Arc<TriMesh>,
+    mesh: &Arc<support::Meshed>,
     quadratic: &Arc<QuadraticWaveOperator>,
-    authored: &Scene,
+    authored: &TopologyScene,
     operator: &CanonicalTemporalWaveOperator,
     state: &CanonicalTemporalWaveState,
     previous: &[f64],
@@ -909,10 +923,11 @@ fn estimate(
             material.stiffness_law.field = FieldLaw::Linear;
         }
     }
-    let mut job = SolutionIndicatorJob::new(
-        mesh.clone(),
+    let mut job = SolutionIndicatorJob::new_topology(
+        Arc::new(mesh.mesh.clone()),
         quadratic.clone(),
-        sized,
+        &mesh.plan,
+        TopologyWaveModel::from_topology_scene(&sized),
         scalar_snapshot,
         SolutionIndicatorOptions {
             minimum_edge_length: 0.005,

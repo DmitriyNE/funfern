@@ -31,12 +31,13 @@
 
 use std::time::Instant;
 
+mod support;
+
 use funfern_core::{
     CanonicalForcing, CanonicalSource, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CanonicalWaveState, CoefficientLaw, FieldLaw, InternalBoundary, InternalBoundaryCoupling,
-    InternalBoundaryId, InternalBoundaryLaw, MeshingOptions, OpenCubicSpline,
-    OuterBoundaryCondition, Point2, QuadraticWaveOperator, ScalarField, Scene, TimeDrive,
-    TimeSignal, mesh_scene,
+    CanonicalWaveState, CoefficientLaw, FaceBoundaryCondition, FieldLaw, InternalBoundaryCoupling,
+    MeshingOptions, OpenCubicSpline, OuterBoundaryCondition, OuterBoundaryConditions, Point2,
+    ScalarField, SpanBehavior, TimeDrive, TimeSignal, TopologyScene, TopologyWaveModel,
 };
 
 const STEPS: u64 = 64;
@@ -100,25 +101,26 @@ fn measure(
     source: bool,
     nonlinear: bool,
 ) {
-    let mut scene = Scene::default();
+    let mut scene = TopologyScene::default();
     if gap {
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(1),
-            spline: OpenCubicSpline::uniform(vec![
+        support::add_baffle(
+            &mut scene,
+            1,
+            OpenCubicSpline::uniform(vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
             ])
             .unwrap(),
-            region: funfern_core::BACKGROUND_REGION,
-            span_laws: vec![InternalBoundaryLaw {
+            SpanBehavior::Separated {
+                left: FaceBoundaryCondition::Reflecting,
+                right: FaceBoundaryCondition::Reflecting,
                 coupling: InternalBoundaryCoupling::ThinGap {
                     stiffness_ratio: 120.0,
                 },
-                ..InternalBoundaryLaw::REFLECTING
-            }],
-        });
+            },
+        );
     }
     if nonlinear {
         scene.materials[0].mass_law.field = FieldLaw::Polynomial {
@@ -144,7 +146,7 @@ fn measure(
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
     }
-    let mesh = mesh_scene(
+    let mesh = support::meshed(
         &fixed_scene,
         17,
         MeshingOptions {
@@ -154,10 +156,19 @@ fn measure(
         },
     )
     .expect("timing mesh");
-    let quadratic = QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, boundary)
-        .expect("timing scalar operator");
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1)
-        .expect("timing temporal operator");
+    let quadratic = support::assembled(
+        &mesh,
+        &fixed_scene,
+        OuterBoundaryConditions::uniform(boundary),
+    )
+    .expect("timing scalar operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &quadratic,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("timing temporal operator");
     let base = operator.base();
 
     let mut forcing = CanonicalForcing::none(base);

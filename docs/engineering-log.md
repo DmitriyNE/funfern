@@ -30087,3 +30087,36 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Legacy phase-out 5: the core's examples off `Scene`
+
+- **Moved.** The seven core examples mesh and assemble through the
+  topology path. A shared `examples/support` module holds the steps: the
+  plan coarsened to the meshing tolerance, meshing, and assembly with the
+  walls each example forces, plus holes, baffles and a hole filled as an
+  inclusion. mesh_timing compiles each scene's plan before its meshing job
+  and times the two apart; the legacy job had validated inside its own
+  phases.
+- **The AMR calibration on both meshers.** temporal_amr_calibration ran
+  once on the topology meshes and once from the last commit before the
+  move.
+  - Every row on the empty box reads the same index to three digits: the
+    topology mesher meshes the empty domain exactly as the legacy one did.
+    The smooth box still averages 1.41 (1.546, 1.304 and 1.386 over the
+    refinement), so `INDICATOR_CALIBRATION` keeps its basis.
+  - Only the interface rows differ, since their inclusion is meshed
+    differently. The inert interface reads 1.49, 1.34 and 1.33 (legacy
+    1.49, 1.41 and 1.32). The pumped interface reads 1.35, 1.08 and 1.04
+    (legacy 1.32, 1.10 and 0.87).
+  - The 0.97 that docs/checks.md and the constant's comment gave for the
+    pumped interface's finest mesh was already stale: the legacy mesh read
+    0.87 before the move. Both now say 1.04.
+- **The timing example.** In canonical_temporal_timing only the thin-gap
+  row meshes differently (5,536 degrees of freedom). The bulk and wall rows
+  run on the empty box's unchanged mesh, so the move does not touch the
+  ratios docs/checks.md quotes. One run, on a host just out of a gate,
+  read 8.6x for the driven bulk against the 13x quoted. It was not
+  re-measured on a quiet host.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

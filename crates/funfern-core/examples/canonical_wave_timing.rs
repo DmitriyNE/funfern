@@ -3,17 +3,19 @@
 //! solves. This is a CPU correctness-core measurement, not a prediction of the
 //! later f32 GPU implementation.
 
+mod support;
+
 use std::time::Instant;
 
 use funfern_core::{
     CanonicalWaveOperator, CanonicalWaveState, MeshingOptions, OuterBoundaryCondition,
-    QuadraticWaveOperator, Scene, mesh_scene,
+    OuterBoundaryConditions, TopologyWaveModel,
 };
 
 fn main() {
     let second_order = std::env::args().any(|argument| argument == "--second-order");
-    let scene = Scene::initial();
-    let mesh = mesh_scene(
+    let scene = support::initial();
+    let mesh = support::meshed(
         &scene,
         1,
         MeshingOptions {
@@ -27,12 +29,17 @@ fn main() {
     } else {
         OuterBoundaryCondition::Reflecting
     };
-    let quadratic = QuadraticWaveOperator::assemble_scene(&mesh, &scene, boundary)
+    let quadratic = support::assembled(&mesh, &scene, OuterBoundaryConditions::uniform(boundary))
         .expect("scalar comparison operator");
 
     let compile_start = Instant::now();
-    let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1)
-        .expect("canonical operator");
+    let operator = CanonicalWaveOperator::compile(
+        &mesh,
+        &quadratic,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("canonical operator");
     let compile_time = compile_start.elapsed();
     let dt = 0.9 * operator.maximum_time_step();
     let factor_start = Instant::now();

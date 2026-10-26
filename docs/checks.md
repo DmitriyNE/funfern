@@ -1140,7 +1140,7 @@ driven; the "static path" rows run the fixed generation's supplement, and on
 an inert medium they read the time-driven one's index to three digits.
 `INDICATOR_CALIBRATION` is set so the smooth box reads 1.41, the index the 6
 percent target was calibrated at; every row then reads 1.26 to 1.67, except the
-pumped interface, down to 0.97 at its finest mesh, and the self-oscillating
+pumped interface, down to 1.04 at its finest mesh, and the self-oscillating
 medium at 0.86 to 0.90. An argument runs only the rows whose label contains
 it.
 

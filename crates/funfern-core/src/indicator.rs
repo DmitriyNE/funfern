@@ -1018,7 +1018,7 @@ impl MeshSizeField for AdaptiveSizeField {
 /// across the example's rows - media driven, patterned, nonlinear and
 /// oscillating, prescribed and Neumann sides, absorbing walls, loss, and the
 /// box mode at two and three times the wavenumber - with the pumped interface
-/// down to 0.97 on its finest mesh and a self-oscillating medium at 0.86 to
+/// down to 1.04 on its finest mesh and a self-oscillating medium at 0.86 to
 /// 0.90. The scalar estimator read 1.3 to 1.6 on smooth content and up to 19
 /// on a material interface, because it measured `∇u`, one time derivative
 /// above the store, which weighs whatever part of the error is fastest.

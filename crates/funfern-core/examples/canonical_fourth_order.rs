@@ -11,11 +11,13 @@
 //! stepper every `N` steps, alternating the step between the fraction and
 //! three quarters of it, as a live drag's generations do.
 
+mod support;
+
 use std::time::Instant;
 
 use funfern_core::{
     CanonicalIntegrator, CanonicalWaveOperator, CanonicalWaveState, MeshingOptions,
-    OuterBoundaryCondition, QuadraticWaveOperator, Scene, mesh_scene,
+    OuterBoundaryCondition, OuterBoundaryConditions, TopologyScene, TopologyWaveModel,
 };
 
 const WAVELENGTH: f64 = 0.4;
@@ -39,8 +41,8 @@ fn main() {
     let targets = flag(&args, "--targets").map_or(vec![2.0, 10.0], |v| list(&v));
     let handoffs: Option<u64> = flag(&args, "--handoffs").map(|v| v.parse().unwrap());
 
-    let scene = Scene::default();
-    let mesh = mesh_scene(
+    let scene = TopologyScene::default();
+    let mesh = support::meshed(
         &scene,
         0,
         MeshingOptions {
@@ -53,11 +55,19 @@ fn main() {
         },
     )
     .expect("box mesh");
-    let quadratic =
-        QuadraticWaveOperator::assemble_scene(&mesh, &scene, OuterBoundaryCondition::Reflecting)
-            .expect("quadratic operator");
-    let operator =
-        CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).expect("operator");
+    let quadratic = support::assembled(
+        &mesh,
+        &scene,
+        OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting),
+    )
+    .expect("quadratic operator");
+    let operator = CanonicalWaveOperator::compile(
+        &mesh,
+        &quadratic,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("operator");
     let mode = operator
         .node_points()
         .iter()

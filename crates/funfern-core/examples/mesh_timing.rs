@@ -1,4 +1,8 @@
 //! Native CPU timings; run with `cargo run -p funfern-core --release --example mesh_timing`.
+//! The plan each scene is meshed from is compiled first, as the runtime's
+//! topology job compiles it, and timed apart from the meshing.
+mod support;
+
 use funfern_core::*;
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -20,27 +24,25 @@ fn main() -> std::process::ExitCode {
     for &max_edge in resolutions {
         for count in [1, 8, 32] {
             let scene = if count == 1 {
-                Scene::initial()
+                support::initial()
             } else {
                 let columns = if count == 8 { 4 } else { 8 };
                 let rows = count / columns;
-                Scene {
-                    obstacles: (0..count)
-                        .map(|i| {
-                            Obstacle::hole(
-                                ObstacleId(i as u64 + 1),
-                                PeriodicCubicSpline::rounded(
-                                    Point2::new(
-                                        -0.85 + 1.7 * (i % columns) as f64 / (columns - 1) as f64,
-                                        -0.65 + 1.3 * (i / columns) as f64 / (rows - 1) as f64,
-                                    ),
-                                    if count == 8 { 0.12 } else { 0.07 },
-                                ),
-                            )
-                        })
-                        .collect(),
-                    ..Scene::default()
+                let mut scene = TopologyScene::default();
+                for i in 0..count {
+                    support::add_hole(
+                        &mut scene,
+                        i as u64 + 1,
+                        PeriodicCubicSpline::rounded(
+                            Point2::new(
+                                -0.85 + 1.7 * (i % columns) as f64 / (columns - 1) as f64,
+                                -0.65 + 1.3 * (i / columns) as f64 / (rows - 1) as f64,
+                            ),
+                            if count == 8 { 0.12 } else { 0.07 },
+                        ),
+                    );
                 }
+                scene
             };
             let options = MeshingOptions {
                 curve_tolerance: (max_edge * 0.02).min(1.5e-3),
@@ -56,8 +58,15 @@ fn main() -> std::process::ExitCode {
                 "Starting {count} obstacles, h <= {max_edge:.3}, reference wavelength 0.4 / h = {:.1}",
                 0.4 / max_edge
             );
+            let plan_start = Instant::now();
+            let compiled = scene.compile(1).expect("a valid scene");
+            let plan = compiled
+                .plan
+                .coarsened(&compiled.topology, AtomCoarsening::from_meshing(options))
+                .expect("a plan that coarsens");
+            let plan_ms = plan_start.elapsed().as_secs_f64() * 1000.0;
             let start = Instant::now();
-            let mut job = MeshingJob::new(scene, 1, options);
+            let mut job = TopologyMeshingJob::new(plan, 1, options);
             let mut maximum = 0.0_f64;
             let mut calls = 0;
             let mut phases = BTreeMap::<&str, (f64, f64)>::new();
@@ -95,7 +104,7 @@ fn main() -> std::process::ExitCode {
                         }
                     };
                     println!(
-                        "{count} obstacles: {:.2} ms total, {maximum:.3} ms max call, {calls} calls, {} vertices, {} triangles",
+                        "{count} obstacles: {plan_ms:.2} ms plan, {:.2} ms meshing, {maximum:.3} ms max call, {calls} calls, {} vertices, {} triangles",
                         start.elapsed().as_secs_f64() * 1000.0,
                         mesh.vertices.len(),
                         mesh.triangles.len(),
