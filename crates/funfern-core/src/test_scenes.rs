@@ -250,9 +250,18 @@ pub(crate) fn plan_of(
         .unwrap()
 }
 
-/// Gives every span of the closed curve `id` `condition` on its outside, the
-/// right side, as the legacy hole's span conditions did.
-pub(crate) fn set_rim(scene: &mut TopologyScene, id: CurveId, condition: FaceBoundaryCondition) {
+/// A hole's span with `condition` on its outside, the right side, as the
+/// legacy hole's span conditions were.
+pub(crate) fn rim(condition: FaceBoundaryCondition) -> SpanBehavior {
+    SpanBehavior::Separated {
+        left: FaceBoundaryCondition::Reflecting,
+        right: condition,
+        coupling: InternalBoundaryCoupling::Independent,
+    }
+}
+
+/// Gives every span of the curve `id` `behavior`.
+pub(crate) fn set_spans(scene: &mut TopologyScene, id: CurveId, behavior: SpanBehavior) {
     let curve = scene
         .geometry
         .curves
@@ -260,12 +269,13 @@ pub(crate) fn set_rim(scene: &mut TopologyScene, id: CurveId, condition: FaceBou
         .find(|curve| curve.id == id)
         .unwrap();
     for span in &mut curve.spans {
-        span.behavior = SpanBehavior::Separated {
-            left: FaceBoundaryCondition::Reflecting,
-            right: condition,
-            coupling: InternalBoundaryCoupling::Independent,
-        };
+        span.behavior = behavior;
     }
+}
+
+/// Gives every span of the hole `id` `condition` on its outside.
+pub(crate) fn set_rim(scene: &mut TopologyScene, id: CurveId, condition: FaceBoundaryCondition) {
+    set_spans(scene, id, rim(condition));
 }
 
 /// `scene`'s scalar operator on `meshed` with `walls`, whatever walls the

@@ -2620,12 +2620,13 @@ fn integrated_field_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_scenes::*;
     use crate::{
         BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalAuxiliaryState, CanonicalForcing,
         CanonicalStepAccounting, CanonicalTemporalWaveState, CanonicalWaveOperator,
-        CanonicalWaveState, DrivenHandoff, InternalBoundaryId, MeshQuality, MeshTriangle,
+        CanonicalWaveState, CurveId, DrivenHandoff, InternalBoundaryId, MeshQuality, MeshTriangle,
         MeshVertex, MeshingOptions, OuterBoundaryCondition, OuterSide, QuadraticWaveOperator,
-        Scene, TimeDriveValues, TimeSignal, mesh_scene,
+        TimeDriveValues, TimeSignal, TopologyScene, TopologyWaveModel,
     };
 
     fn mesh(revision: u64, points: &[[f64; 2]], triangles: &[[usize; 3]]) -> TriMesh {
@@ -2657,18 +2658,22 @@ mod tests {
     }
 
     fn compile(mesh: &TriMesh) -> (QuadraticWaveOperator, CanonicalWaveOperator) {
-        let scene = Scene::default();
-        compile_scene(mesh, &scene)
+        let scene = TopologyScene::default();
+        compile_with_scene(mesh, &scene)
     }
 
-    fn compile_scene(
+    fn compile_with_scene(
         mesh: &TriMesh,
-        scene: &Scene,
+        scene: &TopologyScene,
     ) -> (QuadraticWaveOperator, CanonicalWaveOperator) {
-        let quadratic =
-            QuadraticWaveOperator::assemble_scene(mesh, scene, OuterBoundaryCondition::Reflecting)
-                .unwrap();
-        let canonical = CanonicalWaveOperator::compile_scene(mesh, &quadratic, scene, 1).unwrap();
+        let quadratic = hand_assembled(mesh, scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let canonical = CanonicalWaveOperator::compile(
+            mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            1,
+        )
+        .unwrap();
         (quadratic, canonical)
     }
 
@@ -2746,9 +2751,15 @@ mod tests {
         mesh: &TriMesh,
         boundary: OuterBoundaryCondition,
     ) -> (QuadraticWaveOperator, CanonicalWaveOperator) {
-        let scene = Scene::default();
-        let quadratic = QuadraticWaveOperator::assemble_scene(mesh, &scene, boundary).unwrap();
-        let canonical = CanonicalWaveOperator::compile_scene(mesh, &quadratic, &scene, 1).unwrap();
+        let scene = TopologyScene::default();
+        let quadratic = hand_assembled(mesh, &scene, boundary).unwrap();
+        let canonical = CanonicalWaveOperator::compile(
+            mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        )
+        .unwrap();
         (quadratic, canonical)
     }
 
@@ -3186,8 +3197,8 @@ mod tests {
 
     #[test]
     fn irregular_production_meshes_meet_one_handoff_and_repeated_transfer_limits() {
-        let scene = Scene::initial();
-        let coarse_mesh = mesh_scene(
+        let scene = initial();
+        let coarse_mesh = meshed(
             &scene,
             41,
             MeshingOptions {
@@ -3196,7 +3207,7 @@ mod tests {
             },
         )
         .unwrap();
-        let fine_mesh = mesh_scene(
+        let fine_mesh = meshed(
             &scene,
             42,
             MeshingOptions {
@@ -3205,8 +3216,8 @@ mod tests {
             },
         )
         .unwrap();
-        let (coarse_quadratic, coarse) = compile_scene(&coarse_mesh, &scene);
-        let (fine_quadratic, fine) = compile_scene(&fine_mesh, &scene);
+        let (coarse_quadratic, coarse) = compile_with_scene(&coarse_mesh, &scene);
+        let (fine_quadratic, fine) = compile_with_scene(&fine_mesh, &scene);
         let coarse_to_fine = QuadraticTransferMap::build(
             &coarse_mesh,
             &coarse_quadratic,
@@ -3469,18 +3480,22 @@ mod tests {
         assert!(report.physical_residual_norm < 2.0e-10);
         assert!(report.edit_exchange.abs() < 2.0e-10 * report.source_energy.max(1.0));
 
-        let mut changed_scene = Scene::default();
+        let mut changed_scene = TopologyScene::default();
         changed_scene.materials[0].mass_density = crate::ScalarField::constant(1.7);
         changed_scene.materials[0].stiffness = crate::ScalarField::constant(2.3);
-        let changed_quadratic = QuadraticWaveOperator::assemble_scene(
+        let changed_quadratic = hand_assembled(
             &mesh,
             &changed_scene,
             OuterBoundaryCondition::SecondOrderOutgoing,
         )
         .unwrap();
-        let changed =
-            CanonicalWaveOperator::compile_scene(&mesh, &changed_quadratic, &changed_scene, 2)
-                .unwrap();
+        let changed = CanonicalWaveOperator::compile(
+            &mesh,
+            &changed_quadratic,
+            TopologyWaveModel::from_topology_scene(&changed_scene),
+            2,
+        )
+        .unwrap();
         let changed_identity =
             QuadraticTransferMap::identity_on_mesh(&mesh, &second_quadratic, &changed_quadratic)
                 .unwrap();
@@ -3700,8 +3715,8 @@ mod tests {
     /// gap's new samples do; the rest takes back what the pinned trace held.
     #[test]
     fn outgoing_history_moves_onto_a_trace_that_pinned_sides_end() {
-        let scene = Scene::default();
-        let mesh = mesh_scene(
+        let scene = TopologyScene::default();
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -3711,11 +3726,14 @@ mod tests {
         )
         .unwrap();
         let compile = |sides| {
-            let quadratic =
-                QuadraticWaveOperator::assemble_scene_with_boundaries(&mesh, &scene, sides)
-                    .unwrap();
-            let canonical =
-                CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            let quadratic = assembled_with(&mesh, &scene, sides).unwrap();
+            let canonical = CanonicalWaveOperator::compile(
+                &mesh,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&scene),
+                1,
+            )
+            .unwrap();
             (quadratic, canonical)
         };
         let mut sides = crate::OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
@@ -3816,10 +3834,10 @@ mod tests {
 
     /// Meshes, assembles and compiles a scene at an edge sized for its domain.
     fn compile_at_edge(
-        scene: &Scene,
+        scene: &TopologyScene,
         edge: f64,
-    ) -> (TriMesh, QuadraticWaveOperator, CanonicalWaveOperator) {
-        let mesh = mesh_scene(
+    ) -> (Meshed, QuadraticWaveOperator, CanonicalWaveOperator) {
+        let mesh = meshed(
             scene,
             1,
             MeshingOptions {
@@ -3827,16 +3845,17 @@ mod tests {
                 curve_tolerance: (edge * 0.02).min(5.0e-4),
                 ..MeshingOptions::default()
             }
-            .sized_for_area(scene.domain.width() * scene.domain.height()),
+            .sized_for_area(scene.geometry.domain.width() * scene.geometry.domain.height()),
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene_with_boundaries(
+        let quadratic = assembled_with(&mesh, scene, scene.outer_boundaries).unwrap();
+        let canonical = CanonicalWaveOperator::compile(
             &mesh,
-            scene,
-            scene.outer_boundaries,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            1,
         )
         .unwrap();
-        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap();
         (mesh, quadratic, canonical)
     }
 
@@ -3871,7 +3890,7 @@ mod tests {
     /// the carry the reference makes.
     #[test]
     fn a_remesh_carries_the_walls_memory_at_its_energy() {
-        let scene = Scene::default();
+        let scene = TopologyScene::default();
         let (coarse_mesh, coarse_quadratic, coarse) = compile_at_edge(&scene, 0.07);
         let coarse_boundary = coarse.outgoing_boundary().unwrap();
         let (normalized, start) = coarse_boundary
@@ -3939,7 +3958,7 @@ mod tests {
     /// as stiff halves it, as a held stress halves its strain energy there.
     #[test]
     fn an_edit_holds_the_flux_the_walls_memory_puts_through_it() {
-        let base = Scene::default();
+        let base = TopologyScene::default();
         let (mesh, base_quadratic, source) = compile_at_edge(&base, 0.1);
         let boundary = source.outgoing_boundary().unwrap();
         let (normalized, _) = boundary
@@ -3947,17 +3966,17 @@ mod tests {
             .unwrap();
         let memory = boundary.physical_memory(&normalized).unwrap();
         for (density, stiffness, expected) in [(1.5, 1.0, 1.0), (1.0, 2.0, 0.5)] {
-            let mut scene = Scene::default();
+            let mut scene = TopologyScene::default();
             scene.materials[0].mass_density = crate::ScalarField::constant(density);
             scene.materials[0].stiffness = crate::ScalarField::constant(stiffness);
-            let quadratic = QuadraticWaveOperator::assemble_scene_with_boundaries(
+            let quadratic = assembled_with(&mesh, &scene, scene.outer_boundaries).unwrap();
+            let target = CanonicalWaveOperator::compile(
                 &mesh,
-                &scene,
-                scene.outer_boundaries,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&scene),
+                1,
             )
             .unwrap();
-            let target =
-                CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
             let identity =
                 QuadraticTransferMap::identity_on_mesh(&mesh, &base_quadratic, &quadratic).unwrap();
             let map =
@@ -3976,25 +3995,19 @@ mod tests {
     /// The default scene with a thin gap across its middle, so a handoff has
     /// every kind of state to carry: the bulk, the gap's jumps and the
     /// walls' memory.
-    fn gapped_scene() -> Scene {
-        let mut scene = Scene::default();
-        scene.internal_boundaries.push(crate::InternalBoundary {
-            id: InternalBoundaryId(1),
-            spline: crate::OpenCubicSpline::uniform(vec![
+    fn gapped_scene() -> TopologyScene {
+        let mut scene = TopologyScene::default();
+        add_baffle(
+            &mut scene,
+            CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![crate::InternalBoundaryLaw {
-                coupling: crate::InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 120.0,
-                },
-                ..crate::InternalBoundaryLaw::REFLECTING
-            }],
-        });
+            ],
+            thin_gap(120.0),
+        );
         scene
     }
 
@@ -4095,25 +4108,26 @@ mod tests {
     /// topology runtime does it: on the scene with its temporal laws
     /// stripped, the driven operator compiled from the authored one.
     fn compile_driven_at_edge(
-        scene: &Scene,
+        scene: &TopologyScene,
         edge: f64,
-    ) -> (
-        TriMesh,
-        QuadraticWaveOperator,
-        CanonicalTemporalWaveOperator,
-    ) {
+    ) -> (Meshed, QuadraticWaveOperator, CanonicalTemporalWaveOperator) {
         let mut base = scene.clone();
         crate::canonical_temporal::strip_temporal_laws(&mut base.materials);
         let (mesh, quadratic, _) = compile_at_edge(&base, edge);
-        let temporal =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap();
+        let temporal = CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            1,
+        )
+        .unwrap();
         (mesh, quadratic, temporal)
     }
 
     /// `gapped_scene` with everything a driven generation carries: its
     /// density pumped, its stiffness switching to one and a half times over
     /// a second and a half, and Klein-Gordon's restoring force.
-    fn driven_scene() -> Scene {
+    fn driven_scene() -> TopologyScene {
         let mut scene = gapped_scene();
         let material = &mut scene.materials[0];
         material.mass_law.drive = crate::TimeDrive::ParametricPump {

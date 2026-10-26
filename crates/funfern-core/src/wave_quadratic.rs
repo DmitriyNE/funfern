@@ -2602,13 +2602,14 @@ pub(crate) fn stiffness_quadrature() -> [([f64; 3], f64); 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_scenes::*;
     use crate::{
         BACKGROUND_REGION, BoundaryEdge, CanonicalWaveOperator, CanonicalWaveState, CurveId,
-        CurveNode, CurveSpan, CurveSpanId, CurveSpline, FaceRegionAssignment, InternalBoundary,
-        InternalBoundaryLaw, Material, MaterialId, MeshQuality, MeshTriangle, MeshVertex,
-        MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline, OuterSide, PeriodicCubicSpline,
-        Region, TopologyCurve, TopologyGeometry, TopologyVertex, TopologyVertexId,
-        TopologyVertexLocation, compile_topology, mesh_scene, mesh_topology_plan,
+        CurveNode, CurveSpan, CurveSpanId, CurveSpline, CurveTraceSide, FaceRegionAssignment,
+        Material, MaterialId, MeshQuality, MeshTriangle, MeshVertex, MeshingOptions,
+        OpenCubicSpline, OuterSide, PeriodicCubicSpline, Region, TopologyCurve, TopologyGeometry,
+        TopologyScene, TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology,
+        mesh_topology_plan,
     };
 
     fn topology_span(id: u64, behavior: SpanBehavior) -> CurveSpan {
@@ -2622,7 +2623,7 @@ mod tests {
         curves: Vec<TopologyCurve>,
         vertices: Vec<TopologyVertex>,
         revision: u64,
-    ) -> (TopologyMeshPlan, TriMesh, Scene) {
+    ) -> (TopologyMeshPlan, TriMesh, TopologyScene) {
         let snapshot = compile_topology(
             &TopologyGeometry {
                 curves,
@@ -2655,7 +2656,7 @@ mod tests {
             },
         )
         .unwrap();
-        let scene = Scene {
+        let scene = TopologyScene {
             regions: assignments
                 .iter()
                 .map(|assignment| Region {
@@ -2664,7 +2665,7 @@ mod tests {
                     frame: crate::MaterialFrame::world(),
                 })
                 .collect(),
-            ..Scene::default()
+            ..TopologyScene::default()
         };
         (plan, mesh, scene)
     }
@@ -2759,19 +2760,9 @@ mod tests {
         let operator = QuadraticWaveOperator::assemble_topology(
             &mesh,
             &plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
-        let legacy = QuadraticWaveOperator::assemble_with_provider(
-            &mesh,
-            CoefficientProvider::Scene(&scene),
-            scene.outer_boundaries,
-            Some(&scene),
-            None,
-            scene.physics,
-        )
-        .unwrap();
-        assert_eq!(operator, legacy);
         let force = operator
             .apply_stiffness(&vec![1.0; operator.degrees_of_freedom()])
             .unwrap();
@@ -2782,7 +2773,7 @@ mod tests {
     fn topology_baffle(
         behavior: SpanBehavior,
         revision: u64,
-    ) -> (TopologyMeshPlan, TriMesh, Scene) {
+    ) -> (TopologyMeshPlan, TriMesh, TopologyScene) {
         let curve = TopologyCurve::new(
             CurveId(8),
             CurveSpline::Open(
@@ -2811,7 +2802,7 @@ mod tests {
         let driven = QuadraticWaveOperator::assemble_topology(
             &mesh,
             &plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         assert!(driven.lumped_damping().iter().sum::<f64>() > 0.0);
@@ -2838,7 +2829,7 @@ mod tests {
         let reflecting = QuadraticWaveOperator::assemble_topology(
             &mesh,
             &reflecting_plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         assert_eq!(reflecting.geometry_revision(), mesh.geometry_revision);
@@ -2862,7 +2853,7 @@ mod tests {
         let reflecting = QuadraticWaveOperator::assemble_topology(
             &mesh,
             &reflecting_plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         let mut gap_plan = reflecting_plan.clone();
@@ -2876,7 +2867,7 @@ mod tests {
         let gap = QuadraticWaveOperator::assemble_topology(
             &mesh,
             &gap_plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         let trace_node = |side| {
@@ -2910,21 +2901,8 @@ mod tests {
         assert!(!gap.thin_gap_samples().is_empty());
     }
 
-    fn two_material_scene() -> Scene {
-        Scene {
-            domain: crate::DomainRect::default(),
-            physics: PhysicsModel::Mechanical,
-            obstacles: vec![Obstacle::with_role(
-                ObstacleId(1),
-                PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.2),
-                crate::LoopRole::MaterialInterface {
-                    exterior: BACKGROUND_REGION,
-                    interior: RegionId(2),
-                },
-            )],
-            internal_boundaries: vec![],
-            material_interfaces: vec![],
-            junctions: vec![],
+    fn two_material_scene() -> TopologyScene {
+        let mut scene = TopologyScene {
             materials: vec![
                 Material {
                     id: MaterialId(1),
@@ -2961,9 +2939,16 @@ mod tests {
                     frame: crate::MaterialFrame::world(),
                 },
             ],
-            volume_sources: vec![],
-            outer_boundaries: OuterBoundaryConditions::default(),
-        }
+            ..TopologyScene::default()
+        };
+        add_inclusion(
+            &mut scene,
+            CurveId(1),
+            Point2::new(0.5, 0.5),
+            0.2,
+            RegionId(2),
+        );
+        scene
     }
 
     fn square() -> TriMesh {
@@ -3014,21 +2999,21 @@ mod tests {
         mesh
     }
 
-    fn open_baffle_scene(law: InternalBoundaryLaw) -> (Scene, TriMesh) {
-        let mut scene = Scene::default();
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(1),
-            spline: OpenCubicSpline::uniform(vec![
+    /// A free baffle along `y = 0`, its one span with `behavior`.
+    fn open_baffle_scene(behavior: SpanBehavior) -> (TopologyScene, Meshed) {
+        let mut scene = TopologyScene::default();
+        add_baffle(
+            &mut scene,
+            CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![law],
-        });
-        let mesh = mesh_scene(
+            ],
+            behavior,
+        );
+        let mesh = meshed(
             &scene,
             17,
             MeshingOptions {
@@ -3044,7 +3029,7 @@ mod tests {
     fn trace_edge_nodes(
         mesh: &TriMesh,
         operator: &QuadraticWaveOperator,
-        side: InternalBoundarySide,
+        side: CurveTraceSide,
     ) -> [usize; 3] {
         let edge = mesh
             .boundary_edges
@@ -3052,9 +3037,10 @@ mod tests {
             .filter(|edge| {
                 matches!(
                     edge.label,
-                    BoundaryLabel::InternalBoundary {
-                        id: InternalBoundaryId(1),
+                    BoundaryLabel::Curve {
+                        curve: CurveId(1),
                         side: candidate,
+                        ..
                     } if candidate == side
                 )
             })
@@ -3126,7 +3112,7 @@ mod tests {
     fn scene_assembly_uses_piecewise_material_coefficients() {
         let mut mesh = square();
         mesh.triangles[1].region = RegionId(2);
-        let operator = QuadraticWaveOperator::assemble_scene(
+        let operator = hand_assembled(
             &mesh,
             &two_material_scene(),
             OuterBoundaryCondition::Reflecting,
@@ -3158,17 +3144,13 @@ mod tests {
 
     #[test]
     fn scene_assembly_samples_spatial_materials_at_quadrature_points() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         let material = &mut scene.materials[0];
         material.mass_density = crate::ScalarField::formula("1 + x").unwrap();
         material.stiffness = crate::ScalarField::formula("2 + x").unwrap();
         material.damping = crate::ScalarField::formula("y").unwrap();
-        let operator = QuadraticWaveOperator::assemble_scene(
-            &square(),
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let operator =
+            hand_assembled(&square(), &scene, OuterBoundaryCondition::Reflecting).unwrap();
 
         assert!((operator.lumped_mass().iter().sum::<f64>() - 1.5).abs() < 1.0e-12);
         assert!((operator.lumped_damping().iter().sum::<f64>() - 0.5).abs() < 1.0e-12);
@@ -3186,14 +3168,14 @@ mod tests {
         assert!(constant.iter().all(|value| value.abs() < 5.0e-12));
     }
 
-    /// Reported by the 2026-10-20 review (NUM-15): the Scene path sampled a
-    /// material's four base fields itself, so a constant loss channel was
+    /// Reported by the 2026-10-20 review (NUM-15): the `Scene` path sampled
+    /// a material's four base fields itself, so a constant loss channel was
     /// dropped and a material with a law was assembled as a static medium,
-    /// where the topology path reads `Material::evaluate_static`. It reads
-    /// the same now: the primary channel's rate stands in for `damping`, and
-    /// a law is refused.
+    /// where the topology path reads `Material::evaluate_static`. Held on the
+    /// topology path since the `Scene` path's retirement: the primary
+    /// channel's rate stands in for `damping`, and a law is refused.
     #[test]
-    fn the_scene_path_reads_materials_as_the_static_evaluator_does() {
+    fn the_assembly_reads_materials_as_the_static_evaluator_does() {
         let mut legacy = two_material_scene();
         let mut channel = legacy.clone();
         for material in &mut channel.materials {
@@ -3205,8 +3187,8 @@ mod tests {
         }
         let mut mesh = square();
         mesh.triangles[1].region = RegionId(2);
-        let assemble = |scene: &Scene| {
-            QuadraticWaveOperator::assemble_scene(&mesh, scene, OuterBoundaryCondition::Reflecting)
+        let assemble = |scene: &TopologyScene| {
+            hand_assembled(&mesh, scene, OuterBoundaryCondition::Reflecting)
         };
         let legacy_operator = assemble(&legacy).unwrap();
         let channel_operator = assemble(&channel).unwrap();
@@ -3223,15 +3205,16 @@ mod tests {
         assert!(assemble(&legacy).is_err(), "a law is not a static medium");
     }
 
-    /// Reported by the 2026-10-20 review (NUM-16): the Scene path sampled
+    /// Reported by the 2026-10-20 review (NUM-16): the `Scene` path sampled
     /// the background material along every outer edge, so a side another
     /// region meets absorbed with the background's impedance. Each outer
-    /// edge reads the region of the triangle it belongs to.
+    /// edge reads the region of the triangle it belongs to, as the assembly
+    /// still does on a mesh built by hand, which has no plan.
     #[test]
     fn an_outgoing_side_reads_the_region_that_meets_it() {
         let mut mesh = square_with_outer_boundary();
         mesh.triangles[1].region = RegionId(2);
-        let operator = QuadraticWaveOperator::assemble_scene(
+        let operator = hand_assembled(
             &mesh,
             &two_material_scene(),
             OuterBoundaryCondition::FirstOrderOutgoing,
@@ -3264,9 +3247,12 @@ mod tests {
         }
     }
 
+    /// On the legacy path until the topology assembly names a failing
+    /// material as this one does: it reports an unknown or invalid region
+    /// material instead (found moving this test, 2026-10-26).
     #[test]
     fn spatial_material_failure_identifies_coefficient_material_and_point() {
-        let mut scene = Scene::default();
+        let mut scene = crate::Scene::default();
         scene.materials[0].mass_density = crate::ScalarField::formula("x").unwrap();
         let error = QuadraticWaveOperator::assemble_scene(
             &square(),
@@ -3285,14 +3271,29 @@ mod tests {
         ));
     }
 
+    /// On the legacy path with the test above, for the same reason.
     #[test]
     fn scene_assembly_rejects_an_unknown_triangle_region() {
         let mut mesh = square();
         mesh.triangles[0].region = RegionId(99);
+        let media = two_material_scene();
+        let scene = crate::Scene {
+            obstacles: vec![crate::Obstacle::with_role(
+                crate::ObstacleId(1),
+                PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.2),
+                crate::LoopRole::MaterialInterface {
+                    exterior: BACKGROUND_REGION,
+                    interior: RegionId(2),
+                },
+            )],
+            materials: media.materials,
+            regions: media.regions,
+            ..crate::Scene::default()
+        };
         assert!(matches!(
             QuadraticWaveOperator::assemble_scene(
                 &mesh,
-                &two_material_scene(),
+                &scene,
                 OuterBoundaryCondition::Reflecting,
             ),
             Err(WaveError::InvalidMesh("a triangle has an unknown region"))
@@ -3302,17 +3303,9 @@ mod tests {
     #[test]
     fn closed_wall_regions_evolve_as_disconnected_neumann_domains() {
         let mut scene = two_material_scene();
-        scene.obstacles[0].role = crate::LoopRole::Wall {
-            exterior: BACKGROUND_REGION,
-            interior: RegionId(2),
-        };
-        let mesh = mesh_scene(&scene, 12, MeshingOptions::default()).unwrap();
-        let operator = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        set_spans(&mut scene, CurveId(1), SpanBehavior::REFLECTING);
+        let mesh = meshed(&scene, 12, MeshingOptions::default()).unwrap();
+        let operator = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
         let mut node_region = vec![None; operator.degrees_of_freedom()];
         for (triangle, nodes) in mesh.triangles.iter().zip(operator.element_nodes()) {
             for node in nodes {
@@ -3461,12 +3454,7 @@ mod tests {
             OuterBoundaryCondition::Neumann { signal: neumann };
         boundaries.sides[OuterSide::Right.index()] = OuterBoundaryCondition::FirstOrderOutgoing;
         boundaries.sides[OuterSide::Left.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
-        let operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
-            &mesh,
-            &Scene::default(),
-            boundaries,
-        )
-        .unwrap();
+        let operator = hand_assembled_with(&mesh, &TopologyScene::default(), boundaries).unwrap();
 
         for (node, point) in operator.node_points().iter().enumerate() {
             if point.y == 0.0 {
@@ -3500,9 +3488,7 @@ mod tests {
         quiet.sides[OuterSide::Top.index()] = OuterBoundaryCondition::Neumann {
             signal: crate::TimeSignal::ZERO,
         };
-        let quiet_operator =
-            QuadraticWaveOperator::assemble_scene_with_boundaries(&mesh, &Scene::default(), quiet)
-                .unwrap();
+        let quiet_operator = hand_assembled_with(&mesh, &TopologyScene::default(), quiet).unwrap();
         let mut twin = QuadraticWaveState::zero(&quiet_operator, dt).unwrap();
         twin.step(&quiet_operator, &[]).unwrap();
         let middle = operator
@@ -3526,14 +3512,7 @@ mod tests {
         contradictory.sides[OuterSide::Right.index()] = OuterBoundaryCondition::Dirichlet {
             signal: crate::TimeSignal::harmonic(9.0, 0.0, 1.0, 0.0),
         };
-        assert!(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
-                &Scene::default(),
-                contradictory,
-            )
-            .is_err()
-        );
+        assert!(hand_assembled_with(&mesh, &TopologyScene::default(), contradictory,).is_err());
     }
 
     #[test]
@@ -3649,11 +3628,11 @@ mod tests {
             },
         )
         .unwrap();
-        let scene = Scene::default();
+        let scene = TopologyScene::default();
         let operator = QuadraticWaveOperator::assemble_topology(
             &mesh,
             &plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         assert!(operator.auxiliary_active().iter().any(|active| *active));
@@ -3725,27 +3704,27 @@ mod tests {
 
     #[test]
     fn open_baffle_face_impedance_adds_only_selected_trace_damping() {
-        let (reflecting_scene, mesh) = open_baffle_scene(InternalBoundaryLaw::REFLECTING);
-        let reflecting = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &reflecting_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let law = InternalBoundaryLaw {
-            left: FaceBoundaryCondition::Impedance { ratio: 1.0 },
-            ..InternalBoundaryLaw::REFLECTING
-        };
+        let (reflecting_scene, mesh) = open_baffle_scene(SpanBehavior::REFLECTING);
+        let reflecting =
+            assembled(&mesh, &reflecting_scene, OuterBoundaryCondition::Reflecting).unwrap();
         let mut impedance_scene = reflecting_scene.clone();
-        impedance_scene.internal_boundaries[0].span_laws[0] = law;
-        let impedance = QuadraticWaveOperator::assemble_scene(
-            &mesh,
+        set_spans(
+            &mut impedance_scene,
+            CurveId(1),
+            SpanBehavior::Separated {
+                left: FaceBoundaryCondition::Impedance { ratio: 1.0 },
+                right: FaceBoundaryCondition::Reflecting,
+                coupling: InternalBoundaryCoupling::Independent,
+            },
+        );
+        let impedance = assembled(
+            &mesh.under(&impedance_scene),
             &impedance_scene,
             OuterBoundaryCondition::Reflecting,
         )
         .unwrap();
-        let left = trace_edge_nodes(&mesh, &reflecting, InternalBoundarySide::Left);
-        let right = trace_edge_nodes(&mesh, &reflecting, InternalBoundarySide::Right);
+        let left = trace_edge_nodes(&mesh, &reflecting, CurveTraceSide::Left);
+        let right = trace_edge_nodes(&mesh, &reflecting, CurveTraceSide::Right);
         assert!(impedance.lumped_damping()[left[1]] > reflecting.lumped_damping()[left[1]]);
         assert_eq!(
             impedance.lumped_damping()[right[1]],
@@ -3762,20 +3741,14 @@ mod tests {
             phase_radians: 0.4,
         };
         let neumann = TimeSignal::harmonic(1.25, 0.0, 1.0, 0.0);
-        let law = InternalBoundaryLaw {
+        let (scene, mesh) = open_baffle_scene(SpanBehavior::Separated {
             left: FaceBoundaryCondition::Dirichlet { signal: dirichlet },
             right: FaceBoundaryCondition::Neumann { signal: neumann },
             coupling: InternalBoundaryCoupling::Independent,
-        };
-        let (scene, mesh) = open_baffle_scene(law);
-        let operator = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let left = trace_edge_nodes(&mesh, &operator, InternalBoundarySide::Left)[1];
-        let right = trace_edge_nodes(&mesh, &operator, InternalBoundarySide::Right)[1];
+        });
+        let operator = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let left = trace_edge_nodes(&mesh, &operator, CurveTraceSide::Left)[1];
+        let right = trace_edge_nodes(&mesh, &operator, CurveTraceSide::Right)[1];
         assert_eq!(
             operator.prescribed_value(left, 0.3),
             Some(dirichlet.value(0.3))
@@ -3783,36 +3756,34 @@ mod tests {
         assert!(operator.prescribed_value(right, 0.3).is_none());
         assert!(operator.neumann_acceleration(right, 0.3) > 0.0);
 
-        let mut hole_scene = Scene::initial();
-        hole_scene.obstacles[0].span_conditions[0] =
-            FaceBoundaryCondition::Dirichlet { signal: dirichlet };
-        hole_scene.obstacles[0].span_conditions[1] =
-            FaceBoundaryCondition::Neumann { signal: neumann };
-        let hole_mesh = mesh_scene(&hole_scene, 12, MeshingOptions::default()).unwrap();
-        let hole_operator = QuadraticWaveOperator::assemble_scene(
-            &hole_mesh,
-            &hole_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let mut hole_scene = initial();
+        let spans = &mut hole_scene.geometry.curves[0].spans;
+        spans[0].behavior = rim(FaceBoundaryCondition::Dirichlet { signal: dirichlet });
+        spans[1].behavior = rim(FaceBoundaryCondition::Neumann { signal: neumann });
+        let (first, second) = (spans[0].id, spans[1].id);
+        let hole_mesh = meshed(&hole_scene, 12, MeshingOptions::default()).unwrap();
+        let hole_operator =
+            assembled(&hole_mesh, &hole_scene, OuterBoundaryCondition::Reflecting).unwrap();
         let mut found_dirichlet = false;
         let mut found_neumann = false;
         for edge in &hole_mesh.boundary_edges {
-            if edge.label != BoundaryLabel::Obstacle(ObstacleId(1)) {
+            let BoundaryLabel::Curve {
+                curve: CurveId(1),
+                span,
+                side: CurveTraceSide::Right,
+                ..
+            } = edge.label
+            else {
                 continue;
-            }
-            let span = hole_scene.obstacles[0]
-                .spline
-                .span_index(0.5 * (edge.parameters[0] + edge.parameters[1]))
-                .unwrap();
+            };
             let midpoint = boundary_edge_nodes(&hole_mesh, &hole_operator, edge)[1];
-            if span == 0 {
+            if span == first {
                 found_dirichlet = true;
                 assert_eq!(
                     hole_operator.prescribed_value(midpoint, 0.3),
                     Some(dirichlet.value(0.3))
                 );
-            } else if span == 1 {
+            } else if span == second {
                 found_neumann = true;
                 assert!(hole_operator.neumann_acceleration(midpoint, 0.3) > 0.0);
             }
@@ -3822,31 +3793,22 @@ mod tests {
 
     #[test]
     fn second_order_absorber_applies_to_curved_and_baffle_faces() {
-        let mut hole_scene = Scene::initial();
-        hole_scene.obstacles[0].span_conditions[0] = FaceBoundaryCondition::SecondOrderOutgoing;
-        let hole_mesh = mesh_scene(&hole_scene, 12, MeshingOptions::default()).unwrap();
-        let hole = QuadraticWaveOperator::assemble_scene(
-            &hole_mesh,
-            &hole_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let mut hole_scene = initial();
+        hole_scene.geometry.curves[0].spans[0].behavior =
+            rim(FaceBoundaryCondition::SecondOrderOutgoing);
+        let hole_mesh = meshed(&hole_scene, 12, MeshingOptions::default()).unwrap();
+        let hole = assembled(&hole_mesh, &hole_scene, OuterBoundaryCondition::Reflecting).unwrap();
         assert!(hole.auxiliary_active().iter().any(|active| *active));
         assert!(hole.lumped_damping().iter().any(|value| *value > 0.0));
 
-        let law = InternalBoundaryLaw {
+        let (scene, mesh) = open_baffle_scene(SpanBehavior::Separated {
             left: FaceBoundaryCondition::SecondOrderOutgoing,
-            ..InternalBoundaryLaw::REFLECTING
-        };
-        let (scene, mesh) = open_baffle_scene(law);
-        let baffle = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let left = trace_edge_nodes(&mesh, &baffle, InternalBoundarySide::Left)[1];
-        let right = trace_edge_nodes(&mesh, &baffle, InternalBoundarySide::Right)[1];
+            right: FaceBoundaryCondition::Reflecting,
+            coupling: InternalBoundaryCoupling::Independent,
+        });
+        let baffle = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let left = trace_edge_nodes(&mesh, &baffle, CurveTraceSide::Left)[1];
+        let right = trace_edge_nodes(&mesh, &baffle, CurveTraceSide::Right)[1];
         assert!(baffle.auxiliary_active()[left]);
         assert!(!baffle.auxiliary_active()[right]);
         assert!(baffle.lumped_damping()[left] > baffle.lumped_damping()[right]);
@@ -3854,19 +3816,16 @@ mod tests {
 
     #[test]
     fn hole_impedance_adds_damping_only_on_assigned_knot_span() {
-        let reflecting_scene = Scene::initial();
-        let mesh = mesh_scene(&reflecting_scene, 12, MeshingOptions::default()).unwrap();
-        let reflecting = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &reflecting_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let reflecting_scene = initial();
+        let mesh = meshed(&reflecting_scene, 12, MeshingOptions::default()).unwrap();
+        let reflecting =
+            assembled(&mesh, &reflecting_scene, OuterBoundaryCondition::Reflecting).unwrap();
         let mut impedance_scene = reflecting_scene.clone();
-        impedance_scene.obstacles[0].span_conditions[0] =
-            FaceBoundaryCondition::Impedance { ratio: 1.0 };
-        let impedance = QuadraticWaveOperator::assemble_scene(
-            &mesh,
+        let assigned = &mut impedance_scene.geometry.curves[0].spans[0];
+        assigned.behavior = rim(FaceBoundaryCondition::Impedance { ratio: 1.0 });
+        let assigned = assigned.id;
+        let impedance = assembled(
+            &mesh.under(&impedance_scene),
             &impedance_scene,
             OuterBoundaryCondition::Reflecting,
         )
@@ -3875,15 +3834,17 @@ mod tests {
         let mut assigned_edges = 0;
         let mut reflecting_edges = 0;
         for edge in &mesh.boundary_edges {
-            if edge.label != BoundaryLabel::Obstacle(ObstacleId(1)) {
+            let BoundaryLabel::Curve {
+                curve: CurveId(1),
+                span,
+                side: CurveTraceSide::Right,
+                ..
+            } = edge.label
+            else {
                 continue;
-            }
-            let span = impedance_scene.obstacles[0]
-                .spline
-                .span_index(0.5 * (edge.parameters[0] + edge.parameters[1]))
-                .unwrap();
+            };
             let midpoint = boundary_edge_nodes(&mesh, &impedance, edge)[1];
-            if span == 0 {
+            if span == assigned {
                 assigned_edges += 1;
                 assert!(impedance.lumped_damping()[midpoint] > 0.0);
             } else {
@@ -3900,10 +3861,11 @@ mod tests {
 
     #[test]
     fn open_baffle_knot_spans_keep_distinct_face_conditions_after_meshing() {
-        let mut scene = Scene::default();
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(1),
-            spline: OpenCubicSpline::uniform(vec![
+        let mut scene = TopologyScene::default();
+        add_open_curve(
+            &mut scene,
+            CurveId(1),
+            OpenCubicSpline::uniform(vec![
                 Point2::new(-0.7, 0.0),
                 Point2::new(-0.35, 0.0),
                 Point2::new(0.0, 0.0),
@@ -3911,16 +3873,17 @@ mod tests {
                 Point2::new(0.7, 0.0),
             ])
             .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![
-                InternalBoundaryLaw {
+            vec![
+                SpanBehavior::Separated {
                     left: FaceBoundaryCondition::Impedance { ratio: 1.0 },
-                    ..InternalBoundaryLaw::REFLECTING
+                    right: FaceBoundaryCondition::Reflecting,
+                    coupling: InternalBoundaryCoupling::Independent,
                 },
-                InternalBoundaryLaw::REFLECTING,
+                SpanBehavior::REFLECTING,
             ],
-        });
-        let mesh = mesh_scene(
+        );
+        let first = scene.geometry.curves[0].spans[0].id;
+        let mesh = meshed(
             &scene,
             18,
             MeshingOptions {
@@ -3930,25 +3893,21 @@ mod tests {
             },
         )
         .unwrap();
-        let operator = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let operator = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
         let mut first_span = 0;
         let mut second_span = 0;
         for edge in &mesh.boundary_edges {
-            if edge.label
-                != (BoundaryLabel::InternalBoundary {
-                    id: InternalBoundaryId(1),
-                    side: InternalBoundarySide::Left,
-                })
-            {
+            let BoundaryLabel::Curve {
+                curve: CurveId(1),
+                span,
+                side: CurveTraceSide::Left,
+                ..
+            } = edge.label
+            else {
                 continue;
-            }
+            };
             let midpoint = boundary_edge_nodes(&mesh, &operator, edge)[1];
-            if 0.5 * (edge.parameters[0] + edge.parameters[1]) < 1.0 {
+            if span == first {
                 first_span += 1;
                 assert!(operator.lumped_damping()[midpoint] > 0.0);
             } else {
@@ -3961,29 +3920,19 @@ mod tests {
 
     #[test]
     fn thin_gap_is_symmetric_conservative_and_enters_the_time_step_bound() {
-        let (reflecting_scene, mesh) = open_baffle_scene(InternalBoundaryLaw::REFLECTING);
-        let reflecting = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &reflecting_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let law = InternalBoundaryLaw {
-            coupling: InternalBoundaryCoupling::ThinGap {
-                stiffness_ratio: 10_000.0,
-            },
-            ..InternalBoundaryLaw::REFLECTING
-        };
+        let (reflecting_scene, mesh) = open_baffle_scene(SpanBehavior::REFLECTING);
+        let reflecting =
+            assembled(&mesh, &reflecting_scene, OuterBoundaryCondition::Reflecting).unwrap();
         let mut gap_scene = reflecting_scene.clone();
-        gap_scene.internal_boundaries[0].span_laws[0] = law;
-        let gap = QuadraticWaveOperator::assemble_scene(
-            &mesh,
+        set_spans(&mut gap_scene, CurveId(1), thin_gap(10_000.0));
+        let gap = assembled(
+            &mesh.under(&gap_scene),
             &gap_scene,
             OuterBoundaryCondition::Reflecting,
         )
         .unwrap();
-        let left = trace_edge_nodes(&mesh, &gap, InternalBoundarySide::Left)[1];
-        let right = trace_edge_nodes(&mesh, &gap, InternalBoundarySide::Right)[1];
+        let left = trace_edge_nodes(&mesh, &gap, CurveTraceSide::Left)[1];
+        let right = trace_edge_nodes(&mesh, &gap, CurveTraceSide::Right)[1];
         let mut jump = vec![0.0; gap.degrees_of_freedom()];
         jump[left] = 1.0;
         let reflecting_force = reflecting.apply_stiffness(&jump).unwrap();
@@ -4008,7 +3957,13 @@ mod tests {
         let drift = (state.energy(&gap).unwrap() - initial_energy).abs() / initial_energy;
         assert!(drift < 1.0e-10, "energy drift {drift:e}");
 
-        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &gap, &gap_scene, 91).unwrap();
+        let canonical = CanonicalWaveOperator::compile(
+            &mesh,
+            &gap,
+            TopologyWaveModel::from_topology_scene(&gap_scene),
+            91,
+        )
+        .unwrap();
         assert_eq!(canonical.thin_gap_samples(), gap.thin_gap_samples());
         let initial = canonical
             .node_points()
@@ -4095,13 +4050,13 @@ mod tests {
         let expected = QuadraticWaveOperator::assemble_topology(
             &mesh,
             &plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         let mut job = QuadraticAssemblyJob::new_topology(
             Arc::new(mesh.clone()),
             Arc::new(plan.clone()),
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         let mut steps = 0usize;
@@ -4137,19 +4092,15 @@ mod tests {
     /// material interfaces, and the topology assembly path are all covered.
     #[test]
     fn every_assembled_stiffness_row_sums_to_zero() {
-        let mut hole_scene = Scene::initial();
-        hole_scene.obstacles[0].span_conditions[0] = FaceBoundaryCondition::SecondOrderOutgoing;
-        hole_scene.obstacles[0].span_conditions[1] =
-            FaceBoundaryCondition::Impedance { ratio: 1.0 };
-        let hole_mesh = mesh_scene(&hole_scene, 12, MeshingOptions::default()).unwrap();
-        let (gap_scene, gap_mesh) = open_baffle_scene(InternalBoundaryLaw {
-            coupling: InternalBoundaryCoupling::ThinGap {
-                stiffness_ratio: 25.0,
-            },
-            ..InternalBoundaryLaw::REFLECTING
-        });
+        let mut hole_scene = initial();
+        hole_scene.geometry.curves[0].spans[0].behavior =
+            rim(FaceBoundaryCondition::SecondOrderOutgoing);
+        hole_scene.geometry.curves[0].spans[1].behavior =
+            rim(FaceBoundaryCondition::Impedance { ratio: 1.0 });
+        let hole_mesh = meshed(&hole_scene, 12, MeshingOptions::default()).unwrap();
+        let (gap_scene, gap_mesh) = open_baffle_scene(thin_gap(25.0));
         let materials = two_material_scene();
-        let material_mesh = mesh_scene(&materials, 13, MeshingOptions::default()).unwrap();
+        let material_mesh = meshed(&materials, 13, MeshingOptions::default()).unwrap();
         let (plan, topology_mesh, topology_scene) = topology_baffle(
             SpanBehavior::Separated {
                 left: FaceBoundaryCondition::SecondOrderOutgoing,
@@ -4172,7 +4123,7 @@ mod tests {
             (
                 "curved absorber and impedance",
                 true,
-                QuadraticWaveOperator::assemble_scene(
+                assembled(
                     &hole_mesh,
                     &hole_scene,
                     OuterBoundaryCondition::FirstOrderOutgoing,
@@ -4182,17 +4133,12 @@ mod tests {
             (
                 "thin gap",
                 false,
-                QuadraticWaveOperator::assemble_scene(
-                    &gap_mesh,
-                    &gap_scene,
-                    OuterBoundaryCondition::Reflecting,
-                )
-                .unwrap(),
+                assembled(&gap_mesh, &gap_scene, OuterBoundaryCondition::Reflecting).unwrap(),
             ),
             (
                 "material interface",
                 false,
-                QuadraticWaveOperator::assemble_scene(
+                assembled(
                     &material_mesh,
                     &materials,
                     OuterBoundaryCondition::Reflecting,
@@ -4205,7 +4151,7 @@ mod tests {
                 QuadraticWaveOperator::assemble_topology(
                     &topology_mesh,
                     &plan,
-                    TopologyWaveModel::from_scene(&topology_scene),
+                    TopologyWaveModel::from_topology_scene(&topology_scene),
                 )
                 .unwrap(),
             ),
@@ -4245,8 +4191,8 @@ mod tests {
     }
 
     fn cavity(edge: f64, boundary: OuterBoundaryCondition) -> QuadraticWaveOperator {
-        let mesh = mesh_scene(
-            &Scene::default(),
+        let mesh = meshed(
+            &TopologyScene::default(),
             5,
             MeshingOptions {
                 target_edge_length: edge,
@@ -4375,7 +4321,7 @@ mod tests {
         let operator = QuadraticWaveOperator::assemble_topology(
             &mesh,
             &plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         let modes = ConstantModes::of(&operator);
@@ -4707,7 +4653,7 @@ mod tests {
     #[test]
     fn scene_assembly_compiles_tm_and_te_material_laws() {
         let mesh = square();
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_density = crate::ScalarField::constant(4.0);
         scene.materials[0].stiffness = crate::ScalarField::constant(9.0);
         scene.materials[0].damping = crate::ScalarField::constant(0.5);
@@ -4716,12 +4662,8 @@ mod tests {
             (crate::ElectromagneticPolarization::Te, 9.0, 4.5),
         ] {
             scene.physics = PhysicsModel::Electromagnetic { polarization };
-            let operator = QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &scene,
-                OuterBoundaryCondition::Reflecting,
-            )
-            .unwrap();
+            let operator =
+                hand_assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
             assert!((operator.lumped_mass().iter().sum::<f64>() - expected_mass).abs() < 1e-12);
             assert!(
                 (operator.lumped_damping().iter().sum::<f64>() - expected_damping).abs() < 1e-12
@@ -4917,14 +4859,10 @@ mod tests {
 
     #[test]
     fn directional_scene_assembles_rotated_tensor_energy() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].axis_ratio = crate::ScalarField::constant(4.0);
-        let operator = QuadraticWaveOperator::assemble_scene(
-            &square(),
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let operator =
+            hand_assembled(&square(), &scene, OuterBoundaryCondition::Reflecting).unwrap();
         let energy = |operator: &QuadraticWaveOperator, direction: Point2| {
             let values = operator
                 .node_points()
@@ -4938,21 +4876,17 @@ mod tests {
         assert!((energy(&operator, Point2::new(0.0, 1.0)) - 0.25).abs() < 1.0e-10);
 
         scene.regions[0].frame.angle_radians = std::f64::consts::FRAC_PI_2;
-        let rotated = QuadraticWaveOperator::assemble_scene(
-            &square(),
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let rotated =
+            hand_assembled(&square(), &scene, OuterBoundaryCondition::Reflecting).unwrap();
         assert!((energy(&rotated, Point2::new(1.0, 0.0)) - 0.25).abs() < 1.0e-10);
         assert!((energy(&rotated, Point2::new(0.0, 1.0)) - 4.0).abs() < 1.0e-10);
     }
 
     #[test]
     fn outgoing_impedance_uses_the_boundary_normal() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].axis_ratio = crate::ScalarField::constant(4.0);
-        let operator = QuadraticWaveOperator::assemble_scene(
+        let operator = hand_assembled(
             &square_with_outer_boundary(),
             &scene,
             OuterBoundaryCondition::FirstOrderOutgoing,

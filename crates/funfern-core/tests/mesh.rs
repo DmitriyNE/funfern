@@ -1,9 +1,89 @@
+//! The topology mesher's properties on whole scenes, through the public
+//! path the runtime takes: a topology scene compiled, its plan coarsened to
+//! the meshing tolerance, and meshed. These tests held the legacy `Scene`
+//! mesher until its retirement; the cases a topology test already covered
+//! went with it.
 use std::collections::{BTreeMap, BTreeSet};
 
 use funfern_core::*;
 
-fn mesh(scene: &Scene) -> TriMesh {
-    mesh_scene(
+/// A curve over `spline`, every span with `behavior`, its spans numbered
+/// from `10 * id`.
+fn curve(id: u64, spline: CurveSpline, behavior: SpanBehavior) -> TopologyCurve {
+    let spans = (0..spline.span_count() as u64)
+        .map(|index| CurveSpan {
+            id: CurveSpanId(10 * id + index),
+            behavior,
+        })
+        .collect();
+    TopologyCurve::new(CurveId(id), spline, spans).unwrap()
+}
+
+/// Adds a closed curve whose inside is `region`, or a hole without one.
+fn add_loop(
+    scene: &mut TopologyScene,
+    id: u64,
+    spline: PeriodicCubicSpline,
+    behavior: SpanBehavior,
+    region: Option<RegionId>,
+) {
+    let curve = curve(id, CurveSpline::Closed(spline), behavior);
+    let [start, end] = curve.spline.span_bounds(0).unwrap();
+    scene.face_assignments.push(AuthoredFaceAssignment {
+        anchor: FaceAnchor::Curve {
+            curve: curve.id,
+            span: curve.spans[0].id,
+            side: CurveTraceSide::Left,
+            parameter: 0.5 * (start + end),
+        },
+        region,
+    });
+    scene.geometry.curves.push(curve);
+}
+
+fn add_hole(scene: &mut TopologyScene, id: u64, spline: PeriodicCubicSpline) {
+    add_loop(scene, id, spline, SpanBehavior::REFLECTING, None);
+}
+
+/// Adds a free reflecting baffle over `spline`.
+fn add_baffle(scene: &mut TopologyScene, id: u64, spline: OpenCubicSpline) {
+    scene.geometry.curves.push(curve(
+        id,
+        CurveSpline::Open(spline),
+        SpanBehavior::REFLECTING,
+    ));
+}
+
+/// The default scene and a hole of radius 0.15 at the origin.
+fn initial() -> TopologyScene {
+    let mut scene = TopologyScene::default();
+    add_hole(
+        &mut scene,
+        1,
+        PeriodicCubicSpline::rounded(Point2::default(), 0.15),
+    );
+    scene
+}
+
+/// `scene`'s plan compiled at `revision` and coarsened for `options`.
+fn plan(scene: &TopologyScene, revision: u64, options: MeshingOptions) -> TopologyMeshPlan {
+    let compiled = scene.compile(revision).unwrap();
+    compiled
+        .plan
+        .coarsened(&compiled.topology, AtomCoarsening::from_meshing(options))
+        .unwrap()
+}
+
+fn mesh_with(
+    scene: &TopologyScene,
+    revision: u64,
+    options: MeshingOptions,
+) -> Result<TriMesh, MeshError> {
+    mesh_topology_plan(&plan(scene, revision, options), revision, options)
+}
+
+fn mesh(scene: &TopologyScene) -> TriMesh {
+    mesh_with(
         scene,
         17,
         MeshingOptions {
@@ -19,202 +99,50 @@ fn edge_key(a: usize, b: usize) -> (usize, usize) {
     if a < b { (a, b) } else { (b, a) }
 }
 
-#[test]
-fn open_material_interface_splits_one_region_without_a_duplicate_trace() {
-    let mut scene = Scene::default();
-    scene.regions.push(Region {
-        id: RegionId(2),
-        material: DEFAULT_MATERIAL,
-        frame: MaterialFrame::world(),
-    });
-    scene.junctions = vec![
-        Junction {
-            id: JunctionId(1),
-            location: JunctionLocation::Outer {
-                side: OuterSide::Bottom,
-                fraction: 0.5,
-            },
-        },
-        Junction {
-            id: JunctionId(2),
-            location: JunctionLocation::Outer {
-                side: OuterSide::Top,
-                fraction: 0.5,
-            },
-        },
-    ];
-    scene.material_interfaces.push(MaterialInterface {
-        id: MaterialInterfaceId(1),
-        spline: InterfaceSpline::Open(
-            OpenCubicSpline::polyline(vec![Point2::new(0.0, -1.0), Point2::new(0.0, 1.0)]).unwrap(),
-        ),
-        nodes: vec![
-            InterfaceNode {
-                id: InterfaceNodeId(1),
-                junction: Some(JunctionId(1)),
-            },
-            InterfaceNode {
-                id: InterfaceNodeId(2),
-                junction: Some(JunctionId(2)),
-            },
-        ],
-        span_sides: vec![InterfaceSpanSides {
-            left: RegionId(2),
-            right: BACKGROUND_REGION,
-        }],
-    });
-
-    let mesh = mesh(&scene);
-    assert!(
-        mesh.triangles
-            .iter()
-            .any(|triangle| triangle.region == RegionId(2))
-    );
-    assert!(
-        mesh.triangles
-            .iter()
-            .any(|triangle| triangle.region == BACKGROUND_REGION)
-    );
-    let interface_edges = mesh
-        .boundary_edges
+/// The labels of `mesh`'s edges on `curve` and `side`.
+fn sided(mesh: &TriMesh, curve: u64, side: CurveTraceSide) -> Vec<&BoundaryEdge> {
+    mesh.boundary_edges
         .iter()
-        .filter(|edge| edge.label == BoundaryLabel::OpenMaterialInterface(MaterialInterfaceId(1)))
-        .collect::<Vec<_>>();
-    assert!(!interface_edges.is_empty());
-    for edge in interface_edges {
-        let adjacent = mesh
-            .triangles
-            .iter()
-            .filter(|triangle| {
-                edge.vertices
-                    .iter()
-                    .all(|vertex| triangle.vertices.contains(vertex))
-            })
-            .map(|triangle| triangle.region)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(adjacent, BTreeSet::from([BACKGROUND_REGION, RegionId(2)]));
-    }
+        .filter(|edge| {
+            matches!(
+                edge.label,
+                BoundaryLabel::Curve { curve: id, side: candidate, .. }
+                    if id == CurveId(curve) && candidate == side
+            )
+        })
+        .collect()
 }
 
-#[test]
-fn t_junction_partitions_three_material_regions() {
-    fn branch(
-        id: u64,
-        node: &mut u64,
-        points: [Point2; 2],
-        junctions: [JunctionId; 2],
-        sides: InterfaceSpanSides,
-    ) -> MaterialInterface {
-        let nodes = junctions.map(|junction| {
-            let id = InterfaceNodeId(*node);
-            *node += 1;
-            InterfaceNode {
-                id,
-                junction: Some(junction),
-            }
-        });
-        MaterialInterface {
-            id: MaterialInterfaceId(id),
-            spline: InterfaceSpline::Open(OpenCubicSpline::polyline(points.to_vec()).unwrap()),
-            nodes: nodes.to_vec(),
-            span_sides: vec![sides],
-        }
-    }
-
-    let mut scene = Scene::default();
-    for id in [2, 3] {
-        scene.regions.push(Region {
-            id: RegionId(id),
-            material: DEFAULT_MATERIAL,
-            frame: MaterialFrame::world(),
-        });
-    }
-    scene.junctions = vec![
-        Junction {
-            id: JunctionId(1),
-            location: JunctionLocation::Outer {
-                side: OuterSide::Bottom,
-                fraction: 0.5,
-            },
-        },
-        Junction {
-            id: JunctionId(2),
-            location: JunctionLocation::Outer {
-                side: OuterSide::Top,
-                fraction: 0.5,
-            },
-        },
-        Junction {
-            id: JunctionId(3),
-            location: JunctionLocation::Outer {
-                side: OuterSide::Right,
-                fraction: 0.5,
-            },
-        },
-        Junction {
-            id: JunctionId(4),
-            location: JunctionLocation::Interior,
-        },
-    ];
-    let mut node = 1;
-    scene.material_interfaces = vec![
-        branch(
-            1,
-            &mut node,
-            [Point2::new(0.0, -1.0), Point2::default()],
-            [JunctionId(1), JunctionId(4)],
-            InterfaceSpanSides {
-                left: RegionId(2),
-                right: BACKGROUND_REGION,
-            },
-        ),
-        branch(
-            2,
-            &mut node,
-            [Point2::default(), Point2::new(0.0, 1.0)],
-            [JunctionId(4), JunctionId(2)],
-            InterfaceSpanSides {
-                left: RegionId(2),
-                right: RegionId(3),
-            },
-        ),
-        branch(
-            3,
-            &mut node,
-            [Point2::default(), Point2::new(1.0, 0.0)],
-            [JunctionId(4), JunctionId(3)],
-            InterfaceSpanSides {
-                left: RegionId(3),
-                right: BACKGROUND_REGION,
-            },
-        ),
-    ];
-    assert!(validate(&scene).valid());
-
-    let mesh = mesh(&scene);
-    let regions = mesh
-        .triangles
+fn area(mesh: &TriMesh) -> f64 {
+    mesh.triangles
         .iter()
-        .map(|triangle| triangle.region)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        regions,
-        BTreeSet::from([BACKGROUND_REGION, RegionId(2), RegionId(3)])
+        .map(|triangle| {
+            let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
+            0.5 * (b - a).cross(c - a)
+        })
+        .sum()
+}
+
+/// The default scene with a rounded loop of radius 0.42 at the origin, an
+/// inclusion of a stiffer medium inside, its rim with `behavior`.
+fn two_region_scene(behavior: SpanBehavior) -> TopologyScene {
+    let mut scene = TopologyScene::default();
+    scene
+        .materials
+        .push(medium(2, "Inclusion", 2.5, [180, 90, 70]));
+    scene.regions.push(Region {
+        id: RegionId(2),
+        material: MaterialId(2),
+        frame: MaterialFrame::world(),
+    });
+    add_loop(
+        &mut scene,
+        20,
+        PeriodicCubicSpline::rounded(Point2::default(), 0.42),
+        behavior,
+        Some(RegionId(2)),
     );
-    let center = mesh
-        .vertices
-        .iter()
-        .position(|vertex| vertex.point.norm() < 1.0e-10)
-        .unwrap();
-    let incident_regions = mesh
-        .triangles
-        .iter()
-        .filter(|triangle| triangle.vertices.contains(&center))
-        .map(|triangle| triangle.region)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(incident_regions, regions);
-    QuadraticWaveOperator::assemble_scene_with_boundaries(&mesh, &scene, scene.outer_boundaries)
-        .unwrap();
+    scene
 }
 
 fn assert_mesh_invariants(mesh: &TriMesh, holes: usize) {
@@ -339,19 +267,42 @@ fn polygon_location_distinguishes_boundary_without_epsilon() {
     );
 }
 
+fn edge_adjacency(mesh: &TriMesh) -> BTreeMap<(usize, usize), Vec<usize>> {
+    let mut adjacency = BTreeMap::<_, Vec<_>>::new();
+    for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
+        for edge in [
+            edge_key(triangle.vertices[0], triangle.vertices[1]),
+            edge_key(triangle.vertices[1], triangle.vertices[2]),
+            edge_key(triangle.vertices[2], triangle.vertices[0]),
+        ] {
+            adjacency.entry(edge).or_default().push(triangle_index);
+        }
+    }
+    adjacency
+}
+
+fn medium(id: u64, name: &str, stiffness: f64, color: [u8; 3]) -> Material {
+    Material {
+        id: MaterialId(id),
+        name: name.into(),
+        mass_density: ScalarField::constant(1.0),
+        stiffness: ScalarField::constant(stiffness),
+        damping: ScalarField::constant(0.0),
+        axis_ratio: ScalarField::constant(1.0),
+        parameters: vec![],
+        color,
+        ..Material::default_medium()
+    }
+}
+
 #[test]
 fn rounded_hole_is_constrained_classified_and_refined() {
-    let scene = Scene::initial();
-    let mesh = mesh(&scene);
+    let mesh = mesh(&initial());
     assert_eq!(mesh.geometry_revision, 17);
     assert_mesh_invariants(&mesh, 1);
     assert!(mesh.quality.maximum_edge_length <= 0.28 * 1.05 + 1.0e-10);
     assert!(mesh.quality.minimum_angle_degrees >= 12.0 - 1.0e-8);
-    assert!(
-        mesh.boundary_edges
-            .iter()
-            .any(|edge| edge.label == BoundaryLabel::Obstacle(ObstacleId(1)))
-    );
+    assert!(!sided(&mesh, 1, CurveTraceSide::Right).is_empty());
     for triangle in &mesh.triangles {
         let center = triangle
             .vertices
@@ -360,48 +311,38 @@ fn rounded_hole_is_constrained_classified_and_refined() {
             .fold(Point2::default(), |sum, point| sum + point)
             / 3.0;
         assert!(center.x.abs() < 1.0 && center.y.abs() < 1.0);
-        assert!(
-            center.norm() > 0.09,
-            "triangle centroid entered the obstacle"
-        );
+        assert!(center.norm() > 0.09, "triangle centroid entered the hole");
     }
 }
 
 #[test]
 fn several_holes_keep_labels_and_topology() {
-    let scene = Scene {
-        obstacles: [(-0.55, -0.35), (0.45, -0.35), (-0.35, 0.48)]
-            .into_iter()
-            .enumerate()
-            .map(|(index, (x, y))| {
-                Obstacle::hole(
-                    ObstacleId(index as u64 + 10),
-                    PeriodicCubicSpline::rounded(Point2::new(x, y), 0.13),
-                )
-            })
-            .collect(),
-        ..Scene::default()
-    };
+    let mut scene = TopologyScene::default();
+    for (index, (x, y)) in [(-0.55, -0.35), (0.45, -0.35), (-0.35, 0.48)]
+        .into_iter()
+        .enumerate()
+    {
+        add_hole(
+            &mut scene,
+            index as u64 + 10,
+            PeriodicCubicSpline::rounded(Point2::new(x, y), 0.13),
+        );
+    }
     let mesh = mesh(&scene);
     assert_mesh_invariants(&mesh, 3);
     let labels: BTreeSet<_> = mesh
         .boundary_edges
         .iter()
         .filter_map(|edge| match edge.label {
-            BoundaryLabel::Obstacle(id) => Some(id.0),
-            BoundaryLabel::Outer(_)
-            | BoundaryLabel::MaterialInterface(_)
-            | BoundaryLabel::OpenMaterialInterface(_)
-            | BoundaryLabel::Wall { .. }
-            | BoundaryLabel::InternalBoundary { .. }
-            | BoundaryLabel::Curve { .. } => None,
+            BoundaryLabel::Curve { curve, .. } => Some(curve.0),
+            _ => None,
         })
         .collect();
     assert_eq!(labels, BTreeSet::from([10, 11, 12]));
 }
 
 #[test]
-fn concave_obstacle_meshes_without_filling_the_hole() {
+fn concave_hole_meshes_without_filling_it() {
     let controls = (0..12)
         .map(|index| {
             let angle = index as f64 * std::f64::consts::TAU / 12.0;
@@ -409,37 +350,25 @@ fn concave_obstacle_meshes_without_filling_the_hole() {
             Point2::new(angle.cos() * radius, angle.sin() * radius)
         })
         .collect();
-    let scene = Scene {
-        obstacles: vec![Obstacle::hole(
-            ObstacleId(91),
-            PeriodicCubicSpline::uniform(controls).unwrap(),
-        )],
-        ..Scene::default()
-    };
-    assert!(validate(&scene).valid());
+    let mut scene = TopologyScene::default();
+    add_hole(
+        &mut scene,
+        91,
+        PeriodicCubicSpline::uniform(controls).unwrap(),
+    );
     let mesh = mesh(&scene);
     assert_mesh_invariants(&mesh, 1);
     assert!(mesh.boundary_edges.iter().all(|edge| {
-        !matches!(edge.label, BoundaryLabel::Obstacle(id) if id != ObstacleId(91))
+        !matches!(edge.label, BoundaryLabel::Curve { curve, .. } if curve != CurveId(91))
     }));
 }
 
 #[test]
-fn invalid_geometry_options_and_capacity_fail_explicitly() {
-    let invalid = Scene {
-        obstacles: vec![Obstacle::hole(
-            ObstacleId(1),
-            PeriodicCubicSpline::rounded(Point2::new(0.96, 0.0), 0.2),
-        )],
-        ..Scene::default()
-    };
+fn invalid_options_and_capacity_fail_explicitly() {
+    let scene = initial();
     assert!(matches!(
-        mesh_scene(&invalid, 0, MeshingOptions::default()),
-        Err(MeshError::InvalidGeometry(ValidationIssue::Outside(_)))
-    ));
-    assert!(matches!(
-        mesh_scene(
-            &Scene::initial(),
+        mesh_topology_plan(
+            &plan(&scene, 0, MeshingOptions::default()),
             0,
             MeshingOptions {
                 target_edge_length: 0.0,
@@ -449,8 +378,8 @@ fn invalid_geometry_options_and_capacity_fail_explicitly() {
         Err(MeshError::InvalidOptions)
     ));
     assert!(matches!(
-        mesh_scene(
-            &Scene::initial(),
+        mesh_with(
+            &scene,
             0,
             MeshingOptions {
                 target_edge_length: 0.05,
@@ -464,28 +393,16 @@ fn invalid_geometry_options_and_capacity_fail_explicitly() {
 }
 
 #[test]
-fn meshing_is_deterministic() {
-    let options = MeshingOptions {
-        target_edge_length: 0.3,
-        minimum_angle_degrees: 10.0,
-        ..Default::default()
-    };
-    let first = mesh_scene(&Scene::initial(), 5, options).unwrap();
-    let second = mesh_scene(&Scene::initial(), 5, options).unwrap();
-    assert_eq!(first, second);
-}
-
-#[test]
 fn cooperative_job_advances_refinement_in_bounded_units() {
     let options = MeshingOptions {
         target_edge_length: 0.3,
         minimum_angle_degrees: 10.0,
         ..Default::default()
     };
-    let expected = mesh_scene(&Scene::initial(), 44, options).unwrap();
-    let mut job = MeshingJob::new(Scene::initial(), 44, options);
+    let scene = initial();
+    let expected = mesh_with(&scene, 44, options).unwrap();
+    let mut job = TopologyMeshingJob::new(plan(&scene, 44, options), 44, options);
     assert!(job.advance(0).is_none());
-    // Even validation/preparation can yield; no unit performs a whole rebuild.
     assert!(job.advance(1).is_none());
     let mut phases = BTreeMap::new();
     for _ in 0..2_000_000 {
@@ -495,11 +412,11 @@ fn cooperative_job_advances_refinement_in_bounded_units() {
             assert_eq!(result.unwrap(), expected);
             assert!(job.advance(1).is_none());
             for phase in [
-                "Validating",
-                "Sampling boundaries",
                 "Connecting holes",
                 "Triangulating",
                 "Legalizing edges",
+                "Refining",
+                "Recovering separated curves",
                 "Checking mesh",
             ] {
                 assert!(phases[phase] > 1, "{phase} must be resumable");
@@ -520,34 +437,12 @@ fn cooperative_job_advances_refinement_in_bounded_units() {
 }
 
 #[test]
-fn mesh_output_is_independent_of_work_slice_size() {
+fn limits_terminate_once_and_obsolete_jobs_can_be_replaced() {
     let options = MeshingOptions {
-        target_edge_length: 0.3,
-        minimum_angle_degrees: 10.0,
+        max_refinement_steps: 1,
         ..Default::default()
     };
-    let expected = mesh_scene(&Scene::initial(), 123, options).unwrap();
-    for budget in [7, 257, 10_000] {
-        let mut job = MeshingJob::new(Scene::initial(), 123, options);
-        loop {
-            if let Some(result) = job.advance(budget) {
-                assert_eq!(result.unwrap(), expected);
-                break;
-            }
-        }
-    }
-}
-
-#[test]
-fn limits_terminate_once_and_obsolete_jobs_can_be_replaced() {
-    let mut job = MeshingJob::new(
-        Scene::initial(),
-        1,
-        MeshingOptions {
-            max_refinement_steps: 1,
-            ..Default::default()
-        },
-    );
+    let mut job = TopologyMeshingJob::new(plan(&initial(), 1, options), 1, options);
     loop {
         if let Some(result) = job.advance(1000) {
             assert!(matches!(result, Err(MeshError::RefinementLimit { .. })));
@@ -556,9 +451,10 @@ fn limits_terminate_once_and_obsolete_jobs_can_be_replaced() {
             break;
         }
     }
-    let mut job = MeshingJob::new(Scene::initial(), 9, MeshingOptions::default());
+    let options = MeshingOptions::default();
+    let mut job = TopologyMeshingJob::new(plan(&initial(), 9, options), 9, options);
     assert!(job.advance(100).is_none());
-    job = MeshingJob::new(Scene::default(), 10, MeshingOptions::default());
+    job = TopologyMeshingJob::new(plan(&TopologyScene::default(), 10, options), 10, options);
     loop {
         if let Some(result) = job.advance(1000) {
             let mesh = result.unwrap();
@@ -570,36 +466,30 @@ fn limits_terminate_once_and_obsolete_jobs_can_be_replaced() {
 }
 
 #[test]
-fn maximum_obstacle_scene_stays_within_work_and_quality_limits() {
-    let scene = Scene {
-        obstacles: (0..32)
-            .map(|i| {
-                Obstacle::hole(
-                    ObstacleId(i + 1),
-                    PeriodicCubicSpline::rounded(
-                        Point2::new(
-                            -0.85 + 1.7 * (i % 8) as f64 / 7.0,
-                            -0.65 + 1.3 * (i / 8) as f64 / 3.0,
-                        ),
-                        0.07,
-                    ),
-                )
-            })
-            .collect(),
-        ..Scene::default()
+fn many_holes_stay_within_work_and_quality_limits() {
+    let mut scene = TopologyScene::default();
+    for i in 0..32 {
+        add_hole(
+            &mut scene,
+            i + 1,
+            PeriodicCubicSpline::rounded(
+                Point2::new(
+                    -0.85 + 1.7 * (i % 8) as f64 / 7.0,
+                    -0.65 + 1.3 * (i / 8) as f64 / 3.0,
+                ),
+                0.07,
+            ),
+        );
+    }
+    let options = MeshingOptions {
+        curve_tolerance: 0.0015,
+        target_edge_length: 0.16,
+        minimum_angle_degrees: 12.0,
+        max_vertices: 8000,
+        max_triangles: 16000,
+        max_refinement_steps: 5000,
     };
-    let mut job = MeshingJob::new(
-        scene,
-        32,
-        MeshingOptions {
-            curve_tolerance: 0.0015,
-            target_edge_length: 0.16,
-            minimum_angle_degrees: 12.0,
-            max_vertices: 8000,
-            max_triangles: 16000,
-            max_refinement_steps: 5000,
-        },
-    );
+    let mut job = TopologyMeshingJob::new(plan(&scene, 32, options), 32, options);
     for _ in 0..500 {
         if let Some(result) = job.advance(10_000) {
             let mesh = result.unwrap();
@@ -609,48 +499,20 @@ fn maximum_obstacle_scene_stays_within_work_and_quality_limits() {
             return;
         }
     }
-    panic!("representative maximum scene exceeded five million elementary units");
-}
-
-#[test]
-fn empty_domain_and_outer_side_labels_mesh() {
-    let scene = Scene::default();
-    let mesh = mesh_scene(
-        &scene,
-        1,
-        MeshingOptions {
-            target_edge_length: 0.35,
-            minimum_angle_degrees: 10.0,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_mesh_invariants(&mesh, 0);
-    let sides: BTreeSet<_> = mesh
-        .boundary_edges
-        .iter()
-        .filter_map(|edge| match edge.label {
-            BoundaryLabel::Outer(side) => Some(side as u8),
-            BoundaryLabel::Obstacle(_)
-            | BoundaryLabel::MaterialInterface(_)
-            | BoundaryLabel::OpenMaterialInterface(_)
-            | BoundaryLabel::Wall { .. }
-            | BoundaryLabel::InternalBoundary { .. }
-            | BoundaryLabel::Curve { .. } => None,
-        })
-        .collect();
-    assert_eq!(sides.len(), 4);
+    panic!("the 32-hole scene exceeded five million elementary units");
 }
 
 #[test]
 fn rectangular_domain_controls_outer_mesh_geometry() {
     let domain = DomainRect::new(-2.0, 1.0, -0.5, 1.5);
-    let scene = Scene {
-        domain,
-        ..Scene::default()
+    let scene = TopologyScene {
+        geometry: TopologyGeometry {
+            domain,
+            ..TopologyGeometry::default()
+        },
+        ..TopologyScene::default()
     };
-    assert!(validate(&scene).valid());
-    let mesh = mesh_scene(
+    let mesh = mesh_with(
         &scene,
         2,
         MeshingOptions {
@@ -660,15 +522,7 @@ fn rectangular_domain_controls_outer_mesh_geometry() {
         },
     )
     .unwrap();
-    let area = mesh
-        .triangles
-        .iter()
-        .map(|triangle| {
-            let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
-            0.5 * (b - a).cross(c - a)
-        })
-        .sum::<f64>();
-    assert!((area - domain.width() * domain.height()).abs() < 1.0e-10);
+    assert!((area(&mesh) - domain.width() * domain.height()).abs() < 1.0e-10);
     assert!(mesh.vertices.iter().all(|vertex| {
         (domain.min_x..=domain.max_x).contains(&vertex.point.x)
             && (domain.min_y..=domain.max_y).contains(&vertex.point.y)
@@ -683,25 +537,22 @@ fn rectangular_domain_controls_outer_mesh_geometry() {
 }
 
 #[test]
-fn representative_eight_obstacle_scene_meshes_within_limits() {
-    let scene = Scene {
-        obstacles: (0..8)
-            .map(|index| {
-                Obstacle::hole(
-                    ObstacleId(index + 1),
-                    PeriodicCubicSpline::rounded(
-                        Point2::new(
-                            -0.66 + (index % 4) as f64 * 0.44,
-                            -0.4 + (index / 4) as f64 * 0.8,
-                        ),
-                        0.12,
-                    ),
-                )
-            })
-            .collect(),
-        ..Scene::default()
-    };
-    let mesh = mesh_scene(
+fn eight_holes_mesh_within_limits() {
+    let mut scene = TopologyScene::default();
+    for index in 0..8 {
+        add_hole(
+            &mut scene,
+            index + 1,
+            PeriodicCubicSpline::rounded(
+                Point2::new(
+                    -0.66 + (index % 4) as f64 * 0.44,
+                    -0.4 + (index / 4) as f64 * 0.8,
+                ),
+                0.12,
+            ),
+        );
+    }
+    let mesh = mesh_with(
         &scene,
         8,
         MeshingOptions {
@@ -719,133 +570,12 @@ fn representative_eight_obstacle_scene_meshes_within_limits() {
     assert!(mesh.triangles.len() < 10_000);
 }
 
-fn medium(id: u64, name: &str, stiffness: f64, color: [u8; 3]) -> Material {
-    Material {
-        id: MaterialId(id),
-        name: name.into(),
-        mass_density: ScalarField::constant(1.0),
-        stiffness: ScalarField::constant(stiffness),
-        damping: ScalarField::constant(0.0),
-        axis_ratio: ScalarField::constant(1.0),
-        parameters: vec![],
-        color,
-        ..Material::default_medium()
-    }
-}
-
-fn two_region_scene(role: impl FnOnce(RegionId, RegionId) -> LoopRole) -> Scene {
-    Scene {
-        domain: DomainRect::default(),
-        physics: PhysicsModel::Mechanical,
-        obstacles: vec![Obstacle::with_role(
-            ObstacleId(20),
-            PeriodicCubicSpline::rounded(Point2::default(), 0.42),
-            role(BACKGROUND_REGION, RegionId(2)),
-        )],
-        internal_boundaries: vec![],
-        material_interfaces: vec![],
-        junctions: vec![],
-        materials: vec![
-            Material::default_medium(),
-            medium(2, "Inclusion", 2.5, [180, 90, 70]),
-        ],
-        regions: vec![
-            Region {
-                id: BACKGROUND_REGION,
-                material: DEFAULT_MATERIAL,
-                frame: MaterialFrame::world(),
-            },
-            Region {
-                id: RegionId(2),
-                material: MaterialId(2),
-                frame: MaterialFrame::world(),
-            },
-        ],
-        volume_sources: vec![],
-        outer_boundaries: OuterBoundaryConditions::default(),
-    }
-}
-
-fn edge_adjacency(mesh: &TriMesh) -> BTreeMap<(usize, usize), Vec<usize>> {
-    let mut adjacency = BTreeMap::<_, Vec<_>>::new();
-    for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
-        for edge in [
-            edge_key(triangle.vertices[0], triangle.vertices[1]),
-            edge_key(triangle.vertices[1], triangle.vertices[2]),
-            edge_key(triangle.vertices[2], triangle.vertices[0]),
-        ] {
-            adjacency.entry(edge).or_default().push(triangle_index);
-        }
-    }
-    adjacency
-}
-
-#[test]
-fn material_interface_retains_both_regions_with_a_shared_trace() {
-    let scene =
-        two_region_scene(|exterior, interior| LoopRole::MaterialInterface { exterior, interior });
-    assert!(validate(&scene).valid());
-    let mesh = mesh(&scene);
-    let regions = mesh
-        .triangles
-        .iter()
-        .map(|triangle| triangle.region)
-        .collect::<BTreeSet<_>>();
-    assert_eq!(regions, BTreeSet::from([BACKGROUND_REGION, RegionId(2)]));
-    let adjacency = edge_adjacency(&mesh);
-    let interfaces = mesh
-        .boundary_edges
-        .iter()
-        .filter(|edge| matches!(edge.label, BoundaryLabel::MaterialInterface(ObstacleId(20))))
-        .collect::<Vec<_>>();
-    assert!(!interfaces.is_empty());
-    for edge in interfaces {
-        let sides = &adjacency[&edge_key(edge.vertices[0], edge.vertices[1])];
-        assert_eq!(sides.len(), 2);
-        assert_ne!(
-            mesh.triangles[sides[0]].region,
-            mesh.triangles[sides[1]].region
-        );
-    }
-    let area = mesh
-        .triangles
-        .iter()
-        .map(|triangle| {
-            let [a, b, c] = triangle.vertices.map(|index| mesh.vertices[index].point);
-            0.5 * (b - a).cross(c - a)
-        })
-        .sum::<f64>();
-    assert!((area - 4.0).abs() < 1.0e-10);
-}
-
 #[test]
 fn closed_wall_duplicates_the_two_traces_and_retains_its_interior() {
-    let scene = two_region_scene(|exterior, interior| LoopRole::Wall { exterior, interior });
-    assert!(validate(&scene).valid());
-    let mesh = mesh(&scene);
+    let mesh = mesh(&two_region_scene(SpanBehavior::REFLECTING));
     let adjacency = edge_adjacency(&mesh);
-    let exterior = mesh
-        .boundary_edges
-        .iter()
-        .filter(|edge| {
-            edge.label
-                == BoundaryLabel::Wall {
-                    loop_id: ObstacleId(20),
-                    side: BoundarySide::Exterior,
-                }
-        })
-        .collect::<Vec<_>>();
-    let interior = mesh
-        .boundary_edges
-        .iter()
-        .filter(|edge| {
-            edge.label
-                == BoundaryLabel::Wall {
-                    loop_id: ObstacleId(20),
-                    side: BoundarySide::Interior,
-                }
-        })
-        .collect::<Vec<_>>();
+    let exterior = sided(&mesh, 20, CurveTraceSide::Right);
+    let interior = sided(&mesh, 20, CurveTraceSide::Left);
     assert_eq!(exterior.len(), interior.len());
     assert!(!exterior.is_empty());
     for edge in exterior.iter().chain(&interior) {
@@ -874,103 +604,8 @@ fn closed_wall_duplicates_the_two_traces_and_retains_its_interior() {
 }
 
 #[test]
-fn open_reflecting_boundary_cuts_two_traces_and_reconnects_at_free_tips() {
-    let mut scene = Scene::default();
-    scene.internal_boundaries.push(InternalBoundary {
-        id: InternalBoundaryId(7),
-        spline: OpenCubicSpline::uniform(vec![
-            Point2::new(-0.72, -0.12),
-            Point2::new(-0.35, 0.28),
-            Point2::new(0.05, -0.22),
-            Point2::new(0.42, 0.24),
-            Point2::new(0.73, 0.04),
-        ])
-        .unwrap(),
-        region: BACKGROUND_REGION,
-        span_laws: vec![InternalBoundaryLaw::REFLECTING; 2],
-    });
-    assert!(validate(&scene).valid());
-    let mesh = mesh(&scene);
-    assert_mesh_invariants(&mesh, 1);
-    let adjacency = edge_adjacency(&mesh);
-    let left = mesh
-        .boundary_edges
-        .iter()
-        .filter(|edge| {
-            edge.label
-                == BoundaryLabel::InternalBoundary {
-                    id: InternalBoundaryId(7),
-                    side: InternalBoundarySide::Left,
-                }
-        })
-        .collect::<Vec<_>>();
-    let right = mesh
-        .boundary_edges
-        .iter()
-        .filter(|edge| {
-            edge.label
-                == BoundaryLabel::InternalBoundary {
-                    id: InternalBoundaryId(7),
-                    side: InternalBoundarySide::Right,
-                }
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(left.len(), right.len());
-    assert!(left.len() >= 2);
-    for edge in left.iter().chain(&right) {
-        assert_eq!(
-            adjacency[&edge_key(edge.vertices[0], edge.vertices[1])].len(),
-            1
-        );
-    }
-    for left_edge in &left {
-        let left_points = left_edge.vertices.map(|vertex| mesh.vertices[vertex].point);
-        assert!(right.iter().any(|right_edge| {
-            let right_points = right_edge
-                .vertices
-                .map(|vertex| mesh.vertices[vertex].point);
-            left_points[0] == right_points[1] && left_points[1] == right_points[0]
-        }));
-    }
-    let start = scene.internal_boundaries[0].spline.evaluate(0.0);
-    let end = scene.internal_boundaries[0]
-        .spline
-        .evaluate(scene.internal_boundaries[0].spline.period());
-    for tip in [start, end] {
-        assert_eq!(
-            mesh.vertices
-                .iter()
-                .filter(|vertex| vertex.point == tip)
-                .count(),
-            1,
-            "free tips must reconnect both traces"
-        );
-    }
-}
-
-#[test]
 fn baffle_insertion_avoids_accidental_cfl_slivers() {
-    let mut scene = Scene::default();
-    scene.obstacles.push(Obstacle::with_role(
-        ObstacleId(1),
-        PeriodicCubicSpline::rounded(Point2::default(), 0.30),
-        LoopRole::Wall {
-            exterior: BACKGROUND_REGION,
-            interior: RegionId(2),
-        },
-    ));
-    scene.internal_boundaries.push(InternalBoundary {
-        id: InternalBoundaryId(1),
-        spline: OpenCubicSpline::uniform(vec![
-            Point2::new(-0.841_274_799_6, -0.460_310_562_0),
-            Point2::new(-0.702_926_820_9, -0.393_873_880_9),
-            Point2::new(-0.564_578_842_4, -0.327_437_199_8),
-            Point2::new(-0.426_230_863_7, -0.261_000_518_7),
-        ])
-        .unwrap(),
-        region: BACKGROUND_REGION,
-        span_laws: vec![InternalBoundaryLaw::REFLECTING],
-    });
+    let mut scene = TopologyScene::default();
     scene
         .materials
         .push(medium(2, "Inside", 1.0, [77, 121, 164]));
@@ -979,22 +614,37 @@ fn baffle_insertion_avoids_accidental_cfl_slivers() {
         material: MaterialId(2),
         frame: MaterialFrame::world(),
     });
-    let mesh = mesh_scene(
-        &scene,
-        23,
-        MeshingOptions {
-            curve_tolerance: 0.0015,
-            target_edge_length: 0.08 / 1.05,
-            minimum_angle_degrees: 18.0,
-            ..MeshingOptions::default()
-        },
-    )
-    .unwrap();
+    add_loop(
+        &mut scene,
+        1,
+        PeriodicCubicSpline::rounded(Point2::default(), 0.30),
+        SpanBehavior::REFLECTING,
+        Some(RegionId(2)),
+    );
+    add_baffle(
+        &mut scene,
+        2,
+        OpenCubicSpline::uniform(vec![
+            Point2::new(-0.841_274_799_6, -0.460_310_562_0),
+            Point2::new(-0.702_926_820_9, -0.393_873_880_9),
+            Point2::new(-0.564_578_842_4, -0.327_437_199_8),
+            Point2::new(-0.426_230_863_7, -0.261_000_518_7),
+        ])
+        .unwrap(),
+    );
+    let options = MeshingOptions {
+        curve_tolerance: 0.0015,
+        target_edge_length: 0.08 / 1.05,
+        minimum_angle_degrees: 18.0,
+        ..MeshingOptions::default()
+    };
+    let plan = plan(&scene, 23, options);
+    let mesh = mesh_topology_plan(&plan, 23, options).unwrap();
     assert!(mesh.quality.minimum_angle_degrees > 15.0);
-    let operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
+    let operator = QuadraticWaveOperator::assemble_topology(
         &mesh,
-        &scene,
-        scene.outer_boundaries,
+        &plan,
+        TopologyWaveModel::from_topology_scene(&scene),
     )
     .unwrap();
     assert!(operator.recommended_time_step() > 0.002);
@@ -1002,149 +652,28 @@ fn baffle_insertion_avoids_accidental_cfl_slivers() {
 
 #[test]
 fn multiple_open_baffles_keep_independent_labeled_faces() {
-    let mut scene = Scene::default();
+    let mut scene = TopologyScene::default();
     for (id, y) in [(3, -0.38), (8, 0.42)] {
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(id),
-            spline: OpenCubicSpline::uniform(vec![
+        add_baffle(
+            &mut scene,
+            id,
+            OpenCubicSpline::uniform(vec![
                 Point2::new(-0.62, y),
                 Point2::new(-0.2, y + 0.05),
                 Point2::new(0.2, y - 0.04),
                 Point2::new(0.62, y),
             ])
             .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![InternalBoundaryLaw::REFLECTING],
-        });
+        );
     }
     let mesh = mesh(&scene);
     assert_mesh_invariants(&mesh, 2);
-    for id in [InternalBoundaryId(3), InternalBoundaryId(8)] {
-        let left = mesh
-            .boundary_edges
-            .iter()
-            .filter(|edge| {
-                edge.label
-                    == BoundaryLabel::InternalBoundary {
-                        id,
-                        side: InternalBoundarySide::Left,
-                    }
-            })
-            .count();
-        let right = mesh
-            .boundary_edges
-            .iter()
-            .filter(|edge| {
-                edge.label
-                    == BoundaryLabel::InternalBoundary {
-                        id,
-                        side: InternalBoundarySide::Right,
-                    }
-            })
-            .count();
+    for id in [3, 8] {
+        let left = sided(&mesh, id, CurveTraceSide::Left).len();
+        let right = sided(&mesh, id, CurveTraceSide::Right).len();
         assert_eq!(left, right);
         assert!(left >= 2);
     }
-}
-
-/// MESH-21 of the 2026-10-20 review: validation took the container of a
-/// nested loop, and of an open boundary, to be the enclosing loop with the
-/// smallest perimeter. A star inside a circle has the longer one, so a disc and
-/// a baffle inside the star were held to the circle's region and the valid
-/// scene refused.
-#[test]
-fn a_loop_inside_a_star_inside_a_circle_belongs_to_the_star() {
-    let mut scene =
-        two_region_scene(|exterior, interior| LoopRole::MaterialInterface { exterior, interior });
-    for (id, name, stiffness, color) in [
-        (3, "Star", 0.6, [80, 130, 190]),
-        (4, "Core", 1.4, [90, 170, 90]),
-    ] {
-        scene.materials.push(medium(id, name, stiffness, color));
-        scene.regions.push(Region {
-            id: RegionId(id),
-            material: MaterialId(id),
-            frame: MaterialFrame::world(),
-        });
-    }
-    let star = (0..32)
-        .map(|index| {
-            let angle = index as f64 * std::f64::consts::PI / 16.0;
-            let radius = if index % 2 == 0 { 0.3 } else { 0.15 };
-            Point2::new(angle.cos(), angle.sin()) * radius
-        })
-        .collect::<Vec<_>>();
-    scene.obstacles.push(Obstacle::with_role(
-        ObstacleId(21),
-        PeriodicCubicSpline::polygon(star).unwrap(),
-        LoopRole::MaterialInterface {
-            exterior: RegionId(2),
-            interior: RegionId(3),
-        },
-    ));
-    scene.obstacles.push(Obstacle::with_role(
-        ObstacleId(22),
-        PeriodicCubicSpline::rounded(Point2::default(), 0.04),
-        LoopRole::MaterialInterface {
-            exterior: RegionId(3),
-            interior: RegionId(4),
-        },
-    ));
-    scene.internal_boundaries.push(InternalBoundary {
-        id: InternalBoundaryId(1),
-        spline: OpenCubicSpline::polyline(vec![Point2::new(0.07, 0.0), Point2::new(0.11, 0.0)])
-            .unwrap(),
-        region: RegionId(3),
-        span_laws: vec![InternalBoundaryLaw::REFLECTING],
-    });
-    let validation = validate(&scene);
-    assert!(validation.valid(), "{:?}", validation.issue);
-}
-
-#[test]
-fn nested_material_regions_follow_explicit_region_ownership() {
-    let mut scene =
-        two_region_scene(|exterior, interior| LoopRole::MaterialInterface { exterior, interior });
-    scene.materials.push(medium(3, "Core", 0.6, [80, 130, 190]));
-    scene.regions.push(Region {
-        id: RegionId(3),
-        material: MaterialId(3),
-        frame: MaterialFrame::world(),
-    });
-    scene.obstacles.push(Obstacle::with_role(
-        ObstacleId(21),
-        PeriodicCubicSpline::rounded(Point2::default(), 0.18),
-        LoopRole::MaterialInterface {
-            exterior: RegionId(2),
-            interior: RegionId(3),
-        },
-    ));
-    assert!(validate(&scene).valid());
-    let options = MeshingOptions {
-        target_edge_length: 0.05,
-        curve_tolerance: 0.0008,
-        minimum_angle_degrees: 12.0,
-        max_vertices: 50_000,
-        max_triangles: 100_000,
-        max_refinement_steps: 50_000,
-    };
-    let mesh = mesh_scene(&scene, 17, options).unwrap();
-    assert_eq!(
-        mesh.triangles
-            .iter()
-            .map(|triangle| triangle.region)
-            .collect::<BTreeSet<_>>(),
-        BTreeSet::from([BACKGROUND_REGION, RegionId(2), RegionId(3)])
-    );
-
-    scene.obstacles[1].role = LoopRole::MaterialInterface {
-        exterior: BACKGROUND_REGION,
-        interior: RegionId(3),
-    };
-    assert!(matches!(
-        validate(&scene).issue,
-        Some(ValidationIssue::RegionTopology(ObstacleId(21)))
-    ));
 }
 
 /// The default caps stop the empty 2 × 2 domain short of an edge of 0.032:
@@ -1153,13 +682,14 @@ fn nested_material_regions_follow_explicit_region_ownership() {
 /// domain they are the defaults.
 #[test]
 fn caps_sized_for_the_domain_mesh_what_the_defaults_refuse() {
-    let scene = Scene::default();
-    let area = scene.domain.width() * scene.domain.height();
+    let scene = TopologyScene::default();
+    let domain = scene.geometry.domain;
+    let area = domain.width() * domain.height();
     let options = MeshingOptions {
         target_edge_length: 0.032,
         ..Default::default()
     };
-    let refused = mesh_scene(&scene, 0, options).unwrap_err();
+    let refused = mesh_with(&scene, 0, options).unwrap_err();
     assert!(
         matches!(
             refused,
@@ -1175,7 +705,7 @@ fn caps_sized_for_the_domain_mesh_what_the_defaults_refuse() {
         "{refused}"
     );
     let sized = options.sized_for_area(area);
-    let mesh = mesh_scene(&scene, 0, sized).unwrap();
+    let mesh = mesh_with(&scene, 0, sized).unwrap();
     assert!(
         mesh.quality.maximum_edge_length <= 0.032 * 1.1,
         "{:?}",

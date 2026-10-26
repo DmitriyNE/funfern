@@ -30041,3 +30041,49 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Legacy phase-out 4: wave_quadratic, canonical_transfer and the core's mesh and geometry suites off `Scene`
+
+- **wave_quadratic.** All 45 tests pass with their bounds unchanged.
+  - Hole spans take their law on the rim's outside face through `rim`.
+    Baffle laws are curve spans, and edges are found by curve, span and
+    side, not by the legacy labels.
+  - A law edit on the same mesh is assembled on `Meshed::under`.
+  - The four-region crossing test lost its comparison against the
+    `Scene` coefficient provider.
+  - The NUM-15 test is now `the_assembly_reads_materials_as_the_static_evaluator_does`
+    and holds the topology assembly.
+  - **Two tests stay on the `Scene` path:** that a failing spatial
+    material names its material, coefficient and point, and that an
+    unknown triangle region is refused by name. The topology assembly
+    reports both as "a triangle has an unknown or invalid region
+    material". On the assembly job the app runs, a density of `x` on the
+    default box passes the scene's validation and fails with that message,
+    which names neither the material nor the point. It was reported to the
+    user, and the two tests move with a fix.
+- **canonical_transfer.** All 20 tests pass with their bounds unchanged.
+  Hand-built meshes are assembled without a plan, the gapped scene's gap
+  is a curve, and the meshed fixtures carry their plan.
+- **The mesh suite.** tests/mesh.rs held the legacy mesher's 24 tests,
+  and now holds 15 on the topology mesher through the public path the
+  runtime takes.
+  - **Ported (13):** holes, three and concave; option and capacity
+    failures; the cooperative job's per-unit bounds with each of its six
+    phases resumable; the refinement limit and a replaced job; 32 and 8
+    holes within limits; the rectangular domain; the closed wall's paired
+    traces; the baffle that must not leave CFL slivers; two baffles'
+    labelled faces; and the caps sized for the domain.
+  - **Dropped (9).** Seven are covered by topology tests: the open
+    material interface, the T junction, determinism, slice independence,
+    the empty domain's sides, the shared interface trace and the free
+    baffle's tips. Two concerned the legacy model's region ownership,
+    which topology faces do not have: the star inside a circle and the
+    nested regions. The hole crossing the outer wall belonged to the
+    legacy validation and went with it.
+- **The geometry suite.** tests/geometry.rs keeps 22 of its 33 tests. The
+  11 that tested the legacy validation, its junctions and its open
+  boundaries went with the model. VER-25, which the area 9 plan left to the
+  phase-out, was among them.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
