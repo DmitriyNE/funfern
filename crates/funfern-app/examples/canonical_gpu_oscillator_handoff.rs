@@ -48,13 +48,14 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuTransferPlan, CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalHandoffMaps, CanonicalOutgoingHistoryTransferMap,
     CanonicalPrimaryTransferMap, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
     CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CoefficientLaw, MeshingOptions,
-    Obstacle, ObstacleId, OuterBoundaryCondition, PeriodicCubicSpline, Point2,
-    QuadraticTransferMap, QuadraticWaveOperator, RestoringLaw, ScalarField, Scene, TriMesh,
-    mesh_scene,
+    OuterBoundaryCondition, Point2, QuadraticTransferMap, QuadraticWaveOperator, RestoringLaw,
+    ScalarField, TopologyScene, TriMesh,
 };
 
 const WARMUP_STEPS: u64 = 60;
@@ -107,14 +108,14 @@ struct Generation {
     operator: CanonicalTemporalWaveOperator,
 }
 
-fn generation(scene: &Scene, edge: f64, revision: u64) -> Generation {
+fn generation(scene: &TopologyScene, edge: f64, revision: u64) -> Generation {
     let mut fixed = scene.clone();
     for material in &mut fixed.materials {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
         material.restoring = RestoringLaw::None;
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed,
         revision,
         MeshingOptions {
@@ -123,20 +124,24 @@ fn generation(scene: &Scene, edge: f64, revision: u64) -> Generation {
         },
     )
     .expect("handoff mesh");
-    let scalar =
-        QuadraticWaveOperator::assemble_scene(&mesh, &fixed, OuterBoundaryCondition::Reflecting)
-            .expect("handoff scalar operator");
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, scene, revision)
-        .expect("handoff operator");
+    let scalar = assembled(&mesh, &fixed, OuterBoundaryCondition::Reflecting)
+        .expect("handoff scalar operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(scene),
+        revision,
+    )
+    .expect("handoff operator");
     Generation {
-        mesh,
+        mesh: mesh.mesh,
         scalar,
         operator,
     }
 }
 
-fn with_law(law: RestoringLaw) -> Scene {
-    let mut scene = Scene::default();
+fn with_law(law: RestoringLaw) -> TopologyScene {
+    let mut scene = TopologyScene::default();
     scene.materials[0].restoring = law;
     scene
 }
@@ -172,12 +177,12 @@ fn main() -> AppExit {
             (source, target)
         }
         "from-linear" => (
-            generation(&Scene::default(), 0.12, 1),
+            generation(&TopologyScene::default(), 0.12, 1),
             generation(&klein_gordon, 0.12, 1),
         ),
         "to-linear" => (
             generation(&klein_gordon, 0.12, 1),
-            generation(&Scene::default(), 0.12, 1),
+            generation(&TopologyScene::default(), 0.12, 1),
         ),
         "reject" => (
             generation(&phi4(1.6), 0.12, 1),
@@ -186,10 +191,12 @@ fn main() -> AppExit {
         "opened" => {
             let holed = |x: f64| {
                 let mut scene = sine_gordon(3.0);
-                scene.obstacles = vec![Obstacle::hole(
-                    ObstacleId(1),
-                    PeriodicCubicSpline::rounded(Point2::new(x, 0.1), 0.3),
-                )];
+                add_hole(
+                    &mut scene,
+                    funfern_core::CurveId(1),
+                    Point2::new(x, 0.1),
+                    0.3,
+                );
                 scene
             };
             (

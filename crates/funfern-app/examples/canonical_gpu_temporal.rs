@@ -15,10 +15,12 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuRequest, CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CANONICAL_GRID_FILTER_STRENGTH, CanonicalMaterialDrive, CanonicalTemporalWaveOperator,
     CanonicalTemporalWaveState, CoefficientLaw, GRID_SCALE_FILTER_CADENCE, MeshingOptions,
-    OuterBoundaryCondition, QuadraticWaveOperator, ScalarField, Scene, TimeDrive, mesh_scene,
+    OuterBoundaryCondition, ScalarField, TimeDrive,
 };
 
 const DEFAULT_STEPS: u64 = 96;
@@ -62,7 +64,7 @@ fn main() -> AppExit {
         "the temporal gate needs post-event evolution after both transactions"
     );
 
-    let mut scene = Scene::initial();
+    let mut scene = initial();
     let material = &mut scene.materials[0];
     material.mass_law.drive = TimeDrive::TravellingModulation {
         depth: ScalarField::constant(0.24),
@@ -87,7 +89,7 @@ fn main() -> AppExit {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         1,
         MeshingOptions {
@@ -96,14 +98,15 @@ fn main() -> AppExit {
         },
     )
     .expect("temporal validation mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
+    let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting)
+        .expect("temporal validation scalar operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
         &mesh,
-        &fixed_scene,
-        OuterBoundaryCondition::Reflecting,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
     )
-    .expect("temporal validation scalar operator");
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("temporal validation operator");
+    .expect("temporal validation operator");
     let time_step = 0.4 * operator.maximum_time_step();
 
     // Install immediately before the same threshold used by the production
@@ -176,9 +179,13 @@ fn main() -> AppExit {
         sharpness: ScalarField::constant(2.6),
     };
     target_material.stiffness_law.alternate = Some(ScalarField::constant(0.82));
-    let target_operator =
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &target_scene, 2)
-            .expect("target temporal validation operator");
+    let target_operator = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&target_scene),
+        2,
+    )
+    .expect("target temporal validation operator");
     let target_state = CanonicalTemporalWaveState::new_at(
         &target_operator,
         time_step,

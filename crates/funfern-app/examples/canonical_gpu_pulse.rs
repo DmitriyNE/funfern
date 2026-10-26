@@ -32,9 +32,11 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuLiveEvent, CanonicalGpuPlan,
     CanonicalGpuRequest, CanonicalWaveGpuPlugin, LiveEventRefusal,
 };
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalSource, CanonicalWaveOperator, CanonicalWaveState, MeshingOptions,
-    OuterBoundaryCondition, PulseEnvelope, QuadraticWaveOperator, Scene, TimeSignal, mesh_scene,
+    OuterBoundaryCondition, PulseEnvelope, TimeSignal,
 };
 
 /// Where a clock rebase would have left the epoch.
@@ -167,8 +169,8 @@ fn forcing(
 fn main() -> AppExit {
     let long = std::env::args().any(|argument| argument == "--long");
     let tolerance = if long { LONG_TOLERANCE } else { TOLERANCE };
-    let scene = Scene::initial();
-    let mesh = mesh_scene(
+    let scene = initial();
+    let mesh = meshed(
         &scene,
         1,
         MeshingOptions {
@@ -184,10 +186,14 @@ fn main() -> AppExit {
     } else {
         OuterBoundaryCondition::Reflecting
     };
-    let scalar =
-        QuadraticWaveOperator::assemble_scene(&mesh, &scene, walls).expect("pulse scalar operator");
-    let operator =
-        CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1).expect("pulse operator");
+    let scalar = assembled(&mesh, &scene, walls).expect("pulse scalar operator");
+    let operator = CanonicalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("pulse operator");
     let time_step = 0.4 * operator.maximum_time_step();
     let warmup_steps = (EDIT_TIME / time_step).round() as u64;
     let measured_steps = if long {

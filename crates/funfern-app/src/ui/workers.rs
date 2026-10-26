@@ -872,6 +872,7 @@ mod tests {
     use super::super::*;
     use super::*;
     use crate::topology_editor::TopologyAcceptance;
+    use funfern_core::test_scenes::*;
 
     /// A handoff describes the running generation from its prepared operators
     /// instead of packing it again. That description has to be the one its
@@ -1172,21 +1173,20 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn background_amr_worker_finishes_a_mesh_transaction() {
-        let scene = Scene::default();
-        let mesh = Arc::new(
-            mesh_scene(
-                &scene,
-                1,
-                MeshingOptions {
-                    target_edge_length: 0.2,
-                    ..Default::default()
-                },
-            )
-            .unwrap(),
-        );
-        let job = MeshAdaptationJob::new(
+        let scene = TopologyScene::default();
+        let Meshed { mesh, plan, .. } = meshed(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mesh = Arc::new(mesh);
+        let job = MeshAdaptationJob::new_topology(
             mesh.clone(),
-            scene,
+            &plan,
             MeshAdaptationState::from_mesh(&mesh),
             2,
             Arc::new(|_, _| 0.2),
@@ -1227,11 +1227,11 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn background_amr_worker_prepares_the_canonical_supplement() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.outer_boundaries =
             OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
         let mesh = Arc::new(
-            mesh_scene(
+            meshed(
                 &scene,
                 1,
                 MeshingOptions {
@@ -1241,16 +1241,17 @@ mod tests {
             )
             .unwrap(),
         );
-        let operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene(
+        let operator =
+            Arc::new(assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap());
+        let canonical = Arc::new(
+            CanonicalWaveOperator::compile(
                 &mesh,
-                &scene,
-                OuterBoundaryCondition::Reflecting,
+                &operator,
+                TopologyWaveModel::from_topology_scene(&scene),
+                1,
             )
             .unwrap(),
         );
-        let canonical =
-            Arc::new(CanonicalWaveOperator::compile_scene(&mesh, &operator, &scene, 1).unwrap());
         let forcing = Arc::new(CanonicalForcing::none(&canonical));
         let dofs = operator.degrees_of_freedom();
         let snapshot = QuadraticSolutionSnapshot {
@@ -1282,14 +1283,15 @@ mod tests {
             time_step: 0.01,
         };
         let job = AmrIndicatorJob::with_canonical(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 snapshot,
                 SolutionIndicatorOptions::default(),
             ),
-            mesh,
+            Arc::new(mesh.mesh.clone()),
             canonical,
             None,
             forcing,

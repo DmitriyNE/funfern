@@ -24,14 +24,14 @@ use funfern_app::canonical_gpu::{
     CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::{VectorOverlayDisplay, WaveGpuPlugin, WaveGpuRequest};
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
-    BACKGROUND_REGION, CANONICAL_GRID_FILTER_STRENGTH, CanonicalAuxiliaryState, CanonicalForcing,
-    CanonicalIntegrator, CanonicalPointStencil, CanonicalSource, CanonicalWallStep,
-    CanonicalWaveOperator, CanonicalWaveState, DampingLaw, GRID_SCALE_FILTER_CADENCE,
-    InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw,
-    LossChannel, MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline, OuterBoundaryCondition,
-    PeriodicCubicSpline, Point2, QuadraticPointStencil, QuadraticWaveOperator, RateLaw,
-    ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalAuxiliaryState, CanonicalForcing, CanonicalIntegrator,
+    CanonicalPointStencil, CanonicalSource, CanonicalWallStep, CanonicalWaveOperator,
+    CanonicalWaveState, DampingLaw, GRID_SCALE_FILTER_CADENCE, LossChannel, MeshingOptions,
+    OuterBoundaryCondition, Point2, QuadraticPointStencil, RateLaw, ScalarField, TimeDrive,
+    TimeSignal, TopologyScene,
 };
 
 const DEFAULT_STEPS: u64 = 128;
@@ -140,12 +140,12 @@ fn main() -> AppExit {
     let clock_rebase = std::env::args().any(|argument| argument == "--clock-rebase");
     let preparation = Instant::now();
     let mut scene = if thin_gap || obstacles {
-        Scene::default()
+        TopologyScene::default()
     } else {
-        Scene::initial()
+        initial()
     };
     if obstacles {
-        scene.obstacles = [
+        for (index, center) in [
             [-0.55, -0.48],
             [-0.15, -0.55],
             [0.30, -0.45],
@@ -157,32 +157,27 @@ fn main() -> AppExit {
         ]
         .into_iter()
         .enumerate()
-        .map(|(index, center)| {
-            Obstacle::hole(
-                ObstacleId(index as u64 + 1),
-                PeriodicCubicSpline::rounded(Point2::new(center[0], center[1]), 0.105),
-            )
-        })
-        .collect();
+        {
+            add_hole(
+                &mut scene,
+                funfern_core::CurveId(index as u64 + 1),
+                Point2::new(center[0], center[1]),
+                0.105,
+            );
+        }
     }
     if thin_gap {
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(1),
-            spline: OpenCubicSpline::uniform(vec![
+        add_baffle(
+            &mut scene,
+            funfern_core::CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .expect("thin-gap spline"),
-            region: BACKGROUND_REGION,
-            span_laws: vec![InternalBoundaryLaw {
-                coupling: InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 25.0,
-                },
-                ..InternalBoundaryLaw::REFLECTING
-            }],
-        });
+            ],
+            funfern_core::test_scenes::thin_gap(25.0),
+        );
     }
     if loss {
         scene.materials[0].electric_loss = Some(LossChannel {
@@ -203,7 +198,7 @@ fn main() -> AppExit {
         });
     }
     let mesh_started = Instant::now();
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &scene,
         1,
         MeshingOptions {
@@ -227,12 +222,16 @@ fn main() -> AppExit {
     scalar_scene.materials[0].electric_loss = None;
     scalar_scene.materials[0].magnetic_loss = None;
     let scalar_started = Instant::now();
-    let scalar = QuadraticWaveOperator::assemble_scene(&mesh, &scalar_scene, boundary)
-        .expect("quadratic comparison operator");
+    let scalar = assembled(&mesh, &scalar_scene, boundary).expect("quadratic comparison operator");
     let scalar_elapsed = scalar_started.elapsed();
     let canonical_started = Instant::now();
-    let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("canonical operator");
+    let operator = CanonicalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("canonical operator");
     let canonical_elapsed = canonical_started.elapsed();
     // A lossy law patch is compiled from other rates than the reference
     // steps with, so the device agrees only if the patch rewrites every
@@ -247,8 +246,13 @@ fn main() -> AppExit {
         ] {
             channel.as_mut().expect("lossy material").base_rate = ScalarField::constant(rate);
         }
-        CanonicalWaveOperator::compile_scene(&mesh, &scalar, &unpatched_scene, 1)
-            .expect("unpatched canonical operator")
+        CanonicalWaveOperator::compile(
+            &mesh,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&unpatched_scene),
+            1,
+        )
+        .expect("unpatched canonical operator")
     });
     let overlay_stencils = if vector_overlay_samples > 0 {
         (0..vector_overlay_samples)
@@ -258,8 +262,14 @@ fn main() -> AppExit {
                 let triangle = &mesh.triangles[element];
                 let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
                 let point = (a + b + c) / 3.0;
-                QuadraticPointStencil::build(&mesh, &scalar, &scalar_scene, point)
-                    .expect("vector-overlay stencil")
+                QuadraticPointStencil::build_topology(
+                    &mesh,
+                    &scalar,
+                    &mesh.plan,
+                    TopologyWaveModel::from_topology_scene(&scalar_scene),
+                    point,
+                )
+                .expect("vector-overlay stencil")
             })
             .collect::<Vec<_>>()
     } else {

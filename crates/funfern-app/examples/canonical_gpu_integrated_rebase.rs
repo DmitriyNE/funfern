@@ -8,11 +8,12 @@
 //! the box's total flux integrates the rate. A mean-rate error grows the total
 //! linearly where the reference's only oscillates.
 //!
-//! The clock starts 64 steps before an epoch's rebase, 1,000 s into the run,
-//! and runs 8 s past it. A rebase that formed the anchor apart from the
+//! The clock starts 64 steps before an epoch's rebase, 1,256 s into the run,
+//! and runs 16 s past it. A rebase that formed the anchor apart from the
 //! carrier's reduced phase moved the mean rate for good: the total read
 //! 4.1e-4 of its swing off on the M1 Max, against 2.4e-5 with the anchor
-//! formed from that phase (GPU-6 of the 2026-10-20 review). What is left is
+//! formed from that phase, both on the legacy scene's mesh (GPU-6 of the
+//! 2026-10-20 review); the topology mesh reads 2.5e-5. What is left is
 //! the epoch's own: late in an epoch the carrier's phase rounds at the local
 //! time's magnitude, which biases the mean rate until the next rebase, and a
 //! run inside one epoch reads 2.8e-3 after 127 s. Soon after a rebase the
@@ -28,10 +29,11 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest,
     CanonicalWaveGpuPlugin,
 };
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalIntegrator, CanonicalSource, CanonicalWaveOperator,
-    CanonicalWaveState, MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, Scene,
-    TimeSignal, mesh_scene,
+    CanonicalWaveState, MeshingOptions, OuterBoundaryCondition, TimeSignal,
 };
 
 const ORIGIN: f64 = 1_000.0;
@@ -58,8 +60,8 @@ struct Expected {
 }
 
 fn main() -> AppExit {
-    let scene = Scene::initial();
-    let mesh = mesh_scene(
+    let scene = initial();
+    let mesh = meshed(
         &scene,
         41,
         MeshingOptions {
@@ -68,11 +70,15 @@ fn main() -> AppExit {
         },
     )
     .expect("rebase mesh");
-    let scalar =
-        QuadraticWaveOperator::assemble_scene(&mesh, &scene, OuterBoundaryCondition::Reflecting)
-            .expect("rebase scalar operator");
-    let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 41)
-        .expect("rebase canonical operator");
+    let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting)
+        .expect("rebase scalar operator");
+    let operator = CanonicalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        41,
+    )
+    .expect("rebase canonical operator");
     let integrator = CanonicalIntegrator::FourthOrder;
     // A power of two, so the device's f32 step and the reference's count the
     // same seconds, and an epoch ends at 256 s on a whole step.
@@ -229,8 +235,8 @@ fn validate(
          {:.3e}; Q {q_error:.3e}",
         expected.initial_epoch, clock.epoch, expected.total, expected.swing
     );
-    // The M1 Max reads 2.4e-5, and 4.1e-4 where the rebase moved the mean
-    // rate: a quarter of that, and four times this.
+    // The M1 Max reads 2.5e-5, and read 4.1e-4 where the rebase moved the
+    // mean rate: a quarter of that, and four times this.
     expected.failed = clock.epoch != expected.initial_epoch + 1 || !within(drift, 1.0e-4);
     expected.finished = true;
 }

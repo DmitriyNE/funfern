@@ -24,10 +24,12 @@ use funfern_app::canonical_gpu::{
     CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, DampingLaw,
     LossChannel, MeshingOptions, OuterBoundaryCondition, PulseEnvelope, PulseTrain,
-    QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive, TriMesh, mesh_scene,
+    QuadraticWaveOperator, RateLaw, ScalarField, TimeDrive, TopologyScene, TriMesh,
 };
 
 const EPOCH_ORIGIN: f64 = 1_000.0;
@@ -65,9 +67,9 @@ fn pump(depth: f64, frequency_hz: f64) -> TimeDrive {
 
 /// The medium, its gates timed from `start`, the first absolute instant the
 /// run steps from. `gated: false` leaves the same drives running throughout.
-fn scene(start: f64, gated: bool, driven: bool) -> Scene {
+fn scene(start: f64, gated: bool, driven: bool) -> TopologyScene {
     let gate = |train: PulseTrain| gated.then_some(train);
-    let mut scene = Scene::initial();
+    let mut scene = initial();
     let material = &mut scene.materials[0];
     material.mass_law.drive = TimeDrive::TravellingModulation {
         depth: ScalarField::constant(0.24),
@@ -141,10 +143,15 @@ fn scene(start: f64, gated: bool, driven: bool) -> Scene {
 fn operator(
     mesh: &TriMesh,
     scalar: &QuadraticWaveOperator,
-    scene: &Scene,
+    scene: &TopologyScene,
 ) -> CanonicalTemporalWaveOperator {
-    CanonicalTemporalWaveOperator::compile_scene(mesh, scalar, scene, 1)
-        .expect("gated validation operator")
+    CanonicalTemporalWaveOperator::compile(
+        mesh,
+        scalar,
+        TopologyWaveModel::from_topology_scene(scene),
+        1,
+    )
+    .expect("gated validation operator")
 }
 
 fn main() -> AppExit {
@@ -156,7 +163,7 @@ fn main() -> AppExit {
         material.magnetic_loss = None;
         material.electric_loss = None;
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         1,
         MeshingOptions {
@@ -165,12 +172,8 @@ fn main() -> AppExit {
         },
     )
     .expect("gated validation mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
-        &mesh,
-        &fixed_scene,
-        OuterBoundaryCondition::Reflecting,
-    )
-    .expect("gated validation scalar operator");
+    let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting)
+        .expect("gated validation scalar operator");
     // The gates do not move the step bound, so the probe's is the step.
     let time_step = 0.4 * operator(&mesh, &scalar, &probe).maximum_time_step();
 
@@ -186,7 +189,7 @@ fn main() -> AppExit {
     let start = clock.time();
     let steps = (RUN_SECONDS / time_step).round() as u64;
 
-    let run = |scene: &Scene| {
+    let run = |scene: &TopologyScene| {
         let operator = operator(&mesh, &scalar, scene);
         let primary = operator
             .base()

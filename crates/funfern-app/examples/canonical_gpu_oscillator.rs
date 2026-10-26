@@ -50,14 +50,14 @@ use funfern_app::canonical_gpu::{
     CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
-    BACKGROUND_REGION, CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalSource,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalSource,
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalWallStep, CoefficientLaw,
-    DampingLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE, InternalBoundary, InternalBoundaryCoupling,
-    InternalBoundaryId, InternalBoundaryLaw, LoopRole, LossChannel, Material, MaterialFrame,
-    MaterialId, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition, Point2,
-    QuadraticWaveOperator, RateLaw, Region, RegionId, RestoringLaw, ScalarField, Scene, TimeDrive,
-    TimeSignal, mesh_scene,
+    DampingLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE, LossChannel, Material, MaterialFrame,
+    MaterialId, MeshingOptions, OuterBoundaryCondition, Point2, RateLaw, Region, RegionId,
+    RestoringLaw, ScalarField, TimeDrive, TimeSignal, TopologyScene,
 };
 
 #[derive(Resource)]
@@ -99,12 +99,9 @@ fn main() -> AppExit {
         omega0: ScalarField::constant(omega0),
     };
     let mut scene = if compose == "junction" {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         let interior = RegionId(2);
-        scene.obstacles[0].role = LoopRole::MaterialInterface {
-            exterior: BACKGROUND_REGION,
-            interior,
-        };
+        fill_hole(&mut scene, funfern_core::CurveId(1), interior);
         scene.materials.push(Material {
             id: MaterialId(2),
             name: "Oscillator interior".into(),
@@ -129,7 +126,7 @@ fn main() -> AppExit {
         });
         scene
     } else {
-        Scene::default()
+        TopologyScene::default()
     };
     let material = &mut scene.materials[0];
     material.restoring = match medium.as_str() {
@@ -206,23 +203,17 @@ fn main() -> AppExit {
         scene.materials[last].short_wave_loss = alpha.parse().expect("a short-wave loss α");
     }
     if compose == "gap" {
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(1),
-            spline: OpenCubicSpline::uniform(vec![
+        add_baffle(
+            &mut scene,
+            funfern_core::CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .expect("gap spline"),
-            region: BACKGROUND_REGION,
-            span_laws: vec![InternalBoundaryLaw {
-                coupling: InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 120.0,
-                },
-                ..InternalBoundaryLaw::REFLECTING
-            }],
-        });
+            ],
+            funfern_core::test_scenes::thin_gap(120.0),
+        );
     }
     let wall = match compose.as_str() {
         "wall1" => OuterBoundaryCondition::FirstOrderOutgoing,
@@ -242,7 +233,7 @@ fn main() -> AppExit {
             loss.law = DampingLaw::constant();
         }
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         1,
         MeshingOptions {
@@ -251,10 +242,14 @@ fn main() -> AppExit {
         },
     )
     .expect("oscillator mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, wall)
-        .expect("oscillator scalar operator");
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("oscillator operator");
+    let scalar = assembled(&mesh, &fixed_scene, wall).expect("oscillator scalar operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("oscillator operator");
     assert!(operator.has_restoring());
     let base = operator.base();
     let mut forcing = CanonicalForcing::none(base);

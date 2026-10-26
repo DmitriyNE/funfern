@@ -68,10 +68,11 @@ use funfern_app::canonical_gpu::{
     CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalWallStep,
-    CoefficientLaw, MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, ScalarField,
-    Scene, TimeDrive, mesh_scene,
+    CoefficientLaw, MeshingOptions, OuterBoundaryCondition, ScalarField, TimeDrive,
 };
 
 const STEPS: u64 = 2_000;
@@ -124,7 +125,7 @@ fn main() -> AppExit {
         .find_map(|argument| argument.strip_prefix("--steps=")?.parse().ok())
         .unwrap_or(STEPS);
     let amplitude = if nonlinear { 12.0 } else { 1.0 };
-    let mut scene = Scene::initial();
+    let mut scene = initial();
     if driven {
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.22),
@@ -204,7 +205,7 @@ fn main() -> AppExit {
             loss.law = funfern_core::DampingLaw::constant();
         }
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         1,
         MeshingOptions {
@@ -213,7 +214,7 @@ fn main() -> AppExit {
         },
     )
     .expect("timing mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
+    let scalar = assembled(
         &mesh,
         &fixed_scene,
         if outgoing {
@@ -223,8 +224,13 @@ fn main() -> AppExit {
         },
     )
     .expect("timing scalar operator");
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("timing temporal operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("timing temporal operator");
     let base = operator.base();
 
     // The driven ceiling is the lower of the two, so both runs use it and the

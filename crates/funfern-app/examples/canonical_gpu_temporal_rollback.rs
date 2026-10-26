@@ -11,10 +11,11 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuPlan, CanonicalGpuRequest, CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalMaterialDrive, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CoefficientLaw, MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, ScalarField,
-    Scene, TimeDrive, mesh_scene,
+    CoefficientLaw, MeshingOptions, OuterBoundaryCondition, ScalarField, TimeDrive,
 };
 
 const WARMUP_STEPS: u64 = 20;
@@ -53,7 +54,7 @@ enum Phase {
 }
 
 fn main() -> AppExit {
-    let mut source_scene = Scene::initial();
+    let mut source_scene = initial();
     let material = &mut source_scene.materials[0];
     material.mass_law.drive = TimeDrive::TravellingModulation {
         depth: ScalarField::constant(0.2),
@@ -95,7 +96,7 @@ fn main() -> AppExit {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         81,
         MeshingOptions {
@@ -104,18 +105,22 @@ fn main() -> AppExit {
         },
     )
     .expect("temporal rollback mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
+    let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting)
+        .expect("temporal rollback scalar operator");
+    let source_operator = CanonicalTemporalWaveOperator::compile(
         &mesh,
-        &fixed_scene,
-        OuterBoundaryCondition::Reflecting,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&source_scene),
+        81,
     )
-    .expect("temporal rollback scalar operator");
-    let source_operator =
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &source_scene, 81)
-            .expect("source temporal rollback operator");
-    let target_operator =
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &target_scene, 82)
-            .expect("target temporal rollback operator");
+    .expect("source temporal rollback operator");
+    let target_operator = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&target_scene),
+        82,
+    )
+    .expect("target temporal rollback operator");
     let time_step = 0.38
         * source_operator
             .maximum_time_step()

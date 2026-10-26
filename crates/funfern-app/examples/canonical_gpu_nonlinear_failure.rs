@@ -34,11 +34,12 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalTemporalWaveOperator,
     CanonicalTemporalWaveState, CoefficientLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE,
-    MeshingOptions, OuterBoundaryCondition, Point2, QuadraticWaveOperator, RestoringLaw,
-    ScalarField, Scene, mesh_scene,
+    MeshingOptions, OuterBoundaryCondition, Point2, RestoringLaw, ScalarField, TopologyScene,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,7 +75,7 @@ struct Expected {
 fn main() -> AppExit {
     let phi4 = std::env::var("FAILURE_LAW").is_ok_and(|value| value == "phi4");
     let filtered = std::env::var("FAILURE_FILTER").is_ok_and(|value| value == "1");
-    let mut scene = Scene::default();
+    let mut scene = TopologyScene::default();
     if phi4 {
         scene.materials[0].restoring = RestoringLaw::Phi4 {
             lambda: ScalarField::constant(16.0),
@@ -92,7 +93,7 @@ fn main() -> AppExit {
         material.mass_law = CoefficientLaw::linear();
         material.restoring = RestoringLaw::None;
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         1,
         MeshingOptions {
@@ -101,14 +102,15 @@ fn main() -> AppExit {
         },
     )
     .expect("failure mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
+    let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting)
+        .expect("failure scalar operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
         &mesh,
-        &fixed_scene,
-        OuterBoundaryCondition::Reflecting,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
     )
-    .expect("failure scalar operator");
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("failure operator");
+    .expect("failure operator");
     let base = operator.base();
     let forcing = CanonicalForcing::none(base);
     let time_step = 0.4 * operator.maximum_time_step();

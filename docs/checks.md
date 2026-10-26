@@ -919,14 +919,14 @@ The far field's times, and the clock under them, late into a run.
   drives a closed reflecting box in proportion to the nodal mass with an
   integrated harmonic whose integral has no mean, so the field stays uniform
   and the box's total flux integrates the rate. Its clock starts 64 steps
-  before a rebase at 1,000 s and runs 8 s past it. The total reads 2.4e-5 of
+  before a rebase 1,256 s in and runs 16 s past it. The total reads 2.5e-5 of
   its swing from the reference, held to 1e-4; a rebase that formed the rate
-  anchor apart from the carrier's reduced phase read 4.1e-4 (GPU-6 of the
-  2026-10-20 review). `canonical_gpu_handoff --source --integrated` carries
+  anchor apart from the carrier's reduced phase read 4.1e-4 on the legacy
+  scene's mesh (GPU-6 of the 2026-10-20 review). `canonical_gpu_handoff --source --integrated` carries
   an integrated drive across a handoff, which no other run did.
 - **A plan past the device's limits.** `canonical_gpu_binding_limit` makes
   the device bind half the largest buffer of the cavity's plan at edge 0.08,
-  the 4.1 MiB table buffer, through Bevy's constrained limits. The request
+  the 4.0 MiB table buffer, through Bevy's constrained limits. The request
   must admit against that limit, copied from the device as the app starts,
   refuse that plan naming the buffer, and install and step a coarser plan
   that fits. Installed, the larger plan's bind group failed validation and
@@ -1105,10 +1105,10 @@ variant, `canonical_gpu_temporal_handoff` (pumped, gated and into a
 nonlinear target) and `canonical_gpu_oscillator_handoff` (remesh, identity,
 from and to a linear medium, an opened hole), each side valued at the handoff
 by its own generation's law, restoring potential included. They agree to
-1.9e-8 to 2.6e-7 of the energy, held to 1e-6; Klein-Gordon handed to a plain
+1.9e-8 to 1.6e-7 of the energy, held to 1e-6; Klein-Gordon handed to a plain
 medium books the 10.7, half its energy, that dropping `r` takes. The
 mutation `handoff-store-authored` values the stores quadratically again, and
-the pumped edit reads 0 for -3.0e-5. Nightly, `energy-long-runs` runs PH-17
+the pumped edit reads 0 for -2.8e-5. Nightly, `energy-long-runs` runs PH-17
 and PH-05 long (`long_run_*`, half a minute): a linear medium in two skins
 and Klein-Gordon a thousand seconds under either integrator, the energy's
 excursion the same over the last quarter as the first (3.65e-4 and 4.3e-4);
@@ -1157,22 +1157,24 @@ covered.
 `canonical_gpu_driven_document` is the only end-to-end run: an authored
 document with a material drive, meshed and assembled by the application's own
 resumable jobs, compiled into a temporal plan and stepped on the device against
-an f64 oracle. It reads `2.46e-7` over forty-eight steps. `DRIVEN_WALLS=outgoing`
-puts the drive behind a second-order outgoing wall - the document's default, and
-the combination that used to be refused - and reads `3.31e-7` over the same
-forty-eight. `DRIVEN_STEPS` and `DRIVEN_DEPTH` override the step count and the
+an f64 oracle. It reads `3.6e-7` in Q and `6.4e-7` in b over forty-eight
+steps. `DRIVEN_WALLS=outgoing` puts the drive behind a second-order outgoing
+wall - the document's default, and the combination that used to be refused -
+and reads `4.5e-7` and `4.8e-7` over the same forty-eight. `DRIVEN_STEPS` and `DRIVEN_DEPTH` override the step count and the
 modulation depth. `DRIVEN_LAW=sine-gordon` or `van-der-pol` authors an
 oscillator from the editor's own presets instead and also compares `r`.
 
 `canonical_gpu_temporal_timing` is the throughput comparison that decides
 whether a drive is affordable, run twice with and without `--fixed` on an
-otherwise identical fixture. On an M1 Max at 15270 DOFs both read `517 us/step`:
+otherwise identical fixture. On an M1 Max both read `517 us/step`, at the
+15264 DOFs of the legacy scene's mesh (the topology mesh has 14984):
 per step the drive is free on the production core. What it does cost is the
 timestep, because the CFL bound tightens with the coefficient trajectory, so a
 driven medium runs about `1.23x` the wall clock per simulated second.
 `--outgoing` swaps the first-order wall for a second-order one, the only
 composition whose stage does non-local work. Both runs then read about
-`1045 us/step` at a 328-node trace - still free per step - against `833 us/step`
+`1045 us/step` at a 328-node trace (332 on the topology mesh) - still free per
+step - against `833 us/step`
 before the trace solve became a sweep. That `1.26x` is what buys a driven medium
 behind that wall at all, and it is confined to this composition. The sweep is
 two dispatches per pass and each stays as wide as the boundary; running it in
@@ -1184,7 +1186,7 @@ an absorbing wall - three stages that each divide by the nodal mass - against
 the f64 reference, and requires both state lanes within `2e-4`. It exists
 because the plan compiler used to refuse that combination, so no stage had ever
 been exercised with a moving mass; the first run found the kick dividing by the
-authored mass and missing by `1.4e-2`. It reads `2.42e-7`, down from `5.98e-6`
+authored mass and missing by `1.4e-2`. It reads `2.19e-7`, down from `5.98e-6`
 once a driven stage stopped pinning half a step in.
 
 `canonical_gpu_temporal_amr` runs the error estimate against the f32 state a
@@ -1199,8 +1201,8 @@ requires the same bounds again - the estimate is as good after a refinement
 transfer as before one. In between it measures the transfer on its own, host
 and device applying the same maps to the same input, and requires that the
 device is performing the *conserving* primary transfer: the free one misses by
-`2e-4`, the conserving one lands at `6e-8`, and the complementary transfer is
-exact. The estimate is handed the walls the solver runs and production's rate.
+`1.8e-4`, the conserving one lands at `4.7e-8`, and the complementary transfer
+is exact. The estimate is handed the walls the solver runs and production's rate.
 `TEMPORAL_AMR_LOSSY_WALLS=1` adds a complementary loss and absorbing walls, the
 two compositions whose terms the estimate reads from the direct state itself.
 The field view tessellates every quadratic parent triangle into six display
@@ -1287,10 +1289,11 @@ device alike; `--half-kicks` on `canonical_gpu_timing`,
 `canonical_gpu_handoff` and `canonical_gpu_temporal_timing`, and
 `LONG_RUN_WALL_STEP=half-kicks` on `canonical_gpu_long_run`, step them by the
 half kicks it replaced instead, for comparison. The trapezoid rule's ledger
-is not an exact identity: its split leaves a second-order remainder, `7.7e-4`
+is not an exact identity: its split leaves a second-order remainder, `1.9e-3`
 of the energy over the timing fixture's 144 steps, which the reference
 leaves too. The timing example therefore holds the device's ledger to the
-reference's own remainder, which under the half kicks is roundoff.
+reference's own remainder, which under the half kicks is `1.3e-5`, beside the
+bulk's own `3.2e-6` with no walls at all.
 `--leapfrog` steps both at the leapfrog's own step instead of the production
 integrator's. `--law-patch` is the check that a patch's commit keeps the
 wall step; with `--loss` the plan is compiled from other rates than the

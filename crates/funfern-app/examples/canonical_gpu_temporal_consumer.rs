@@ -22,12 +22,13 @@ use funfern_app::{
         RecorderContext, RecorderHistory, VectorOverlayDisplay, WaveGpuPlugin, WaveGpuRequest,
     },
 };
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     AreaProbeShape, BACKGROUND_REGION, CanonicalTemporalPointStencil,
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, MeshingOptions,
     OuterBoundaryCondition, PhysicsModel, Point2, QuadraticAreaStencil, QuadraticPointStencil,
-    QuadraticWaveOperator, ScalarField, Scene, TimeDrive, mesh_scene,
-    sample_temporal_canonical_area,
+    ScalarField, TimeDrive, sample_temporal_canonical_area,
 };
 
 const PROBE_ID: u64 = 71;
@@ -62,6 +63,16 @@ struct Expected {
     time: f64,
     primary: f64,
     primary_rate: f64,
+    /// The smallest rate error the device can resolve. Its rate is the
+    /// difference of two f32 fields one step apart over the step, so each
+    /// field's rounding reaches the rate magnified by `1/dt`: a few ulps of
+    /// `u` over `dt`. Without a gate one mass divides both fields and the
+    /// roundings cancel, the ungated runs reading near 1e-6 of the rate; a
+    /// gate divides them by different masses, and on the topology mesh the
+    /// gated run read 1.6 ulps, 2.1e-4 of the rate, with the reference's
+    /// own rate moving 5e-6 when its times were rounded to f32 as the
+    /// device's are (2026-10-26).
+    rate_floor: f64,
     complementary_magnitude: f64,
     flow_magnitude: f64,
     energy: f64,
@@ -81,7 +92,7 @@ struct Expected {
 }
 
 fn main() -> AppExit {
-    let mut scene = Scene::initial();
+    let mut scene = initial();
     let material = &mut scene.materials[0];
     material.mass_law.drive = TimeDrive::TravellingModulation {
         depth: ScalarField::constant(0.23),
@@ -151,7 +162,7 @@ fn main() -> AppExit {
         material.stiffness_law = CoefficientLaw::linear();
         material.restoring = funfern_core::RestoringLaw::None;
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         1,
         MeshingOptions {
@@ -160,20 +171,22 @@ fn main() -> AppExit {
         },
     )
     .expect("temporal consumer mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
-        &mesh,
-        &fixed_scene,
-        OuterBoundaryCondition::Reflecting,
-    )
-    .expect("temporal consumer scalar operator");
+    let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting)
+        .expect("temporal consumer scalar operator");
     let triangle = mesh.triangles[0].vertices;
     let point = triangle
         .into_iter()
         .map(|vertex| mesh.vertices[vertex].point)
         .fold(Point2::default(), |sum, point| sum + point)
         / 3.0;
-    let stencil = QuadraticPointStencil::build(&mesh, &scalar, &fixed_scene, point)
-        .expect("interior point stencil");
+    let stencil = QuadraticPointStencil::build_topology(
+        &mesh,
+        &scalar,
+        &mesh.plan,
+        TopologyWaveModel::from_topology_scene(&fixed_scene),
+        point,
+    )
+    .expect("interior point stencil");
     // A straight interior line, slanted so the travelling drive varies along
     // it, and clear of the scene's central hole.
     let ends = (Point2::new(-0.52, 0.38), Point2::new(0.54, 0.61));
@@ -182,23 +195,35 @@ fn main() -> AppExit {
     let line = (0..5)
         .map(|index| {
             let position = ends.0 + span * (index as f64 / 4.0);
-            let stencil = QuadraticPointStencil::build(&mesh, &scalar, &fixed_scene, position)
-                .expect("interior line stencil");
+            let stencil = QuadraticPointStencil::build_topology(
+                &mesh,
+                &scalar,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&fixed_scene),
+                position,
+            )
+            .expect("interior line stencil");
             (stencil, normal)
         })
         .collect::<Vec<_>>();
 
     // The whole active face, so the reported energy must equal the solver's.
-    let area = QuadraticAreaStencil::build(
+    let area = QuadraticAreaStencil::build_topology(
         &mesh,
         &scalar,
-        &fixed_scene,
+        &mesh.plan,
+        TopologyWaveModel::from_topology_scene(&fixed_scene),
         AreaProbeShape::Region(BACKGROUND_REGION),
     )
     .expect("region area stencil");
 
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("temporal consumer operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("temporal consumer operator");
     let time_step = 0.38 * operator.maximum_time_step();
     let sample_stride = (1.0 / (SAMPLE_RATE * time_step)).round().max(1.0) as u64;
     let line_stride = (1.0 / (LINE_SAMPLE_RATE * time_step)).round().max(1.0) as u64;
@@ -230,8 +255,13 @@ fn main() -> AppExit {
             start: 0.25 * span,
             repeat: 0.0,
         });
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-            .expect("gated temporal consumer operator")
+        CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        )
+        .expect("gated temporal consumer operator")
     } else {
         operator
     };
@@ -357,6 +387,7 @@ fn main() -> AppExit {
         time: state.time(),
         primary: sample.primary,
         primary_rate: sample.primary_rate,
+        rate_floor: 4.0 * f64::from(f32::EPSILON) * sample.primary.abs() / time_step,
         complementary_magnitude: sample.complementary.norm(),
         flow_magnitude: sample.energy_flow.norm(),
         energy: sample.energy_density,
@@ -629,7 +660,13 @@ fn finish_when_ready(
     );
     let errors = [
         relative_error(sample.displacement, expected.primary),
-        relative_error(sample.velocity, expected.primary_rate),
+        // Relative to the rate, or to the floor the bound allows, whichever
+        // is larger.
+        (sample.velocity - expected.primary_rate).abs()
+            / expected
+                .primary_rate
+                .abs()
+                .max(expected.rate_floor / 2.0e-4),
         relative_error(
             sample.transverse_magnitude,
             expected.complementary_magnitude,

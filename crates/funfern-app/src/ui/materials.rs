@@ -1815,7 +1815,7 @@ mod tests {
             .iter()
             .find(|variable| variable.parameter == "edge")
             .expect("its edge sharpness");
-        let mut material = Scene::initial().materials[0].clone();
+        let mut material = Material::default_medium();
         material.parameters.push(MaterialParameter {
             name: "edge".into(),
             value: variable.maximum + 8.0,
@@ -1831,7 +1831,7 @@ mod tests {
     /// names and as the coefficient's percentage change.
     #[test]
     fn the_strength_readout_names_each_nonlinear_row() {
-        let mut material = Scene::initial().materials[0].clone();
+        let mut material = Material::default_medium();
         material.mass_law.field = FieldLaw::Polynomial {
             chi1: ScalarField::constant(0.0),
             chi2: ScalarField::constant(0.8),
@@ -2378,7 +2378,7 @@ mod tests {
             },
         ];
         for physics in skins {
-            let base = Scene::initial().materials[0].clone();
+            let base = Material::default_medium();
             let mut materials = medium_presets()
                 .iter()
                 .map(|preset| apply_medium_preset(preset, &base, physics).unwrap())

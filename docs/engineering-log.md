@@ -30120,3 +30120,68 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Legacy phase-out 6: the app's tests and the device examples off `Scene`
+
+- **Shared fixtures.** The core's `test_scenes` module is public behind a
+  `test-support` feature, which only the app's dev-dependency enables, so
+  the app's tests and examples build their scenes the way the core's tests
+  do and no shipped build carries it.
+- **The app's tests.** canonical_gpu, wave_gpu and the workers', AMR,
+  materials and law-editor panels' tests moved; 156 pass with their
+  bounds unchanged. The panels' `Scene::initial().materials[0]` was the
+  default medium all along.
+- **The 22 device examples.** All of them go through the core pipeline and
+  the shared fixtures, the same move the tests made, rather than through
+  the runtime as the plan proposed for most of them: each keeps its own
+  structure. Their holes, baffles, thin gaps and filled holes are curves,
+  and the indicator and adaptation jobs take the plan. The five examples
+  already prepared through the runtime keep their own `prepare`; they
+  differ too much to share one.
+- **The device suite.** It passed 112 of 113 (target/device-suite/20261026-124957).
+  - **The failure:** the gated temporal consumer's probe rate read 2.1e-4
+    of the reference against 2e-4, where the legacy mesh read 1.9e-6.
+  - **The cause:** the device's rate is the difference of two f32 fields
+    one step apart, over the step. Without a gate one mass divides both
+    fields and their rounding cancels; the ungated runs read near 1e-6. A
+    gate divides them by different masses, and the previous field was off
+    by 1.6 ulps over a step of 1.29e-3. The reference is not the cause:
+    rounding its times to f32 as the device does moved its rate by 5e-6
+    of it.
+  - **The fix:** the check's rate tolerance is now the larger of 2e-4 of
+    the rate and four ulps of `u` over the step, 2.6e-5 there. The other
+    components keep 2e-4. All five consumer runs pass, alone and through
+    the suite (20261026-130854).
+- **Figures re-measured.** Every figure docs/checks.md quotes from a moved
+  example was read off the old and new suites' logs.
+  - **Changed with the mesh:**
+    - integrated rebase: 16 s past a rebase 1,256 s in (was 8 s), 2.5e-5
+      of its swing (2.4e-5);
+    - the binding-limit table: 4.0 MiB (4.1);
+    - handoff edit lanes: 1.9e-8 to 1.6e-7 (to 2.6e-7);
+    - pumped edit: -2.8e-5 (-3.0e-5);
+    - forced run: 2.19e-7 (2.45e-7 before the move, where the docs said
+      2.42e-7);
+    - the AMR transfer's free and conserving lanes: 1.8e-4 and 4.7e-8
+      (1.3e-4 and 4.8e-8 before the move, where the docs said 2e-4 and
+      6e-8);
+    - the timing fixture's trapezoid remainder: 1.9e-3 of the energy
+      (7.7e-4);
+    - the half kicks' remainder: 1.3e-5, beside the bulk's own 3.2e-6
+      without walls; the docs called it roundoff, and it was 1.8e-7.
+  - **Already stale, not moved:** the driven document reads 3.6e-7 in Q and
+    6.4e-7 in b, and behind the outgoing wall 4.5e-7 and 4.8e-7, where the
+    docs said 2.46e-7 and 3.31e-7. Its logs read the same before and after.
+  - **Example comments** repeating those figures now quote the new ones.
+  - **Not re-measured:** the temporal timing example's throughput (517 and
+    1045 us/step at the legacy mesh's 15264 DOFs; the topology mesh has
+    14984 and a 332-node trace) wants a quiet host and 20,000 steps. The
+    oscillator's worst case over its 120 combinations wants its own sweep;
+    the suite's seven runs read at most 3.3e-6 and 6.5e-7 in its lane.
+    The half kicks' seventyfold rise, which no power of the 1.46 times
+    longer step explains, and the re-timing are under docs/plan.md's
+    "Worth checking sometime".
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs; the full
+  device suite as above.

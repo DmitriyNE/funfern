@@ -25,9 +25,11 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest,
     CanonicalWaveGpuPlugin,
 };
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalWaveOperator, CanonicalWaveState, MeshingOptions,
-    OuterBoundaryCondition, QuadraticWaveOperator, Scene, mesh_scene,
+    OuterBoundaryCondition,
 };
 
 const STEPS: u64 = 16;
@@ -43,8 +45,8 @@ struct Pending {
 
 /// The cavity's plan at `edge`, and its largest buffer's size.
 fn cavity_plan(edge: f64) -> (CanonicalGpuPlan, u64) {
-    let scene = Scene::initial();
-    let mesh = mesh_scene(
+    let scene = initial();
+    let mesh = meshed(
         &scene,
         1,
         MeshingOptions {
@@ -53,11 +55,15 @@ fn cavity_plan(edge: f64) -> (CanonicalGpuPlan, u64) {
         },
     )
     .expect("cavity mesh");
-    let scalar =
-        QuadraticWaveOperator::assemble_scene(&mesh, &scene, OuterBoundaryCondition::Reflecting)
-            .expect("cavity scalar operator");
-    let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("cavity canonical operator");
+    let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting)
+        .expect("cavity scalar operator");
+    let operator = CanonicalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("cavity canonical operator");
     let time_step = 0.5 * operator.maximum_time_step();
     let plan = CanonicalGpuPlan::compile_with_quadratic(
         &operator,

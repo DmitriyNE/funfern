@@ -19,9 +19,11 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuLiveEvent, CanonicalGpuPlan,
     CanonicalGpuRequest, CanonicalWaveGpuPlugin,
 };
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalSource, CanonicalWaveOperator, CanonicalWaveState, MeshingOptions,
-    OuterBoundaryCondition, QuadraticWaveOperator, Scene, TimeSignal, mesh_scene,
+    OuterBoundaryCondition, TimeSignal,
 };
 
 const WARMUP_STEPS: u64 = 20;
@@ -66,8 +68,8 @@ enum Phase {
 }
 
 fn main() -> AppExit {
-    let scene = Scene::initial();
-    let mesh = mesh_scene(
+    let scene = initial();
+    let mesh = meshed(
         &scene,
         31,
         MeshingOptions {
@@ -76,14 +78,15 @@ fn main() -> AppExit {
         },
     )
     .expect("event mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
+    let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::FirstOrderOutgoing)
+        .expect("event scalar operator");
+    let operator = CanonicalWaveOperator::compile(
         &mesh,
-        &scene,
-        OuterBoundaryCondition::FirstOrderOutgoing,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        31,
     )
-    .expect("event scalar operator");
-    let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31)
-        .expect("event canonical operator");
+    .expect("event canonical operator");
     let time_step = 0.8 * operator.maximum_time_step();
     let primary = operator
         .node_points()

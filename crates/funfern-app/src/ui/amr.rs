@@ -706,6 +706,7 @@ fn stepped_since_handoff(start: &mut Option<(u64, u64)>, generation: u64, step: 
 mod tests {
     use super::*;
     use crate::topology_editor::TopologyEditor;
+    use funfern_core::test_scenes::*;
 
     /// An adaptation spans many frames while the user may remesh underneath
     /// it. Once the active mesh is no longer the one the job started from, the
@@ -1031,9 +1032,9 @@ mod tests {
     /// under the mesh's edges binds every element as a limit.
     #[test]
     fn a_size_rule_refinement_applies_only_the_limits() {
-        let scene = Scene::initial();
+        let scene = initial();
         let mesh = Arc::new(
-            mesh_scene(
+            meshed(
                 &scene,
                 1,
                 MeshingOptions {
@@ -1043,19 +1044,14 @@ mod tests {
             )
             .unwrap(),
         );
-        let operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &scene,
-                OuterBoundaryCondition::Reflecting,
-            )
-            .unwrap(),
-        );
+        let operator =
+            Arc::new(assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap());
         let dofs = operator.degrees_of_freedom();
-        let mut job = SolutionIndicatorJob::new(
-            mesh,
+        let mut job = SolutionIndicatorJob::new_topology(
+            std::sync::Arc::new(mesh.mesh.clone()),
             operator,
-            scene,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&scene),
             QuadraticSolutionSnapshot {
                 mesh_revision: 1,
                 displacement: vec![0.0; dofs],

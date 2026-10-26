@@ -306,7 +306,7 @@ impl QuadraticWaveOperator {
     /// Assembles a mesh built by hand, which has no plan, from a material
     /// model: each outer edge takes the region of its triangle, and no curve
     /// law applies.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn assemble_model(
         mesh: &TriMesh,
         model: TopologyWaveModel<'_>,

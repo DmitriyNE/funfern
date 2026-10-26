@@ -8,3 +8,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# The topology scenes the core's tests share, for the app's tests and
+# examples to build theirs the same way. Not for a shipped build.
+test-support = []

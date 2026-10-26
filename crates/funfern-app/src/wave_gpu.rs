@@ -2888,16 +2888,16 @@ fn prepare_probe_bind_group(
 mod tests {
     use super::*;
     use bevy::ecs::world::CommandQueue;
+    use funfern_core::TopologyWaveModel;
+    use funfern_core::test_scenes::*;
 
-    use funfern_core::{
-        MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, Scene, mesh_scene,
-    };
+    use funfern_core::{MeshingOptions, OuterBoundaryCondition};
 
     /// The operator a recorder reads its stencils through. The rings below are
     /// kept or replaced on what the recorders are, whatever the mesh.
     fn canonical_operator() -> CanonicalWaveOperator {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -2906,13 +2906,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
-        .unwrap();
-        CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1).unwrap()
+        .unwrap()
     }
 
     #[test]

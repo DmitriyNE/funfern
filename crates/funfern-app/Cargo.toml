@@ -49,6 +49,9 @@ wasm-bindgen-rayon = { version = "1.3", features = ["no-bundler"], optional = tr
 web-sys = { version = "0.3", features = ["Blob", "console", "Document", "Element", "History", "HtmlElement", "Location", "Storage", "Url", "Window"] }
 
 [dev-dependencies]
+# The core's shared test scenes, for tests and examples to build theirs as
+# the core's tests do.
+funfern-core = { path = "../funfern-core", features = ["test-support"] }
 # Pinned to the version wgpu links, so the parse a test does is the parse the
 # app's own device does. Nothing in the workspace read the shaders before this:
 # every edit was checked by hand against a throwaway crate. `wgsl-out` is the

@@ -1648,6 +1648,18 @@ is next touched.
   refuses the case rather than run it from the authored anchor. No fixture
   edits a harmonic drive through a handoff, so nothing holds the device's rule
   there (found while fixing GPU-2 of the 2026-10-20 review).
+- The timing fixture's reference ledger leaves more on the topology
+  mesh than it did on the legacy scene's (2026-10-26, legacy phase-out 6).
+  With a step 1.46 times longer, the trapezoid remainder went from 7.7e-4
+  to 1.9e-3 of the energy over 144 steps, about as dt² grows, and the bulk
+  with no walls from 4.9e-7 to 3.2e-6, about as dt⁵ does. The half kicks, which
+  docs/checks.md had called roundoff, went from 1.8e-7 to 1.3e-5: seventy
+  times, which no power of the step explains. The device matches the
+  reference in every run. Worth a look beside VER-63's wall energy.
+- The throughput figures docs/checks.md gives for
+  `canonical_gpu_temporal_timing` (517 and 1045 us/step) were measured on
+  the legacy scene's mesh, 15264 DOFs; the topology mesh has 14984 and a
+  332-node trace. Re-time them on a quiet host at 20,000 steps.
 
 ## Working practice
 

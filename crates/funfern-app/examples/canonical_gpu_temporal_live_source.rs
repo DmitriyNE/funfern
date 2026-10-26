@@ -32,10 +32,12 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuLiveEvent, CanonicalGpuPlan,
     CanonicalGpuRequest, CanonicalWaveGpuPlugin, LiveEventRefusal,
 };
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalSource, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CanonicalWaveOperator, CoefficientLaw, MeshingOptions, OuterBoundaryCondition,
-    QuadraticWaveOperator, ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
+    CanonicalWaveOperator, CoefficientLaw, MeshingOptions, OuterBoundaryCondition, ScalarField,
+    TimeDrive, TimeSignal,
 };
 
 const WARMUP_STEPS: u64 = 24;
@@ -90,7 +92,7 @@ fn source(
 }
 
 fn main() -> AppExit {
-    let mut scene = Scene::initial();
+    let mut scene = initial();
     let material = &mut scene.materials[0];
     material.mass_law.drive = TimeDrive::ParametricPump {
         depth: ScalarField::constant(0.3),
@@ -108,7 +110,7 @@ fn main() -> AppExit {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         1,
         MeshingOptions {
@@ -117,14 +119,15 @@ fn main() -> AppExit {
         },
     )
     .expect("live source mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
+    let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting)
+        .expect("live source scalar operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
         &mesh,
-        &fixed_scene,
-        OuterBoundaryCondition::Reflecting,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
     )
-    .expect("live source scalar operator");
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("live source temporal operator");
+    .expect("live source temporal operator");
     let base = operator.base();
     let time_step = 0.4 * operator.maximum_time_step();
 

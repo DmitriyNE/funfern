@@ -9179,10 +9179,12 @@ fn rebase_packed_temporal_runtime(plan: &mut CanonicalGpuPlan, elapsed: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use funfern_core::TopologyWaveModel;
+    use funfern_core::test_scenes::*;
     use funfern_core::{
         CanonicalRateDrive, CanonicalSource, CoefficientLaw, MeshingOptions,
-        OuterBoundaryCondition, QuadraticTransferMap, QuadraticWaveOperator, ScalarField, Scene,
-        TimeDrive, TriMesh, mesh_scene,
+        OuterBoundaryCondition, QuadraticTransferMap, QuadraticWaveOperator, ScalarField,
+        TimeDrive, TopologyScene,
     };
 
     #[test]
@@ -9820,8 +9822,8 @@ mod tests {
         );
         assert!(low != 0.0 && (f64::from(high) + f64::from(low) - 1234.567).abs() < 1.0e-9);
 
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -9830,13 +9832,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            7,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 7).unwrap();
         let pin = TimeSignal::pulsed(
             [0.1, 0.0, 1.0, 0.0],
             PulseEnvelope::Gaussian { width: 0.05 },
@@ -9880,8 +9883,8 @@ mod tests {
     /// overlapping source agreed (VER-36 of the 2026-10-20 review).
     #[test]
     fn a_differing_second_source_entry_is_found() {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -9890,13 +9893,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            7,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 7).unwrap();
         let dt = 0.8 * operator.maximum_time_step();
         let state = CanonicalWaveState::zero(&operator, dt).unwrap();
         let mut forcing = CanonicalForcing::none(&operator);
@@ -9939,8 +9943,8 @@ mod tests {
         inverted: bool,
         adjust: impl FnOnce(&CanonicalWaveOperator, CanonicalWaveState) -> CanonicalWaveState,
     ) -> CanonicalGpuPlan {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -9949,8 +9953,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(&mesh, &scene, boundary).unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 7).unwrap();
+        let scalar = assembled(&mesh, &scene, boundary).unwrap();
+        let operator = CanonicalWaveOperator::compile(
+            &mesh,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            7,
+        )
+        .unwrap();
         let dt = 0.8 * operator.maximum_time_step();
         let state = if inverted {
             CanonicalWaveState::zero(&operator, dt)
@@ -9980,8 +9990,8 @@ mod tests {
     }
 
     type TemporalFixture = (
-        Scene,
-        TriMesh,
+        TopologyScene,
+        Meshed,
         QuadraticWaveOperator,
         CanonicalTemporalWaveOperator,
         CanonicalTemporalWaveState,
@@ -10013,7 +10023,7 @@ mod tests {
     }
 
     fn temporal_plan_with(edit: impl FnOnce(&mut funfern_core::Material)) -> TemporalFixture {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         let material = &mut scene.materials[0];
         material.mass_law.drive = TimeDrive::TravellingModulation {
             depth: ScalarField::constant(0.24),
@@ -10044,7 +10054,7 @@ mod tests {
                 loss.law = funfern_core::DampingLaw::constant();
             }
         }
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &fixed_scene,
             1,
             MeshingOptions {
@@ -10053,14 +10063,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &fixed_scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            31,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
         let time_step = 0.4 * operator.maximum_time_step();
         let primary = operator
             .base()
@@ -10376,7 +10386,7 @@ mod tests {
         law: MediaLaw,
         wall_step: CanonicalWallStep,
     ) -> CanonicalGpuPlan {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.2),
             frequency_hz: ScalarField::constant(0.9),
@@ -10401,7 +10411,7 @@ mod tests {
         let mut fixed_scene = scene.clone();
         fixed_scene.materials[0].mass_law = CoefficientLaw::linear();
         fixed_scene.materials[0].stiffness_law = CoefficientLaw::linear();
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &fixed_scene,
             1,
             MeshingOptions {
@@ -10410,9 +10420,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, boundary).unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
+        let scalar = assembled(&mesh, &fixed_scene, boundary).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            31,
+        )
+        .unwrap();
         let time_step = 0.4 * operator.maximum_time_step();
         let state = CanonicalTemporalWaveState::zero(&operator, time_step)
             .unwrap()
@@ -10505,7 +10520,7 @@ mod tests {
     /// interior pins and hold no row.
     #[test]
     fn a_pinned_trace_on_a_driven_generation_packs_a_held_row() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.2),
             frequency_hz: ScalarField::constant(0.9),
@@ -10513,7 +10528,7 @@ mod tests {
         };
         let mut fixed_scene = scene.clone();
         fixed_scene.materials[0].mass_law = CoefficientLaw::linear();
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &fixed_scene,
             1,
             MeshingOptions {
@@ -10526,10 +10541,14 @@ mod tests {
             (OuterBoundaryCondition::Reflecting, false),
             (OuterBoundaryCondition::SecondOrderOutgoing, true),
         ] {
-            let scalar =
-                QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, boundary).unwrap();
-            let operator =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
+            let scalar = assembled(&mesh, &fixed_scene, boundary).unwrap();
+            let operator = CanonicalTemporalWaveOperator::compile(
+                &mesh,
+                &scalar,
+                TopologyWaveModel::from_topology_scene(&scene),
+                31,
+            )
+            .unwrap();
             let base = operator.base();
             let prescribed = base
                 .node_points()
@@ -10563,13 +10582,13 @@ mod tests {
     /// restoring record per primary coefficient record, and flags it.
     #[test]
     fn an_oscillator_plan_carries_its_integrated_field() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].restoring = funfern_core::RestoringLaw::SineGordon {
             omega0: ScalarField::constant(2.0),
         };
         let mut fixed_scene = scene.clone();
         fixed_scene.materials[0].restoring = funfern_core::RestoringLaw::None;
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &fixed_scene,
             1,
             MeshingOptions {
@@ -10578,14 +10597,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &fixed_scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            31,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
         assert!(operator.has_restoring());
         let base = operator.base();
         let time_step = 0.4 * operator.maximum_time_step();
@@ -10638,7 +10657,7 @@ mod tests {
     /// lane rather than to loss.
     #[test]
     fn a_van_der_pol_plan_marks_its_records_and_nodes() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].restoring = funfern_core::RestoringLaw::KleinGordon {
             omega0: ScalarField::constant(3.0),
         };
@@ -10658,7 +10677,7 @@ mod tests {
         // The static assembly refuses the van der Pol law too; its rate stays.
         fixed_scene.materials[0].magnetic_loss.as_mut().unwrap().law =
             funfern_core::DampingLaw::constant();
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &fixed_scene,
             1,
             MeshingOptions {
@@ -10667,14 +10686,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &fixed_scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            31,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 31).unwrap();
         let time_step = 0.4 * operator.maximum_time_step();
         let state = CanonicalTemporalWaveState::zero(&operator, time_step).unwrap();
         let plan = CanonicalGpuPlan::compile_temporal(
@@ -11018,8 +11037,8 @@ mod tests {
     /// ω·t_handoff out of phase with the reference.
     #[test]
     fn a_newly_prescribed_node_takes_no_donor_from_an_empty_slot() {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             9,
             MeshingOptions {
@@ -11028,13 +11047,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            9,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 9).unwrap();
         let interpolation =
             QuadraticTransferMap::identity_on_mesh(&mesh, &scalar, &scalar).unwrap();
         let primary =
@@ -11065,8 +11085,8 @@ mod tests {
 
     #[test]
     fn latest_state_transfer_plan_packs_every_physical_state_class() {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             9,
             MeshingOptions {
@@ -11075,13 +11095,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            9,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 9).unwrap();
         let interpolation =
             QuadraticTransferMap::identity_on_mesh(&mesh, &scalar, &scalar).unwrap();
         let primary =
@@ -11293,16 +11314,12 @@ mod tests {
             material.mass_law = CoefficientLaw::linear();
             material.stiffness_law = CoefficientLaw::linear();
         }
-        let converted_scalar = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &fixed_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let target_operator = CanonicalTemporalWaveOperator::compile_scene(
+        let converted_scalar =
+            assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let target_operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
             &converted_scalar,
-            &converted_scene,
+            TopologyWaveModel::from_topology_scene(&converted_scene),
             32,
         )
         .unwrap();
@@ -11462,8 +11479,8 @@ mod tests {
 
     #[test]
     fn edited_source_handoff_selects_target_parameters_with_old_runtime_anchor() {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             17,
             MeshingOptions {
@@ -11472,13 +11489,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            17,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 17).unwrap();
         let interpolation =
             QuadraticTransferMap::identity_on_mesh(&mesh, &scalar, &scalar).unwrap();
         let primary =
@@ -11635,8 +11653,8 @@ mod tests {
     /// every later pulse moved by up to 2 ms.
     #[test]
     fn a_live_pulse_patch_starts_on_the_running_clock() {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             23,
             MeshingOptions {
@@ -11645,13 +11663,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            23,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 23).unwrap();
         let (start, repeat) = (0.37, 0.8);
         let forcing = |amplitude: f64| {
             let mut forcing = CanonicalForcing::none(&operator);
@@ -11738,8 +11757,8 @@ mod tests {
 
     #[test]
     fn live_source_weight_patch_rejects_changed_structural_support() {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             23,
             MeshingOptions {
@@ -11748,13 +11767,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            23,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 23).unwrap();
         let weights = operator.primary_mass().to_vec();
         let signal = TimeSignal::harmonic(0.0, 1.0, 2.0, 0.0);
         let mut current = CanonicalForcing::none(&operator);

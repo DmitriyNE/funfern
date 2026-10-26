@@ -21,10 +21,12 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuRequest, CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CoefficientLaw, MaterialId,
-    MeshingOptions, OuterBoundaryCondition, QuadraticWaveOperator, ScalarField, Scene, TimeDrive,
-    canonical_temporal_energy_breakdown, mesh_scene,
+    MeshingOptions, OuterBoundaryCondition, ScalarField, TimeDrive,
+    canonical_temporal_energy_breakdown,
 };
 
 const WARMUP_STEPS: u64 = 24;
@@ -55,7 +57,7 @@ struct Expected {
 }
 
 fn main() -> AppExit {
-    let mut scene = Scene::initial();
+    let mut scene = initial();
     scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
         depth: ScalarField::constant(0.26),
         frequency_hz: ScalarField::constant(0.73),
@@ -75,7 +77,7 @@ fn main() -> AppExit {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         1,
         MeshingOptions {
@@ -84,14 +86,15 @@ fn main() -> AppExit {
         },
     )
     .expect("temporal-work mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
+    let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting)
+        .expect("temporal-work scalar operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
         &mesh,
-        &fixed_scene,
-        OuterBoundaryCondition::Reflecting,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
     )
-    .expect("temporal-work scalar operator");
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("temporal-work operator");
+    .expect("temporal-work operator");
     let material = operator.initial_runtime().records()[0].material();
     let time_step = 0.4 * operator.maximum_time_step();
 

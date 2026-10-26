@@ -45,13 +45,13 @@ use funfern_app::canonical_gpu::{
     CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
-    BACKGROUND_REGION, CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalSource,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalSource,
     CanonicalTemporalWaveOperator, CanonicalTemporalWaveState, CanonicalWallStep, CoefficientLaw,
-    DampingLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE, InternalBoundary, InternalBoundaryCoupling,
-    InternalBoundaryId, InternalBoundaryLaw, LossChannel, MeshingOptions, OpenCubicSpline,
-    OuterBoundaryCondition, Point2, QuadraticWaveOperator, RateLaw, ScalarField, Scene, TimeDrive,
-    TimeSignal, mesh_scene,
+    DampingLaw, FieldLaw, GRID_SCALE_FILTER_CADENCE, LossChannel, MeshingOptions,
+    OuterBoundaryCondition, Point2, RateLaw, ScalarField, TimeDrive, TimeSignal, TopologyScene,
 };
 
 const TOTAL_STEPS: u64 = 200;
@@ -92,7 +92,7 @@ fn main() -> AppExit {
     let short_wave = std::env::var("NONLINEAR_SHORT_WAVE")
         .ok()
         .map(|alpha| alpha.parse::<f64>().expect("a short-wave loss α"));
-    let mut scene = Scene::default();
+    let mut scene = TopologyScene::default();
     if let Some(alpha) = short_wave {
         scene.materials[0].short_wave_loss = alpha;
     }
@@ -109,23 +109,17 @@ fn main() -> AppExit {
         scene.materials[0].magnetic_loss = Some(channel(0.25));
     }
     if gap {
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(1),
-            spline: OpenCubicSpline::uniform(vec![
+        add_baffle(
+            &mut scene,
+            funfern_core::CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .expect("gap spline"),
-            region: BACKGROUND_REGION,
-            span_laws: vec![InternalBoundaryLaw {
-                coupling: InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 120.0,
-                },
-                ..InternalBoundaryLaw::REFLECTING
-            }],
-        });
+            ],
+            funfern_core::test_scenes::thin_gap(120.0),
+        );
     }
     if !linear_medium {
         scene.materials[0].mass_law.field = FieldLaw::Polynomial {
@@ -150,7 +144,7 @@ fn main() -> AppExit {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         1,
         MeshingOptions {
@@ -159,10 +153,14 @@ fn main() -> AppExit {
         },
     )
     .expect("nonlinear mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, wall)
-        .expect("nonlinear scalar operator");
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("nonlinear operator");
+    let scalar = assembled(&mesh, &fixed_scene, wall).expect("nonlinear scalar operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("nonlinear operator");
     assert_eq!(operator.has_field_laws(), !linear_medium);
     let base = operator.base();
     let mut forcing = CanonicalForcing::none(base);

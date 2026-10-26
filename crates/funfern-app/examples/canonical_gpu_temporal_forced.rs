@@ -30,10 +30,12 @@ use funfern_app::canonical_gpu::{
     CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalSource, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
-    CanonicalWallStep, CoefficientLaw, MeshingOptions, OuterBoundaryCondition, Point2,
-    QuadraticWaveOperator, ScalarField, Scene, TimeDrive, TimeSignal, mesh_scene,
+    CanonicalWallStep, CoefficientLaw, MeshingOptions, OuterBoundaryCondition, Point2, ScalarField,
+    TimeDrive, TimeSignal, TopologyScene,
 };
 
 const TOTAL_STEPS: u64 = 48;
@@ -73,9 +75,9 @@ fn main() -> AppExit {
     // stages' treatment of a pinned node is the stage under test.
     let pinned_loss = std::env::var("FORCED_PINNED_LOSS").is_ok_and(|value| value == "1");
     let mut scene = if gap {
-        Scene::default()
+        TopologyScene::default()
     } else {
-        Scene::initial()
+        initial()
     };
     scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
         depth: ScalarField::constant(0.24),
@@ -95,25 +97,17 @@ fn main() -> AppExit {
     let bare = std::env::var("FORCED_BARE").is_ok_and(|value| value == "1");
     if gap {
         for target in [&mut scene, &mut fixed_scene] {
-            target
-                .internal_boundaries
-                .push(funfern_core::InternalBoundary {
-                    id: funfern_core::InternalBoundaryId(1),
-                    spline: funfern_core::OpenCubicSpline::uniform(vec![
-                        Point2::new(-0.65, 0.0),
-                        Point2::new(-0.2, 0.0),
-                        Point2::new(0.2, 0.0),
-                        Point2::new(0.65, 0.0),
-                    ])
-                    .expect("gap spline"),
-                    region: funfern_core::BACKGROUND_REGION,
-                    span_laws: vec![funfern_core::InternalBoundaryLaw {
-                        coupling: funfern_core::InternalBoundaryCoupling::ThinGap {
-                            stiffness_ratio: 120.0,
-                        },
-                        ..funfern_core::InternalBoundaryLaw::REFLECTING
-                    }],
-                });
+            add_baffle(
+                target,
+                funfern_core::CurveId(1),
+                vec![
+                    Point2::new(-0.65, 0.0),
+                    Point2::new(-0.2, 0.0),
+                    Point2::new(0.2, 0.0),
+                    Point2::new(0.65, 0.0),
+                ],
+                funfern_core::test_scenes::thin_gap(120.0),
+            );
         }
     }
     // A bare fixture is a conservative bulk; everything else must not be.
@@ -133,7 +127,7 @@ fn main() -> AppExit {
         fixed_scene.materials[0].electric_loss = scene.materials[0].electric_loss.clone();
         fixed_scene.materials[0].magnetic_loss = scene.materials[0].magnetic_loss.clone();
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         1,
         MeshingOptions {
@@ -142,7 +136,7 @@ fn main() -> AppExit {
         },
     )
     .expect("forced temporal mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
+    let scalar = assembled(
         &mesh,
         &fixed_scene,
         if std::env::var("FORCED_WALLS").is_ok_and(|value| value == "second") {
@@ -154,8 +148,13 @@ fn main() -> AppExit {
         },
     )
     .expect("forced temporal scalar operator");
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("forced temporal operator");
+    let operator = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("forced temporal operator");
     let base = operator.base();
     assert!(
         operator.conservative_bulk_supported() == conservative,

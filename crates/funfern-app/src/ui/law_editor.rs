@@ -1221,7 +1221,7 @@ mod tests {
     #[test]
     fn a_fired_loss_takes_the_parameters_its_channel_reads() {
         let physics = PhysicsModel::Mechanical;
-        let mut applied = Scene::initial().materials[0].clone();
+        let mut applied = Material::default_medium();
         applied.parameters = vec![
             MaterialParameter {
                 name: "rate".into(),
@@ -1276,7 +1276,7 @@ mod tests {
     #[test]
     fn a_fired_drive_takes_what_its_editor_shows_and_nothing_else() {
         let physics = PhysicsModel::Mechanical;
-        let mut applied = Scene::initial().materials[0].clone();
+        let mut applied = Material::default_medium();
         applied.damping = ScalarField::constant(0.2);
         let gate = Some(PulseTrain {
             envelope: PulseEnvelope::Gaussian { width: 0.1 },
@@ -1337,7 +1337,7 @@ mod tests {
     #[test]
     fn firing_the_other_rows_loss_keeps_the_adopted_primary_channel() {
         let physics = PhysicsModel::Mechanical;
-        let mut applied = Scene::initial().materials[0].clone();
+        let mut applied = Material::default_medium();
         applied.damping = ScalarField::constant(0.2);
         let mut edited = applied.clone();
         adopt_legacy_damping(&mut edited, physics);
@@ -1432,7 +1432,7 @@ mod tests {
     /// editor with no input leaves the material exactly as it was.
     #[test]
     fn showing_the_reciprocal_stiffness_does_not_rewrite_the_stiffness() {
-        let mut material = Scene::initial().materials[0].clone();
+        let mut material = Material::default_medium();
         material.stiffness = ScalarField::formula("2 + 0.5 * x").unwrap();
         let before = material.clone();
         let (mut edit, mut error) = edits();
@@ -1466,7 +1466,7 @@ mod tests {
     /// not run, a loss channel - is shown in every skin and left intact.
     #[test]
     fn the_advanced_view_leaves_a_custom_material_intact_in_every_skin() {
-        let mut material = Scene::initial().materials[0].clone();
+        let mut material = Material::default_medium();
         material.parameters.push(MaterialParameter {
             name: "q".into(),
             value: 1.5,
@@ -1571,7 +1571,7 @@ mod tests {
             .unwrap();
         for physics in SKINS {
             let mut material =
-                apply_restoring_preset(sine_gordon, &Scene::initial().materials[0]).unwrap();
+                apply_restoring_preset(sine_gordon, &Material::default_medium()).unwrap();
             set_self_oscillating(&mut material, physics, legacy_damping_row(physics), true);
             let before = material.clone();
             for advanced in [false, true] {
@@ -1600,7 +1600,7 @@ mod tests {
     #[test]
     fn self_oscillation_sits_on_the_primary_channel() {
         for physics in SKINS {
-            let mut material = Scene::initial().materials[0].clone();
+            let mut material = Material::default_medium();
             material.damping = ScalarField::constant(0.3);
             let row = legacy_damping_row(physics);
             set_self_oscillating(&mut material, physics, row, true);
@@ -1633,7 +1633,7 @@ mod tests {
 
     #[test]
     fn viewing_a_legacy_damping_leaves_it_where_it_is() {
-        let mut material = Scene::initial().materials[0].clone();
+        let mut material = Material::default_medium();
         material.damping = ScalarField::constant(0.3);
         let before = material.clone();
         for physics in SKINS {
@@ -1676,7 +1676,7 @@ mod tests {
             "the primary row: density, ε for TM, μ for TE"
         );
         for (physics, electric) in [(SKINS[0], false), (SKINS[1], true), (SKINS[2], false)] {
-            let mut material = Scene::initial().materials[0].clone();
+            let mut material = Material::default_medium();
             material.damping = ScalarField::constant(0.3);
             adopt_legacy_damping(&mut material, physics);
             assert_eq!(material.damping, ScalarField::constant(0.0));

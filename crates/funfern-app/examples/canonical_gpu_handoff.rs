@@ -34,15 +34,15 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuRuntimeTransfer, CanonicalGpuTransferPlan,
     CanonicalWaveGpuPlugin,
 };
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
-    BACKGROUND_REGION, CanonicalAuxiliaryState, CanonicalForcing,
-    CanonicalOutgoingHistoryTransferMap, CanonicalOutgoingNormalizedTransferJob,
-    CanonicalPrimaryTransferMap, CanonicalRateDrive, CanonicalThinGapHistoryTransferMap,
-    CanonicalVectorTransferJob, CanonicalWallStep, CanonicalWaveOperator, CanonicalWaveState,
-    InternalBoundary, InternalBoundaryCoupling, InternalBoundaryId, InternalBoundaryLaw,
-    MeshingOptions, OpenCubicSpline, OuterBoundaryCondition, OuterBoundaryConditions, OuterSide,
-    Point2, PulseEnvelope, QuadraticTransferMap, QuadraticWaveOperator, Scene, TimeSignal,
-    mesh_scene,
+    CanonicalAuxiliaryState, CanonicalForcing, CanonicalOutgoingHistoryTransferMap,
+    CanonicalOutgoingNormalizedTransferJob, CanonicalPrimaryTransferMap, CanonicalRateDrive,
+    CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferJob, CanonicalWallStep,
+    CanonicalWaveOperator, CanonicalWaveState, MeshingOptions, OuterBoundaryCondition,
+    OuterBoundaryConditions, OuterSide, Point2, PulseEnvelope, QuadraticTransferMap, TimeSignal,
+    TopologyScene,
 };
 
 const WARMUP_STEPS: u64 = 12;
@@ -157,31 +157,25 @@ fn main() -> AppExit {
     let source_edge = requested_edge.unwrap_or(if standard { 0.08 } else { 0.16 });
     let target_edge = requested_edge.unwrap_or(if standard { 0.08 } else { 0.12 });
     let mut scene = if thin_gap {
-        Scene::default()
+        TopologyScene::default()
     } else {
-        Scene::initial()
+        initial()
     };
     if thin_gap {
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(1),
-            spline: OpenCubicSpline::uniform(vec![
+        add_baffle(
+            &mut scene,
+            funfern_core::CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .expect("thin-gap spline"),
-            region: BACKGROUND_REGION,
-            span_laws: vec![InternalBoundaryLaw {
-                coupling: InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 25.0,
-                },
-                ..InternalBoundaryLaw::REFLECTING
-            }],
-        });
+            ],
+            funfern_core::test_scenes::thin_gap(25.0),
+        );
     }
     let source_mesh = Arc::new(
-        mesh_scene(
+        meshed(
             &scene,
             11,
             MeshingOptions {
@@ -198,7 +192,7 @@ fn main() -> AppExit {
         source_mesh.clone()
     } else {
         Arc::new(
-            mesh_scene(
+            meshed(
                 &scene,
                 12,
                 MeshingOptions {
@@ -225,19 +219,25 @@ fn main() -> AppExit {
         boundaries.sides[OuterSide::Top.index()] = zero;
         boundaries.sides[OuterSide::Bottom.index()] = zero;
     }
-    let source_scalar =
-        QuadraticWaveOperator::assemble_scene_with_boundaries(&source_mesh, &scene, boundaries)
-            .expect("source scalar");
-    let target_scalar =
-        QuadraticWaveOperator::assemble_scene_with_boundaries(&target_mesh, &scene, boundaries)
-            .expect("target scalar");
+    let source_scalar = assembled_with(&source_mesh, &scene, boundaries).expect("source scalar");
+    let target_scalar = assembled_with(&target_mesh, &scene, boundaries).expect("target scalar");
     let source_operator = Arc::new(
-        CanonicalWaveOperator::compile_scene(&source_mesh, &source_scalar, &scene, 11)
-            .expect("source canonical operator"),
+        CanonicalWaveOperator::compile(
+            &source_mesh,
+            &source_scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            11,
+        )
+        .expect("source canonical operator"),
     );
     let target_operator = Arc::new(
-        CanonicalWaveOperator::compile_scene(&target_mesh, &target_scalar, &scene, 12)
-            .expect("target canonical operator"),
+        CanonicalWaveOperator::compile(
+            &target_mesh,
+            &target_scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            12,
+        )
+        .expect("target canonical operator"),
     );
     let time_step = 0.72
         * source_operator
@@ -391,9 +391,9 @@ fn main() -> AppExit {
     let primary_elapsed = primary_started.elapsed();
     let vector_started = Instant::now();
     let mut vector_job = CanonicalVectorTransferJob::new(
-        source_mesh.clone(),
+        Arc::new(source_mesh.mesh.clone()),
         source_operator.clone(),
-        target_mesh.clone(),
+        Arc::new(target_mesh.mesh.clone()),
         target_operator.clone(),
     );
     let mut maximum_vector_slice = Duration::ZERO;
@@ -931,7 +931,7 @@ fn validate(
             );
             // The edit lane to the f32 reductions of either side's store, and
             // to the host carrying the walls' memory the physical way beside
-            // the device's matrix: measured to 2.6e-7.
+            // the device's matrix: measured to 1.6e-7.
             if !within(edit_error, 1.0e-6) {
                 eprintln!("the handoff's edit lane books another energy than the handoff moved");
             }

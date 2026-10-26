@@ -18,12 +18,14 @@ use funfern_app::canonical_gpu::{
     CanonicalGpuTransferPlan, CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalHandoffMaps, CanonicalOutgoingHistoryTransferMap,
     CanonicalPrimaryTransferMap, CanonicalTemporalWaveOperator, CanonicalTemporalWaveState,
     CanonicalThinGapHistoryTransferMap, CanonicalVectorTransferMap, CoefficientLaw, MeshingOptions,
-    OuterBoundaryCondition, PulseEnvelope, PulseTrain, QuadraticTransferMap, QuadraticWaveOperator,
-    ScalarField, Scene, TimeDrive, mesh_scene,
+    OuterBoundaryCondition, PulseEnvelope, PulseTrain, QuadraticTransferMap, ScalarField,
+    TimeDrive, TopologyScene,
 };
 
 const WARMUP_STEPS: u64 = 24;
@@ -66,7 +68,7 @@ enum Phase {
 }
 
 fn main() -> AppExit {
-    let mut source_scene = Scene::initial();
+    let mut source_scene = initial();
     let material = &mut source_scene.materials[0];
     material.mass_law.drive = TimeDrive::TravellingModulation {
         depth: ScalarField::constant(0.21),
@@ -132,7 +134,7 @@ fn main() -> AppExit {
         material.mass_law = CoefficientLaw::linear();
         material.stiffness_law = CoefficientLaw::linear();
     }
-    let mesh = mesh_scene(
+    let mesh = meshed(
         &fixed_scene,
         71,
         MeshingOptions {
@@ -141,18 +143,24 @@ fn main() -> AppExit {
         },
     )
     .expect("temporal handoff mesh");
-    let scalar = QuadraticWaveOperator::assemble_scene(
-        &mesh,
-        &fixed_scene,
-        OuterBoundaryCondition::Reflecting,
-    )
-    .expect("temporal handoff scalar operator");
-    let compile = |source_scene: &Scene, target_scene: &Scene| {
+    let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting)
+        .expect("temporal handoff scalar operator");
+    let compile = |source_scene: &TopologyScene, target_scene: &TopologyScene| {
         (
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, source_scene, 71)
-                .expect("source temporal operator"),
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &scalar, target_scene, 72)
-                .expect("target temporal operator"),
+            CanonicalTemporalWaveOperator::compile(
+                &mesh,
+                &scalar,
+                TopologyWaveModel::from_topology_scene(source_scene),
+                71,
+            )
+            .expect("source temporal operator"),
+            CanonicalTemporalWaveOperator::compile(
+                &mesh,
+                &scalar,
+                TopologyWaveModel::from_topology_scene(target_scene),
+                72,
+            )
+            .expect("target temporal operator"),
         )
     };
     let (mut source_operator, mut target_operator) = compile(&source_scene, &target_scene);

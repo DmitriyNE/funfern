@@ -39,6 +39,8 @@ use funfern_app::canonical_gpu::{
     CanonicalWaveGpuPlugin,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalHandoffMaps, CanonicalIndicatorSnapshot,
     CanonicalMaterialRuntimeState, CanonicalOutgoingHistoryTransferMap,
@@ -47,9 +49,9 @@ use funfern_core::{
     CoefficientLaw, DampingLaw, LossChannel, MeshAdaptationJob, MeshAdaptationOptions,
     MeshAdaptationState, MeshSizeField, MeshingOptions, OuterBoundaryCondition,
     OuterBoundaryConditions, Point2, QuadraticSolutionSnapshot, QuadraticTransferMap,
-    QuadraticWaveOperator, RateLaw, ScalarField, Scene, SolutionIndicatorJob,
-    SolutionIndicatorOptions, SolutionIndicatorResult, TimeDrive, TriMesh,
-    canonical_temporal_indicator_supplement, canonical_temporal_primary_rate, mesh_scene,
+    QuadraticWaveOperator, RateLaw, ScalarField, SolutionIndicatorJob, SolutionIndicatorOptions,
+    SolutionIndicatorResult, TimeDrive, TopologyScene, canonical_temporal_indicator_supplement,
+    canonical_temporal_primary_rate,
 };
 
 const TOTAL_STEPS: u64 = 48;
@@ -83,7 +85,7 @@ struct Estimate {
 
 /// One mesh generation and everything needed to estimate on it.
 struct Generation {
-    mesh: Arc<TriMesh>,
+    mesh: Arc<Meshed>,
     quadratic: Arc<QuadraticWaveOperator>,
     operator: CanonicalTemporalWaveOperator,
     oracle: Estimate,
@@ -129,7 +131,7 @@ struct Expected {
     /// The device's step count once the settle steps after the handoff are
     /// done, which the compared snapshot must be taken at.
     settled_at: u64,
-    scene: Scene,
+    scene: TopologyScene,
     time: f64,
     target_time: f64,
     time_step: f64,
@@ -146,7 +148,7 @@ fn main() -> AppExit {
     } else {
         OuterBoundaryCondition::Reflecting
     };
-    let mut scene = Scene::initial();
+    let mut scene = initial();
     if lossy_walls {
         // The mechanical skin's complementary row carries the electric channel.
         scene.materials[0].electric_loss = Some(LossChannel {
@@ -177,7 +179,7 @@ fn main() -> AppExit {
         material.stiffness_law = CoefficientLaw::linear();
     }
     let mesh = Arc::new(
-        mesh_scene(
+        meshed(
             &fixed_scene,
             1,
             MeshingOptions {
@@ -187,12 +189,15 @@ fn main() -> AppExit {
         )
         .expect("temporal AMR mesh"),
     );
-    let quadratic = Arc::new(
-        QuadraticWaveOperator::assemble_scene(&mesh, &fixed_scene, wall)
-            .expect("temporal AMR scalar operator"),
-    );
-    let operator = CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1)
-        .expect("temporal AMR operator");
+    let quadratic =
+        Arc::new(assembled(&mesh, &fixed_scene, wall).expect("temporal AMR scalar operator"));
+    let operator = CanonicalTemporalWaveOperator::compile(
+        &mesh,
+        &quadratic,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("temporal AMR operator");
     let time_step = 0.4 * operator.maximum_time_step();
 
     let primary = operator
@@ -259,9 +264,9 @@ fn main() -> AppExit {
     // the estimator's own size field is what makes this an adaptive run
     // rather than a transfer to an arbitrary mesh.
     let size_field: Arc<dyn MeshSizeField> = oracle_result.field.clone();
-    let mut adaptation = MeshAdaptationJob::new(
-        mesh.clone(),
-        fixed_scene.clone(),
+    let mut adaptation = MeshAdaptationJob::new_topology(
+        Arc::new(mesh.mesh.clone()),
+        &mesh.plan,
         MeshAdaptationState::from_mesh(&mesh),
         mesh.mesh_revision + 1,
         size_field,
@@ -280,18 +285,25 @@ fn main() -> AppExit {
             break result.expect("temporal AMR adaptation");
         }
     };
-    let target_mesh = Arc::new(adapted.mesh);
+    // Adaptation keeps the plan: the refined mesh is assembled through it.
+    let target_mesh = Arc::new(Meshed {
+        mesh: adapted.mesh,
+        plan: mesh.plan.clone(),
+        source: mesh.source,
+    });
     assert!(
         target_mesh.triangles.len() != mesh.triangles.len(),
         "the estimate has to actually move the mesh, or the transfer proves nothing"
     );
-    let target_quadratic = Arc::new(
-        QuadraticWaveOperator::assemble_scene(&target_mesh, &fixed_scene, wall)
-            .expect("target scalar operator"),
-    );
-    let target_operator =
-        CanonicalTemporalWaveOperator::compile_scene(&target_mesh, &target_quadratic, &scene, 1)
-            .expect("target temporal operator");
+    let target_quadratic =
+        Arc::new(assembled(&target_mesh, &fixed_scene, wall).expect("target scalar operator"));
+    let target_operator = CanonicalTemporalWaveOperator::compile(
+        &target_mesh,
+        &target_quadratic,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("target temporal operator");
 
     // The host applies the same maps the device will, so the new generation
     // gets an oracle of its own rather than being compared against the old
@@ -326,7 +338,7 @@ fn main() -> AppExit {
     // The reference is the CPU's handoff through the same maps: each
     // component's total where the runtime transfer puts it - interpolating a
     // field onto another mesh must neither create nor destroy any of it,
-    // and the free transfer moved the state by 2e-4 - the walls' memory
+    // and the free transfer moved the state by 1.8e-4 - the walls' memory
     // carried, and the runtime by material, as the device carries it.
     let source_forcing = CanonicalForcing::none(operator.base());
     let target_forcing = CanonicalForcing::none(target_operator.base());
@@ -489,9 +501,9 @@ fn main() -> AppExit {
 /// instantaneous coefficients coming from the supplied runtime.
 #[allow(clippy::too_many_arguments)]
 fn estimate(
-    mesh: &Arc<TriMesh>,
+    mesh: &Arc<Meshed>,
     quadratic: &Arc<QuadraticWaveOperator>,
-    scene: &Scene,
+    scene: &TopologyScene,
     operator: &CanonicalTemporalWaveOperator,
     primary_flux: &[f64],
     previous_primary_flux: &[f64],
@@ -545,10 +557,11 @@ fn estimate(
         time_step,
     };
     let patterns = operator.resolution_demand_by_material();
-    let mut job = SolutionIndicatorJob::new(
-        mesh.clone(),
+    let mut job = SolutionIndicatorJob::new_topology(
+        std::sync::Arc::new(mesh.mesh.clone()),
         quadratic.clone(),
-        scene.clone(),
+        &mesh.plan,
+        TopologyWaveModel::from_topology_scene(scene),
         scalar_snapshot,
         SolutionIndicatorOptions {
             minimum_edge_length: MINIMUM_EDGE,
@@ -735,7 +748,7 @@ fn drive(
             );
             // Which of the two transfers the device performs, stated as a
             // check rather than left to a comment. The free one misses by
-            // `2e-4`; the conserving one lands at f32 level, and the
+            // `1.8e-4`; the conserving one lands at f32 level, and the
             // complementary transfer is exact.
             if !within(conserving, 1.0e-6)
                 || !within(complementary, 1.0e-6)

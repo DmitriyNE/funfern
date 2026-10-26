@@ -25,10 +25,12 @@ use funfern_app::{
     },
     wave_gpu::{ProbeDisplay, RecorderContext, RecorderHistory, WaveGpuPlugin, WaveGpuRequest},
 };
+use funfern_core::TopologyWaveModel;
+use funfern_core::test_scenes::*;
 use funfern_core::{
     CANONICAL_GRID_FILTER_STRENGTH, CanonicalForcing, CanonicalWaveOperator, CanonicalWaveState,
     GRID_SCALE_FILTER_CADENCE, MeshingOptions, OuterBoundaryCondition, PhysicsModel, Point2,
-    QuadraticPointStencil, QuadraticWaveOperator, Scene, mesh_scene,
+    QuadraticPointStencil,
 };
 
 const PROBE_ID: u64 = 91;
@@ -58,8 +60,8 @@ struct Expected {
 }
 
 fn main() -> AppExit {
-    let scene = Scene::initial();
-    let mesh = mesh_scene(
+    let scene = initial();
+    let mesh = meshed(
         &scene,
         1,
         MeshingOptions {
@@ -68,11 +70,15 @@ fn main() -> AppExit {
         },
     )
     .expect("filter-boundary mesh");
-    let scalar =
-        QuadraticWaveOperator::assemble_scene(&mesh, &scene, OuterBoundaryCondition::Reflecting)
-            .expect("filter-boundary scalar operator");
-    let operator = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1)
-        .expect("canonical operator");
+    let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting)
+        .expect("filter-boundary scalar operator");
+    let operator = CanonicalWaveOperator::compile(
+        &mesh,
+        &scalar,
+        TopologyWaveModel::from_topology_scene(&scene),
+        1,
+    )
+    .expect("canonical operator");
 
     // Stride exactly the cadence: every sample would land on a commit.
     let time_step = 1.0 / (SAMPLE_RATE * GRID_SCALE_FILTER_CADENCE as f64);
@@ -93,8 +99,14 @@ fn main() -> AppExit {
         .map(|vertex| mesh.vertices[vertex].point)
         .fold(Point2::default(), |sum, point| sum + point)
         / 3.0;
-    let stencil =
-        QuadraticPointStencil::build(&mesh, &scalar, &scene, point).expect("interior stencil");
+    let stencil = QuadraticPointStencil::build_topology(
+        &mesh,
+        &scalar,
+        &mesh.plan,
+        TopologyWaveModel::from_topology_scene(&scene),
+        point,
+    )
+    .expect("interior stencil");
     let consumer = funfern_core::CanonicalPointStencil::from_quadratic(stencil, &operator)
         .expect("point consumer");
 
