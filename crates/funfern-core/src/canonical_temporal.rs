@@ -7202,19 +7202,19 @@ fn material_error<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_scenes::*;
     use crate::{
-        BACKGROUND_REGION, CanonicalSource, CanonicalWaveState, ElectromagneticPolarization,
-        FieldLaw, LoopRole, LossChannel, MaterialFrame, MeshingOptions, Obstacle, ObstacleId,
-        OuterBoundaryCondition, PeriodicCubicSpline, PulseEnvelope, PulseTrain,
-        QuadraticSolutionSnapshot, Region, RegionId, ScalarField, SolutionIndicatorJob,
-        SolutionIndicatorOptions, SymmetricTensor2, TimeDrive, TimeSignal,
-        enriched_quadratic_basis, mesh_scene, sample_canonical_area,
+        BACKGROUND_REGION, CanonicalSource, CanonicalWaveState, CurveId,
+        ElectromagneticPolarization, FieldLaw, LossChannel, MaterialFrame, MeshingOptions,
+        OuterBoundaryCondition, PulseEnvelope, PulseTrain, QuadraticSolutionSnapshot, Region,
+        RegionId, ScalarField, SolutionIndicatorJob, SolutionIndicatorOptions, SymmetricTensor2,
+        TimeDrive, TimeSignal, TopologyScene, enriched_quadratic_basis, sample_canonical_area,
     };
 
-    fn compile(scene: &Scene) -> Result<CanonicalTemporalWaveOperator, WaveError> {
+    fn compile(scene: &TopologyScene) -> Result<CanonicalTemporalWaveOperator, WaveError> {
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -7223,12 +7223,13 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting)?;
+        CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
-        )?;
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1)
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            1,
+        )
     }
 
     fn pump(depth: f64, frequency_hz: f64, phase_radians: f64) -> TimeDrive {
@@ -7241,7 +7242,7 @@ mod tests {
 
     #[test]
     fn inert_temporal_wrapper_is_exactly_the_fixed_operator() {
-        let temporal = compile(&Scene::initial()).unwrap();
+        let temporal = compile(&initial()).unwrap();
         assert!(!temporal.has_temporal_laws());
         let runtime = temporal.initial_runtime();
         let primary = temporal
@@ -7283,7 +7284,7 @@ mod tests {
 
     #[test]
     fn frozen_time_filter_reduces_energy_and_preserves_primary_total() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
             depth: ScalarField::constant(0.22),
             frequency_hz: ScalarField::constant(0.8),
@@ -7420,7 +7421,7 @@ mod tests {
     /// once at the probe. Nonlinear laws cannot do the latter at all.
     #[test]
     fn temporal_point_consumer_inverts_at_the_samples_and_weighs_density_at_the_point() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
             depth: ScalarField::constant(0.24),
             frequency_hz: ScalarField::constant(0.8),
@@ -7553,7 +7554,7 @@ mod tests {
         const BASE_MASS: f64 = 1.3;
         const BASE_STIFFNESS: f64 = 0.7;
         for mass_row in [true, false] {
-            let mut driven = Scene::default();
+            let mut driven = TopologyScene::default();
             driven.materials[0].mass_density = ScalarField::constant(BASE_MASS);
             driven.materials[0].stiffness = ScalarField::constant(BASE_STIFFNESS);
             let pump = TimeDrive::ParametricPump {
@@ -7570,7 +7571,7 @@ mod tests {
             strip_temporal_laws(&mut authored.materials);
 
             let mesh = std::sync::Arc::new(
-                mesh_scene(
+                meshed(
                     &authored,
                     1,
                     MeshingOptions {
@@ -7581,16 +7582,15 @@ mod tests {
                 .unwrap(),
             );
             let quadratic = std::sync::Arc::new(
-                QuadraticWaveOperator::assemble_scene(
-                    &mesh,
-                    &authored,
-                    OuterBoundaryCondition::Reflecting,
-                )
-                .unwrap(),
+                assembled(&mesh, &authored, OuterBoundaryCondition::Reflecting).unwrap(),
             );
-            let temporal =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &driven, 1)
-                    .unwrap();
+            let temporal = CanonicalTemporalWaveOperator::compile(
+                &mesh,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&driven),
+                1,
+            )
+            .unwrap();
             let runtime = temporal.initial_runtime();
             let time = 0.37;
 
@@ -7649,23 +7649,25 @@ mod tests {
                 forcing_frequency_hz: 2.0,
                 ..SolutionIndicatorOptions::default()
             };
-            let report = |scene: &Scene, runtime: Option<&CanonicalMaterialRuntimeState>| {
-                let mut job = SolutionIndicatorJob::new(
-                    mesh.clone(),
-                    quadratic.clone(),
-                    scene.clone(),
-                    snapshot.clone(),
-                    options,
-                );
-                if let Some(runtime) = runtime {
-                    job = job.with_instantaneous_materials(runtime.clone());
-                }
-                loop {
-                    if let Some(result) = job.advance(8_192) {
-                        return result.unwrap().report;
+            let report =
+                |scene: &TopologyScene, runtime: Option<&CanonicalMaterialRuntimeState>| {
+                    let mut job = SolutionIndicatorJob::new_topology(
+                        std::sync::Arc::new(mesh.mesh.clone()),
+                        quadratic.clone(),
+                        &mesh.plan,
+                        TopologyWaveModel::from_topology_scene(scene),
+                        snapshot.clone(),
+                        options,
+                    );
+                    if let Some(runtime) = runtime {
+                        job = job.with_instantaneous_materials(runtime.clone());
                     }
-                }
-            };
+                    loop {
+                        if let Some(result) = job.advance(8_192) {
+                            return result.unwrap().report;
+                        }
+                    }
+                };
 
             let instantaneous = report(&driven, Some(&runtime));
             let equivalent = report(&equivalent, None);
@@ -7714,7 +7716,7 @@ mod tests {
     /// with nothing.
     #[test]
     fn a_runtime_moves_the_gradient_terms_onto_the_solver_flux() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
             depth: ScalarField::constant(0.22),
             frequency_hz: ScalarField::constant(0.9),
@@ -7726,7 +7728,7 @@ mod tests {
         strip_temporal_laws(&mut authored.materials);
 
         let mesh = std::sync::Arc::new(
-            mesh_scene(
+            meshed(
                 &authored,
                 1,
                 MeshingOptions {
@@ -7737,15 +7739,15 @@ mod tests {
             .unwrap(),
         );
         let quadratic = std::sync::Arc::new(
-            QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &authored,
-                OuterBoundaryCondition::Reflecting,
-            )
-            .unwrap(),
+            assembled(&mesh, &authored, OuterBoundaryCondition::Reflecting).unwrap(),
         );
-        let temporal =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let temporal = CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        )
+        .unwrap();
         let runtime = temporal.initial_runtime();
         let base = temporal.base();
         let time_step = 0.4 * temporal.maximum_time_step();
@@ -7803,14 +7805,11 @@ mod tests {
         };
         let options = SolutionIndicatorOptions::default();
         let report = |supplement: CanonicalIndicatorSupplement, driven: bool| {
-            let mut job = SolutionIndicatorJob::new(
-                mesh.clone(),
+            let mut job = SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 quadratic.clone(),
-                if driven {
-                    scene.clone()
-                } else {
-                    authored.clone()
-                },
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(if driven { &scene } else { &authored }),
                 scalar_snapshot.clone(),
                 options,
             )
@@ -7880,9 +7879,9 @@ mod tests {
     /// path would report a different error for the same physics.
     #[test]
     fn instantaneous_samples_leave_an_inert_medium_untouched() {
-        let scene = Scene::default();
+        let scene = TopologyScene::default();
         let mesh = std::sync::Arc::new(
-            mesh_scene(
+            meshed(
                 &scene,
                 1,
                 MeshingOptions {
@@ -7893,15 +7892,15 @@ mod tests {
             .unwrap(),
         );
         let quadratic = std::sync::Arc::new(
-            QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &scene,
-                OuterBoundaryCondition::Reflecting,
-            )
-            .unwrap(),
+            assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap(),
         );
-        let temporal =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let temporal = CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        )
+        .unwrap();
         let runtime = temporal.initial_runtime();
 
         let count = quadratic.degrees_of_freedom();
@@ -7926,10 +7925,11 @@ mod tests {
             ..SolutionIndicatorOptions::default()
         };
         let report = |runtime: Option<&CanonicalMaterialRuntimeState>| {
-            let mut job = SolutionIndicatorJob::new(
-                mesh.clone(),
+            let mut job = SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 quadratic.clone(),
-                scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 snapshot.clone(),
                 options,
             );
@@ -7958,7 +7958,7 @@ mod tests {
     /// reason, and no fixture with a real wave in it could tell the difference.
     #[test]
     fn a_constant_prescribed_field_over_a_pumped_mass_is_all_boundary_exchange() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.3),
             frequency_hz: ScalarField::constant(1.1),
@@ -8075,7 +8075,7 @@ mod tests {
         condition: OuterBoundaryCondition,
         integrator: CanonicalIntegrator,
     ) {
-        let scene = Scene::default();
+        let scene = TopologyScene::default();
         let operator = walled(condition, &scene);
         let base = operator.base();
         let count = base.degrees_of_freedom();
@@ -8197,9 +8197,9 @@ mod tests {
             })
         };
         for physics in [PhysicsModel::Mechanical, tm, te] {
-            let mut scene = Scene {
+            let mut scene = TopologyScene {
                 physics,
-                ..Scene::default()
+                ..TopologyScene::default()
             };
             let material = &mut scene.materials[0];
             if physics == te {
@@ -8231,7 +8231,7 @@ mod tests {
     /// balance and the dissipation lanes stay passive.
     #[test]
     fn a_driven_loss_dissipates_passively_and_still_balances_to_second_order() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.25),
             frequency_hz: ScalarField::constant(1.3),
@@ -8312,7 +8312,7 @@ mod tests {
     /// on which stepper ran it.
     #[test]
     fn an_inert_constant_loss_decays_exactly_as_the_fixed_path_does() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].damping = ScalarField::constant(0.45);
         let operator = compile(&scene).unwrap();
         let base = operator.base();
@@ -8382,14 +8382,14 @@ mod tests {
     fn a_frozen_wall_reflects_more_as_the_medium_moves_away_from_it() {
         let mut remaining = Vec::new();
         for alternate in [1.0, 2.2, 6.0] {
-            let mut scene = Scene::default();
+            let mut scene = TopologyScene::default();
             if alternate != 1.0 {
                 scene.materials[0].mass_law.alternate = Some(ScalarField::constant(alternate));
             }
             scene.materials[0].switch_ramp = 0.0;
             let mut base_scene = scene.clone();
             strip_temporal_laws(&mut base_scene.materials);
-            let mesh = mesh_scene(
+            let mesh = meshed(
                 &base_scene,
                 1,
                 MeshingOptions {
@@ -8398,14 +8398,19 @@ mod tests {
                 },
             )
             .unwrap();
-            let quadratic = QuadraticWaveOperator::assemble_scene(
+            let quadratic = assembled(
                 &mesh,
                 &base_scene,
                 OuterBoundaryCondition::FirstOrderOutgoing,
             )
             .unwrap();
-            let operator =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            let operator = CanonicalTemporalWaveOperator::compile(
+                &mesh,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&scene),
+                1,
+            )
+            .unwrap();
             let base = operator.base();
             let forcing = CanonicalForcing::none(base);
             let time_step = 0.4 * operator.maximum_time_step();
@@ -8484,8 +8489,8 @@ mod tests {
     /// depending on which stepper ran it.
     #[test]
     fn an_inert_absorbing_wall_damps_exactly_as_the_fixed_path_does() {
-        let scene = Scene::default();
-        let mesh = mesh_scene(
+        let scene = TopologyScene::default();
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -8494,14 +8499,15 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic =
+            assembled(&mesh, &scene, OuterBoundaryCondition::FirstOrderOutgoing).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::FirstOrderOutgoing,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let base = operator.base();
         assert!(
             base.first_order_boundary_damping()
@@ -8565,7 +8571,7 @@ mod tests {
     #[test]
     fn a_driven_open_boundary_keeps_its_balance_second_order() {
         crate::canonical_wave::under_each_wall_step(|_| {
-            let mut scene = Scene::default();
+            let mut scene = TopologyScene::default();
             scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
                 depth: ScalarField::constant(0.18),
                 frequency_hz: ScalarField::constant(1.2),
@@ -8573,7 +8579,7 @@ mod tests {
             };
             let mut base_scene = scene.clone();
             strip_temporal_laws(&mut base_scene.materials);
-            let mesh = mesh_scene(
+            let mesh = meshed(
                 &base_scene,
                 1,
                 MeshingOptions {
@@ -8582,14 +8588,19 @@ mod tests {
                 },
             )
             .unwrap();
-            let quadratic = QuadraticWaveOperator::assemble_scene(
+            let quadratic = assembled(
                 &mesh,
                 &base_scene,
                 OuterBoundaryCondition::SecondOrderOutgoing,
             )
             .unwrap();
-            let operator =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+            let operator = CanonicalTemporalWaveOperator::compile(
+                &mesh,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&scene),
+                1,
+            )
+            .unwrap();
             let base = operator.base();
             let forcing = CanonicalForcing::none(base);
 
@@ -8647,8 +8658,8 @@ mod tests {
     #[test]
     fn an_inert_open_boundary_evolves_exactly_as_the_fixed_path_does() {
         crate::canonical_wave::under_each_wall_step(|_| {
-            let scene = Scene::default();
-            let mesh = mesh_scene(
+            let scene = TopologyScene::default();
+            let mesh = meshed(
                 &scene,
                 1,
                 MeshingOptions {
@@ -8657,14 +8668,15 @@ mod tests {
                 },
             )
             .unwrap();
-            let quadratic = QuadraticWaveOperator::assemble_scene(
+            let quadratic =
+                assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+            let operator = CanonicalTemporalWaveOperator::compile(
                 &mesh,
-                &scene,
-                OuterBoundaryCondition::SecondOrderOutgoing,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&scene),
+                1,
             )
             .unwrap();
-            let operator =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
             let base = operator.base();
             assert!(base.outgoing_boundary().is_some());
             assert!(!operator.conservative_bulk_supported());
@@ -8720,25 +8732,19 @@ mod tests {
     /// The same gap, inert, must evolve exactly as the fixed path's does.
     #[test]
     fn an_inert_thin_gap_evolves_exactly_as_the_fixed_path_does() {
-        let mut scene = Scene::default();
-        scene.internal_boundaries.push(crate::InternalBoundary {
-            id: crate::InternalBoundaryId(1),
-            spline: crate::OpenCubicSpline::uniform(vec![
+        let mut scene = TopologyScene::default();
+        add_baffle(
+            &mut scene,
+            CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![crate::InternalBoundaryLaw {
-                coupling: crate::InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 120.0,
-                },
-                ..crate::InternalBoundaryLaw::REFLECTING
-            }],
-        });
-        let mesh = mesh_scene(
+            ],
+            thin_gap(120.0),
+        );
+        let mesh = meshed(
             &scene,
             17,
             MeshingOptions {
@@ -8748,14 +8754,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let base = operator.base();
         assert!(!base.thin_gap_samples().is_empty());
         let forcing = CanonicalForcing::none(base);
@@ -8817,24 +8823,18 @@ mod tests {
     /// the same midpoint field, which is what makes the local split exact.
     #[test]
     fn a_thin_gap_stores_energy_and_keeps_the_balance_second_order() {
-        let mut scene = Scene::default();
-        scene.internal_boundaries.push(crate::InternalBoundary {
-            id: crate::InternalBoundaryId(1),
-            spline: crate::OpenCubicSpline::uniform(vec![
+        let mut scene = TopologyScene::default();
+        add_baffle(
+            &mut scene,
+            CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![crate::InternalBoundaryLaw {
-                coupling: crate::InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 120.0,
-                },
-                ..crate::InternalBoundaryLaw::REFLECTING
-            }],
-        });
+            ],
+            thin_gap(120.0),
+        );
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.2),
             frequency_hz: ScalarField::constant(1.1),
@@ -8843,7 +8843,7 @@ mod tests {
 
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             17,
             MeshingOptions {
@@ -8853,14 +8853,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let base = operator.base();
         assert!(
             !base.thin_gap_samples().is_empty(),
@@ -8925,8 +8925,8 @@ mod tests {
     /// trace's law holds exactly in discrete time.
     #[test]
     fn the_trapezoid_wall_step_leaves_no_outgoing_history_defect() {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -8935,14 +8935,15 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic =
+            assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+        let inert = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let inert =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let base = inert.base();
         let time_step = inert.recommended_time_step();
         let primary = base
@@ -9019,7 +9020,7 @@ mod tests {
     /// What an application holding a law-carrying document actually hits.
     #[test]
     fn a_law_carrying_scene_needs_a_stripped_base_the_temporal_operator_can_reuse() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.2),
             frequency_hz: ScalarField::constant(1.0),
@@ -9027,7 +9028,7 @@ mod tests {
         };
         let mut stripped = scene.clone();
         strip_temporal_laws(&mut stripped.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &stripped,
             1,
             MeshingOptions {
@@ -9036,30 +9037,44 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &stripped,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let quadratic = assembled(&mesh, &stripped, OuterBoundaryCondition::Reflecting).unwrap();
         // The fixed compiler refuses it, by the same gate that stops a law
         // being executed as a static medium.
-        assert!(crate::CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).is_err());
+        assert!(
+            crate::CanonicalWaveOperator::compile(
+                &mesh,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&scene),
+                1
+            )
+            .is_err()
+        );
         // The temporal one strips for its base and keeps the laws for itself.
-        let whole =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let whole = CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        )
+        .unwrap();
 
         // And an application that already built that stripped base reuses it
         // rather than compiling the assembly twice. The two routes must agree,
         // or the reuse would be a second definition of the operator.
         let base = std::sync::Arc::new(
-            crate::CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &stripped, 1).unwrap(),
+            crate::CanonicalWaveOperator::compile(
+                &mesh,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&stripped),
+                1,
+            )
+            .unwrap(),
         );
         let reused = CanonicalTemporalWaveOperator::from_base(
             base,
             &mesh,
             &quadratic,
-            crate::TopologyWaveModel::from_scene(&scene),
+            crate::TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         assert_eq!(
@@ -9094,8 +9109,8 @@ mod tests {
     /// reached a user as "AMR fails at load". The earlier parity fixture is a
     /// reflecting box, so it could not have caught it.
     fn open_boundary_supplement_matches_the_fixed_one_when_inert() {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -9104,14 +9119,15 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic =
+            assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+        let inert = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let inert =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let base = inert.base();
         assert!(
             base.outgoing_boundary().is_some(),
@@ -9208,8 +9224,8 @@ mod tests {
     #[test]
     fn temporal_supplement_matches_the_fixed_one_when_inert_and_departs_when_driven() {
         open_boundary_supplement_matches_the_fixed_one_when_inert();
-        let inert_scene = Scene::initial();
-        let mesh = mesh_scene(
+        let inert_scene = initial();
+        let mesh = meshed(
             &inert_scene,
             1,
             MeshingOptions {
@@ -9218,16 +9234,15 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &inert_scene, OuterBoundaryCondition::Reflecting).unwrap();
+
+        let inert = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &inert_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&inert_scene),
+            1,
         )
         .unwrap();
-
-        let inert =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &inert_scene, 1)
-                .unwrap();
         let base = inert.base();
         let time_step = 0.4 * inert.maximum_time_step();
         let primary = base
@@ -9299,12 +9314,16 @@ mod tests {
 
         // Now the same state under a driven medium. The fixed supplement is
         // blind to the modulation; the temporal one is not.
-        let mut driven_scene = Scene::initial();
+        let mut driven_scene = initial();
         driven_scene.materials[0].mass_law.drive = pump(0.35, 0.8, 0.4);
         driven_scene.materials[0].stiffness_law.drive = pump(0.3, 0.6, -0.2);
-        let driven =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &driven_scene, 1)
-                .unwrap();
+        let driven = CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&driven_scene),
+            1,
+        )
+        .unwrap();
         let runtime = driven.initial_runtime();
         let driven_supplement = canonical_temporal_indicator_supplement(
             &mesh,
@@ -9367,7 +9386,7 @@ mod tests {
     /// on a field quiet enough that no error estimate would have asked.
     #[test]
     fn a_travelling_modulation_sizes_the_mesh_even_on_a_quiet_field() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         let wavenumber = 24.0;
         scene.materials[0].stiffness_law.drive = TimeDrive::TravellingModulation {
             depth: ScalarField::constant(0.25),
@@ -9380,7 +9399,7 @@ mod tests {
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
         let mesh = std::sync::Arc::new(
-            mesh_scene(
+            meshed(
                 &base_scene,
                 1,
                 MeshingOptions {
@@ -9391,15 +9410,15 @@ mod tests {
             .unwrap(),
         );
         let quadratic = std::sync::Arc::new(
-            QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &base_scene,
-                OuterBoundaryCondition::Reflecting,
-            )
-            .unwrap(),
+            assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap(),
         );
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        )
+        .unwrap();
 
         let demand = operator.resolution_demand();
         let elements_per_wavelength = 5.0;
@@ -9419,10 +9438,11 @@ mod tests {
             time: 0.0,
             time_step: 0.4 * operator.maximum_time_step(),
         };
-        let mut job = crate::SolutionIndicatorJob::new(
-            mesh.clone(),
+        let mut job = crate::SolutionIndicatorJob::new_topology(
+            std::sync::Arc::new(mesh.mesh.clone()),
             quadratic.clone(),
-            base_scene,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&base_scene),
             snapshot,
             crate::SolutionIndicatorOptions {
                 minimum_edge_length: 0.005,
@@ -9468,12 +9488,9 @@ mod tests {
     /// refined to the inclusion's floor whatever the error read.
     #[test]
     fn a_travelling_modulation_sizes_only_its_own_material() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         let interior = RegionId(2);
-        scene.obstacles[0].role = LoopRole::MaterialInterface {
-            exterior: BACKGROUND_REGION,
-            interior,
-        };
+        fill_hole(&mut scene, CurveId(1), interior);
         let wavenumber = 24.0;
         scene.materials.push(Material {
             id: crate::MaterialId(2),
@@ -9520,10 +9537,11 @@ mod tests {
             time: 0.0,
             time_step: 0.4 * operator.maximum_time_step(),
         };
-        let mut job = crate::SolutionIndicatorJob::new(
-            mesh.clone(),
+        let mut job = crate::SolutionIndicatorJob::new_topology(
+            std::sync::Arc::new(mesh.mesh.clone()),
             std::sync::Arc::new(quadratic),
-            base_scene,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&base_scene),
             snapshot,
             crate::SolutionIndicatorOptions {
                 minimum_edge_length: 0.005,
@@ -9564,19 +9582,19 @@ mod tests {
     /// into the coefficients.
     #[test]
     fn only_a_travelling_drive_demands_a_mesh_of_its_own() {
-        let pattern = |scene: &Scene| {
+        let pattern = |scene: &TopologyScene| {
             compile(scene)
                 .unwrap()
                 .resolution_demand()
                 .coefficient_wavelength
         };
-        assert!(pattern(&Scene::initial()).is_infinite());
+        assert!(pattern(&initial()).is_infinite());
 
         // Neither a deep pump nor a sharp smoothed square writes a pattern.
-        let mut pumped = Scene::initial();
+        let mut pumped = initial();
         pumped.materials[0].mass_law.drive = pump(0.9, 0.5, 0.0);
         assert!(pattern(&pumped).is_infinite());
-        let mut crystal = Scene::initial();
+        let mut crystal = initial();
         crystal.materials[0].mass_law.drive = TimeDrive::TimeCrystal {
             depth: ScalarField::constant(0.3),
             frequency_hz: ScalarField::constant(1.0),
@@ -9589,7 +9607,7 @@ mod tests {
         // mesh on its own, independently of any source; at zero depth it
         // writes nothing.
         let travelling = |depth: f64| {
-            let mut scene = Scene::initial();
+            let mut scene = initial();
             scene.materials[0].stiffness_law.drive = TimeDrive::TravellingModulation {
                 depth: ScalarField::constant(depth),
                 frequency_hz: ScalarField::constant(0.4),
@@ -9613,7 +9631,7 @@ mod tests {
     /// canonical state held still.
     #[test]
     fn temporal_energy_breakdown_reports_the_actual_pump_power() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = pump(0.27, 0.72, 0.19);
         scene.materials[0].stiffness_law.drive = TimeDrive::TimeCrystal {
             depth: ScalarField::constant(0.16),
@@ -9676,7 +9694,7 @@ mod tests {
     /// exchanges silently missing.
     #[test]
     fn temporal_energy_breakdown_refuses_a_composed_system() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = pump(0.2, 0.6, 0.0);
         scene.materials[0].damping = ScalarField::constant(0.35);
         let operator = compile(&scene).unwrap();
@@ -9702,7 +9720,7 @@ mod tests {
     /// at the sampled instant rather than reusing the authored one.
     #[test]
     fn temporal_area_probe_over_every_face_reports_the_instantaneous_energy() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = TimeDrive::TravellingModulation {
             depth: ScalarField::constant(0.31),
             frequency_hz: ScalarField::constant(0.65),
@@ -9714,7 +9732,7 @@ mod tests {
 
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -9723,18 +9741,19 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
-        let stencil = QuadraticAreaStencil::build(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
             &quadratic,
-            &base_scene,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        )
+        .unwrap();
+        let stencil = QuadraticAreaStencil::build_topology(
+            &mesh,
+            &quadratic,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&base_scene),
             crate::AreaProbeShape::Region(BACKGROUND_REGION),
         )
         .unwrap();
@@ -9797,7 +9816,7 @@ mod tests {
         // nodes carry a share of each: the scene had one material, so no
         // junction, and a split that read every node through one law summed
         // right (VER-15 of the 2026-10-20 review).
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.field = kerr(0.8);
         scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
         let mut second = scene.materials[0].clone();
@@ -9812,17 +9831,16 @@ mod tests {
             material: MaterialId(2),
             frame: MaterialFrame::world(),
         });
-        scene.obstacles.push(Obstacle::with_role(
-            ObstacleId(1),
-            PeriodicCubicSpline::rounded(Point2::new(0.4, 0.3), 0.35),
-            LoopRole::MaterialInterface {
-                exterior: BACKGROUND_REGION,
-                interior: RegionId(2),
-            },
-        ));
+        add_inclusion(
+            &mut scene,
+            CurveId(1),
+            Point2::new(0.4, 0.3),
+            0.35,
+            RegionId(2),
+        );
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -9831,14 +9849,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let mut owners = vec![BTreeSet::new(); operator.base().degrees_of_freedom()];
         for (contribution, sample) in operator
             .base()
@@ -9857,10 +9875,11 @@ mod tests {
             .unwrap();
         let mut total = 0.0;
         for region in &base_scene.regions {
-            let stencil = QuadraticAreaStencil::build(
+            let stencil = QuadraticAreaStencil::build_topology(
                 &mesh,
                 &quadratic,
-                &base_scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&base_scene),
                 crate::AreaProbeShape::Region(region.id),
             )
             .unwrap();
@@ -9895,9 +9914,9 @@ mod tests {
     }
 
     fn sample_canonical_area_total(
-        mesh: &crate::TriMesh,
+        mesh: &Meshed,
         quadratic: &QuadraticWaveOperator,
-        scene: &Scene,
+        scene: &TopologyScene,
         operator: &CanonicalTemporalWaveOperator,
         primary: &[f64],
         complementary: &[Point2],
@@ -9906,10 +9925,11 @@ mod tests {
             .regions
             .iter()
             .map(|region| {
-                let stencil = QuadraticAreaStencil::build(
+                let stencil = QuadraticAreaStencil::build_topology(
                     mesh,
                     quadratic,
-                    scene,
+                    &mesh.plan,
+                    TopologyWaveModel::from_topology_scene(scene),
                     crate::AreaProbeShape::Region(region.id),
                 )
                 .unwrap();
@@ -9924,12 +9944,12 @@ mod tests {
     /// most field-law harmonics on a uniform Kerr medium of `chi` carrying a
     /// 2 Hz harmonic field of envelope one, sampled at `phase`.
     fn kerr_size_rule(chi: f64, phase: f64) -> (f64, f64, u32) {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.field = kerr(chi);
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
         let mesh = std::sync::Arc::new(
-            mesh_scene(
+            meshed(
                 &base_scene,
                 1,
                 MeshingOptions {
@@ -9940,15 +9960,15 @@ mod tests {
             .unwrap(),
         );
         let quadratic = std::sync::Arc::new(
-            QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &base_scene,
-                OuterBoundaryCondition::Reflecting,
-            )
-            .unwrap(),
+            assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap(),
         );
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        )
+        .unwrap();
         let frequency = 2.0;
         let omega = std::f64::consts::TAU * frequency;
         let count = quadratic.degrees_of_freedom();
@@ -9961,10 +9981,11 @@ mod tests {
             time: 0.0,
             time_step: 0.4 * operator.maximum_time_step(),
         };
-        let mut job = crate::SolutionIndicatorJob::new(
-            mesh.clone(),
+        let mut job = crate::SolutionIndicatorJob::new_topology(
+            std::sync::Arc::new(mesh.mesh.clone()),
             quadratic.clone(),
-            scene,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&scene),
             snapshot,
             crate::SolutionIndicatorOptions {
                 minimum_edge_length: 1.0e-4,
@@ -10050,7 +10071,7 @@ mod tests {
 
     #[test]
     fn travelling_complementary_drive_is_resolved_at_each_sample() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].stiffness_law.drive = TimeDrive::TravellingModulation {
             depth: ScalarField::constant(0.42),
             frequency_hz: ScalarField::constant(0.7),
@@ -10115,7 +10136,7 @@ mod tests {
 
     #[test]
     fn travelling_primary_drive_is_sampled_in_the_region_material_frame() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.regions[0].frame = MaterialFrame {
             origin: Point2::new(0.2, -0.1),
             angle_radians: 0.37,
@@ -10161,7 +10182,7 @@ mod tests {
 
     #[test]
     fn shared_nodes_gather_independently_driven_material_contributions() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         let mut second = scene.materials[0].clone();
         second.id = MaterialId(2);
         second.name = "Second".into();
@@ -10173,17 +10194,16 @@ mod tests {
             material: MaterialId(2),
             frame: MaterialFrame::world(),
         });
-        scene.obstacles.push(Obstacle::with_role(
-            ObstacleId(1),
-            PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.2),
-            LoopRole::MaterialInterface {
-                exterior: BACKGROUND_REGION,
-                interior: RegionId(2),
-            },
-        ));
+        add_inclusion(
+            &mut scene,
+            CurveId(1),
+            Point2::new(0.5, 0.5),
+            0.2,
+            RegionId(2),
+        );
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -10192,14 +10212,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let temporal = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let temporal =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let runtime = temporal.initial_runtime();
         let mass = temporal.primary_mass_at(0.0, &runtime).unwrap();
         let mut owners = vec![BTreeSet::new(); temporal.base().degrees_of_freedom()];
@@ -10228,7 +10248,7 @@ mod tests {
 
     #[test]
     fn te_places_mass_row_drive_on_the_complementary_field() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.physics = PhysicsModel::Electromagnetic {
             polarization: ElectromagneticPolarization::Te,
         };
@@ -10268,9 +10288,9 @@ mod tests {
             ElectromagneticPolarization::Te,
         ] {
             let tm = polarization == ElectromagneticPolarization::Tm;
-            let mut scene = Scene {
+            let mut scene = TopologyScene {
                 physics: PhysicsModel::Electromagnetic { polarization },
-                ..Scene::default()
+                ..TopologyScene::default()
             };
             scene.materials[0].mass_law.alternate = Some(ScalarField::constant(4.0));
             scene.materials[0].switch_ramp = 0.0;
@@ -10433,7 +10453,7 @@ mod tests {
     /// refused as past the law's bound.
     #[test]
     fn a_handoff_checks_its_fluxes_under_the_runtime_it_carries() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.field = bounded_kerr(-0.2, 1.0);
         scene.materials[0].mass_law.alternate = Some(ScalarField::constant(4.0));
         let operator = compile(&scene).unwrap();
@@ -10507,7 +10527,7 @@ mod tests {
 
     #[test]
     fn switch_and_reciprocal_drive_modify_the_complete_primary_map() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.alternate = Some(ScalarField::constant(4.0));
         scene.materials[0].mass_law.inverted = true;
         scene.materials[0].switch_ramp = 2.0;
@@ -10524,7 +10544,7 @@ mod tests {
 
     #[test]
     fn constant_loss_drive_follows_the_physical_channel() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.physics = PhysicsModel::Electromagnetic {
             polarization: ElectromagneticPolarization::Tm,
         };
@@ -10551,25 +10571,25 @@ mod tests {
 
     #[test]
     fn ordinary_production_compiler_still_rejects_a_driven_material() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = pump(0.2, 1.0, 0.0);
         // The static assembly reads the medium with its laws stripped, as
-        // production does: the Scene path refuses a law as well (NUM-15 of
+        // production does: the TopologyScene path refuses a law as well (NUM-15 of
         // the 2026-10-20 review), and the refusal under test is the
         // compiler's own.
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(&base_scene, 1, MeshingOptions::default()).unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let mesh = meshed(&base_scene, 1, MeshingOptions::default()).unwrap();
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
         // The refusal names the material and the row, because it shares its
         // error with a genuinely invalid coefficient and the two are
         // indistinguishable to anyone reading the application's message.
-        let refusal = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1);
+        let refusal = CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        );
         let Err(WaveError::MaterialEvaluation {
             material,
             coefficient,
@@ -10608,7 +10628,7 @@ mod tests {
 
     #[test]
     fn inert_bulk_split_matches_the_existing_kdk_step() {
-        let operator = compile(&Scene::initial()).unwrap();
+        let operator = compile(&initial()).unwrap();
         assert!(operator.conservative_bulk_supported());
         let time_step = 0.2 * operator.maximum_time_step();
         let (primary, complementary) = reference_fluxes(&operator);
@@ -10629,7 +10649,7 @@ mod tests {
 
     #[test]
     fn driven_bulk_split_is_reversible_to_roundoff() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = pump(0.24, 0.8, 0.31);
         scene.materials[0].stiffness_law.drive = pump(0.17, 0.6, -0.23);
         let operator = compile(&scene).unwrap();
@@ -10668,7 +10688,7 @@ mod tests {
 
     #[test]
     fn bulk_energy_rate_is_the_fixed_state_time_derivative() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = pump(0.22, 0.9, 0.41);
         scene.materials[0].stiffness_law.drive = pump(0.13, 0.7, -0.19);
         let operator = compile(&scene).unwrap();
@@ -10691,7 +10711,7 @@ mod tests {
 
     #[test]
     fn temporal_work_residual_converges_at_second_order() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = pump(0.31, 1.1, 0.27);
         scene.materials[0].stiffness_law.drive = pump(0.21, 0.9, -0.34);
         let operator = compile(&scene).unwrap();
@@ -10726,8 +10746,8 @@ mod tests {
 
     /// A gated pump on each row: a flat top on the mass, a Gaussian on the
     /// stiffness, placed by the length `span` of the run that watches them.
-    fn gated_scene(span: f64) -> Scene {
-        let mut scene = Scene::initial();
+    fn gated_scene(span: f64) -> TopologyScene {
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = pump(0.31, 1.1, 0.27);
         scene.materials[0].mass_law.gate = Some(PulseTrain {
             envelope: PulseEnvelope::FlatTop {
@@ -10811,7 +10831,7 @@ mod tests {
         let depth = 0.3;
         // The slowest mode of the 2 × 2 box runs at 0.25 Hz.
         let width = 4.0;
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.drive = pump(depth, 0.0, 0.0);
         scene.materials[0].mass_law.gate = Some(PulseTrain {
             envelope: PulseEnvelope::Gaussian { width },
@@ -10865,7 +10885,7 @@ mod tests {
 
     #[test]
     fn trajectory_cfl_uses_the_worst_bulk_coefficient_factors() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.drive = pump(0.36, 0.8, 0.0);
         scene.materials[0].stiffness_law.drive = pump(0.19, 0.7, 0.0);
         let operator = compile(&scene).unwrap();
@@ -10878,15 +10898,15 @@ mod tests {
         // Loss used to have no state here at all. It now steps as an accounted
         // dissipation lane, so what it loses is the conservative-bulk claim
         // rather than the ability to run.
-        let mut lossy_scene = Scene::initial();
+        let mut lossy_scene = initial();
         lossy_scene.materials[0].damping = ScalarField::constant(0.1);
         let lossy = compile(&lossy_scene).unwrap();
         assert!(lossy.has_loss());
         assert!(!lossy.conservative_bulk_supported());
         assert!(CanonicalTemporalWaveState::zero(&lossy, 0.1 * lossy.maximum_time_step()).is_ok());
 
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
+        let scene = initial();
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -10896,14 +10916,15 @@ mod tests {
         )
         .unwrap();
         // A first-order wall is a local damping term in the kick and composes.
-        let first_order = QuadraticWaveOperator::assemble_scene(
+        let first_order =
+            assembled(&mesh, &scene, OuterBoundaryCondition::FirstOrderOutgoing).unwrap();
+        let damped = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::FirstOrderOutgoing,
+            &first_order,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let damped =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &first_order, &scene, 1).unwrap();
         assert!(!damped.conservative_bulk_supported());
         assert!(
             CanonicalTemporalWaveState::zero(&damped, 0.1 * damped.maximum_time_step()).is_ok()
@@ -10911,14 +10932,15 @@ mod tests {
 
         // A second-order wall carries pole currents of its own, and now has
         // state for them.
-        let second_order = QuadraticWaveOperator::assemble_scene(
+        let second_order =
+            assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+        let open = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
+            &second_order,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let open =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &second_order, &scene, 1).unwrap();
         assert!(!open.conservative_bulk_supported());
         assert!(CanonicalTemporalWaveState::zero(&open, 0.1 * open.maximum_time_step()).is_ok());
     }
@@ -10930,7 +10952,7 @@ mod tests {
     /// (VER-16 of the 2026-10-20 review).
     #[test]
     fn temporal_tensor_scaling_keeps_the_base_anisotropy_shape() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].axis_ratio = ScalarField::constant(1.6);
         scene.regions[0].frame.angle_radians = 0.5;
         // At zero frequency and phase the pump stands at 1 + 0.3 everywhere.
@@ -11003,14 +11025,14 @@ mod tests {
         )
     }
 
-    fn kerr_scene() -> Scene {
-        let mut scene = Scene::initial();
+    fn kerr_scene() -> TopologyScene {
+        let mut scene = initial();
         scene.materials[0].mass_law.field = kerr(0.8);
         scene.materials[0].stiffness_law.field = kerr(20.0);
         scene
     }
 
-    fn field_law_refusal(scene: &Scene) -> Option<String> {
+    fn field_law_refusal(scene: &TopologyScene) -> Option<String> {
         match compile(scene) {
             Err(WaveError::MaterialEvaluation {
                 coefficient: "field law",
@@ -11032,13 +11054,13 @@ mod tests {
             operator.maximum_time_step(),
             operator.base().maximum_time_step()
         );
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].stiffness_law.field = saturable_law(-0.2, 2.0);
         let operator = compile(&scene).unwrap();
         let expected = operator.base().maximum_time_step() * (1.0_f64 + 9.0 * -0.8 / 8.0).sqrt();
         assert!((operator.maximum_time_step() - expected).abs() < 1e-14 * expected);
 
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.field = FieldLaw::Polynomial {
             chi1: ScalarField::constant(0.3),
             chi2: ScalarField::constant(0.8),
@@ -11056,7 +11078,7 @@ mod tests {
 
         // Nonlinear anisotropy is Gate C's; a nonlinear mass row on an
         // anisotropic medium is fine, because the primary map is a scalar.
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].axis_ratio = ScalarField::constant(1.6);
         scene.materials[0].mass_law.field = kerr(0.8);
         assert!(compile(&scene).unwrap().has_field_laws());
@@ -11068,7 +11090,7 @@ mod tests {
         );
 
         // Field-dependent loss stays gated.
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].electric_loss = Some(LossChannel {
             base_rate: ScalarField::constant(0.1),
             law: DampingLaw {
@@ -11125,10 +11147,13 @@ mod tests {
         assert!(operator.primary.records.len() < operator.primary.len());
     }
 
-    fn walled(condition: OuterBoundaryCondition, scene: &Scene) -> CanonicalTemporalWaveOperator {
+    fn walled(
+        condition: OuterBoundaryCondition,
+        scene: &TopologyScene,
+    ) -> CanonicalTemporalWaveOperator {
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -11137,9 +11162,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic =
-            QuadraticWaveOperator::assemble_scene(&mesh, &base_scene, condition).unwrap();
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap()
+        let quadratic = assembled(&mesh, &base_scene, condition).unwrap();
+        CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            1,
+        )
+        .unwrap()
     }
 
     const WALLS: [OuterBoundaryCondition; 2] = [
@@ -11157,13 +11187,13 @@ mod tests {
     /// (PH-05, 2026-10-15).
     #[test]
     fn a_source_on_a_wall_books_its_work_at_second_order() {
-        let mut pumped = Scene::default();
+        let mut pumped = TopologyScene::default();
         pumped.materials[0].mass_law.drive = pump(0.25, 1.3, 0.2);
-        let mut nonlinear = Scene::default();
+        let mut nonlinear = TopologyScene::default();
         nonlinear.materials[0].mass_law.field = kerr(0.8);
         for condition in WALLS {
             for (label, scene) in [
-                ("fixed", Scene::default()),
+                ("fixed", TopologyScene::default()),
                 ("pumped", pumped.clone()),
                 ("Kerr", nonlinear.clone()),
             ] {
@@ -11275,7 +11305,7 @@ mod tests {
                 .into_iter()
                 .flat_map(|condition| [false, true].map(|pins| (condition, pins)))
             {
-                let mut scene = Scene::default();
+                let mut scene = TopologyScene::default();
                 let linear = walled(condition, &scene);
                 scene.materials[0].mass_law.field = kerr(0.0);
                 let nonlinear = walled(condition, &scene);
@@ -11331,7 +11361,7 @@ mod tests {
     fn a_nonlinear_trace_radiates_passively_and_balances_at_second_order() {
         crate::canonical_wave::under_each_wall_step(|_| {
             for (condition, pumped) in [(WALLS[0], false), (WALLS[1], false), (WALLS[1], true)] {
-                let mut scene = Scene::default();
+                let mut scene = TopologyScene::default();
                 scene.materials[0].mass_law.field = kerr(0.8);
                 scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
                 if pumped {
@@ -11353,7 +11383,7 @@ mod tests {
             // amplitude, like the bulk's: nothing at the wall is first order in
             // the nonlinearity.
             for condition in WALLS {
-                let mut scene = Scene::default();
+                let mut scene = TopologyScene::default();
                 let linear = walled(condition, &scene);
                 scene.materials[0].mass_law.field = kerr(0.8);
                 let nonlinear = walled(condition, &scene);
@@ -11400,7 +11430,7 @@ mod tests {
             // A pulse strong enough that the trace map departs from linear by
             // over 50% crosses the second-order wall. Nothing may pile up at the
             // wall: most of the energy leaves, and the budget closes.
-            let mut scene = Scene::default();
+            let mut scene = TopologyScene::default();
             scene.materials[0].mass_law.field = kerr(0.8);
             let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
             let base = operator.base();
@@ -11442,15 +11472,15 @@ mod tests {
     /// A snapshot across one step of `operator` from a strong state, and the
     /// mesh it was compiled on, on the second-order wall.
     fn nonlinear_snapshot(
-        scene: &Scene,
+        scene: &TopologyScene,
     ) -> (
-        TriMesh,
+        Meshed,
         CanonicalTemporalWaveOperator,
         CanonicalIndicatorSnapshot,
     ) {
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -11459,14 +11489,19 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(
             &mesh,
             &base_scene,
             OuterBoundaryCondition::SecondOrderOutgoing,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            1,
+        )
+        .unwrap();
         let (primary, complementary) = strong_fluxes(&operator, 6.0);
         let time_step = 0.4 * operator.maximum_time_step();
         // Stepped by the half kicks, so the outgoing-history term has a defect
@@ -11497,7 +11532,7 @@ mod tests {
         let scene = kerr_scene();
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -11506,14 +11541,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let runtime = operator.initial_runtime();
         // A uniform field and a uniform complementary field: the probe must
         // read exactly those, and the energy density of the stored maps.
@@ -11535,7 +11570,14 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let point = Point2::new(0.1, 0.2);
-        let stencil = QuadraticPointStencil::build(&mesh, &quadratic, &base_scene, point).unwrap();
+        let stencil = QuadraticPointStencil::build_topology(
+            &mesh,
+            &quadratic,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&base_scene),
+            point,
+        )
+        .unwrap();
         let probe = CanonicalTemporalPointStencil::from_quadratic(stencil, &operator).unwrap();
         let sample = probe
             .sample(
@@ -11563,7 +11605,7 @@ mod tests {
 
     #[test]
     fn nonlinear_invariant_maintenance_shifts_the_field_and_respects_the_domain() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.field = bounded_kerr(-0.2, 1.0);
         let operator = compile(&scene).unwrap();
         let base = operator.base();
@@ -11614,8 +11656,8 @@ mod tests {
 
     #[test]
     fn the_nonlinear_estimate_is_the_linear_one_at_zero_response() {
-        let linear_scene = Scene::default();
-        let mut scene = Scene::default();
+        let linear_scene = TopologyScene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.field = kerr(0.0);
         scene.materials[0].stiffness_law.field = saturable_law(0.0, 1.0);
         let (mesh, linear, snapshot) = nonlinear_snapshot(&linear_scene);
@@ -11655,7 +11697,7 @@ mod tests {
 
     #[test]
     fn the_nonlinear_estimate_splits_the_solver_energy_and_departs_from_linear() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.field = kerr(0.8);
         scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
         let (mesh, operator, snapshot) = nonlinear_snapshot(&scene);
@@ -11689,7 +11731,7 @@ mod tests {
             "{split} against {stored} and {poles}"
         );
         // Read with the linear maps, the same state is mis-weighed.
-        let (_, linear, _) = nonlinear_snapshot(&Scene::default());
+        let (_, linear, _) = nonlinear_snapshot(&TopologyScene::default());
         let linear_estimate = canonical_temporal_indicator_supplement(
             &mesh,
             &linear,
@@ -11725,11 +11767,11 @@ mod tests {
 
     #[test]
     fn the_tangent_filter_is_the_linear_filter_at_zero_response() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.field = kerr(0.0);
         scene.materials[0].stiffness_law.field = saturable_law(0.0, 1.0);
         let nonlinear = compile(&scene).unwrap();
-        let linear = compile(&Scene::initial()).unwrap();
+        let linear = compile(&initial()).unwrap();
         let (primary, complementary) = strong_fluxes(&linear, 6.0);
         let (expected, expected_removed) = filtered(&linear, &primary, &complementary, 0.8);
         let (actual, actual_removed) = filtered(&nonlinear, &primary, &complementary, 0.8);
@@ -11800,8 +11842,8 @@ mod tests {
 
     /// A scene the filter's bound is hard on: a slow disk, whose rows sit far
     /// under the medium's around it, beside a hole the mesh grades down to.
-    fn contrasted_scene() -> Scene {
-        let mut scene = Scene::initial();
+    fn contrasted_scene() -> TopologyScene {
+        let mut scene = initial();
         let mut slow = scene.materials[0].clone();
         slow.id = MaterialId(2);
         slow.name = "Slow".into();
@@ -11812,14 +11854,13 @@ mod tests {
             material: MaterialId(2),
             frame: MaterialFrame::world(),
         });
-        scene.obstacles.push(Obstacle::with_role(
-            ObstacleId(2),
-            PeriodicCubicSpline::rounded(Point2::new(0.5, 0.4), 0.3),
-            LoopRole::MaterialInterface {
-                exterior: BACKGROUND_REGION,
-                interior: RegionId(2),
-            },
-        ));
+        add_inclusion(
+            &mut scene,
+            CurveId(2),
+            Point2::new(0.5, 0.4),
+            0.3,
+            RegionId(2),
+        );
         scene
     }
 
@@ -11925,7 +11966,7 @@ mod tests {
         // Held to the nonlinear generation's bound, which covers every
         // amplitude its stiffness law admits and so is not the linear one's:
         // what departs is then the tangent maps alone.
-        let linear = compile(&Scene::initial())
+        let linear = compile(&initial())
             .unwrap()
             .with_grid_filter_reach(nonlinear.grid_filter_reach().to_vec());
         let departure = |amplitude: f64| {
@@ -11959,12 +12000,12 @@ mod tests {
     fn a_zero_response_steps_as_the_linear_medium_does() {
         // χ = 0 takes every nonlinear code path (inverse, discrete energy,
         // forward map) and must reproduce the linear division.
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.field = kerr(0.0);
         scene.materials[0].stiffness_law.field = saturable_law(0.0, 1.0);
         let nonlinear = compile(&scene).unwrap();
         assert!(nonlinear.has_field_laws());
-        let linear = compile(&Scene::initial()).unwrap();
+        let linear = compile(&initial()).unwrap();
         let time_step = 0.4 * linear.maximum_time_step();
         let (primary, complementary) = strong_fluxes(&linear, 6.0);
         // The stiffness-side law puts the nonlinear generation's fourth-order
@@ -12017,8 +12058,14 @@ mod tests {
             .complementary_field_at(&complementary, 0.0, &runtime)
             .unwrap();
         let energy = |p: &[f64], c: &[Point2]| operator.energy_at(p, c, 0.0, &runtime).unwrap();
+        // The step is set by the field's scale, not the node's value: a
+        // millionth of a small node's own flux left the slope to the
+        // energy's rounding, 7e-6 of it on the topology mesh's last node.
+        let scale = primary
+            .iter()
+            .fold(0.0_f64, |most, value| most.max(value.abs()));
         for node in [0, 3, primary.len() / 2, primary.len() - 1] {
-            let h = 1e-6 * primary[node].abs().max(1e-6);
+            let h = 1e-6 * scale;
             let mut plus = primary.clone();
             let mut minus = primary.clone();
             plus[node] += h;
@@ -12074,10 +12121,12 @@ mod tests {
         };
         let coarse = deviation(0.5, 200);
         let fine = deviation(0.25, 400);
-        // The fourth-order step's energy breathes a little more than the
-        // leapfrog's about the store it conserves, 2.3e-4 against 1.9e-4
-        // here, at the same second order.
-        assert!(coarse < 2.5e-4, "{coarse:e}");
+        // The fourth-order step's energy breathes about the store it
+        // conserves at second order, 3.75e-4 here and a quarter of that at
+        // half the step. The legacy scene's mesh, whose smallest element held
+        // the step to two thirds of this one's, breathed 2.3e-4 (the
+        // leapfrog 1.9e-4).
+        assert!(coarse < 4.0e-4, "{coarse:e}");
         assert!(fine < 0.35 * coarse, "coarse {coarse:e}, fine {fine:e}");
     }
 
@@ -12144,7 +12193,7 @@ mod tests {
 
     #[test]
     fn a_junction_node_holds_the_sum_of_its_materials_maps() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         let mut second = scene.materials[0].clone();
         second.id = MaterialId(2);
         second.name = "Second".into();
@@ -12157,14 +12206,13 @@ mod tests {
             material: MaterialId(2),
             frame: MaterialFrame::world(),
         });
-        scene.obstacles.push(Obstacle::with_role(
-            ObstacleId(1),
-            PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.2),
-            LoopRole::MaterialInterface {
-                exterior: BACKGROUND_REGION,
-                interior: RegionId(2),
-            },
-        ));
+        add_inclusion(
+            &mut scene,
+            CurveId(1),
+            Point2::new(0.5, 0.5),
+            0.2,
+            RegionId(2),
+        );
         let operator = compile(&scene).unwrap();
         let runtime = operator.initial_runtime();
         let (primary, complementary) = strong_fluxes(&operator, 6.0);
@@ -12209,7 +12257,7 @@ mod tests {
         // the identical map on the primary row, so the two evolve alike; the
         // same law on the same slot does not.
         let skin = |polarization| {
-            let mut scene = Scene::initial();
+            let mut scene = initial();
             scene.physics = PhysicsModel::Electromagnetic { polarization };
             scene
         };
@@ -12262,7 +12310,7 @@ mod tests {
 
     #[test]
     fn a_flux_past_a_declared_bound_is_refused_and_leaves_the_state_intact() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.field = bounded_kerr(-0.2, 1.0);
         let operator = compile(&scene).unwrap();
         let mass = operator.base().primary_mass().to_vec();
@@ -12315,7 +12363,7 @@ mod tests {
         // trajectory is third order in the amplitude, so its departure from
         // the linear control, relative to the trajectory, grows as A².
         let nonlinear = compile(&kerr_scene()).unwrap();
-        let linear = compile(&Scene::initial()).unwrap();
+        let linear = compile(&initial()).unwrap();
         let time_step = 0.4 * linear.maximum_time_step();
         let departure = |amplitude: f64| {
             let run = |operator: &CanonicalTemporalWaveOperator| {
@@ -12354,11 +12402,11 @@ mod tests {
         // Far above saturation `ḡ → 1 + χσ²`, so a very strong field runs as
         // a linear medium with that coefficient: the response stays bounded.
         let (chi, saturation) = (0.6, 0.002);
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.field =
             saturable_law(chi / (saturation * saturation), saturation);
         let saturated = compile(&scene).unwrap();
-        let mut limit = Scene::initial();
+        let mut limit = initial();
         limit.materials[0].mass_density = ScalarField::constant(
             limit.materials[0].mass_density.constant_value().unwrap() * (1.0 + chi),
         );
@@ -12509,8 +12557,8 @@ mod tests {
         finest
     }
 
-    fn nonlinear_default_scene() -> Scene {
-        let mut scene = Scene::default();
+    fn nonlinear_default_scene() -> TopologyScene {
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.field = kerr(0.8);
         scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
         scene
@@ -12608,26 +12656,20 @@ mod tests {
     #[test]
     fn a_thin_gap_in_a_nonlinear_medium_keeps_the_balance_second_order() {
         let mut scene = nonlinear_default_scene();
-        scene.internal_boundaries.push(crate::InternalBoundary {
-            id: crate::InternalBoundaryId(1),
-            spline: crate::OpenCubicSpline::uniform(vec![
+        add_baffle(
+            &mut scene,
+            CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![crate::InternalBoundaryLaw {
-                coupling: crate::InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 120.0,
-                },
-                ..crate::InternalBoundaryLaw::REFLECTING
-            }],
-        });
+            ],
+            thin_gap(120.0),
+        );
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             17,
             MeshingOptions {
@@ -12637,14 +12679,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         assert!(!operator.base().thin_gap_samples().is_empty());
         let forcing = CanonicalForcing::none(operator.base());
         nonlinear_balance_is_second_order(&operator, &forcing, 0.25, 0.5);
@@ -12657,8 +12699,8 @@ mod tests {
                 OuterBoundaryCondition::FirstOrderOutgoing,
                 OuterBoundaryCondition::SecondOrderOutgoing,
             ] {
-                let mut scene = Scene::default();
-                let mesh = mesh_scene(
+                let mut scene = TopologyScene::default();
+                let mesh = meshed(
                     &scene,
                     1,
                     MeshingOptions {
@@ -12667,12 +12709,15 @@ mod tests {
                     },
                 )
                 .unwrap();
-                let quadratic =
-                    QuadraticWaveOperator::assemble_scene(&mesh, &scene, condition).unwrap();
+                let quadratic = assembled(&mesh, &scene, condition).unwrap();
                 scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
-                let operator =
-                    CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1)
-                        .unwrap();
+                let operator = CanonicalTemporalWaveOperator::compile(
+                    &mesh,
+                    &quadratic,
+                    TopologyWaveModel::from_topology_scene(&scene),
+                    1,
+                )
+                .unwrap();
                 let forcing = CanonicalForcing::none(operator.base());
                 let (total, _) = nonlinear_balance_is_second_order(&operator, &forcing, 0.2, 0.5);
                 assert!(total.boundary_loss > 1e-5, "{condition:?}: {total:?}");
@@ -12686,7 +12731,7 @@ mod tests {
     /// signal at its own instant.
     #[test]
     fn a_varying_prescribed_signal_steps_at_second_order() {
-        let operator = compile(&Scene::default()).unwrap();
+        let operator = compile(&TopologyScene::default()).unwrap();
         let base = operator.base();
         let mut prescribed = vec![None; base.degrees_of_freedom()];
         for (node, point) in base.node_points().iter().enumerate() {
@@ -12738,7 +12783,7 @@ mod tests {
     }
 
     fn pinned_trace_steps_at_second_order(field: Option<FieldLaw>, lossy: bool) {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.drive = pump(0.4, 1.1, 0.3);
         if let Some(field) = field {
             scene.materials[0].mass_law.field = field;
@@ -12820,7 +12865,7 @@ mod tests {
     #[test]
     fn a_pinned_nonlinear_trace_holds_its_field_and_balances_at_second_order() {
         crate::canonical_wave::under_each_wall_step(|_| {
-            let mut scene = Scene::default();
+            let mut scene = TopologyScene::default();
             scene.materials[0].mass_law.field = kerr(0.8);
             scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
             scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
@@ -12899,7 +12944,7 @@ mod tests {
     #[test]
     fn a_pinned_trace_holds_its_signal_and_reverses() {
         crate::canonical_wave::under_each_wall_step(|_| {
-            let mut scene = Scene::default();
+            let mut scene = TopologyScene::default();
             scene.materials[0].mass_law.drive = pump(0.4, 1.1, 0.3);
             let operator = walled(OuterBoundaryCondition::SecondOrderOutgoing, &scene);
             let base = operator.base();
@@ -13005,7 +13050,7 @@ mod tests {
             ]
             .map(|condition| (signal, condition))
         }) {
-            let mut scene = Scene::default();
+            let mut scene = TopologyScene::default();
             scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
             let operator = walled(condition, &scene);
             let base = operator.base();
@@ -13033,7 +13078,7 @@ mod tests {
         let te = PhysicsModel::Electromagnetic {
             polarization: ElectromagneticPolarization::Te,
         };
-        let mut pumped = Scene::initial();
+        let mut pumped = initial();
         pumped.materials[0].stiffness_law.drive = pump(0.3, 0.9, 0.2);
         pumped.materials[0].stiffness_law.alternate = Some(ScalarField::constant(1.4));
         pumped.materials[0].mass_law.drive = pump(0.2, 0.7, -0.1);
@@ -13087,60 +13132,54 @@ mod tests {
     /// Each composition the stepper admits beside the bulk: both walls, a
     /// prescribed wall, a thin gap, a constant loss and a prescribed side on
     /// a second-order wall's trace.
-    fn filter_compositions() -> Vec<(&'static str, Scene, OuterBoundaryCondition)> {
-        let mut gapped = Scene::default();
-        gapped.internal_boundaries.push(crate::InternalBoundary {
-            id: crate::InternalBoundaryId(1),
-            spline: crate::OpenCubicSpline::uniform(vec![
+    fn filter_compositions() -> Vec<(&'static str, TopologyScene, OuterBoundaryCondition)> {
+        let mut gapped = TopologyScene::default();
+        add_baffle(
+            &mut gapped,
+            CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![crate::InternalBoundaryLaw {
-                coupling: crate::InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 120.0,
-                },
-                ..crate::InternalBoundaryLaw::REFLECTING
-            }],
-        });
-        let mut lossy = Scene::default();
+            ],
+            thin_gap(120.0),
+        );
+        let mut lossy = TopologyScene::default();
         lossy.materials[0].damping = ScalarField::constant(0.45);
         vec![
             (
                 "first-order wall",
-                Scene::default(),
+                TopologyScene::default(),
                 OuterBoundaryCondition::FirstOrderOutgoing,
             ),
             (
                 "second-order wall",
-                Scene::default(),
+                TopologyScene::default(),
                 OuterBoundaryCondition::SecondOrderOutgoing,
             ),
             (
                 "prescribed wall",
-                Scene::default(),
+                TopologyScene::default(),
                 OuterBoundaryCondition::Reflecting,
             ),
             ("thin gap", gapped, OuterBoundaryCondition::Reflecting),
             ("loss", lossy, OuterBoundaryCondition::Reflecting),
             (
                 "pinned trace",
-                Scene::default(),
+                TopologyScene::default(),
                 OuterBoundaryCondition::SecondOrderOutgoing,
             ),
         ]
     }
 
     fn filter_operator(
-        scene: &Scene,
+        scene: &TopologyScene,
         condition: OuterBoundaryCondition,
     ) -> CanonicalTemporalWaveOperator {
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             17,
             MeshingOptions {
@@ -13150,9 +13189,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic =
-            QuadraticWaveOperator::assemble_scene(&mesh, &base_scene, condition).unwrap();
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap()
+        let quadratic = assembled(&mesh, &base_scene, condition).unwrap();
+        CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            1,
+        )
+        .unwrap()
     }
 
     /// A constant prescribed wall on the left for the cases that ask for one.
@@ -13308,7 +13352,7 @@ mod tests {
     /// jumps where they were, and keeps a free component's total.
     #[test]
     fn a_driven_or_nonlinear_filter_beside_each_composition_only_removes_energy() {
-        type Author = fn(&mut Scene);
+        type Author = fn(&mut TopologyScene);
         let media: [(&str, Author); 5] = [
             ("pumped", |scene| {
                 scene.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
@@ -13395,7 +13439,7 @@ mod tests {
     /// the field.
     #[test]
     fn nonlinear_strength_reads_each_rows_coefficient_change() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.field = kerr(0.8);
         scene.materials[0].stiffness_law.field = saturable_law(6.0, 0.3);
         let operator = compile(&scene).unwrap();
@@ -13429,7 +13473,7 @@ mod tests {
         // it read +0.00% (UI-5 of the 2026-10-20 review). A Divide row's
         // departure, 1/ḡ − 1, is checked on the law itself, since the solver
         // gates a reciprocal field response (Gate C).
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_law.field = bounded_kerr(-0.2, 1.0);
         let operator = compile(&scene).unwrap();
         let runtime = operator.initial_runtime();
@@ -13454,7 +13498,7 @@ mod tests {
         assert_eq!(strength.complementary, 0.0, "a linear row departs nowhere");
 
         // A linear generation has nothing to report.
-        let linear = compile(&Scene::initial()).unwrap();
+        let linear = compile(&initial()).unwrap();
         let (primary, complementary) = reference_fluxes(&linear);
         assert!(
             linear
@@ -13588,7 +13632,7 @@ mod tests {
     #[test]
     fn the_samples_assemble_the_fixed_stiffness_and_mass() {
         let scene = contrasted_scene();
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -13597,14 +13641,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let base = operator.base();
         let (offsets, columns) = (quadratic.row_offsets(), quadratic.columns());
         let mut assembled = vec![0.0; quadratic.stiffness_values().len()];
@@ -13648,7 +13692,7 @@ mod tests {
     /// by its square root; a self-focusing law leaves the fixed ceiling.
     #[test]
     fn the_time_step_bound_names_the_row_that_lowers_it() {
-        let mut pumped = Scene::initial();
+        let mut pumped = initial();
         pumped.materials[0].mass_law.drive = pump(0.2, 1.1, 0.3);
         let bound = compile(&pumped).unwrap().time_step_bound();
         assert!((bound.primary_floor - 0.8).abs() < 1e-12, "{bound:?}");
@@ -13664,10 +13708,10 @@ mod tests {
     /// A plane pulse launched along +x in a reflecting channel, stepped for
     /// `seconds`, and the share of its field energy found behind where it
     /// started: what a modulation sent backwards.
-    fn backward_share(scene: &Scene, sign: f64, seconds: f64) -> f64 {
+    fn backward_share(scene: &TopologyScene, sign: f64, seconds: f64) -> f64 {
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -13676,14 +13720,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            1,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1).unwrap();
         let base = operator.base();
         let (start, width) = (-0.35, 0.08);
         let pulse = |x: f64| (-((x - start) / width).powi(2)).exp();
@@ -13739,8 +13783,8 @@ mod tests {
         behind / total
     }
 
-    fn modulated(depth: f64, invert_stiffness: bool) -> Scene {
-        let mut scene = Scene::default();
+    fn modulated(depth: f64, invert_stiffness: bool) -> TopologyScene {
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.drive = pump(depth, 2.0, 0.0);
         scene.materials[0].stiffness_law.drive = pump(depth, 2.0, 0.0);
         scene.materials[0].stiffness_law.inverted = invert_stiffness;
@@ -13766,11 +13810,11 @@ mod tests {
 
     /// A reflecting unit box of the default medium carrying one restoring law.
     fn restoring_operator(law: crate::RestoringLaw, edge: f64) -> CanonicalTemporalWaveOperator {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].restoring = law;
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -13779,13 +13823,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
-        .unwrap();
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap()
+        .unwrap()
     }
 
     fn klein_gordon(omega0: f64) -> crate::RestoringLaw {
@@ -14044,7 +14089,7 @@ mod tests {
     fn a_kerr_uniform_mode_follows_its_ode() {
         let omega0 = 3.0;
         let chi2 = 0.5;
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].restoring = klein_gordon(omega0);
         scene.materials[0].mass_law.field = crate::FieldLaw::Polynomial {
             chi1: ScalarField::constant(0.0),
@@ -14053,7 +14098,7 @@ mod tests {
         };
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -14062,14 +14107,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let field = |q: f64| {
             let mut u = q;
             for _ in 0..60 {
@@ -14404,12 +14449,12 @@ mod tests {
         assert!(drift < 1.0e-3, "energy moved by {drift:.2e}");
 
         // Just off the top, with a loss to settle into.
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].restoring = phi4(lambda, 1.6);
         scene.materials[0].damping = ScalarField::constant(2.0);
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -14418,14 +14463,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let lossy = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let lossy =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let forcing = CanonicalForcing::none(lossy.base());
         let settle = |seed: &dyn Fn(Point2) -> f64| {
             let noise = lossy
@@ -14594,7 +14639,7 @@ mod tests {
         omega0: f64,
         law: FieldLaw,
     ) -> CanonicalTemporalWaveOperator {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.field = law;
         scene.materials[0].restoring = klein_gordon(omega0);
         scene.materials[0].magnetic_loss = Some(crate::LossChannel {
@@ -14610,7 +14655,7 @@ mod tests {
         });
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -14619,13 +14664,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
-        .unwrap();
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap()
+        .unwrap()
     }
 
     /// Beside Klein-Gordon the node equation is Rayleigh's form of van der
@@ -14807,7 +14853,7 @@ mod tests {
     /// "formula produced an invalid value".
     #[test]
     fn van_der_pol_beside_a_pumped_mass_steps() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].restoring = klein_gordon(3.0);
         scene.materials[0].mass_law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.2),
@@ -15054,7 +15100,7 @@ mod tests {
     #[test]
     fn an_authored_short_wave_loss_damps_the_ceiling_and_spares_long_waves() {
         let alpha = 0.25;
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].short_wave_loss = alpha;
         assert!(scene.materials[0].valid());
         assert!(!scene.materials[0].time_invariant());
@@ -15145,7 +15191,7 @@ mod tests {
         ];
         let alpha = 0.25;
         for (name, author) in laws {
-            let mut scene = Scene::default();
+            let mut scene = TopologyScene::default();
             author(&mut scene.materials[0]);
             scene.materials[0].short_wave_loss = alpha;
             let (_, _, operator) = generation(&scene, 0.5, 1);
@@ -15217,7 +15263,7 @@ mod tests {
     /// refused.
     #[test]
     fn a_short_wave_loss_beside_van_der_pol_splits_its_energy_by_node() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].restoring = klein_gordon(3.0);
         scene.materials[0].magnetic_loss = Some(crate::LossChannel {
             base_rate: ScalarField::constant(1.0),
@@ -15231,10 +15277,7 @@ mod tests {
             },
         });
         let interior = RegionId(2);
-        scene.obstacles[0].role = LoopRole::MaterialInterface {
-            exterior: BACKGROUND_REGION,
-            interior,
-        };
+        fill_hole(&mut scene, CurveId(1), interior);
         scene.materials.push(Material {
             id: crate::MaterialId(2),
             name: "interior".into(),
@@ -15260,8 +15303,10 @@ mod tests {
             let [ceiling, ..] = short_wave_fields(&operator);
             let dt = 0.2 * operator.maximum_time_step();
             let (_, total) = short_wave_run(&operator, &ceiling, dt, 0.5);
+            // The inclusion's share, 9% here with 80 of its triangles, 14% on
+            // the legacy mesh, which put 136 there.
             assert!(
-                total.short_wave_loss > 0.1 * total.energy_change.abs(),
+                total.short_wave_loss > 0.05 * total.energy_change.abs(),
                 "{name}: {total:?}"
             );
             assert!(total.active_gain < 0.0, "{name}: {total:?}");
@@ -15272,7 +15317,7 @@ mod tests {
             );
         }
 
-        let mut past = Scene::default();
+        let mut past = TopologyScene::default();
         past.materials[0].short_wave_loss = 1.5;
         assert!(!past.materials[0].valid());
     }
@@ -15286,7 +15331,7 @@ mod tests {
     #[test]
     fn oscillator_media_balance_at_second_order_beside_each_composition() {
         crate::canonical_wave::under_each_wall_step(|_| {
-            type Author = fn(&mut Scene);
+            type Author = fn(&mut TopologyScene);
             let media: [(&str, Author); 5] = [
                 ("klein-gordon", |scene| {
                     scene.materials[0].restoring = klein_gordon(2.0);
@@ -15320,7 +15365,7 @@ mod tests {
             let mut compositions = filter_compositions();
             compositions.push((
                 "source",
-                Scene::default(),
+                TopologyScene::default(),
                 OuterBoundaryCondition::Reflecting,
             ));
             for (label, scene, condition) in compositions {
@@ -15491,17 +15536,13 @@ mod tests {
     /// One generation of a scene: its mesh, its quadratic operator and its
     /// time-driven operator, for handoff tests that need all three.
     fn generation(
-        scene: &Scene,
+        scene: &TopologyScene,
         edge: f64,
         revision: u64,
-    ) -> (
-        TriMesh,
-        QuadraticWaveOperator,
-        CanonicalTemporalWaveOperator,
-    ) {
+    ) -> (Meshed, QuadraticWaveOperator, CanonicalTemporalWaveOperator) {
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             revision,
             MeshingOptions {
@@ -15510,32 +15551,23 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            revision,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, scene, revision)
-                .unwrap();
         (mesh, quadratic, operator)
     }
 
     /// Hands a state to a new generation the way a topology transaction
     /// does, through [`CanonicalTemporalWaveState::handed_over`].
     fn hand_off(
-        source: &(
-            TriMesh,
-            QuadraticWaveOperator,
-            CanonicalTemporalWaveOperator,
-        ),
+        source: &(Meshed, QuadraticWaveOperator, CanonicalTemporalWaveOperator),
         state: &CanonicalTemporalWaveState,
-        target: &(
-            TriMesh,
-            QuadraticWaveOperator,
-            CanonicalTemporalWaveOperator,
-        ),
+        target: &(Meshed, QuadraticWaveOperator, CanonicalTemporalWaveOperator),
     ) -> (
         CanonicalTemporalWaveState,
         crate::CanonicalIntegratedFieldTransfer,
@@ -15593,7 +15625,7 @@ mod tests {
     /// nothing had happened.
     #[test]
     fn an_identity_handoff_carries_the_integrated_field_exactly() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].restoring = sine_gordon(3.0);
         let generation = generation(&scene, 0.3, 1);
         let operator = &generation.2;
@@ -15659,7 +15691,7 @@ mod tests {
     /// same generation, every lane keeps the phase it had reached.
     #[test]
     fn a_handoff_keeps_each_pumped_rows_own_carrier() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.drive = pump(0.1, 1.0, 0.0);
         scene.materials[0].stiffness_law.drive = pump(0.1, 1.5, 0.0);
         let temporal = compile(&scene).unwrap();
@@ -15702,11 +15734,11 @@ mod tests {
     /// had reached, as the coefficient lanes do.
     #[test]
     fn a_handoff_keeps_a_loss_drives_carrier_across_a_frequency_edit() {
-        let mut scene = Scene {
+        let mut scene = TopologyScene {
             physics: PhysicsModel::Electromagnetic {
                 polarization: ElectromagneticPolarization::Tm,
             },
-            ..Scene::default()
+            ..TopologyScene::default()
         };
         scene.materials[0].electric_loss = Some(LossChannel {
             base_rate: ScalarField::constant(0.4),
@@ -15825,8 +15857,8 @@ mod tests {
     /// reports that.
     #[test]
     fn a_handoff_reports_an_integrated_field_started_or_dropped() {
-        let linear = generation(&Scene::default(), 0.3, 1);
-        let mut scene = Scene::default();
+        let linear = generation(&TopologyScene::default(), 0.3, 1);
+        let mut scene = TopologyScene::default();
         scene.materials[0].restoring = klein_gordon(2.0);
         let oscillator = generation(&scene, 0.25, 2);
         let (primary, complementary) = reference_fluxes(&linear.2);
@@ -15862,7 +15894,7 @@ mod tests {
     fn a_kink_crosses_a_remesh_at_rest_or_at_its_speed() {
         let omega0 = 4.0;
         let length = 1.0 / omega0;
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].restoring = sine_gordon(omega0);
         let coarse = generation(&scene, 0.1, 1);
         let fine = generation(&scene, 0.07, 2);
@@ -15922,14 +15954,14 @@ mod tests {
     fn oscillator_snapshot(
         condition: OuterBoundaryCondition,
     ) -> (
-        TriMesh,
+        Meshed,
         CanonicalTemporalWaveOperator,
         CanonicalTemporalWaveState,
         CanonicalIndicatorSnapshot,
     ) {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].restoring = sine_gordon(3.0);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &scene,
             1,
             MeshingOptions {
@@ -15940,9 +15972,14 @@ mod tests {
         .unwrap();
         let mut stripped = scene.clone();
         stripped.materials[0].restoring = crate::RestoringLaw::None;
-        let quadratic = QuadraticWaveOperator::assemble_scene(&mesh, &stripped, condition).unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        let quadratic = assembled(&mesh, &stripped, condition).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        )
+        .unwrap();
         let (primary, complementary) = reference_fluxes(&operator);
         let integrated = operator
             .base()
@@ -16045,7 +16082,7 @@ mod tests {
     #[test]
     fn the_drift_defect_takes_the_loss_out() {
         let drift = |complementary_rate: f64| {
-            let mut scene = Scene::default();
+            let mut scene = TopologyScene::default();
             scene.materials[0].restoring = klein_gordon(3.0);
             scene.materials[0].magnetic_loss = Some(crate::LossChannel {
                 base_rate: ScalarField::constant(4.0),
@@ -16070,7 +16107,7 @@ mod tests {
             }
             let mut base_scene = scene.clone();
             strip_temporal_laws(&mut base_scene.materials);
-            let mesh = mesh_scene(
+            let mesh = meshed(
                 &base_scene,
                 1,
                 MeshingOptions {
@@ -16079,14 +16116,15 @@ mod tests {
                 },
             )
             .unwrap();
-            let quadratic = QuadraticWaveOperator::assemble_scene(
+            let quadratic =
+                assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+            let operator = CanonicalTemporalWaveOperator::compile(
                 &mesh,
-                &base_scene,
-                OuterBoundaryCondition::Reflecting,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&scene),
+                1,
             )
             .unwrap();
-            let operator =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
             let time_step = 0.25 * operator.maximum_time_step();
             let mut state = rate_test_state(&operator, time_step, false);
             let previous = state.clone();
@@ -16141,13 +16179,10 @@ mod tests {
     /// two materials carrying different laws.
     #[test]
     fn an_oscillator_area_probe_over_every_face_reports_the_solver_energy() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].restoring = sine_gordon(3.0);
         let interior = RegionId(2);
-        scene.obstacles[0].role = LoopRole::MaterialInterface {
-            exterior: BACKGROUND_REGION,
-            interior,
-        };
+        fill_hole(&mut scene, CurveId(1), interior);
         scene.materials.push(Material {
             id: crate::MaterialId(2),
             name: "interior".into(),
@@ -16185,10 +16220,11 @@ mod tests {
         let expected = state.energy(&operator).unwrap();
         let mut total = 0.0;
         for region in &base_scene.regions {
-            let stencil = QuadraticAreaStencil::build(
+            let stencil = QuadraticAreaStencil::build_topology(
                 &mesh,
                 &quadratic,
-                &base_scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&base_scene),
                 crate::AreaProbeShape::Region(region.id),
             )
             .unwrap();
@@ -16344,20 +16380,20 @@ mod tests {
     #[test]
     fn the_temporal_rate_is_the_trajectorys_own_derivative() {
         crate::canonical_wave::under_each_wall_step(|_| {
-            let mut pumped = Scene::default();
+            let mut pumped = TopologyScene::default();
             pumped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
-            let mut stiffness_pumped = Scene::default();
+            let mut stiffness_pumped = TopologyScene::default();
             stiffness_pumped.materials[0].stiffness_law.drive = pump(0.25, 0.7, -0.3);
             let mut lossy_pumped = pumped.clone();
             lossy_pumped.materials[0].damping = ScalarField::constant(0.45);
-            let mut kerr_medium = Scene::default();
+            let mut kerr_medium = TopologyScene::default();
             kerr_medium.materials[0].mass_law.field = kerr(0.8);
             kerr_medium.materials[0].stiffness_law.field = kerr(20.0);
             let mut kerr_pumped = kerr_medium.clone();
             kerr_pumped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
             let (_, mut gapped, _) = filter_compositions().remove(3);
             gapped.materials[0].mass_law.drive = pump(0.3, 0.9, 0.2);
-            let mut short_wave = Scene::default();
+            let mut short_wave = TopologyScene::default();
             short_wave.materials[0].short_wave_loss = 1.0;
             let mut short_wave_pumped = short_wave.clone();
             short_wave_pumped.materials[0].stiffness_law.drive = pump(0.25, 0.7, -0.3);
@@ -16510,14 +16546,14 @@ mod tests {
                 polarization: ElectromagneticPolarization::Te,
             },
         ] {
-            let mut scene = Scene {
+            let mut scene = TopologyScene {
                 physics,
-                ..Scene::default()
+                ..TopologyScene::default()
             };
             scene.materials[0].mass_law.drive = pump(0.2, 0.9, 0.0);
             let mut base_scene = scene.clone();
             strip_temporal_laws(&mut base_scene.materials);
-            let mesh = mesh_scene(
+            let mesh = meshed(
                 &base_scene,
                 1,
                 MeshingOptions {
@@ -16526,14 +16562,15 @@ mod tests {
                 },
             )
             .unwrap();
-            let quadratic = QuadraticWaveOperator::assemble_scene(
+            let quadratic =
+                assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+            let operator = CanonicalTemporalWaveOperator::compile(
                 &mesh,
-                &base_scene,
-                OuterBoundaryCondition::Reflecting,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&scene),
+                1,
             )
             .unwrap();
-            let operator =
-                CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
             let base = operator.base();
             let potential = base
                 .node_points()
@@ -16608,7 +16645,7 @@ mod tests {
 
     struct FourthOrderCase {
         label: &'static str,
-        scene: Scene,
+        scene: TopologyScene,
         condition: OuterBoundaryCondition,
         prescribed: bool,
         source: bool,
@@ -16627,8 +16664,8 @@ mod tests {
             integrated: 0.0,
         };
         let reflecting = OuterBoundaryCondition::Reflecting;
-        let with = |f: &dyn Fn(&mut Scene)| {
-            let mut scene = Scene::default();
+        let with = |f: &dyn Fn(&mut TopologyScene)| {
+            let mut scene = TopologyScene::default();
             f(&mut scene);
             scene
         };
@@ -16638,26 +16675,26 @@ mod tests {
             .unwrap()
             .1;
         vec![
-            case("bulk", Scene::default(), reflecting),
+            case("bulk", TopologyScene::default(), reflecting),
             case(
                 "first-order wall",
-                Scene::default(),
+                TopologyScene::default(),
                 OuterBoundaryCondition::FirstOrderOutgoing,
             ),
             case(
                 "second-order wall",
-                Scene::default(),
+                TopologyScene::default(),
                 OuterBoundaryCondition::SecondOrderOutgoing,
             ),
             FourthOrderCase {
                 prescribed: true,
-                ..case("prescribed wall", Scene::default(), reflecting)
+                ..case("prescribed wall", TopologyScene::default(), reflecting)
             },
             FourthOrderCase {
                 prescribed: true,
                 ..case(
                     "pinned trace",
-                    Scene::default(),
+                    TopologyScene::default(),
                     OuterBoundaryCondition::SecondOrderOutgoing,
                 )
             },
@@ -16669,7 +16706,7 @@ mod tests {
             ),
             FourthOrderCase {
                 source: true,
-                ..case("source", Scene::default(), reflecting)
+                ..case("source", TopologyScene::default(), reflecting)
             },
             case(
                 "pumped mass",
@@ -16753,12 +16790,12 @@ mod tests {
             FourthOrderCase {
                 source: true,
                 amplitude: 0.0,
-                ..case("source only", Scene::default(), reflecting)
+                ..case("source only", TopologyScene::default(), reflecting)
             },
             FourthOrderCase {
                 prescribed: true,
                 amplitude: 0.0,
-                ..case("prescribed only", Scene::default(), reflecting)
+                ..case("prescribed only", TopologyScene::default(), reflecting)
             },
             FourthOrderCase {
                 amplitude: 0.6,
@@ -17228,7 +17265,7 @@ mod tests {
     /// which on a linear generation are the same step.
     #[test]
     fn the_fourth_order_step_is_fourth_order_from_rest() {
-        let operator = compile(&Scene::default()).unwrap();
+        let operator = compile(&TopologyScene::default()).unwrap();
         let forcing = CanonicalForcing::none(operator.base());
         let [(_, leapfrog), drift, kick] = fourth_order_errors(&operator, &forcing, 1.0);
         eprintln!(
@@ -17264,7 +17301,7 @@ mod tests {
     /// worth 1.24 and 1.70 of that against pins read plainly.
     #[test]
     fn the_fourth_order_step_carries_sources_and_prescribed_signals() {
-        let operator = compile(&Scene::default()).unwrap();
+        let operator = compile(&TopologyScene::default()).unwrap();
         let base = operator.base();
         let mut sourced = CanonicalForcing::none(base);
         let weights = base
@@ -17331,7 +17368,7 @@ mod tests {
     #[test]
     fn the_field_laws_pick_the_fourth_order_form() {
         let skin = |physics: PhysicsModel, mass: bool, stiffness: bool| {
-            let mut scene = Scene::initial();
+            let mut scene = initial();
             scene.physics = physics;
             if mass {
                 scene.materials[0].mass_law.field = kerr(0.8);
@@ -17398,7 +17435,7 @@ mod tests {
     /// and holds it.
     #[test]
     fn a_stiffness_side_law_keeps_its_energy_in_the_kick_form() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].stiffness_law.field = kerr(0.8);
         let operator = compile(&scene).unwrap();
         assert_eq!(operator.fourth_order_form(), FourthOrderForm::Kick);
@@ -17446,7 +17483,7 @@ mod tests {
     /// subnormal's spacings, the law linear down there.
     #[test]
     fn a_kerr_state_starts_from_a_subnormal_flux() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_law.field = crate::FieldLaw::Polynomial {
             chi1: ScalarField::constant(0.0),
             chi2: ScalarField::constant(0.5),
@@ -17454,7 +17491,7 @@ mod tests {
         };
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -17463,14 +17500,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let operator =
-            CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
         let base = operator.base();
         for size in [1.0e-315, 1.0e-310] {
             let primary = base.primary_mass().iter().map(|mass| mass * size).collect();
@@ -17511,11 +17548,11 @@ mod tests {
         author: impl FnOnce(&mut Material),
         edge: f64,
     ) -> CanonicalTemporalWaveOperator {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         author(&mut scene.materials[0]);
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &base_scene,
             1,
             MeshingOptions {
@@ -17524,13 +17561,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = assembled(&mesh, &base_scene, OuterBoundaryCondition::Reflecting).unwrap();
+        CanonicalTemporalWaveOperator::compile(
             &mesh,
-            &base_scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
-        .unwrap();
-        CanonicalTemporalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap()
+        .unwrap()
     }
 
     /// One uniform run at step `h` from the integrated field `r0` and the
@@ -18198,10 +18236,10 @@ mod tests {
                 gate: None,
             },
         };
-        let mut off_the_row = Scene::default();
+        let mut off_the_row = TopologyScene::default();
         off_the_row.materials[0].restoring = klein_gordon(omega0);
         off_the_row.materials[0].electric_loss = Some(van_der_pol(TimeDrive::None));
-        let mut driven = Scene::default();
+        let mut driven = TopologyScene::default();
         driven.materials[0].restoring = klein_gordon(omega0);
         driven.materials[0].magnetic_loss = Some(van_der_pol(pump(0.2, 1.1, 0.0)));
         for scene in [off_the_row, driven] {

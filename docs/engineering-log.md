@@ -29963,3 +29963,38 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Legacy phase-out 2: canonical_temporal's tests off `Scene`
+
+- **Moved.** Every canonical_temporal test that meshed or assembled
+  through `Scene`, 112 of its 137. The fixtures gained `Meshed`, a mesh
+  with the plan it was meshed from that reads as the mesh, and `meshed`,
+  `assembled` and `assembled_with`, which keep the `Scene` path's call shape
+  (mesh, then a scalar assembly with every wall forced, then the temporal
+  compile with the laws kept), so each test kept its own edge, options and
+  walls. Holes turned into inclusions, inclusions and thin gaps became
+  curves through `fill_hole`, `add_inclusion` and `thin_gap`, and the
+  indicator jobs take the plan through `new_topology`.
+- **The mesh.** The topology mesher meshes the initial scene at edge 0.3
+  more coarsely than the legacy one: 968 primary degrees of freedom against
+  1,252, and a largest stable step of 4.20e-3 against 2.74e-3, which an
+  element of the legacy mesh had held down. 132 tests passed unchanged.
+- **Three bounds re-derived.** Each was measured on both meshes before
+  it changed.
+  - The Kerr bulk's energy at half the largest step breathes 3.75e-4,
+    against 2.30e-4 on the legacy mesh. The step is half again as long,
+    and the fine run is 0.248 of the coarse on both meshes, so the second
+    order holds. The bound goes from 2.5e-4 to 4e-4.
+  - The check that the stored energy is the potential of both
+    observables took its finite-difference step as a millionth of each
+    node's own flux. The new mesh's last node holds 1.7e-5, so the slope
+    was left to the energy's rounding, 7.2e-6 of it against a tolerance of
+    1e-6. The oracle, not the operator, was at fault, so the step is now a
+    millionth of the largest flux and the tolerance is unchanged.
+  - The inclusion beside van der Pol has 80 triangles on the topology
+    mesh against 136, and its short-wave lane takes 9.2% of the energy
+    change against 14.0%. The check that the lane carries a share of its
+    own goes from 10% to 5%.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

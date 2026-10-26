@@ -65,6 +65,60 @@ pub(crate) fn add_hole(scene: &mut TopologyScene, id: CurveId, center: Point2, r
     scene.geometry.curves.push(curve);
 }
 
+/// Adds a rounded closed curve whose inside is `region`, its rim
+/// transmitting: the legacy material interface's place. The region is the
+/// caller's to add.
+pub(crate) fn add_inclusion(
+    scene: &mut TopologyScene,
+    id: CurveId,
+    center: Point2,
+    radius: f64,
+    region: RegionId,
+) {
+    let spline = CurveSpline::Closed(PeriodicCubicSpline::rounded(center, radius));
+    let curve = TopologyCurve::new(
+        id,
+        spline.clone(),
+        spans(id, &spline, SpanBehavior::Transmitting),
+    )
+    .unwrap();
+    scene.face_assignments.push(AuthoredFaceAssignment {
+        anchor: inside(&curve, CurveTraceSide::Left),
+        region: Some(region),
+    });
+    scene.geometry.curves.push(curve);
+}
+
+/// Makes the hole `id` an inclusion of `region`, its rim transmitting, as
+/// the legacy scenes turned their hole into a material interface.
+pub(crate) fn fill_hole(scene: &mut TopologyScene, id: CurveId, region: RegionId) {
+    let curve = scene
+        .geometry
+        .curves
+        .iter_mut()
+        .find(|curve| curve.id == id)
+        .unwrap();
+    for span in &mut curve.spans {
+        span.behavior = SpanBehavior::Transmitting;
+    }
+    let anchor = inside(curve, CurveTraceSide::Left);
+    scene
+        .face_assignments
+        .iter_mut()
+        .find(|assignment| assignment.anchor == anchor)
+        .unwrap()
+        .region = Some(region);
+}
+
+/// A thin gap of `stiffness_ratio` between two reflecting faces.
+pub(crate) fn thin_gap(stiffness_ratio: f64) -> SpanBehavior {
+    SpanBehavior::Separated {
+        left: FaceBoundaryCondition::Reflecting,
+        right: FaceBoundaryCondition::Reflecting,
+        coupling: InternalBoundaryCoupling::ThinGap { stiffness_ratio },
+    }
+}
+
 /// Adds a free open curve through `points`, every span with `behavior`: a
 /// baffle when separated, the legacy internal boundary's place.
 pub(crate) fn add_baffle(
@@ -76,6 +130,60 @@ pub(crate) fn add_baffle(
     let spline = CurveSpline::Open(OpenCubicSpline::uniform(points).unwrap());
     let curve = TopologyCurve::new(id, spline.clone(), spans(id, &spline, behavior)).unwrap();
     scene.geometry.curves.push(curve);
+}
+
+/// A mesh with the plan it was meshed from, through which the assembly
+/// reads the walls and curve laws. It reads as the mesh it holds.
+pub(crate) struct Meshed {
+    pub(crate) mesh: TriMesh,
+    pub(crate) plan: TopologyMeshPlan,
+}
+
+impl std::ops::Deref for Meshed {
+    type Target = TriMesh;
+
+    fn deref(&self) -> &TriMesh {
+        &self.mesh
+    }
+}
+
+/// `scene` compiled at `revision` and meshed with `options` as the runtime
+/// meshes it.
+pub(crate) fn meshed(
+    scene: &TopologyScene,
+    revision: u64,
+    options: MeshingOptions,
+) -> Result<Meshed, MeshError> {
+    let compiled = scene.compile(revision).unwrap();
+    let plan = compiled
+        .plan
+        .coarsened(&compiled.topology, AtomCoarsening::from_meshing(options))
+        .unwrap();
+    let mesh = mesh_topology_plan(&plan, revision, options)?;
+    Ok(Meshed { mesh, plan })
+}
+
+/// `scene`'s scalar operator on `meshed` with `walls`, whatever walls the
+/// scene has: what the `Scene` path's assembly took.
+pub(crate) fn assembled_with(
+    meshed: &Meshed,
+    scene: &TopologyScene,
+    walls: OuterBoundaryConditions,
+) -> Result<QuadraticWaveOperator, WaveError> {
+    let model = OwnedTopologyWaveModel {
+        outer_boundaries: walls,
+        ..TopologyWaveModel::from_topology_scene(scene).to_owned()
+    };
+    QuadraticWaveOperator::assemble_topology(&meshed.mesh, &meshed.plan, model.as_model())
+}
+
+/// [`assembled_with`] one condition on every wall.
+pub(crate) fn assembled(
+    meshed: &Meshed,
+    scene: &TopologyScene,
+    condition: OuterBoundaryCondition,
+) -> Result<QuadraticWaveOperator, WaveError> {
+    assembled_with(meshed, scene, OuterBoundaryConditions::uniform(condition))
 }
 
 /// A scene meshed and assembled: the plan the mesh came from, the scalar
