@@ -340,10 +340,10 @@ fn number(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MaterialParameter, Scene};
+    use crate::MaterialParameter;
 
     fn material() -> Material {
-        Scene::default().materials[0].clone()
+        Material::default_medium()
     }
 
     fn named(material: &Material, physics: PhysicsModel) -> Vec<LawSummaryLine> {

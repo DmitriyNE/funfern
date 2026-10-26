@@ -303,6 +303,24 @@ impl QuadraticWaveOperator {
         )
     }
 
+    /// Assembles a mesh built by hand, which has no plan, from a material
+    /// model: each outer edge takes the region of its triangle, and no curve
+    /// law applies.
+    #[cfg(test)]
+    pub(crate) fn assemble_model(
+        mesh: &TriMesh,
+        model: TopologyWaveModel<'_>,
+    ) -> Result<Self, WaveError> {
+        Self::assemble_with_provider(
+            mesh,
+            CoefficientProvider::Topology(model),
+            *model.outer_boundaries,
+            None,
+            None,
+            model.physics,
+        )
+    }
+
     fn assemble_regions(
         mesh: &TriMesh,
         coefficients_by_region: BTreeMap<RegionId, WaveCoefficients>,

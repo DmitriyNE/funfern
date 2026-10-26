@@ -29929,3 +29929,37 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Legacy phase-out 1: the core's shared topology fixtures, and six test modules off `Scene`
+
+- **The phase-out.** The user chose to retire the legacy `Scene` model
+  after the 2026-10-20 review's fixes, and agreed on 2026-10-26 to the
+  plan: shared fixtures; the core's tests, module by module; the app's tests
+  and the device examples; then the deletion of the model, its mesher and
+  validation; and last, the legacy `damping` for the named loss channels,
+  through a v23 file migration, with a skin switch mapping channels by role.
+- **The fixtures.** A test-only `test_scenes` module: `initial()` is
+  `Scene::initial()` as a topology scene (the default scene and a reflecting
+  hole of radius 0.15 at the origin); `add_hole`, `add_baffle` and
+  `library` build holes, free curves and bare material models; `prepare`
+  meshes and assembles a scene as the runtime does, its plan coarsened to
+  the meshing tolerance and its laws stripped from the base. The `Scene`
+  fixtures forced reflecting walls on the scalar assembly whatever the
+  scene's own walls; the topology assembly reads the scene's walls, so the
+  fixtures that relied on that set `REFLECTING_WALLS`. A test-only
+  `QuadraticWaveOperator::assemble_model` assembles a hand-built mesh from a
+  material model without a plan, which the assembly already did for the
+  `Scene` path: an outer edge takes its triangle's region.
+- **Moved.** source_reach, volume_source, canonical_consumer and
+  law_summary, one site in topology_plan and one test in transfer; every
+  bound is unchanged. volume_source's two tests on a hand-built triangle run
+  on the meshed box the topology compiler takes, and its frame test lost a
+  comparison of the model's `material_at` against `Scene::material_at`,
+  which called the same function. transfer's wall test labelled its traces
+  with the legacy `Wall` label on two whole coincident triangles, which only
+  the legacy label's split by region told apart; with a separated curve
+  span's labels it is one triangle on each side of the edge, as a mesh has
+  it, and the cooperative job still lands on the built map.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

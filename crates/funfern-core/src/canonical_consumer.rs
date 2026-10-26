@@ -607,38 +607,31 @@ fn area_quadrature() -> [([f64; 3], f64); 12] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_scenes::{Prepared, REFLECTING_WALLS, add_baffle, initial, prepare};
     use crate::{
-        AreaProbeShape, BACKGROUND_REGION, CanonicalWaveState, MeshingOptions,
-        OuterBoundaryCondition, QuadraticAreaStencil, QuadraticPointStencil, QuadraticWaveOperator,
-        Scene, TriMesh, mesh_scene,
+        AreaProbeShape, BACKGROUND_REGION, CanonicalWaveState, CurveId, QuadraticAreaStencil,
+        QuadraticPointStencil, SpanBehavior, TopologyGeometry, TopologyScene,
     };
 
-    fn scene_fixture() -> (TriMesh, QuadraticWaveOperator, CanonicalWaveOperator, Scene) {
-        let scene = Scene::initial();
-        let mesh = mesh_scene(
-            &scene,
-            1,
-            MeshingOptions {
-                target_edge_length: 0.3,
-                ..MeshingOptions::default()
-            },
-        )
-        .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1).unwrap();
-        (mesh, scalar, canonical, scene)
+    fn scene_fixture() -> Prepared {
+        let mut scene = initial();
+        scene.outer_boundaries = REFLECTING_WALLS;
+        prepare(scene, 0.3)
     }
 
     fn fixture() -> (CanonicalWaveOperator, QuadraticPointStencil) {
-        let (mesh, scalar, canonical, scene) = scene_fixture();
+        let prepared = scene_fixture();
+        let canonical = &prepared.canonical;
         let point = canonical.node_points()[canonical.element_nodes()[0][6] as usize];
-        let stencil = QuadraticPointStencil::build(&mesh, &scalar, &scene, point).unwrap();
-        (canonical, stencil)
+        let stencil = QuadraticPointStencil::build_topology(
+            &prepared.mesh,
+            &prepared.quadratic,
+            &prepared.plan,
+            prepared.model(),
+            point,
+        )
+        .unwrap();
+        (prepared.canonical, stencil)
     }
 
     /// What the canonical decomposition buys: an area probe covering every
@@ -648,14 +641,16 @@ mod tests {
     /// mass-lumped.
     #[test]
     fn area_probe_over_every_face_reports_the_solver_bulk_energy() {
-        let (mesh, scalar, operator, scene) = scene_fixture();
-        let stencil = QuadraticAreaStencil::build(
-            &mesh,
-            &scalar,
-            &scene,
+        let prepared = scene_fixture();
+        let stencil = QuadraticAreaStencil::build_topology(
+            &prepared.mesh,
+            &prepared.quadratic,
+            &prepared.plan,
+            prepared.model(),
             AreaProbeShape::Region(BACKGROUND_REGION),
         )
         .unwrap();
+        let operator = prepared.canonical;
         let primary = operator
             .node_points()
             .iter()
@@ -730,40 +725,25 @@ mod tests {
     /// had nothing to sum (VER-67 of the 2026-10-20 review).
     #[test]
     fn energy_breakdown_matches_the_state_oracle_including_auxiliaries() {
-        let mut scene = Scene::default();
-        scene.internal_boundaries.push(crate::InternalBoundary {
-            id: crate::InternalBoundaryId(1),
-            spline: crate::OpenCubicSpline::uniform(vec![
+        let mut scene = TopologyScene::default();
+        add_baffle(
+            &mut scene,
+            CurveId(1),
+            vec![
                 Point2::new(-0.65, 0.0),
                 Point2::new(-0.2, 0.0),
                 Point2::new(0.2, 0.0),
                 Point2::new(0.65, 0.0),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![crate::InternalBoundaryLaw {
+            ],
+            SpanBehavior::Separated {
+                left: crate::FaceBoundaryCondition::Reflecting,
+                right: crate::FaceBoundaryCondition::Reflecting,
                 coupling: crate::InternalBoundaryCoupling::ThinGap {
                     stiffness_ratio: 120.0,
                 },
-                ..crate::InternalBoundaryLaw::REFLECTING
-            }],
-        });
-        let mesh = mesh_scene(
-            &scene,
-            1,
-            MeshingOptions {
-                target_edge_length: 0.1,
-                ..MeshingOptions::default()
             },
-        )
-        .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene_with_boundaries(
-            &mesh,
-            &scene,
-            scene.outer_boundaries,
-        )
-        .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
+        );
+        let operator = prepare(scene, 0.1).canonical;
         let primary = operator
             .node_points()
             .iter()
@@ -821,31 +801,19 @@ mod tests {
         physics: crate::PhysicsModel,
         domain: crate::DomainRect,
         edge: f64,
-    ) -> (TriMesh, QuadraticWaveOperator, CanonicalWaveOperator, Scene) {
-        let mut scene = Scene {
-            domain,
+    ) -> Prepared {
+        let mut scene = TopologyScene {
+            geometry: TopologyGeometry {
+                domain,
+                ..TopologyGeometry::default()
+            },
             physics,
-            ..Scene::default()
+            outer_boundaries: REFLECTING_WALLS,
+            ..TopologyScene::default()
         };
         scene.materials[0].mass_density = crate::ScalarField::constant(2.0);
         scene.materials[0].stiffness = crate::ScalarField::constant(0.8);
-        let mesh = mesh_scene(
-            &scene,
-            1,
-            MeshingOptions {
-                target_edge_length: edge,
-                ..MeshingOptions::default()
-            },
-        )
-        .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1).unwrap();
-        (mesh, scalar, canonical, scene)
+        prepare(scene, edge)
     }
 
     /// The scalar wave `ρ ü = ∇·(A ∇u)` each skin's slots make, as
@@ -935,8 +903,8 @@ mod tests {
         let (kx, ky) = (0.5 * std::f64::consts::PI, std::f64::consts::PI);
         let (rho, a) = skin_coefficients(physics, 2.0, 0.8);
         let omega = (a * (kx * kx + ky * ky) / rho).sqrt();
-        let (mesh, scalar, operator, scene) =
-            analytic_fixture(physics, crate::DomainRect::UNIT, edge);
+        let prepared = analytic_fixture(physics, crate::DomainRect::UNIT, edge);
+        let operator = &prepared.canonical;
         let orientation = operator.orientation();
         let phi = |p: Point2| (kx * (p.x + 1.0)).cos() * (ky * (p.y + 1.0)).cos();
         let grad = |p: Point2| {
@@ -952,7 +920,7 @@ mod tests {
             .collect::<Vec<_>>();
         let h = operator.recommended_time_step();
         let mut state = CanonicalWaveState::from_primary_and_potential(
-            &operator,
+            operator,
             h,
             &primary,
             &vec![0.0; primary.len()],
@@ -960,13 +928,29 @@ mod tests {
         .unwrap();
         let stencils = points.map(|p| {
             CanonicalPointStencil::from_quadratic(
-                QuadraticPointStencil::build(&mesh, &scalar, &scene, p).unwrap(),
-                &operator,
+                QuadraticPointStencil::build_topology(
+                    &prepared.mesh,
+                    &prepared.quadratic,
+                    &prepared.plan,
+                    prepared.model(),
+                    p,
+                )
+                .unwrap(),
+                operator,
             )
             .unwrap()
         });
         let (center, radius) = (Point2::new(0.2, -0.15), 0.45);
-        let area = |shape| QuadraticAreaStencil::build(&mesh, &scalar, &scene, shape).unwrap();
+        let area = |shape| {
+            QuadraticAreaStencil::build_topology(
+                &prepared.mesh,
+                &prepared.quadratic,
+                &prepared.plan,
+                prepared.model(),
+                shape,
+            )
+            .unwrap()
+        };
         let disk = area(AreaProbeShape::Disk { center, radius });
         let whole = area(AreaProbeShape::Region(BACKGROUND_REGION));
         let disk_area = std::f64::consts::PI * radius * radius;
@@ -975,7 +959,7 @@ mod tests {
         let steps = (1.3 * std::f64::consts::TAU / omega / h).ceil() as usize;
         for _ in 0..steps {
             let previous = state.primary_flux().to_vec();
-            state.step(&operator).unwrap();
+            state.step(operator).unwrap();
             let t = state.time();
             let rate = state
                 .primary_flux()
@@ -1004,7 +988,7 @@ mod tests {
             }
             let read = sample_canonical_area(
                 &disk,
-                &operator,
+                operator,
                 state.primary_flux(),
                 state.complementary_flux(),
             )
@@ -1021,7 +1005,7 @@ mod tests {
             );
             let total = sample_canonical_area(
                 &whole,
-                &operator,
+                operator,
                 state.primary_flux(),
                 state.complementary_flux(),
             )
@@ -1107,7 +1091,8 @@ mod tests {
         };
         let (rho, a) = skin_coefficients(physics, 2.0, 0.8);
         let speed = (a / rho).sqrt();
-        let (mesh, scalar, operator, scene) = analytic_fixture(physics, domain, edge);
+        let prepared = analytic_fixture(physics, domain, edge);
+        let operator = &prepared.canonical;
         let orientation = operator.orientation();
         let field = |p: &Point2| -speed * dp_of(p.x);
         let primary = operator.node_points().iter().map(field).collect::<Vec<_>>();
@@ -1118,12 +1103,19 @@ mod tests {
             .collect::<Vec<_>>();
         let h = operator.recommended_time_step();
         let mut state =
-            CanonicalWaveState::from_primary_and_potential(&operator, h, &primary, &potential)
+            CanonicalWaveState::from_primary_and_potential(operator, h, &primary, &potential)
                 .unwrap();
         let stencil = |p: Point2| {
             CanonicalPointStencil::from_quadratic(
-                QuadraticPointStencil::build(&mesh, &scalar, &scene, p).unwrap(),
-                &operator,
+                QuadraticPointStencil::build_topology(
+                    &prepared.mesh,
+                    &prepared.quadratic,
+                    &prepared.plan,
+                    prepared.model(),
+                    p,
+                )
+                .unwrap(),
+                operator,
             )
             .unwrap()
         };
@@ -1139,7 +1131,7 @@ mod tests {
         let mut worst = [0.0_f64; 6];
         let mut carried = 0.0;
         for _ in 0..(2.6 / speed / h).ceil() as usize {
-            state.step(&operator).unwrap();
+            state.step(operator).unwrap();
             let t = state.time();
             let read = |stencil: &CanonicalPointStencil| {
                 stencil

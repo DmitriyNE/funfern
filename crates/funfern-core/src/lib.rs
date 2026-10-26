@@ -17,6 +17,8 @@ mod source_reach;
 mod spectrum;
 mod spline;
 mod spline_patch;
+#[cfg(test)]
+mod test_scenes;
 mod topology;
 mod topology_scene;
 mod trace_eigen;

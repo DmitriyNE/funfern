@@ -335,36 +335,31 @@ fn strictly_between(start: Point2, end: Point2, point: Point2) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        BACKGROUND_REGION, InternalBoundary, InternalBoundaryId, InternalBoundaryLaw,
-        MeshingOptions, Obstacle, ObstacleId, OpenCubicSpline, OuterBoundaryCondition,
-        PeriodicCubicSpline, QuadraticWaveOperator, Scene, mesh_scene,
-    };
+    use crate::test_scenes::{REFLECTING_WALLS, add_baffle, add_hole, prepare_with};
+    use crate::{CurveId, MeshingOptions, QuadraticWaveOperator, SpanBehavior, TopologyScene};
 
-    fn operator(scene: &Scene, edge: f64) -> QuadraticWaveOperator {
-        let mesh = mesh_scene(
+    fn operator(mut scene: TopologyScene, edge: f64) -> QuadraticWaveOperator {
+        scene.outer_boundaries = REFLECTING_WALLS;
+        prepare_with(
             scene,
-            3,
             MeshingOptions {
                 target_edge_length: edge,
                 minimum_angle_degrees: 14.0,
                 ..MeshingOptions::default()
             },
         )
-        .unwrap();
-        QuadraticWaveOperator::assemble_scene(&mesh, scene, OuterBoundaryCondition::Reflecting)
-            .unwrap()
+        .quadratic
     }
 
     /// A reflecting baffle along `y = 0` through the given x.
-    fn baffle(xs: [f64; 4]) -> Scene {
-        let mut scene = Scene::default();
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(1),
-            spline: OpenCubicSpline::uniform(xs.map(|x| Point2::new(x, 0.0)).to_vec()).unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![InternalBoundaryLaw::REFLECTING],
-        });
+    fn baffle(xs: [f64; 4]) -> TopologyScene {
+        let mut scene = TopologyScene::default();
+        add_baffle(
+            &mut scene,
+            CurveId(1),
+            xs.map(|x| Point2::new(x, 0.0)).to_vec(),
+            SpanBehavior::REFLECTING,
+        );
         scene
     }
 
@@ -388,7 +383,7 @@ mod tests {
     /// nor is anything else behind the baffle, whose tips are out of reach.
     #[test]
     fn a_source_drives_only_its_side_of_a_baffle() {
-        let operator = operator(&baffle([-0.72, -0.25, 0.25, 0.72]), 0.1);
+        let operator = operator(baffle([-0.72, -0.25, 0.25, 0.72]), 0.1);
         let (position, width) = (Point2::new(0.0, 0.05), 0.06);
         let reach = POINT_SOURCE_REACH * width;
         let distances = distances(&operator, position, width);
@@ -419,7 +414,7 @@ mod tests {
     /// past the tip, and along the line it grazes, it drives as in the open.
     #[test]
     fn a_free_tips_shadow_is_not_driven() {
-        let operator = operator(&baffle([0.0, 0.3, 0.6, 0.9]), 0.05);
+        let operator = operator(baffle([0.0, 0.3, 0.6, 0.9]), 0.05);
         let (position, width) = (Point2::new(0.08, 0.04), 0.05);
         let reach = POINT_SOURCE_REACH * width;
         let distances = distances(&operator, position, width);
@@ -460,7 +455,7 @@ mod tests {
     /// bit for bit, and nothing beyond its reach or outside its elements.
     #[test]
     fn a_source_without_walls_keeps_the_plain_gaussian_within_its_reach() {
-        let operator = operator(&Scene::default(), 0.1);
+        let operator = operator(TopologyScene::default(), 0.1);
         let (position, width) = (Point2::new(0.1, -0.2), 0.15);
         let reach = POINT_SOURCE_REACH * width;
         let elements = operator
@@ -568,12 +563,9 @@ mod tests {
     /// A hole's rim is a wall: the source does not drive what lies behind it.
     #[test]
     fn a_hole_hides_its_far_side() {
-        let mut scene = Scene::default();
-        scene.obstacles.push(Obstacle::hole(
-            ObstacleId(1),
-            PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.2),
-        ));
-        let operator = operator(&scene, 0.05);
+        let mut scene = TopologyScene::default();
+        add_hole(&mut scene, CurveId(1), Point2::new(0.0, 0.0), 0.2);
+        let operator = operator(scene, 0.05);
         let (position, width) = (Point2::new(-0.25, 0.0), 0.08);
         let distances = distances(&operator, position, width);
         let mut behind = 0;

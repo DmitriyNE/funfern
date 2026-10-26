@@ -1083,13 +1083,13 @@ fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
 mod tests {
     use super::*;
     use crate::{
-        AtomCoarsening, BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, BoundarySide, CurveNode,
-        CurveSpan, CurveSpanId, CurveSpline, FaceRegionAssignment, LoopRole, Material, MaterialId,
-        MeshQuality, MeshTriangle, MeshVertex, MeshingOptions, Obstacle, ObstacleId,
-        OpenCubicSpline, OuterBoundaryCondition, OuterBoundaryConditions, PeriodicCubicSpline,
-        Region, RegionId, Scene, SpanBehavior, TopologyCurve, TopologyGeometry, TopologyMeshPlan,
-        TopologyVertex, TopologyVertexId, TopologyVertexLocation, TopologyWaveModel,
-        WaveCoefficients, carve_topology_mesh, compile_topology, mesh_topology_plan,
+        AtomCoarsening, BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CurveNode, CurveSpan,
+        CurveSpanId, CurveSpline, FaceRegionAssignment, Material, MaterialId, MeshQuality,
+        MeshTriangle, MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryConditions,
+        OwnedTopologyWaveModel, PeriodicCubicSpline, Region, RegionId, SpanBehavior, TopologyCurve,
+        TopologyGeometry, TopologyMeshPlan, TopologyVertex, TopologyVertexId,
+        TopologyVertexLocation, TopologyWaveModel, WaveCoefficients, carve_topology_mesh,
+        compile_topology, mesh_topology_plan,
     };
 
     /// MESH-10 of the 2026-10-20 review: a point on an element's own edge lies
@@ -1468,52 +1468,48 @@ mod tests {
         assert_eq!(identity.interpolate(&copied, 0.0).unwrap(), copied);
     }
 
+    /// A wall between two regions: one triangle on each side of a separated
+    /// edge, whose two traces coincide node for node.
     #[test]
     fn quadratic_transfer_keeps_coincident_wall_traces_on_their_own_regions() {
         let points = [
             [0.0, 0.0],
             [1.0, 0.0],
-            [0.0, 1.0],
+            [0.5, 0.5],
             [0.0, 0.0],
             [1.0, 0.0],
-            [0.0, 1.0],
+            [0.5, -0.5],
         ];
-        let mut source = mesh(3, &points, &[[0, 1, 2], [3, 4, 5]]);
+        let mut source = mesh(3, &points, &[[0, 1, 2], [3, 5, 4]]);
         source.triangles[1].region = RegionId(2);
+        for (vertex, trace) in [(0, 1), (3, 1), (1, 2), (4, 2)] {
+            source.vertices[vertex].trace = Some(TraceVertexId(trace));
+        }
         source.boundary_edges = vec![
             BoundaryEdge {
                 vertices: [0, 1],
-                label: BoundaryLabel::Wall {
-                    loop_id: ObstacleId(1),
-                    side: BoundarySide::Exterior,
+                label: BoundaryLabel::Curve {
+                    curve: CurveId(1),
+                    span: CurveSpanId(10),
+                    side: CurveTraceSide::Left,
+                    separated: true,
                 },
                 parameters: [0.0, 1.0],
             },
             BoundaryEdge {
-                vertices: [3, 4],
-                label: BoundaryLabel::Wall {
-                    loop_id: ObstacleId(1),
-                    side: BoundarySide::Interior,
+                vertices: [4, 3],
+                label: BoundaryLabel::Curve {
+                    curve: CurveId(1),
+                    span: CurveSpanId(10),
+                    side: CurveTraceSide::Right,
+                    separated: true,
                 },
-                parameters: [0.0, 1.0],
+                parameters: [1.0, 0.0],
             },
         ];
         let mut target = source.clone();
         target.geometry_revision = 8;
-        let scene = Scene {
-            domain: crate::DomainRect::default(),
-            physics: crate::PhysicsModel::Mechanical,
-            obstacles: vec![Obstacle::with_role(
-                ObstacleId(1),
-                PeriodicCubicSpline::rounded(Point2::new(0.2, 0.2), 0.1),
-                LoopRole::Wall {
-                    exterior: BACKGROUND_REGION,
-                    interior: RegionId(2),
-                },
-            )],
-            internal_boundaries: vec![],
-            material_interfaces: vec![],
-            junctions: vec![],
+        let media = OwnedTopologyWaveModel {
             materials: vec![
                 Material::default_medium(),
                 Material {
@@ -1540,21 +1536,12 @@ mod tests {
                     frame: crate::MaterialFrame::world(),
                 },
             ],
-            volume_sources: vec![],
-            outer_boundaries: OuterBoundaryConditions::default(),
+            ..crate::test_scenes::library(vec![])
         };
-        let source_operator = QuadraticWaveOperator::assemble_scene(
-            &source,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let target_operator = QuadraticWaveOperator::assemble_scene(
-            &target,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let source_operator =
+            QuadraticWaveOperator::assemble_model(&source, media.as_model()).unwrap();
+        let target_operator =
+            QuadraticWaveOperator::assemble_model(&target, media.as_model()).unwrap();
         let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
             .unwrap();
         // The cooperative job runs the same steps one at a time and lands on

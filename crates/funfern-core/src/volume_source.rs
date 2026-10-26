@@ -399,100 +399,16 @@ pub fn compile_topology_volume_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_scenes::library;
     use crate::{
         BACKGROUND_REGION, CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline,
-        FaceRegionAssignment, MaterialFrame, MeshQuality, MeshTriangle, MeshVertex, MeshingOptions,
-        OpenCubicSpline, OuterSide, ScalarField, SpanBehavior, TopologyCurve, TopologyGeometry,
-        TopologyVertex, TopologyVertexId, TopologyVertexLocation, WaveCoefficients,
-        compile_topology, mesh_topology_plan,
+        FaceRegionAssignment, MaterialFrame, MeshingOptions, OpenCubicSpline, OuterSide,
+        OwnedTopologyWaveModel, ScalarField, SpanBehavior, TopologyCurve, TopologyGeometry,
+        TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology,
+        mesh_topology_plan,
     };
 
-    fn triangle_mesh() -> Arc<TriMesh> {
-        Arc::new(TriMesh {
-            geometry_revision: 4,
-            mesh_revision: 7,
-            vertices: vec![
-                MeshVertex {
-                    point: Point2::new(0.0, 0.0),
-                    boundary: None,
-                    trace: None,
-                },
-                MeshVertex {
-                    point: Point2::new(1.0, 0.0),
-                    boundary: None,
-                    trace: None,
-                },
-                MeshVertex {
-                    point: Point2::new(0.0, 1.0),
-                    boundary: None,
-                    trace: None,
-                },
-            ],
-            triangles: vec![MeshTriangle {
-                vertices: [0, 1, 2],
-                region: BACKGROUND_REGION,
-            }],
-            boundary_edges: vec![],
-            requested_sizes: vec![],
-            quality: MeshQuality {
-                minimum_angle_degrees: 45.0,
-                maximum_edge_length: 2.0_f64.sqrt(),
-            },
-        })
-    }
-
-    #[test]
-    fn constant_profile_compiles_to_mass_normalized_acceleration() {
-        let mesh = triangle_mesh();
-        let operator =
-            Arc::new(QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()).unwrap());
-        let mut scene = Scene::default();
-        scene.volume_sources.push(VolumeSource {
-            region: BACKGROUND_REGION,
-            enabled: true,
-            profile: ScalarField::constant(2.5),
-            parameters: vec![],
-            signal: TimeSignal::Harmonic {
-                offset: 3.0,
-                amplitude: 0.0,
-                frequency_hz: 1.0,
-                phase_radians: 0.0,
-            },
-        });
-        let compiled = compile_volume_sources(mesh, operator, scene).unwrap();
-        assert_eq!(compiled.signals.len(), 1);
-        for value in compiled.acceleration(0.37) {
-            assert!((value - 7.5).abs() < 1.0e-12, "{value}");
-        }
-    }
-
-    #[test]
-    fn compiler_is_resumable_and_disabled_sources_are_omitted() {
-        let mesh = triangle_mesh();
-        let operator =
-            Arc::new(QuadraticWaveOperator::assemble(&mesh, WaveCoefficients::default()).unwrap());
-        let mut scene = Scene::default();
-        scene.volume_sources.push(VolumeSource {
-            region: BACKGROUND_REGION,
-            enabled: false,
-            profile: ScalarField::formula("1 + x").unwrap(),
-            parameters: vec![],
-            signal: TimeSignal::ZERO,
-        });
-        let mut job = VolumeSourceCompileJob::new(mesh, operator, scene).unwrap();
-        let mut slices = 0;
-        let compiled = loop {
-            slices += 1;
-            if let Some(result) = job.advance(1) {
-                break result.unwrap();
-            }
-        };
-        assert!(slices > 1);
-        assert!(compiled.signals.is_empty());
-        assert!(compiled.acceleration(1.0).iter().all(|value| *value == 0.0));
-    }
-
-    fn topology_domain() -> (TopologyMeshPlan, Arc<TriMesh>, Scene) {
+    fn topology_domain() -> (TopologyMeshPlan, Arc<TriMesh>, OwnedTopologyWaveModel) {
         let snapshot = compile_topology(&TopologyGeometry::default(), 19).unwrap();
         let plan = TopologyMeshPlan::new(
             &snapshot,
@@ -517,13 +433,78 @@ mod tests {
             )
             .unwrap(),
         );
-        (plan, mesh, Scene::default())
+        let model = library(vec![Region {
+            id: BACKGROUND_REGION,
+            material: crate::DEFAULT_MATERIAL,
+            frame: MaterialFrame::world(),
+        }]);
+        (plan, mesh, model)
+    }
+
+    #[test]
+    fn constant_profile_compiles_to_mass_normalized_acceleration() {
+        let (plan, mesh, model) = topology_domain();
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_topology(&mesh, &plan, model.as_model()).unwrap(),
+        );
+        let source = VolumeSource {
+            region: BACKGROUND_REGION,
+            enabled: true,
+            profile: ScalarField::constant(2.5),
+            parameters: vec![],
+            signal: TimeSignal::Harmonic {
+                offset: 3.0,
+                amplitude: 0.0,
+                frequency_hz: 1.0,
+                phase_radians: 0.0,
+            },
+        };
+        let compiled =
+            compile_topology_volume_sources(mesh, operator, &plan, model.as_model(), &[source])
+                .unwrap();
+        assert_eq!(compiled.signals.len(), 1);
+        for value in compiled.acceleration(0.37) {
+            assert!((value - 7.5).abs() < 1.0e-12, "{value}");
+        }
+    }
+
+    #[test]
+    fn compiler_is_resumable_and_disabled_sources_are_omitted() {
+        let (plan, mesh, model) = topology_domain();
+        let operator = Arc::new(
+            QuadraticWaveOperator::assemble_topology(&mesh, &plan, model.as_model()).unwrap(),
+        );
+        let source = VolumeSource {
+            region: BACKGROUND_REGION,
+            enabled: false,
+            profile: ScalarField::formula("1 + x").unwrap(),
+            parameters: vec![],
+            signal: TimeSignal::ZERO,
+        };
+        let mut job = VolumeSourceCompileJob::new_topology(
+            mesh,
+            operator,
+            &plan,
+            model.as_model(),
+            &[source],
+        )
+        .unwrap();
+        let mut slices = 0;
+        let compiled = loop {
+            slices += 1;
+            if let Some(result) = job.advance(1) {
+                break result.unwrap();
+            }
+        };
+        assert!(slices > 1);
+        assert!(compiled.signals.is_empty());
+        assert!(compiled.acceleration(1.0).iter().all(|value| *value == 0.0));
     }
 
     #[test]
     fn topology_compiler_uses_region_frame_and_remains_resumable() {
-        let (plan, mesh, mut scene) = topology_domain();
-        scene.regions[0].frame = MaterialFrame {
+        let (plan, mesh, mut model) = topology_domain();
+        model.regions[0].frame = MaterialFrame {
             origin: Point2::new(0.25, -0.1),
             ..MaterialFrame::world()
         };
@@ -534,15 +515,7 @@ mod tests {
             parameters: vec![],
             signal: TimeSignal::harmonic(1.0, 0.0, 1.0, 0.0),
         };
-        let model = TopologyWaveModel::from_scene(&scene);
-        assert_eq!(
-            model
-                .material_at(BACKGROUND_REGION, Point2::new(0.6, -0.2))
-                .unwrap(),
-            scene
-                .material_at(BACKGROUND_REGION, Point2::new(0.6, -0.2))
-                .unwrap()
-        );
+        let model = model.as_model();
         let operator =
             Arc::new(QuadraticWaveOperator::assemble_topology(&mesh, &plan, model).unwrap());
         let mut job = VolumeSourceCompileJob::new_topology(
@@ -571,20 +544,15 @@ mod tests {
 
     #[test]
     fn topology_compiler_rejects_sources_outside_active_faces() {
-        let (plan, mesh, mut scene) = topology_domain();
+        let (plan, mesh, mut model) = topology_domain();
         let inactive = RegionId(2);
-        scene.regions.push(Region {
+        model.regions.push(Region {
             id: inactive,
-            material: scene.materials[0].id,
+            material: model.materials[0].id,
             frame: MaterialFrame::world(),
         });
         let operator = Arc::new(
-            QuadraticWaveOperator::assemble_topology(
-                &mesh,
-                &plan,
-                TopologyWaveModel::from_scene(&scene),
-            )
-            .unwrap(),
+            QuadraticWaveOperator::assemble_topology(&mesh, &plan, model.as_model()).unwrap(),
         );
         let source = VolumeSource {
             region: inactive,
@@ -598,7 +566,7 @@ mod tests {
                 mesh,
                 operator,
                 &plan,
-                TopologyWaveModel::from_scene(&scene),
+                model.as_model(),
                 &[source],
             ),
             Err(VolumeSourceError::InvalidInputs)
@@ -705,8 +673,8 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut scene = Scene {
-            regions: assignments
+        let media = library(
+            assignments
                 .iter()
                 .map(|assignment| Region {
                     id: assignment.region.unwrap(),
@@ -714,9 +682,8 @@ mod tests {
                     frame: MaterialFrame::world(),
                 })
                 .collect(),
-            ..Scene::default()
-        };
-        scene.volume_sources = scene
+        );
+        let sources: Vec<VolumeSource> = media
             .regions
             .iter()
             .enumerate()
@@ -728,17 +695,12 @@ mod tests {
                 signal: TimeSignal::harmonic(index as f64 + 1.0, 0.0, 1.0, 0.0),
             })
             .collect();
-        let model = TopologyWaveModel::from_scene(&scene);
+        let model = media.as_model();
         let operator =
             Arc::new(QuadraticWaveOperator::assemble_topology(&mesh, &plan, model).unwrap());
-        let compiled = compile_topology_volume_sources(
-            mesh.clone(),
-            operator.clone(),
-            &plan,
-            model,
-            &scene.volume_sources,
-        )
-        .unwrap();
+        let compiled =
+            compile_topology_volume_sources(mesh.clone(), operator.clone(), &plan, model, &sources)
+                .unwrap();
         let junction = operator
             .node_points()
             .iter()
@@ -763,10 +725,10 @@ mod tests {
             operator.clone(),
             &plan,
             model,
-            &scene.volume_sources[..1],
+            &sources[..1],
         )
         .unwrap();
-        let target = scene.volume_sources[0].region;
+        let target = sources[0].region;
         let mut memberships =
             vec![std::collections::BTreeSet::new(); operator.degrees_of_freedom()];
         for (triangle, nodes) in mesh.triangles.iter().zip(operator.element_nodes()) {

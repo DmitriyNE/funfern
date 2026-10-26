@@ -3462,8 +3462,8 @@ mod tests {
             assert!((region_areas(&coarse_mesh)[&region] - area).abs() < 2.0e-3);
         }
         assert!(coarse_mesh.boundary_edges.len() * 2 < fine_mesh.boundary_edges.len());
-        let scene = crate::Scene {
-            regions: assignments
+        let media = crate::test_scenes::library(
+            assignments
                 .iter()
                 .map(|assignment| crate::Region {
                     id: assignment.region.unwrap(),
@@ -3471,16 +3471,11 @@ mod tests {
                     frame: crate::MaterialFrame::world(),
                 })
                 .collect(),
-            ..crate::Scene::default()
-        };
+        );
         let time_step = |plan: &TopologyMeshPlan, mesh: &TriMesh| {
-            crate::QuadraticWaveOperator::assemble_topology(
-                mesh,
-                plan,
-                crate::TopologyWaveModel::from_scene(&scene),
-            )
-            .unwrap()
-            .recommended_time_step()
+            crate::QuadraticWaveOperator::assemble_topology(mesh, plan, media.as_model())
+                .unwrap()
+                .recommended_time_step()
         };
         let (fine_step, coarse_step) = (
             time_step(&fine, &fine_mesh),
