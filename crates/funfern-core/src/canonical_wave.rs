@@ -13,7 +13,7 @@ use crate::trace_eigen::{
 use crate::{
     CompiledVolumeSources, DirectionalWaveCoefficients, ElectromagneticPolarization, Material,
     MaterialFrame, OuterBoundaryCondition, OuterSide, OwnedTopologyWaveModel, PhysicsModel, Point2,
-    PointSource, QuadraticWaveOperator, Scene, SymmetricTensor2, ThinGapSample, TimeSignal,
+    PointSource, QuadraticWaveOperator, SymmetricTensor2, ThinGapSample, TimeSignal,
     TopologyWaveModel, TriMesh, VolumeSource, WaveError, enriched_quadratic_basis_gradients,
     source_reach::point_source_squared_distances, trace_eigen::BandedEigenJob,
 };
@@ -1132,22 +1132,6 @@ pub struct CanonicalWaveOperator {
 }
 
 impl CanonicalWaveOperator {
-    /// Compiles the direct interior and linear boundary composition against an
-    /// already assembled quadratic comparison operator.
-    pub fn compile_scene(
-        mesh: &TriMesh,
-        quadratic: &QuadraticWaveOperator,
-        scene: &Scene,
-        constitutive_revision: u64,
-    ) -> Result<Self, WaveError> {
-        Self::compile(
-            mesh,
-            quadratic,
-            TopologyWaveModel::from_scene(scene),
-            constitutive_revision,
-        )
-    }
-
     pub fn compile(
         mesh: &TriMesh,
         quadratic: &QuadraticWaveOperator,

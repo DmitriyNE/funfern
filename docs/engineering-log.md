@@ -30185,3 +30185,32 @@ without it.
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs; the full
   device suite as above.
+
+## 2026-10-26 — Legacy phase-out 7: the `Scene` adapters and the dual internals behind them
+
+- **Gone.** With no caller left, the adapters that took a `Scene` went:
+  - `CanonicalWaveOperator::compile_scene` and
+    `CanonicalTemporalWaveOperator::compile_scene`;
+  - `TopologyWaveModel::from_scene`;
+  - the point, area and boundary stencils' `build`;
+  - `SolutionIndicatorJob::new` and `MeshAdaptationJob::new`;
+  - `VolumeSourceCompileJob::new` and `compile_volume_sources`.
+- **Folded to topology.** Each internal that switched between a scene and
+  a plan now holds the plan alone:
+  - the probe's model is a plan and a material model;
+  - the indicator's input is the plan and the owned model, its boundary
+    pass the topology one, and its pair carrier lost the legacy
+    internal-boundary arm;
+  - the adaptation job keeps its topology contract directly, which drops
+    the scene-only boundary anchors, merged-curve hulls and boundary points;
+  - the volume sources lost the scene medium.
+  The indicator's `InvalidScene` error, which the topology path raises
+  when a material sample is missing, is `InvalidMaterials`.
+- **Still standing.** `assemble_scene` and its coefficient path, the
+  legacy mesher, the model with its validation and the legacy labels. The
+  two wave_quadratic tests that name a failing material still use
+  `assemble_scene`, and move with the material-error fix the user is
+  asked about.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

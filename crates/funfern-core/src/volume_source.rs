@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     EvaluatedMaterial, MAX_VOLUME_SOURCES, MaterialError, OwnedTopologyWaveModel, Point2,
-    QuadraticWaveOperator, Region, RegionId, Scene, TimeSignal, TopologyMeshPlan,
-    TopologyWaveModel, TriMesh, VolumeSource,
+    QuadraticWaveOperator, Region, RegionId, TimeSignal, TopologyMeshPlan, TopologyWaveModel,
+    TriMesh, VolumeSource,
 };
 
 const MASS_WEIGHTS: [f64; 7] = [
@@ -113,12 +113,6 @@ struct VolumeSourceMedium {
 }
 
 impl VolumeSourceMedium {
-    fn from_scene(scene: &Scene) -> Self {
-        Self {
-            model: TopologyWaveModel::from_scene(scene).to_owned(),
-        }
-    }
-
     fn from_topology(model: TopologyWaveModel<'_>) -> Self {
         Self {
             model: model.to_owned(),
@@ -139,32 +133,6 @@ impl VolumeSourceMedium {
 }
 
 impl VolumeSourceCompileJob {
-    pub fn new(
-        mesh: Arc<TriMesh>,
-        operator: Arc<QuadraticWaveOperator>,
-        scene: Scene,
-    ) -> Result<Self, VolumeSourceError> {
-        if !scene.structure_valid()
-            || mesh.mesh_revision != operator.mesh_revision()
-            || mesh.geometry_revision != operator.geometry_revision()
-            || mesh.triangles.len() != operator.element_nodes().len()
-        {
-            return Err(VolumeSourceError::InvalidInputs);
-        }
-        let sources = scene
-            .volume_sources
-            .iter()
-            .filter(|source| source.enabled)
-            .cloned()
-            .collect::<Vec<_>>();
-        Self::from_parts(
-            mesh,
-            operator,
-            VolumeSourceMedium::from_scene(&scene),
-            sources,
-        )
-    }
-
     /// Starts source compilation from the unified topology contract. The job
     /// owns a compact material/source snapshot so it remains deterministic
     /// while the editor advances it over multiple frames.
@@ -364,19 +332,6 @@ impl VolumeSourceCompileJob {
         CompiledVolumeSources {
             signals: self.sources.iter().map(|source| source.signal).collect(),
             nodes: std::mem::take(&mut self.nodes),
-        }
-    }
-}
-
-pub fn compile_volume_sources(
-    mesh: Arc<TriMesh>,
-    operator: Arc<QuadraticWaveOperator>,
-    scene: Scene,
-) -> Result<CompiledVolumeSources, VolumeSourceError> {
-    let mut job = VolumeSourceCompileJob::new(mesh, operator, scene)?;
-    loop {
-        if let Some(result) = job.advance(usize::MAX) {
-            return result;
         }
     }
 }

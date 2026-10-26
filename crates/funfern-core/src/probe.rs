@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use crate::{
     BoundaryLabel, EvaluatedMaterial, PlannedBoundarySource, Point2, PointSource,
-    QuadraticWaveOperator, RegionId, Scene, TopologyMeshPlan, TopologyWaveModel, TriMesh,
-    VolumeSource, WaveCoefficients, enriched_quadratic_basis, enriched_quadratic_basis_gradients,
+    QuadraticWaveOperator, RegionId, TopologyMeshPlan, TopologyWaveModel, TriMesh, VolumeSource,
+    WaveCoefficients, enriched_quadratic_basis, enriched_quadratic_basis_gradients,
     point_segment_distance,
 };
 
@@ -13,30 +13,24 @@ const MAX_DISK_POLYGON_SIDES: usize = 128;
 const DISK_APPROXIMATION_TOLERANCE: f64 = 2.0e-4;
 pub const MAX_FAR_FIELD_CONTOUR_POINTS: usize = 4096;
 
+/// The plan a probe's regions and boundary targets are read from, and the
+/// material model its coefficients are.
 #[derive(Clone, Copy)]
-enum ProbeModel<'a> {
-    Scene(&'a Scene),
-    Topology {
-        plan: &'a TopologyMeshPlan,
-        model: TopologyWaveModel<'a>,
-    },
+struct ProbeModel<'a> {
+    plan: &'a TopologyMeshPlan,
+    model: TopologyWaveModel<'a>,
 }
 
 impl ProbeModel<'_> {
     fn valid(self) -> bool {
-        match self {
-            Self::Scene(scene) => scene.structure_valid(),
-            Self::Topology { plan, model } => model.valid_for(plan),
-        }
+        self.model.valid_for(self.plan)
     }
 
     fn contains_region(self, region: RegionId) -> bool {
-        match self {
-            Self::Scene(scene) => scene.region(region).is_some(),
-            Self::Topology { plan, .. } => {
-                plan.domains.iter().any(|domain| domain.region == region)
-            }
-        }
+        self.plan
+            .domains
+            .iter()
+            .any(|domain| domain.region == region)
     }
 
     fn directional_material_at(
@@ -44,10 +38,7 @@ impl ProbeModel<'_> {
         region: RegionId,
         point: Point2,
     ) -> Result<crate::DirectionalWaveCoefficients, crate::MaterialError> {
-        match self {
-            Self::Scene(scene) => scene.directional_material_at(region, point),
-            Self::Topology { model, .. } => model.directional_material_at(region, point),
-        }
+        self.model.directional_material_at(region, point)
     }
 
     fn contains_boundary_target(
@@ -57,9 +48,7 @@ impl ProbeModel<'_> {
         period: Option<f64>,
         region: RegionId,
     ) -> bool {
-        let Self::Topology { plan, .. } = self else {
-            return true;
-        };
+        let plan = self.plan;
         wrapped(parameter, period).any(|parameter| {
             plan.boundaries.iter().any(|boundary| {
                 let [a, b] = boundary.parameter;
@@ -418,15 +407,6 @@ impl std::fmt::Display for PointProbeError {
 impl std::error::Error for PointProbeError {}
 
 impl QuadraticPointStencil {
-    pub fn build(
-        mesh: &TriMesh,
-        operator: &QuadraticWaveOperator,
-        scene: &Scene,
-        point: Point2,
-    ) -> Result<Self, PointProbeError> {
-        Self::build_with_model(mesh, operator, ProbeModel::Scene(scene), point)
-    }
-
     /// Builds a point stencil from explicit topology face assignments and the
     /// shared material library. Points on a curve constraint are rejected because
     /// their material/trace side is ambiguous without a boundary target.
@@ -437,7 +417,7 @@ impl QuadraticPointStencil {
         model: TopologyWaveModel<'_>,
         point: Point2,
     ) -> Result<Self, PointProbeError> {
-        Self::build_with_model(mesh, operator, ProbeModel::Topology { plan, model }, point)
+        Self::build_with_model(mesh, operator, ProbeModel { plan, model }, point)
     }
 
     fn build_with_model(
@@ -590,15 +570,6 @@ impl QuadraticPointStencil {
 }
 
 impl QuadraticAreaStencil {
-    pub fn build(
-        mesh: &TriMesh,
-        operator: &QuadraticWaveOperator,
-        scene: &Scene,
-        shape: AreaProbeShape,
-    ) -> Result<Self, AreaProbeError> {
-        Self::build_with_model(mesh, operator, ProbeModel::Scene(scene), shape)
-    }
-
     /// Builds a disk or active-face-region integral from a compiled topology
     /// plan. Region targets must name an active face assignment, even if the
     /// material library still contains an unused region with the same ID.
@@ -609,7 +580,7 @@ impl QuadraticAreaStencil {
         model: TopologyWaveModel<'_>,
         shape: AreaProbeShape,
     ) -> Result<Self, AreaProbeError> {
-        Self::build_with_model(mesh, operator, ProbeModel::Topology { plan, model }, shape)
+        Self::build_with_model(mesh, operator, ProbeModel { plan, model }, shape)
     }
 
     fn build_with_model(
@@ -894,27 +865,6 @@ fn area_quadrature() -> [([f64; 3], f64); 12] {
 }
 
 impl QuadraticBoundaryStencil {
-    pub fn build(
-        mesh: &TriMesh,
-        operator: &QuadraticWaveOperator,
-        scene: &Scene,
-        label: BoundaryLabel,
-        parameter: f64,
-        period: f64,
-        region: RegionId,
-    ) -> Result<Self, PointProbeError> {
-        Self::build_with_model(
-            mesh,
-            operator,
-            ProbeModel::Scene(scene),
-            label,
-            None,
-            parameter,
-            Some(period),
-            region,
-        )
-    }
-
     /// Builds a trace-specific boundary stencil from a topology curve label.
     /// The explicit region selects the adjacent face at transmitting interfaces;
     /// separated curves additionally retain their left/right trace identity.
@@ -952,7 +902,7 @@ impl QuadraticBoundaryStencil {
             } => Some(side),
             _ => None,
         };
-        if !(ProbeModel::Topology { plan, model }).contains_boundary_target(
+        if !(ProbeModel { plan, model }).contains_boundary_target(
             target.label,
             target.parameter,
             target.period,
@@ -963,7 +913,7 @@ impl QuadraticBoundaryStencil {
         Self::build_with_model(
             mesh,
             operator,
-            ProbeModel::Topology { plan, model },
+            ProbeModel { plan, model },
             mesh_label,
             side,
             target.parameter,

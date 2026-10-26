@@ -4,13 +4,13 @@ use crate::SymmetricTensor2;
 use crate::canonical_consumer::complementary_interpolation_weights;
 use crate::wave::TimedDirectionalWaveCoefficients;
 use crate::{
-    BoundaryLabel, BoundarySide, CanonicalForcing, CanonicalMaterialRuntimeState,
-    CanonicalRateDrive, CanonicalWaveOperator, DirectionalWaveCoefficients, FaceBoundaryCondition,
-    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, LoopRole, MaterialId,
-    MeshSizeField, OuterBoundaryCondition, OwnedTopologyWaveModel, PlannedBoundarySource, Point2,
-    QuadraticWaveOperator, RegionId, SOURCE_ANCHOR_TIME, Scene, SpanBehavior, TopologyMeshPlan,
-    TopologyWaveModel, TriMesh, WaveError, enriched_quadratic_basis,
-    enriched_quadratic_basis_gradients, enriched_quadratic_basis_hessians,
+    BoundaryLabel, CanonicalForcing, CanonicalMaterialRuntimeState, CanonicalRateDrive,
+    CanonicalWaveOperator, DirectionalWaveCoefficients, FaceBoundaryCondition,
+    InternalBoundaryCoupling, MaterialId, MeshSizeField, OuterBoundaryCondition,
+    OwnedTopologyWaveModel, PlannedBoundarySource, Point2, QuadraticWaveOperator, RegionId,
+    SOURCE_ANCHOR_TIME, SpanBehavior, TopologyMeshPlan, TopologyWaveModel, TriMesh, WaveError,
+    enriched_quadratic_basis, enriched_quadratic_basis_gradients,
+    enriched_quadratic_basis_hessians,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -847,7 +847,7 @@ pub enum SolutionIndicatorError {
     InvalidOptions,
     InvalidMesh,
     InvalidOperator,
-    InvalidScene,
+    InvalidMaterials,
     InvalidTopology,
     MaterialEvaluation {
         region: RegionId,
@@ -864,7 +864,7 @@ impl std::fmt::Display for SolutionIndicatorError {
             Self::InvalidOptions => "Invalid solution-indicator options",
             Self::InvalidMesh => "Invalid solution-indicator mesh",
             Self::InvalidOperator => "Wave operator does not match the indicator mesh",
-            Self::InvalidScene => "Scene coefficients do not match the indicator mesh",
+            Self::InvalidMaterials => "material samples do not match the indicator mesh",
             Self::InvalidTopology => "Topology coefficients do not match the indicator mesh",
             Self::InvalidSnapshot => "Invalid solution-indicator field snapshot",
             Self::WorkLimit => "Solution-indicator work limit reached",
@@ -1067,7 +1067,6 @@ struct BoundaryPairKey {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum BoundaryPairCarrier {
-    Legacy(InternalBoundaryId),
     Topology(crate::CurveId, crate::CurveSpanId),
 }
 
@@ -1133,31 +1132,13 @@ pub struct SolutionIndicatorJob {
     coefficient_patterns: BTreeMap<MaterialId, f64>,
 }
 
-enum IndicatorInput {
-    Scene(Scene),
-    Topology {
-        plan: TopologyMeshPlan,
-        model: OwnedTopologyWaveModel,
-    },
+/// The plan and model an estimate reads, snapshotted for the job's lifetime.
+struct IndicatorInput {
+    plan: TopologyMeshPlan,
+    model: OwnedTopologyWaveModel,
 }
 
 impl SolutionIndicatorJob {
-    pub fn new(
-        mesh: Arc<TriMesh>,
-        operator: Arc<QuadraticWaveOperator>,
-        scene: Scene,
-        snapshot: QuadraticSolutionSnapshot,
-        options: SolutionIndicatorOptions,
-    ) -> Self {
-        Self::from_input(
-            mesh,
-            operator,
-            IndicatorInput::Scene(scene),
-            snapshot,
-            options,
-        )
-    }
-
     /// Starts a resumable estimate using unified face, curve-side, and material
     /// labels. The plan and model are snapshotted for the lifetime of the job.
     pub fn new_topology(
@@ -1171,7 +1152,7 @@ impl SolutionIndicatorJob {
         Self::from_input(
             mesh,
             operator,
-            IndicatorInput::Topology {
+            IndicatorInput {
                 plan: plan.clone(),
                 model: model.to_owned(),
             },
@@ -1393,30 +1374,15 @@ impl SolutionIndicatorJob {
         {
             return Err(SolutionIndicatorError::InvalidOperator);
         }
-        match &self.input {
-            IndicatorInput::Scene(scene) => {
-                if !scene.structure_valid()
-                    || self
-                        .mesh
-                        .triangles
-                        .iter()
-                        .any(|triangle| scene.region_material(triangle.region).is_none())
-                {
-                    return Err(SolutionIndicatorError::InvalidScene);
-                }
-            }
-            IndicatorInput::Topology { plan, model } => {
-                let model = model.as_model();
-                if !model.valid_for(plan)
-                    || self.mesh.triangles.iter().any(|triangle| {
-                        plan.domains
-                            .iter()
-                            .all(|domain| domain.region != triangle.region)
-                    })
-                {
-                    return Err(SolutionIndicatorError::InvalidTopology);
-                }
-            }
+        let IndicatorInput { plan, model } = &self.input;
+        if !model.as_model().valid_for(plan)
+            || self.mesh.triangles.iter().any(|triangle| {
+                plan.domains
+                    .iter()
+                    .all(|domain| domain.region != triangle.region)
+            })
+        {
+            return Err(SolutionIndicatorError::InvalidTopology);
         }
         let count = self.operator.degrees_of_freedom();
         if self.snapshot.mesh_revision != self.mesh.mesh_revision
@@ -1480,168 +1446,7 @@ impl SolutionIndicatorJob {
             .ok()
             .map(|found| &self.edge_list[found].1)
             .ok_or(SolutionIndicatorError::InvalidMesh)?;
-        if matches!(self.input, IndicatorInput::Topology { .. }) {
-            return self.build_topology_boundary(index, edge, sides.clone());
-        }
-        if matches!(
-            edge.label,
-            BoundaryLabel::MaterialInterface(_) | BoundaryLabel::OpenMaterialInterface(_)
-        ) {
-            if sides.len() != 2 {
-                return Err(SolutionIndicatorError::InvalidMesh);
-            }
-            self.phase = IndicatorPhase::BuildBoundary(index + 1);
-            return Ok(());
-        }
-        if sides.len() != 1 {
-            return Err(SolutionIndicatorError::InvalidMesh);
-        }
-        let triangle = sides[0];
-        let region = self.mesh.triangles[triangle].region;
-        let IndicatorInput::Scene(scene) = &self.input else {
-            unreachable!()
-        };
-        let raw_nodes = self.boundary_edge_nodes(triangle, edge.vertices)?;
-        let (nodes, vertices) = if edge.parameters[0] < edge.parameters[1] {
-            (raw_nodes, edge.vertices)
-        } else {
-            (
-                [raw_nodes[2], raw_nodes[1], raw_nodes[0]],
-                [edge.vertices[1], edge.vertices[0]],
-            )
-        };
-        let (condition, pair) = match edge.label {
-            BoundaryLabel::Outer(side) => {
-                if region != crate::BACKGROUND_REGION {
-                    return Err(SolutionIndicatorError::InvalidMesh);
-                }
-                let condition = match scene.outer_boundaries.get(side).resolved(scene.physics) {
-                    OuterBoundaryCondition::Reflecting => FaceBoundaryCondition::Reflecting,
-                    OuterBoundaryCondition::FirstOrderOutgoing => {
-                        FaceBoundaryCondition::Impedance { ratio: 1.0 }
-                    }
-                    OuterBoundaryCondition::SecondOrderOutgoing => {
-                        FaceBoundaryCondition::SecondOrderOutgoing
-                    }
-                    OuterBoundaryCondition::Neumann { signal } => {
-                        FaceBoundaryCondition::Neumann { signal }
-                    }
-                    OuterBoundaryCondition::Dirichlet { signal } => {
-                        FaceBoundaryCondition::Dirichlet { signal }
-                    }
-                    OuterBoundaryCondition::ElectricWall | OuterBoundaryCondition::MagneticWall => {
-                        unreachable!()
-                    }
-                };
-                (condition, None)
-            }
-            BoundaryLabel::Obstacle(id) => {
-                let obstacle = scene
-                    .obstacles
-                    .iter()
-                    .find(|obstacle| obstacle.id == id)
-                    .ok_or(SolutionIndicatorError::InvalidScene)?;
-                let LoopRole::Hole { exterior } = obstacle.role else {
-                    return Err(SolutionIndicatorError::InvalidMesh);
-                };
-                if exterior != region {
-                    return Err(SolutionIndicatorError::InvalidMesh);
-                }
-                let span = obstacle
-                    .spline
-                    .span_index(0.5 * (edge.parameters[0] + edge.parameters[1]))
-                    .ok_or(SolutionIndicatorError::InvalidMesh)?;
-                (obstacle.span_conditions[span].resolved(scene.physics), None)
-            }
-            BoundaryLabel::Wall { loop_id, side } => {
-                let obstacle = scene
-                    .obstacles
-                    .iter()
-                    .find(|obstacle| obstacle.id == loop_id)
-                    .ok_or(SolutionIndicatorError::InvalidScene)?;
-                let LoopRole::Wall { exterior, interior } = obstacle.role else {
-                    return Err(SolutionIndicatorError::InvalidMesh);
-                };
-                let expected = match side {
-                    BoundarySide::Exterior => exterior,
-                    BoundarySide::Interior => interior,
-                };
-                if expected != region {
-                    return Err(SolutionIndicatorError::InvalidMesh);
-                }
-                (FaceBoundaryCondition::Reflecting, None)
-            }
-            BoundaryLabel::InternalBoundary { id, side } => {
-                let boundary = scene
-                    .internal_boundaries
-                    .iter()
-                    .find(|boundary| boundary.id == id)
-                    .ok_or(SolutionIndicatorError::InvalidScene)?;
-                if boundary.region != region {
-                    return Err(SolutionIndicatorError::InvalidMesh);
-                }
-                let span = boundary
-                    .spline
-                    .span_index(0.5 * (edge.parameters[0] + edge.parameters[1]))
-                    .ok_or(SolutionIndicatorError::InvalidMesh)?;
-                let law = boundary.span_laws[span];
-                let condition = match side {
-                    InternalBoundarySide::Left => law.left,
-                    InternalBoundarySide::Right => law.right,
-                };
-                let pair = match law.coupling {
-                    InternalBoundaryCoupling::Independent => None,
-                    InternalBoundaryCoupling::ThinGap { stiffness_ratio } => {
-                        let start = edge.parameters[0].min(edge.parameters[1]).to_bits();
-                        let end = edge.parameters[0].max(edge.parameters[1]).to_bits();
-                        let slot = match side {
-                            InternalBoundarySide::Left => 0,
-                            InternalBoundarySide::Right => 1,
-                        };
-                        let point = boundary
-                            .spline
-                            .evaluate(0.5 * (edge.parameters[0] + edge.parameters[1]));
-                        let stiffness = self
-                            .material_at(boundary.region, point)?
-                            .geometric_mean_stiffness();
-                        Some((
-                            BoundaryPairKey {
-                                carrier: BoundaryPairCarrier::Legacy(id),
-                                start,
-                                end,
-                            },
-                            slot,
-                            stiffness_ratio,
-                            stiffness,
-                        ))
-                    }
-                };
-                (condition.resolved(scene.physics), pair)
-            }
-            BoundaryLabel::MaterialInterface(_) | BoundaryLabel::OpenMaterialInterface(_) => {
-                unreachable!()
-            }
-            BoundaryLabel::Curve { .. } => {
-                return Err(SolutionIndicatorError::InvalidScene);
-            }
-        };
-        let record_index = self.boundary_records.len();
-        self.boundary_records.push(BoundaryRecord {
-            triangle,
-            region,
-            nodes,
-            vertices,
-            condition,
-            pair,
-        });
-        if let Some((key, slot, _, _)) = pair {
-            let entry = self.boundary_pairs.entry(key).or_default();
-            if entry[slot].replace(record_index).is_some() {
-                return Err(SolutionIndicatorError::InvalidMesh);
-            }
-        }
-        self.phase = IndicatorPhase::BuildBoundary(index + 1);
-        Ok(())
+        self.build_topology_boundary(index, edge, sides.clone())
     }
 
     fn build_topology_boundary(
@@ -1650,9 +1455,7 @@ impl SolutionIndicatorJob {
         edge: crate::BoundaryEdge,
         sides: Vec<usize>,
     ) -> Result<(), SolutionIndicatorError> {
-        let IndicatorInput::Topology { plan, model } = &self.input else {
-            unreachable!()
-        };
+        let IndicatorInput { plan, model } = &self.input;
         let midpoint = 0.5 * (edge.parameters[0] + edge.parameters[1]);
         let (source, transmitting) = match edge.label {
             BoundaryLabel::Outer(side) => (PlannedBoundarySource::Outer(side), false),
@@ -1810,7 +1613,7 @@ impl SolutionIndicatorJob {
             *sample = Some(material.instantaneous);
         }
         let [Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)] = samples else {
-            return Err(SolutionIndicatorError::InvalidScene);
+            return Err(SolutionIndicatorError::InvalidMaterials);
         };
         let samples = [a, b, c, d, e, f];
         let mut dxx = Point2::default();
@@ -1872,14 +1675,9 @@ impl SolutionIndicatorJob {
         if self.runtime.is_none() {
             return Ok(crate::wave::PrimaryFieldResponse::LINEAR);
         }
-        let (physics, materials, regions) = match &self.input {
-            IndicatorInput::Scene(scene) => {
-                (scene.physics, &scene.materials[..], &scene.regions[..])
-            }
-            IndicatorInput::Topology { model, .. } => {
-                (model.physics, &model.materials[..], &model.regions[..])
-            }
-        };
+        let model = &self.input.model;
+        let (physics, materials, regions) =
+            (model.physics, &model.materials[..], &model.regions[..]);
         let omega = std::f64::consts::TAU * self.options.forcing_frequency_hz;
         let amplitude = self.operator.element_nodes()[index]
             .iter()
@@ -1979,13 +1777,11 @@ impl SolutionIndicatorJob {
             .map(|timed| timed.instantaneous)
     }
 
-    /// The material a region is assigned, from whichever model the job holds.
+    /// The material a region is assigned.
     fn region_material(&self, region: RegionId) -> Option<MaterialId> {
-        let regions = match &self.input {
-            IndicatorInput::Scene(scene) => &scene.regions,
-            IndicatorInput::Topology { model, .. } => &model.regions,
-        };
-        regions
+        self.input
+            .model
+            .regions
             .iter()
             .find(|candidate| candidate.id == region)
             .map(|candidate| candidate.material)
@@ -1996,33 +1792,18 @@ impl SolutionIndicatorJob {
         region: RegionId,
         point: Point2,
     ) -> Result<TimedDirectionalWaveCoefficients, SolutionIndicatorError> {
-        let result = match (&self.input, &self.runtime) {
-            (IndicatorInput::Scene(scene), Some(runtime)) => {
-                crate::wave::evaluate_timed_directional_material_library_at(
-                    scene.physics,
-                    &scene.materials,
-                    &scene.regions,
-                    region,
-                    point,
-                    self.snapshot.time,
-                    runtime,
-                )
-            }
-            (IndicatorInput::Topology { model, .. }, Some(runtime)) => {
-                crate::wave::evaluate_timed_directional_material_library_at(
-                    model.physics,
-                    &model.materials,
-                    &model.regions,
-                    region,
-                    point,
-                    self.snapshot.time,
-                    runtime,
-                )
-            }
-            (IndicatorInput::Scene(scene), None) => scene
-                .directional_material_at(region, point)
-                .map(TimedDirectionalWaveCoefficients::fixed),
-            (IndicatorInput::Topology { model, .. }, None) => model
+        let model = &self.input.model;
+        let result = match &self.runtime {
+            Some(runtime) => crate::wave::evaluate_timed_directional_material_library_at(
+                model.physics,
+                &model.materials,
+                &model.regions,
+                region,
+                point,
+                self.snapshot.time,
+                runtime,
+            ),
+            None => model
                 .as_model()
                 .directional_material_at(region, point)
                 .map(TimedDirectionalWaveCoefficients::fixed),
@@ -2042,7 +1823,8 @@ impl SolutionIndicatorJob {
         let triangle = self.mesh.triangles[index];
         let geometry = element_geometry(&self.mesh, triangle.vertices)?;
         let nodes = self.operator.element_nodes()[index].map(|node| node as usize);
-        let material = self.material_samples[index].ok_or(SolutionIndicatorError::InvalidScene)?;
+        let material =
+            self.material_samples[index].ok_or(SolutionIndicatorError::InvalidMaterials)?;
         for local in 0..3 {
             let mut barycentric = [0.0; 3];
             barycentric[local] = 1.0;
@@ -2073,7 +1855,8 @@ impl SolutionIndicatorJob {
         let triangle = self.mesh.triangles[index];
         let geometry = element_geometry(&self.mesh, triangle.vertices)?;
         let nodes = self.operator.element_nodes()[index].map(|node| node as usize);
-        let material = self.material_samples[index].ok_or(SolutionIndicatorError::InvalidScene)?;
+        let material =
+            self.material_samples[index].ok_or(SolutionIndicatorError::InvalidMaterials)?;
         let omega = (std::f64::consts::TAU * self.options.forcing_frequency_hz).max(1.0);
         let recovered = triangle.vertices.map(|vertex| {
             let value = self.recovery[&(vertex, triangle.region)];
@@ -2398,7 +2181,8 @@ impl SolutionIndicatorJob {
                 .sqrt()
                 .clamp(self.options.minimum_scale, self.options.maximum_scale)
         };
-        let material = self.material_samples[index].ok_or(SolutionIndicatorError::InvalidScene)?;
+        let material =
+            self.material_samples[index].ok_or(SolutionIndicatorError::InvalidMaterials)?;
         // Carrying a forced wavelength is a floor, not an error target: too few
         // elements across a wave is wrong however small the estimate reads. It
         // applies wherever the material carries that wave, so which of the two

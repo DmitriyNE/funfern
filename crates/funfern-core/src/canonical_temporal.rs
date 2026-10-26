@@ -26,9 +26,8 @@ use crate::{
     FieldLawValues, LossChannel, Material, MaterialCoordinates, MaterialError, MaterialId,
     MaterialSwitchRuntime, PhysicsModel, Point2, QuadraticAreaElement, QuadraticAreaStencil,
     QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues, RegionId, RestoringLaw,
-    RestoringLawValues, Scene, SymmetricTensor2, TimeDriveRuntime, TimeDriveValues,
-    TopologyWaveModel, TriMesh, WaveError, canonical_area_contribution,
-    complementary_interpolation_weights,
+    RestoringLawValues, SymmetricTensor2, TimeDriveRuntime, TimeDriveValues, TopologyWaveModel,
+    TriMesh, WaveError, canonical_area_contribution, complementary_interpolation_weights,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2299,20 +2298,6 @@ pub struct CanonicalTemporalWaveOperator {
 const SHORT_WAVE_VISCOSITY: f64 = 8.0;
 
 impl CanonicalTemporalWaveOperator {
-    pub fn compile_scene(
-        mesh: &TriMesh,
-        quadratic: &QuadraticWaveOperator,
-        scene: &Scene,
-        constitutive_revision: u64,
-    ) -> Result<Self, WaveError> {
-        Self::compile(
-            mesh,
-            quadratic,
-            TopologyWaveModel::from_scene(scene),
-            constitutive_revision,
-        )
-    }
-
     pub fn compile(
         mesh: &TriMesh,
         quadratic: &QuadraticWaveOperator,

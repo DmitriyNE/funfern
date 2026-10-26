@@ -175,12 +175,6 @@ struct BoundaryCollapsePlan {
     merged: Option<BoundaryEdge>,
 }
 
-/// Boxed: one lives per adaptation, and either variant is a few hundred bytes.
-enum AdaptationInput {
-    Scene(Box<Scene>),
-    Topology(Box<TopologyAdaptationContract>),
-}
-
 #[derive(Clone)]
 struct TopologyBoundaryAtom {
     boundary: PlannedBoundaryEdge,
@@ -494,7 +488,7 @@ enum AdaptationPhase {
 
 pub struct MeshAdaptationJob {
     source: Arc<TriMesh>,
-    input: AdaptationInput,
+    contract: Box<TopologyAdaptationContract>,
     target_mesh_revision: u64,
     field: Arc<dyn MeshSizeField>,
     options: MeshAdaptationOptions,
@@ -521,26 +515,6 @@ pub struct MeshAdaptationJob {
 }
 
 impl MeshAdaptationJob {
-    pub fn new(
-        source: Arc<TriMesh>,
-        scene: Scene,
-        state: MeshAdaptationState,
-        target_mesh_revision: u64,
-        field: Arc<dyn MeshSizeField>,
-        options: MeshAdaptationOptions,
-    ) -> Self {
-        let domain = scene.domain;
-        Self::from_input(
-            source,
-            AdaptationInput::Scene(Box::new(scene)),
-            domain,
-            state,
-            target_mesh_revision,
-            field,
-            options,
-        )
-    }
-
     /// Starts a fixed-geometry adaptation transaction from a compiled topology
     /// plan. The plan is cloned so every yielded slice observes one immutable
     /// boundary and trace contract.
@@ -554,7 +528,7 @@ impl MeshAdaptationJob {
     ) -> Self {
         Self::from_input(
             source,
-            AdaptationInput::Topology(Box::new(TopologyAdaptationContract::new(plan))),
+            Box::new(TopologyAdaptationContract::new(plan)),
             plan.domain,
             state,
             target_mesh_revision,
@@ -565,7 +539,7 @@ impl MeshAdaptationJob {
 
     fn from_input(
         source: Arc<TriMesh>,
-        input: AdaptationInput,
+        contract: Box<TopologyAdaptationContract>,
         domain: crate::DomainRect,
         state: MeshAdaptationState,
         target_mesh_revision: u64,
@@ -585,7 +559,7 @@ impl MeshAdaptationJob {
         }
         Self {
             source,
-            input,
+            contract,
             target_mesh_revision,
             field,
             options,
@@ -736,20 +710,10 @@ impl MeshAdaptationJob {
             if self.source.vertices.is_empty() || self.source.triangles.is_empty() {
                 return Err(MeshAdaptationError::InvalidSource("empty mesh"));
             }
-            match &self.input {
-                AdaptationInput::Scene(scene) if !scene.structure_valid() => {
-                    return Err(MeshAdaptationError::InvalidSource(
-                        "invalid scene structure",
-                    ));
-                }
-                AdaptationInput::Topology(contract)
-                    if contract.active_regions.is_empty() || contract.atoms.is_empty() =>
-                {
-                    return Err(MeshAdaptationError::InvalidSource(
-                        "empty topology adaptation contract",
-                    ));
-                }
-                _ => {}
+            if self.contract.active_regions.is_empty() || self.contract.atoms.is_empty() {
+                return Err(MeshAdaptationError::InvalidSource(
+                    "empty topology adaptation contract",
+                ));
             }
             if self.target_mesh_revision == self.source.mesh_revision {
                 return Err(MeshAdaptationError::InvalidMeshRevision);
@@ -773,20 +737,6 @@ impl MeshAdaptationJob {
             {
                 return Err(MeshAdaptationError::InvalidState);
             }
-            if let AdaptationInput::Scene(scene) = &self.input {
-                self.builder.loop_ids = scene.obstacles.iter().map(|loop_| loop_.id).collect();
-                self.builder.loop_roles = scene.obstacles.iter().map(|loop_| loop_.role).collect();
-                self.builder.internal_boundary_ids = scene
-                    .internal_boundaries
-                    .iter()
-                    .map(|boundary| boundary.id)
-                    .collect();
-                self.builder.internal_boundary_regions = scene
-                    .internal_boundaries
-                    .iter()
-                    .map(|boundary| boundary.region)
-                    .collect();
-            }
         }
         if index == self.source.vertices.len() {
             self.phase = AdaptationPhase::ImportTriangles(0);
@@ -798,8 +748,8 @@ impl MeshAdaptationJob {
         }
         let added = self.builder.add_vertex(vertex.point, vertex.boundary)?;
         self.builder.vertices[added].trace = vertex.trace;
-        if let AdaptationInput::Topology(contract) = &mut self.input
-            && let Some(trace) = vertex.trace
+        let contract = &mut self.contract;
+        if let Some(trace) = vertex.trace
             && (contract.trace_points.get(&trace).copied() != Some(vertex.point)
                 || !contract.seen_traces.insert(trace))
         {
@@ -823,14 +773,12 @@ impl MeshAdaptationJob {
             return Ok(());
         }
         let triangle = self.source.triangles[index];
-        if let AdaptationInput::Topology(contract) = &mut self.input {
-            if !contract.active_regions.contains(&triangle.region) {
-                return Err(MeshAdaptationError::InvalidSource(
-                    "triangle uses an inactive topology region",
-                ));
-            }
-            contract.seen_regions.insert(triangle.region);
+        if !self.contract.active_regions.contains(&triangle.region) {
+            return Err(MeshAdaptationError::InvalidSource(
+                "triangle uses an inactive topology region",
+            ));
         }
+        self.contract.seen_regions.insert(triangle.region);
         if triangle
             .vertices
             .iter()
@@ -859,11 +807,7 @@ impl MeshAdaptationJob {
             self.builder.queued_edges.clear();
             self.builder.bad_triangles.clear();
             self.builder.scores.fill(None);
-            self.phase = if matches!(self.input, AdaptationInput::Topology(_)) {
-                AdaptationPhase::ValidateImportCoverage(0)
-            } else {
-                AdaptationPhase::FindCollapse(0)
-            };
+            self.phase = AdaptationPhase::ValidateImportCoverage(0);
             return Ok(());
         }
         let edge = self.source.boundary_edges[index];
@@ -879,9 +823,7 @@ impl MeshAdaptationJob {
                 "invalid constrained edge",
             ));
         }
-        if let AdaptationInput::Topology(contract) = &mut self.input {
-            record_topology_boundary(&self.builder, contract, edge)?;
-        }
+        record_topology_boundary(&self.builder, &mut self.contract, edge)?;
         self.builder.add_boundary_edge(edge);
         self.phase = AdaptationPhase::ImportBoundary(index + 1);
         Ok(())
@@ -892,11 +834,7 @@ impl MeshAdaptationJob {
         index: usize,
         quality: Option<MeshQuality>,
     ) -> Result<(), MeshAdaptationError> {
-        let AdaptationInput::Topology(contract) = &mut self.input else {
-            return Err(MeshAdaptationError::InvalidSource(
-                "topology coverage requested for a legacy scene",
-            ));
-        };
+        let contract = &mut self.contract;
         if index == contract.atoms.len() {
             if contract.seen_traces.len() != contract.trace_points.len()
                 || contract.seen_regions != contract.active_regions
@@ -1105,70 +1043,14 @@ impl MeshAdaptationJob {
 
     fn is_boundary_anchor(&self, point: BoundaryPoint) -> bool {
         let parameter = point.parameter;
-        if let AdaptationInput::Topology(contract) = &self.input {
-            return contract.atoms.iter().any(|atom| {
-                atom.label == point.label
-                    && atom
-                        .boundary
-                        .parameter
-                        .iter()
-                        .any(|endpoint| parameter_close(parameter, *endpoint))
-            });
-        }
-        let AdaptationInput::Scene(scene) = &self.input else {
-            unreachable!()
-        };
-        match point.label {
-            BoundaryLabel::Outer(_) => parameter == 0.0 || parameter == 1.0,
-            BoundaryLabel::Obstacle(id)
-            | BoundaryLabel::MaterialInterface(id)
-            | BoundaryLabel::Wall { loop_id: id, .. } => scene
-                .obstacles
-                .iter()
-                .find(|obstacle| obstacle.id == id)
-                .is_none_or(|obstacle| {
-                    let mut breakpoint = 0.0;
-                    if parameter == 0.0 || parameter == obstacle.spline.period() {
-                        return true;
-                    }
-                    obstacle.spline.intervals().iter().any(|interval| {
-                        breakpoint += interval;
-                        parameter == breakpoint
-                    })
-                }),
-            BoundaryLabel::InternalBoundary { id, .. } => scene
-                .internal_boundaries
-                .iter()
-                .find(|boundary| boundary.id == id)
-                .is_none_or(|boundary| {
-                    let mut breakpoint = 0.0;
-                    if parameter == 0.0 || parameter == boundary.spline.period() {
-                        return true;
-                    }
-                    boundary.spline.intervals().iter().any(|interval| {
-                        breakpoint += interval;
-                        parameter == breakpoint
-                    })
-                }),
-            BoundaryLabel::OpenMaterialInterface(id) => scene
-                .material_interfaces
-                .iter()
-                .find(|interface| interface.id == id)
-                .is_none_or(|interface| {
-                    let crate::InterfaceSpline::Open(spline) = &interface.spline else {
-                        return true;
-                    };
-                    let mut breakpoint = 0.0;
-                    if parameter == 0.0 || parameter == spline.period() {
-                        return true;
-                    }
-                    spline.intervals().iter().any(|interval| {
-                        breakpoint += interval;
-                        parameter == breakpoint
-                    })
-                }),
-            BoundaryLabel::Curve { .. } => true,
-        }
+        self.contract.atoms.iter().any(|atom| {
+            atom.label == point.label
+                && atom
+                    .boundary
+                    .parameter
+                    .iter()
+                    .any(|endpoint| parameter_close(parameter, *endpoint))
+        })
     }
 
     fn face_edges(&self, vertex: usize, label: BoundaryLabel) -> Option<(usize, usize)> {
@@ -1276,11 +1158,7 @@ impl MeshAdaptationJob {
                     *index != remove
                         && vertex.boundary.is_some_and(|candidate| {
                             candidate.label == pair_label
-                                && if matches!(self.input, AdaptationInput::Topology(_)) {
-                                    parameter_close(candidate.parameter, point.parameter)
-                                } else {
-                                    vertex.point == self.builder.point(remove)
-                                }
+                                && parameter_close(candidate.parameter, point.parameter)
                         })
                 })
                 .map(|(index, _)| index)
@@ -1353,8 +1231,7 @@ impl MeshAdaptationJob {
             _ => None,
         }?;
         if matches!(label, BoundaryLabel::Curve { .. })
-            && let AdaptationInput::Topology(contract) = &self.input
-            && !contract.atoms.iter().any(|atom| {
+            && !self.contract.atoms.iter().any(|atom| {
                 let [a, b] = atom.boundary.parameter;
                 let (low, high) = (a.min(b), a.max(b));
                 atom.label == pair
@@ -1412,71 +1289,7 @@ impl MeshAdaptationJob {
         if (d - a).norm() > target {
             return Ok(false);
         }
-        if let AdaptationInput::Topology(contract) = &self.input {
-            return Ok(topology_atom_index(contract, edge).is_some());
-        }
-        let AdaptationInput::Scene(scene) = &self.input else {
-            unreachable!()
-        };
-        let [t0, t1] = edge.parameters;
-        let hull = match edge.label {
-            BoundaryLabel::Outer(_) => return Ok(true),
-            BoundaryLabel::Obstacle(id)
-            | BoundaryLabel::MaterialInterface(id)
-            | BoundaryLabel::Wall { loop_id: id, .. } => {
-                let spline = &scene
-                    .obstacles
-                    .iter()
-                    .find(|obstacle| obstacle.id == id)
-                    .ok_or(MeshAdaptationError::InvalidSource("unknown loop boundary"))?
-                    .spline;
-                [
-                    spline.evaluate(t0),
-                    spline.evaluate(t0) + spline.derivative(t0, 1) * ((t1 - t0) / 3.0),
-                    spline.evaluate(t1) - spline.derivative(t1, 1) * ((t1 - t0) / 3.0),
-                    spline.evaluate(t1),
-                ]
-            }
-            BoundaryLabel::InternalBoundary { id, .. } => {
-                let spline = &scene
-                    .internal_boundaries
-                    .iter()
-                    .find(|boundary| boundary.id == id)
-                    .ok_or(MeshAdaptationError::InvalidSource("unknown open boundary"))?
-                    .spline;
-                [
-                    spline.evaluate(t0),
-                    spline.evaluate(t0) + spline.derivative(t0, 1) * ((t1 - t0) / 3.0),
-                    spline.evaluate(t1) - spline.derivative(t1, 1) * ((t1 - t0) / 3.0),
-                    spline.evaluate(t1),
-                ]
-            }
-            BoundaryLabel::OpenMaterialInterface(id) => {
-                let interface = scene
-                    .material_interfaces
-                    .iter()
-                    .find(|interface| interface.id == id)
-                    .ok_or(MeshAdaptationError::InvalidSource(
-                        "unknown material interface",
-                    ))?;
-                let crate::InterfaceSpline::Open(spline) = &interface.spline else {
-                    return Err(MeshAdaptationError::InvalidSource(
-                        "unsupported closed graph interface",
-                    ));
-                };
-                [
-                    spline.evaluate(t0),
-                    spline.evaluate(t0) + spline.derivative(t0, 1) * ((t1 - t0) / 3.0),
-                    spline.evaluate(t1) - spline.derivative(t1, 1) * ((t1 - t0) / 3.0),
-                    spline.evaluate(t1),
-                ]
-            }
-            BoundaryLabel::Curve { .. } => unreachable!(),
-        };
-        Ok(hull.iter().all(|point| {
-            crate::point_segment_distance(*point, a, d)
-                <= self.options.meshing.curve_tolerance * (1.0 + 1e-9)
-        }))
+        Ok(topology_atom_index(&self.contract, edge).is_some())
     }
 
     fn collapse_plan(
@@ -1707,9 +1520,7 @@ impl MeshAdaptationJob {
             self.report.remaining_oversized_triangles = self.count_oversized()?;
             self.report.converged =
                 self.report.remaining_oversized_triangles == 0 && self.report.limit.is_none();
-            if let AdaptationInput::Topology(contract) = &mut self.input {
-                contract.seen_regions.clear();
-            }
+            self.contract.seen_regions.clear();
             self.phase = AdaptationPhase::VerifyTriangles(
                 0,
                 MeshQuality {
@@ -1856,14 +1667,8 @@ impl MeshAdaptationJob {
         label: BoundaryLabel,
     ) -> bool {
         candidate.label == label
-            && if matches!(self.input, AdaptationInput::Topology(_)) {
-                parameter_close(candidate.parameters[0], edge.parameters[1])
-                    && parameter_close(candidate.parameters[1], edge.parameters[0])
-            } else {
-                self.builder.point(candidate.vertices[0]) == self.builder.point(edge.vertices[1])
-                    && self.builder.point(candidate.vertices[1])
-                        == self.builder.point(edge.vertices[0])
-            }
+            && parameter_close(candidate.parameters[0], edge.parameters[1])
+            && parameter_close(candidate.parameters[1], edge.parameters[0])
     }
 
     fn split_boundary_face(
@@ -1906,63 +1711,18 @@ impl MeshAdaptationJob {
         label: BoundaryLabel,
         parameter: f64,
     ) -> Result<Point2, MeshAdaptationError> {
-        if let AdaptationInput::Topology(contract) = &self.input {
-            let mut atoms = contract.atoms.iter().filter(|atom| {
-                let [a, b] = atom.boundary.parameter;
-                atom.label == label && parameter > a.min(b) && parameter < a.max(b)
-            });
-            let atom = atoms.next().filter(|_| atoms.next().is_none()).ok_or(
-                MeshAdaptationError::InvalidSource(
-                    "boundary split does not belong to one topology interval",
-                ),
-            )?;
-            return topology_point_on_atom(atom.boundary, parameter).ok_or(
-                MeshAdaptationError::InvalidSource("invalid topology interval geometry"),
-            );
-        }
-        let AdaptationInput::Scene(scene) = &self.input else {
-            unreachable!()
-        };
-        match label {
-            BoundaryLabel::Outer(side) => {
-                let corners = scene.domain.corners();
-                let [a, b] = match side {
-                    OuterSide::Bottom => [corners[0], corners[1]],
-                    OuterSide::Right => [corners[1], corners[2]],
-                    OuterSide::Top => [corners[2], corners[3]],
-                    OuterSide::Left => [corners[3], corners[0]],
-                };
-                Ok(a.lerp(b, parameter))
-            }
-            BoundaryLabel::Obstacle(id)
-            | BoundaryLabel::MaterialInterface(id)
-            | BoundaryLabel::Wall { loop_id: id, .. } => scene
-                .obstacles
-                .iter()
-                .find(|obstacle| obstacle.id == id)
-                .map(|obstacle| obstacle.spline.evaluate(parameter))
-                .ok_or(MeshAdaptationError::InvalidSource("unknown loop boundary")),
-            BoundaryLabel::InternalBoundary { id, .. } => scene
-                .internal_boundaries
-                .iter()
-                .find(|boundary| boundary.id == id)
-                .map(|boundary| boundary.spline.evaluate(parameter))
-                .ok_or(MeshAdaptationError::InvalidSource("unknown open boundary")),
-            BoundaryLabel::OpenMaterialInterface(id) => scene
-                .material_interfaces
-                .iter()
-                .find(|interface| interface.id == id)
-                .and_then(|interface| match &interface.spline {
-                    crate::InterfaceSpline::Open(spline) => Some(spline.evaluate(parameter)),
-                    crate::InterfaceSpline::Closed(_) => None,
-                })
-                .ok_or(MeshAdaptationError::InvalidSource(
-                    "unknown material interface",
-                )),
-            BoundaryLabel::Curve { .. } => Err(MeshAdaptationError::InvalidSource(
-                "unified topology curve geometry is unavailable to legacy AMR",
-            )),
-        }
+        let mut atoms = self.contract.atoms.iter().filter(|atom| {
+            let [a, b] = atom.boundary.parameter;
+            atom.label == label && parameter > a.min(b) && parameter < a.max(b)
+        });
+        let atom = atoms.next().filter(|_| atoms.next().is_none()).ok_or(
+            MeshAdaptationError::InvalidSource(
+                "boundary split does not belong to one topology interval",
+            ),
+        )?;
+        topology_point_on_atom(atom.boundary, parameter).ok_or(MeshAdaptationError::InvalidSource(
+            "invalid topology interval geometry",
+        ))
     }
 
     fn add_lineage(&mut self, vertex: usize) {
@@ -1996,14 +1756,12 @@ impl MeshAdaptationJob {
             return Ok(());
         }
         let triangle = self.builder.triangles[index];
-        if let AdaptationInput::Topology(contract) = &mut self.input {
-            if !contract.active_regions.contains(&triangle.region) {
-                return Err(MeshAdaptationError::InvalidSource(
-                    "adaptation produced an inactive topology region",
-                ));
-            }
-            contract.seen_regions.insert(triangle.region);
+        if !self.contract.active_regions.contains(&triangle.region) {
+            return Err(MeshAdaptationError::InvalidSource(
+                "adaptation produced an inactive topology region",
+            ));
         }
+        self.contract.seen_regions.insert(triangle.region);
         let points = self.builder.triangle_points(triangle);
         if orient2d(points[0], points[1], points[2]) != PredicateSign::Positive {
             return Err(MeshAdaptationError::InvalidSource(
@@ -2060,11 +1818,8 @@ impl MeshAdaptationJob {
         quality: MeshQuality,
     ) -> Result<(), MeshAdaptationError> {
         if index == self.builder.boundary_edges.len() {
-            if matches!(self.input, AdaptationInput::Topology(_)) {
-                self.phase = AdaptationPhase::VerifyTopologyCoverage(0, quality);
-            } else {
-                self.begin_publish(quality);
-            }
+            self.phase = AdaptationPhase::VerifyTopologyCoverage(0, quality);
+
             return Ok(());
         }
         let boundary = self.builder.boundary_edges[index];
@@ -2079,9 +1834,7 @@ impl MeshAdaptationJob {
                 "adaptation broke a constrained edge",
             ));
         }
-        if let AdaptationInput::Topology(contract) = &mut self.input {
-            record_topology_boundary(&self.builder, contract, boundary)?;
-        }
+        record_topology_boundary(&self.builder, &mut self.contract, boundary)?;
         self.phase = AdaptationPhase::VerifyBoundary(index + 1, quality);
         Ok(())
     }
