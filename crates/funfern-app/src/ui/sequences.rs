@@ -425,6 +425,26 @@ impl Panel {
             .cloned()
     }
 
+    /// How many number boxes show `text` read as a number, to the decimals
+    /// each box shows.
+    fn showing_number(&self, text: &str) -> usize {
+        let Ok(typed) = text.parse::<f64>() else {
+            return 0;
+        };
+        self.of_role(Role::SpinButton)
+            .iter()
+            .filter(|shown| {
+                let decimals = shown
+                    .label
+                    .split_once('.')
+                    .map_or(0, |(_, fraction)| fraction.len());
+                shown.label.parse::<f64>().is_ok_and(|value| {
+                    (value - typed).abs() <= 0.5 * 10f64.powi(-(decimals as i32))
+                })
+            })
+            .count()
+    }
+
     /// Whether the action said something in the status line.
     fn noticed(&self) -> bool {
         !self.state.message.is_empty()
@@ -495,16 +515,24 @@ impl Panel {
                 let Some(target) = Self::nth(&fields, *field) else {
                     return;
                 };
+                let boxes = self.showing_number(text);
                 self.pass(click(&target));
                 self.pass(typed(text));
                 self.pass(vec![]);
                 // What was typed is on screen, or the panel refused it and
                 // said so. Nothing typed is dropped or replaced quietly. Found
                 // by its text rather than its place: a law edited by hand
-                // leaves its preset, and the fields are laid out anew.
+                // leaves its preset, and the fields are laid out anew. A
+                // number may come back in a number box: the reciprocal
+                // stiffness is kept as `k₀ = 1/s₀` with the reciprocal
+                // cancelled, so a typed 9.5 returns as a constant showing
+                // 9.50. That box has to be new, since one showing the number
+                // before proves nothing.
                 let fields = self.of_role(Role::TextInput);
                 assert!(
-                    fields.iter().any(|shown| shown.label == *text) || self.noticed(),
+                    fields.iter().any(|shown| shown.label == *text)
+                        || self.showing_number(text) > boxes
+                        || self.noticed(),
                     "typed {text:?} into {target:?}: no field shows it and nothing was said"
                 );
             }

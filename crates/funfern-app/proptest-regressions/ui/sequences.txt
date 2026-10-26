@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 3efa0fbadbfe473d0a0f51384426bbbefe5421fddaf87e750c5fd830fa337e16 # shrinks to (initial_state, transitions, seen_counter) = (Steps { taken: 0 }, [Press(AddMaterial), Undo], None)
 cc 411948a8e96e3d6766c720d39b6ce1b8fb531e4eb72b2fb30c052f100a182939 # shrinks to (initial_state, transitions, seen_counter) = (Steps { taken: 0 }, [New, New], None)
+cc 5bb81d3ed35a6baeca11c9081aaa1165aad6f153654fbeac6279c5ad15ae2c8f # shrinks to (initial_state, transitions, seen_counter) = (Steps { taken: 0 }, [Pick { combo: 23, item: 19 }, Redo, Fold(Anisotropy), Pick { combo: 240, item: 11 }, Type { field: 110, text: "1 + 3*x*x" }, Advanced, Type { field: 162, text: "9.5" }], None)

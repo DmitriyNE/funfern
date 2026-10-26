@@ -935,9 +935,11 @@ predictable on representative dense scenes.
   equal-area box's, because a single bijective patch of a smooth domain has
   singular corners; condensing or mass-scaling the corner functions buys the
   step back only at the same rate it costs accuracy. A deformed box keeps
-  0.82 to 0.87 of the step. So the single patch is the scene's own box, with
-  the curves inside it as materials; a curved outer wall, and the
-  curved-span outgoing item above, need multipatch. Spike 4 (same day): a
+  about half the step, 0.52 to 0.56 with one side pushed out by a fifth of
+  its width (first read as 0.82 to 0.87 over a quarter of the patch, VER-38
+  of the 2026-10-20 review). So the single patch is the scene's own box, with
+  the curves inside it as materials; a curved outer wall needs multipatch.
+  Spike 4 (same day): a
   material interface on a knot line with the right continuity (plain basis
   for a density jump, a C⁰ knot for a stiffness jump) reflects a pulse to
   Fresnel's value at high order; an interface between knot lines, or a kink
@@ -970,11 +972,6 @@ predictable on representative dense scenes.
 - Reuse the UI and transaction lifecycle, with discretization-specific numerical
   kernels where appropriate.
 - Compare propagation, editing behavior, and cost against the triangular solver.
-- Revisit second-order outgoing conditions on curved spans here, where the
-  boundary curvature is available exactly. On the triangle solver the
-  Engquist-Majda tangential term injects energy on curved spans (reproducer
-  test ignored in `wave_quadratic.rs`, diagnosis in the engineering log for
-  2026-09-15); until then curved faces stay reflecting or first order.
 
 **Completion:** an interactive browser IGA wave example works on one patch, with
 documented numerical and performance observations.
@@ -1248,9 +1245,9 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   2026-10-20 review). Multiplying the Engquist-Majda law by `u̇` gives
   `d/dt(E + uᵀK_auxψ) = −u̇ᵀDu̇ + uᵀK_aux u`, which is not plainly
   non-increasing, so a functional the law dissipates has to be derived, and
-  checked on the curved and baffle faces whose divergence the ignored
-  reproducer `second_order_curved_and_baffle_faces_never_add_energy` holds.
-  Until then that test and `second_order_auxiliary_state_remains_bounded_and_loses_energy`
+  checked on the curved and baffle faces of
+  `second_order_curved_and_baffle_faces_never_add_energy`. Until then that
+  test and `second_order_auxiliary_state_remains_bounded_and_loses_energy`
   judge the interior's discrete energy and bound its growth.
 - [ ] Refill a repair's band by a free tip as well as a full build meshes it.
   Dragging a welded baffle 0.025 to 0.038 a step, the refill beside its free

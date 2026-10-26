@@ -3562,20 +3562,18 @@ mod tests {
         assert!(state.auxiliary().iter().all(|value| value.is_finite()));
     }
 
-    /// Reproducer for the open item on second-order outgoing conditions on
-    /// curved and baffle spans, which were reported to inject energy and
-    /// diverge. A hole bounded by second-order faces and a curved baffle with
-    /// second-order faces sit in a reflecting cavity, meshed through the
-    /// topology path the app uses, and a pulse is released beside them. The
-    /// absorbers may only remove energy.
+    /// Second-order outgoing faces on curved and baffle spans. A hole bounded
+    /// by second-order faces and a curved baffle with second-order faces sit
+    /// in a reflecting cavity, meshed through the topology path the app uses,
+    /// and a pulse is released beside them. The absorbers may only remove
+    /// energy.
     ///
-    /// It reproduces the divergence today: the energy grows by eighteen
-    /// orders of magnitude within 8,000 steps, independently of the time step
-    /// and worse under interior refinement, while a straight baffle with the
-    /// same law is stable. See the engineering log for 2026-09-15. It stays
-    /// ignored until the condition is fixed; run it with `--ignored`.
+    /// Written on 2026-09-15 to reproduce a divergence, the energy growing by
+    /// eighteen orders of magnitude within 8,000 steps (the engineering log
+    /// for that day), and kept ignored while it did. The divergence has since
+    /// gone: on 2026-10-26 the interior's energy never rose and ended at 0.7%
+    /// of its start, and the test runs with the rest.
     #[test]
-    #[ignore = "reproduces the open second-order instability on curved spans"]
     fn second_order_curved_and_baffle_faces_never_add_energy() {
         let second_order = SpanBehavior::Separated {
             left: FaceBoundaryCondition::SecondOrderOutgoing,

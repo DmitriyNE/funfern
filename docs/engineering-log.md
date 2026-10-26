@@ -29894,3 +29894,38 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Area 9 closed: the full device suite, the IGA figure in the plan, the curved-span reproducer in the gate, and a typed number shown in a number box
+
+- **Device suite.** After area 9's 29 commits the full suite passes, 113
+  of 113 on the M1 Max, the eleven runs VER-3 and VER-31 added and the
+  consumer gate's switched mode among them. The three cavity-modes runs owed
+  since area 6, which hit their deadline under GPU contention, passed in
+  71, 75 and 70 s.
+- **The IGA figure.** docs/plan.md's IGA paragraph said a deformed box
+  keeps 0.82 to 0.87 of the step; it keeps 0.52 to 0.56 (VER-38). The user:
+  single-patch IGA is not of interest, so the plan is only made correct and
+  consistent, the decision left as it was. The paragraph's reference to the
+  curved-span outgoing item goes with that item.
+- **The curved-span reproducer.** `second_order_curved_and_baffle_faces_never_add_energy`
+  was written on 2026-09-15 to reproduce a divergence of the second-order
+  condition on curved and baffle spans and kept ignored while it did. The
+  user confirmed the instability was fixed some time ago, and the test
+  passes (the interior's energy never rises, 0.7% of it left after 8,000
+  steps), so it now runs in the gate, its doc says what it was, and the
+  plan's item to revisit the condition on curved spans is closed.
+- **A typed number in a number box.** This entry's first gate failed in
+  `material_edits_in_any_order_leave_the_panel_and_the_document_agreed`,
+  on a case the generator had not drawn before: "9.5" typed into the
+  reciprocal stiffness's formula. The editor keeps `k₀ = 1/s₀` with the
+  reciprocal cancelled, so the constant comes back as a constant, and the
+  field returns in Constant mode as a number box showing 9.50. The value and
+  the document were right; the harness looked only for a text field showing
+  "9.5". It now also accepts a number box showing the typed number to its
+  decimals, provided there is one more such box than before the typing. The
+  saved case fails before the change and passes after it. With the editor
+  broken to store `s₀` as `k₀`, it still fails. The user agreed that the
+  harness, not the editor, was wrong.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
