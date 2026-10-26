@@ -2739,18 +2739,20 @@ fn quadrature() -> [([f64; 3], f64); 6] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_scenes::*;
     use crate::{
         BACKGROUND_REGION, CanonicalSource, CurveId, CurveNode, CurveSpan, CurveSpanId,
-        CurveSpline, FaceRegionAssignment, InternalBoundary, InternalBoundaryLaw, Material,
-        MaterialId, MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshQuality,
-        MeshTriangle, MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition,
-        OuterBoundaryConditions, OuterSide, Region, TimeSignal, TopologyCurve, TopologyGeometry,
-        TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology, mesh_scene,
-        mesh_topology_plan,
+        CurveSpline, CurveTraceSide, DomainRect, FaceRegionAssignment, Material, MaterialId,
+        MeshAdaptationJob, MeshAdaptationOptions, MeshAdaptationState, MeshQuality, MeshTriangle,
+        MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition,
+        OuterBoundaryConditions, OuterSide, Region, SpanBehavior, TimeSignal, TopologyCurve,
+        TopologyGeometry, TopologyScene, TopologyVertex, TopologyVertexId, TopologyVertexLocation,
+        compile_topology, mesh_topology_plan,
     };
 
-    fn square() -> Arc<TriMesh> {
-        Arc::new(TriMesh {
+    /// The unit square in two triangles, with the plan of its rectangle.
+    fn square() -> Arc<Meshed> {
+        let mesh = TriMesh {
             geometry_revision: 4,
             mesh_revision: 7,
             vertices: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
@@ -2777,23 +2779,20 @@ mod tests {
                 minimum_angle_degrees: 45.0,
                 maximum_edge_length: 2.0_f64.sqrt(),
             },
-        })
+        };
+        Arc::new(Meshed::by_hand(
+            mesh,
+            box_plan(DomainRect::new(0.0, 1.0, 0.0, 1.0)),
+        ))
     }
 
-    fn setup() -> (Arc<TriMesh>, Arc<QuadraticWaveOperator>, Scene) {
+    fn setup() -> (Arc<Meshed>, Arc<QuadraticWaveOperator>, TopologyScene) {
         let mesh = square();
-        let scene = Scene {
+        let scene = TopologyScene {
             outer_boundaries: OuterBoundaryConditions::default(),
-            ..Scene::default()
+            ..TopologyScene::default()
         };
-        let operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
-                &scene,
-                scene.outer_boundaries,
-            )
-            .unwrap(),
-        );
+        let operator = Arc::new(assembled_with(&mesh, &scene, scene.outer_boundaries).unwrap());
         (mesh, operator, scene)
     }
 
@@ -2816,11 +2815,11 @@ mod tests {
     }
 
     fn meshed_setup(
-        scene: Scene,
+        scene: TopologyScene,
         revision: u64,
-    ) -> (Arc<TriMesh>, Arc<QuadraticWaveOperator>, Scene) {
+    ) -> (Arc<Meshed>, Arc<QuadraticWaveOperator>, TopologyScene) {
         let mesh = Arc::new(
-            mesh_scene(
+            meshed(
                 &scene,
                 revision,
                 MeshingOptions {
@@ -2834,14 +2833,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
-                &scene,
-                scene.outer_boundaries,
-            )
-            .unwrap(),
-        );
+        let operator = Arc::new(assembled_with(&mesh, &scene, scene.outer_boundaries).unwrap());
         (mesh, operator, scene)
     }
 
@@ -2905,7 +2897,7 @@ mod tests {
         TopologyMeshPlan,
         Arc<TriMesh>,
         Arc<QuadraticWaveOperator>,
-        Scene,
+        TopologyScene,
     ) {
         let topology = compile_topology(&geometry, revision).unwrap();
         let assignments = topology
@@ -2933,7 +2925,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let scene = Scene {
+        let scene = TopologyScene {
             regions: assignments
                 .iter()
                 .map(|assignment| Region {
@@ -2942,13 +2934,13 @@ mod tests {
                     frame: crate::MaterialFrame::world(),
                 })
                 .collect(),
-            ..Scene::default()
+            ..TopologyScene::default()
         };
         let operator = Arc::new(
             QuadraticWaveOperator::assemble_topology(
                 &mesh,
                 &plan,
-                TopologyWaveModel::from_scene(&scene),
+                TopologyWaveModel::from_topology_scene(&scene),
             )
             .unwrap(),
         );
@@ -3035,10 +3027,11 @@ mod tests {
             ..Default::default()
         };
         let one = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state.clone(),
                 options,
             ),
@@ -3046,7 +3039,14 @@ mod tests {
         )
         .unwrap();
         let many = run(
-            SolutionIndicatorJob::new(mesh.clone(), operator, scene, state, options),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
+                operator,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
+                state,
+                options,
+            ),
             10_000,
         )
         .unwrap();
@@ -3058,42 +3058,6 @@ mod tests {
                 .target_edge_length(Point2::new(0.25, 0.25), BACKGROUND_REGION)
                 .is_finite()
         );
-    }
-
-    #[test]
-    fn topology_indicator_matches_the_legacy_material_path_on_one_face() {
-        let (plan, mesh, operator, scene) = topology_setup(TopologyGeometry::default(), 70);
-        let state = snapshot(&mesh, &operator, |point| point.x * point.x + 0.3 * point.y);
-        let options = SolutionIndicatorOptions {
-            maximum_edge_length: 0.6,
-            ..Default::default()
-        };
-        let legacy = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
-                operator.clone(),
-                scene.clone(),
-                state.clone(),
-                options,
-            ),
-            17,
-        )
-        .unwrap();
-        let topology = run(
-            SolutionIndicatorJob::new_topology(
-                mesh,
-                operator,
-                &plan,
-                TopologyWaveModel::from_scene(&scene),
-                state,
-                options,
-            ),
-            1,
-        )
-        .unwrap();
-        assert_eq!(topology.element_indicators, legacy.element_indicators);
-        assert_eq!(topology.element_targets, legacy.element_targets);
-        assert_eq!(topology.report, legacy.report);
     }
 
     #[test]
@@ -3132,7 +3096,7 @@ mod tests {
                 mesh,
                 operator,
                 &plan,
-                TopologyWaveModel::from_scene(&scene),
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions::default(),
             ),
@@ -3202,7 +3166,7 @@ mod tests {
             QuadraticWaveOperator::assemble_topology(
                 &mesh,
                 &plan,
-                TopologyWaveModel::from_scene(&scene),
+                TopologyWaveModel::from_topology_scene(&scene),
             )
             .unwrap(),
         );
@@ -3213,7 +3177,7 @@ mod tests {
                 mesh,
                 operator,
                 &plan,
-                TopologyWaveModel::from_scene(&scene),
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions::default(),
             ),
@@ -3239,7 +3203,7 @@ mod tests {
                 mesh.clone(),
                 operator,
                 &plan,
-                TopologyWaveModel::from_scene(&scene),
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions::default(),
             ),
@@ -3272,7 +3236,7 @@ mod tests {
     /// read without it the side would put a residual of one on every edge.
     #[test]
     fn manufactured_outer_laws_have_zero_boundary_residual_and_detect_mismatch() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.outer_boundaries.sides[OuterSide::Bottom.index()] = OuterBoundaryCondition::Neumann {
             signal: constant_signal(-2.0),
         };
@@ -3288,10 +3252,11 @@ mod tests {
         state.velocity.fill(-1.0);
         let options = SolutionIndicatorOptions::default();
         let one = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state.clone(),
                 options,
             ),
@@ -3299,10 +3264,11 @@ mod tests {
         )
         .unwrap();
         let many = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state.clone(),
                 options,
             ),
@@ -3323,7 +3289,14 @@ mod tests {
 
         state.velocity.fill(0.0);
         let mismatch = run(
-            SolutionIndicatorJob::new(mesh, operator, scene, state, options),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
+                operator,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
+                state,
+                options,
+            ),
             10_000,
         )
         .unwrap();
@@ -3332,18 +3305,19 @@ mod tests {
 
     #[test]
     fn dirichlet_mismatch_is_diagnostic_only() {
-        let scene = Scene {
+        let scene = TopologyScene {
             outer_boundaries: OuterBoundaryConditions::uniform(OuterBoundaryCondition::Dirichlet {
                 signal: TimeSignal::ZERO,
             }),
-            ..Scene::default()
+            ..TopologyScene::default()
         };
         let (mesh, operator, scene) = meshed_setup(scene, 72);
         let exact = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 snapshot(&mesh, &operator, |_| 0.0),
                 SolutionIndicatorOptions::default(),
             ),
@@ -3354,10 +3328,11 @@ mod tests {
         assert_eq!(exact.report.boundary_residual_contribution, 0.0);
 
         let mismatch = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 snapshot(&mesh, &operator, |_| 0.25),
                 SolutionIndicatorOptions::default(),
             ),
@@ -3370,21 +3345,24 @@ mod tests {
 
     #[test]
     fn hole_impedance_contributes_to_its_adjacent_elements() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.materials[0].mass_density = crate::ScalarField::formula("1 + 0.1 * x").unwrap();
         scene.outer_boundaries =
             OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
-        scene.obstacles[0]
-            .span_conditions
-            .fill(FaceBoundaryCondition::Impedance { ratio: 1.0 });
+        set_rim(
+            &mut scene,
+            CurveId(1),
+            FaceBoundaryCondition::Impedance { ratio: 1.0 },
+        );
         let (mesh, operator, scene) = meshed_setup(scene, 73);
         let mut state = snapshot(&mesh, &operator, |_| 0.0);
         state.velocity.fill(1.0);
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions::default(),
             ),
@@ -3400,29 +3378,22 @@ mod tests {
 
     #[test]
     fn thin_gap_faces_add_without_cancelling_and_require_a_pair() {
-        let mut scene = Scene {
+        let mut scene = TopologyScene {
             outer_boundaries: OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting),
-            ..Scene::default()
+            ..TopologyScene::default()
         };
         scene.materials[0].stiffness = crate::ScalarField::formula("1 + 0.1 * x").unwrap();
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(4),
-            spline: OpenCubicSpline::uniform(vec![
+        add_baffle(
+            &mut scene,
+            CurveId(4),
+            vec![
                 Point2::new(-0.75, 0.0),
                 Point2::new(-0.25, 0.0),
                 Point2::new(0.25, 0.0),
                 Point2::new(0.75, 0.0),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![InternalBoundaryLaw {
-                left: FaceBoundaryCondition::Reflecting,
-                right: FaceBoundaryCondition::Reflecting,
-                coupling: InternalBoundaryCoupling::ThinGap {
-                    stiffness_ratio: 3.0,
-                },
-            }],
-        });
+            ],
+            thin_gap(3.0),
+        );
         let (mesh, gap_operator, gap_scene) = meshed_setup(scene, 74);
         let mut state = snapshot(&mesh, &gap_operator, |_| 0.0);
         for (node, point) in gap_operator.node_points().iter().enumerate() {
@@ -3435,12 +3406,12 @@ mod tests {
             };
         }
         for edge in &mesh.boundary_edges {
-            let BoundaryLabel::InternalBoundary { side, .. } = edge.label else {
+            let BoundaryLabel::Curve { side, .. } = edge.label else {
                 continue;
             };
             let value = match side {
-                InternalBoundarySide::Left => 1.0,
-                InternalBoundarySide::Right => -1.0,
+                CurveTraceSide::Left => 1.0,
+                CurveTraceSide::Right => -1.0,
             };
             for node in test_boundary_nodes(&mesh, &gap_operator, edge) {
                 state.displacement[node] = value;
@@ -3449,10 +3420,11 @@ mod tests {
         let malformed_state = state.clone();
         let options = SolutionIndicatorOptions::default();
         let gap = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 gap_operator.clone(),
-                gap_scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&gap_scene),
                 state.clone(),
                 options,
             ),
@@ -3460,12 +3432,16 @@ mod tests {
         )
         .unwrap();
 
+        // The same mesh under the plan of the independent law: a law-only
+        // edit, as the runtime reuses a mesh across one.
         let mut independent_scene = gap_scene.clone();
-        independent_scene.internal_boundaries[0].span_laws[0].coupling =
-            InternalBoundaryCoupling::Independent;
+        for span in &mut independent_scene.geometry.curves[0].spans {
+            span.behavior = SpanBehavior::REFLECTING;
+        }
+        let independent_mesh = mesh.under(&independent_scene);
         let independent_operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
+            assembled_with(
+                &independent_mesh,
                 &independent_scene,
                 independent_scene.outer_boundaries,
             )
@@ -3476,10 +3452,11 @@ mod tests {
             gap_operator.node_points()
         );
         let independent = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 independent_operator,
-                independent_scene,
+                &independent_mesh.plan,
+                TopologyWaveModel::from_topology_scene(&independent_scene),
                 state,
                 options,
             ),
@@ -3498,20 +3475,21 @@ mod tests {
             .position(|edge| {
                 matches!(
                     edge.label,
-                    BoundaryLabel::InternalBoundary {
-                        side: InternalBoundarySide::Right,
+                    BoundaryLabel::Curve {
+                        side: CurveTraceSide::Right,
                         ..
                     }
                 )
             })
             .unwrap();
-        malformed.boundary_edges.remove(right);
+        malformed.mesh.boundary_edges.remove(right);
         let malformed = Arc::new(malformed);
         let result = run(
-            SolutionIndicatorJob::new(
-                malformed.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(malformed.mesh.clone()),
                 gap_operator,
-                gap_scene,
+                &malformed.plan,
+                TopologyWaveModel::from_topology_scene(&gap_scene),
                 malformed_state,
                 options,
             ),
@@ -3522,12 +3500,9 @@ mod tests {
 
     #[test]
     fn spatial_material_interface_uses_each_sides_local_flux() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         let interior = RegionId(2);
-        scene.obstacles[0].role = LoopRole::MaterialInterface {
-            exterior: BACKGROUND_REGION,
-            interior,
-        };
+        fill_hole(&mut scene, CurveId(1), interior);
         scene.materials[0].stiffness = crate::ScalarField::formula("1 + 0.1 * x").unwrap();
         scene.materials.push(Material {
             id: MaterialId(2),
@@ -3547,10 +3522,11 @@ mod tests {
         });
         let (mesh, operator, scene) = meshed_setup(scene, 75);
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 snapshot(&mesh, &operator, |point| point.x),
                 SolutionIndicatorOptions::default(),
             ),
@@ -3570,10 +3546,11 @@ mod tests {
             ..Default::default()
         };
         let first = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 snapshot(&mesh, &operator, |point| point.x * point.x),
                 options,
             ),
@@ -3581,10 +3558,11 @@ mod tests {
         )
         .unwrap();
         let scaled = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 snapshot(&mesh, &operator, |point| 7.0 * point.x * point.x),
                 options,
             ),
@@ -3613,10 +3591,11 @@ mod tests {
             ..Default::default()
         };
         let active = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state.clone(),
                 options,
             ),
@@ -3628,10 +3607,11 @@ mod tests {
         assert!(!active.report.dormant);
 
         let dormant = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state.clone(),
                 SolutionIndicatorOptions {
                     dormant_below_energy: 2.0 * active.report.total_energy,
@@ -3654,10 +3634,11 @@ mod tests {
         // A pulse's band edge is resolved as a floor, but the estimate does
         // not scale with it as it does with the forcing frequency.
         let banded = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state.clone(),
                 SolutionIndicatorOptions {
                     band_edge_hz: 10.0,
@@ -3672,10 +3653,11 @@ mod tests {
             active.report.global_indicator
         );
         let widened = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator.clone(),
-                scene.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state.clone(),
                 SolutionIndicatorOptions {
                     dormant_below_energy: f64::MAX,
@@ -3691,10 +3673,11 @@ mod tests {
         // Dormancy suppresses only relative-error chasing. A declared forcing
         // wavelength remains a hard resolution floor.
         let forced = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions {
                     dormant_below_energy: f64::MAX,
@@ -3721,10 +3704,11 @@ mod tests {
         state.acceleration.fill(3.0);
         state.volume_acceleration.fill(3.0);
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions::default(),
             ),
@@ -3736,7 +3720,7 @@ mod tests {
 
     #[test]
     fn repeated_quiet_estimates_coarsen_a_fine_mesh_without_refinement() {
-        let scene = Scene::default();
+        let scene = TopologyScene::default();
         let meshing = MeshingOptions {
             curve_tolerance: 1.0e-3,
             target_edge_length: 0.12,
@@ -3745,25 +3729,19 @@ mod tests {
             max_triangles: 40_000,
             max_refinement_steps: 20_000,
         };
-        let mut mesh = Arc::new(mesh_scene(&scene, 10, meshing).unwrap());
+        let mut mesh = Arc::new(meshed(&scene, 10, meshing).unwrap());
         let mut adaptation_state = MeshAdaptationState::from_mesh(&mesh);
         let initial_triangles = mesh.triangles.len();
         let mut coarsening_changes = 0;
 
         for pass in 0..2 {
-            let operator = Arc::new(
-                QuadraticWaveOperator::assemble_scene_with_boundaries(
-                    &mesh,
-                    &scene,
-                    scene.outer_boundaries,
-                )
-                .unwrap(),
-            );
+            let operator = Arc::new(assembled_with(&mesh, &scene, scene.outer_boundaries).unwrap());
             let estimate = run(
-                SolutionIndicatorJob::new(
-                    mesh.clone(),
+                SolutionIndicatorJob::new_topology(
+                    std::sync::Arc::new(mesh.mesh.clone()),
                     operator.clone(),
-                    scene.clone(),
+                    &mesh.plan,
+                    TopologyWaveModel::from_topology_scene(&scene),
                     snapshot(&mesh, &operator, |_| 0.0),
                     SolutionIndicatorOptions {
                         minimum_edge_length: 0.06,
@@ -3778,9 +3756,9 @@ mod tests {
             .unwrap();
             assert_eq!(estimate.report.refine_candidates, 0);
 
-            let mut job = MeshAdaptationJob::new(
-                mesh.clone(),
-                scene.clone(),
+            let mut job = MeshAdaptationJob::new_topology(
+                Arc::new(mesh.mesh.clone()),
+                &mesh.plan,
                 adaptation_state,
                 11 + pass,
                 estimate.field,
@@ -3802,7 +3780,11 @@ mod tests {
             };
             assert_eq!(adapted.report.inserted_vertices, 0);
             coarsening_changes += adapted.report.coarsening_changes;
-            mesh = Arc::new(adapted.mesh);
+            mesh = Arc::new(Meshed {
+                mesh: adapted.mesh,
+                plan: mesh.plan.clone(),
+                source: mesh.source,
+            });
             adaptation_state = adapted.state;
         }
 
@@ -3815,10 +3797,11 @@ mod tests {
         let (mesh, operator, scene) = setup();
         let state = snapshot(&mesh, &operator, |point| point.x);
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions {
                     minimum_edge_length: 0.005,
@@ -3853,9 +3836,9 @@ mod tests {
         let mut previous = f64::INFINITY;
         let mut asking = 0;
         for (edge, revision) in [(0.16, 11), (0.08, 12), (0.04, 13)] {
-            let scene = Scene::default();
+            let scene = TopologyScene::default();
             let mesh = Arc::new(
-                mesh_scene(
+                meshed(
                     &scene,
                     revision,
                     MeshingOptions {
@@ -3869,14 +3852,7 @@ mod tests {
                 )
                 .unwrap(),
             );
-            let operator = Arc::new(
-                QuadraticWaveOperator::assemble_scene_with_boundaries(
-                    &mesh,
-                    &scene,
-                    scene.outer_boundaries,
-                )
-                .unwrap(),
-            );
+            let operator = Arc::new(assembled_with(&mesh, &scene, scene.outer_boundaries).unwrap());
             let bump = |point: Point2| (-point.dot(point) / (2.0 * sigma * sigma)).exp();
             let zeros = vec![0.0; operator.degrees_of_freedom()];
             let state = QuadraticSolutionSnapshot {
@@ -3893,10 +3869,11 @@ mod tests {
                 time_step: 0.01,
             };
             let result = run(
-                SolutionIndicatorJob::new(
-                    mesh,
+                SolutionIndicatorJob::new_topology(
+                    std::sync::Arc::new(mesh.mesh.clone()),
                     operator,
-                    scene,
+                    &mesh.plan,
+                    TopologyWaveModel::from_topology_scene(&scene),
                     state,
                     SolutionIndicatorOptions::default(),
                 ),
@@ -3930,10 +3907,11 @@ mod tests {
         let (mesh, operator, scene) = setup();
         let state = snapshot(&mesh, &operator, |point| point.x);
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions {
                     minimum_edge_length: 0.005,
@@ -3961,17 +3939,18 @@ mod tests {
     /// ones included - is an error candidate.
     #[test]
     fn a_graded_neighbour_is_an_error_candidate() {
-        let (mesh, operator, scene) = meshed_setup(Scene::default(), 1);
+        let (mesh, operator, scene) = meshed_setup(TopologyScene::default(), 1);
         // A steep bump off centre: its error binds a few elements, and grading
         // pulls their neighbours in.
         let state = snapshot(&mesh, &operator, |point| {
             (-((point.x - 0.6).powi(2) + (point.y - 0.6).powi(2)) / 0.01).exp()
         });
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions {
                     minimum_edge_length: 0.005,
@@ -3999,17 +3978,18 @@ mod tests {
     /// limit alone.
     #[test]
     fn the_limits_field_leaves_out_the_estimates_targets() {
-        let (mesh, operator, scene) = meshed_setup(Scene::default(), 1);
+        let (mesh, operator, scene) = meshed_setup(TopologyScene::default(), 1);
         let state = snapshot(&mesh, &operator, |point| {
             (-((point.x - 0.6).powi(2) + (point.y - 0.6).powi(2)) / 0.01).exp()
         });
         let count = mesh.triangles.len();
         let largest = 0.15;
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions {
                     minimum_edge_length: 0.005,
@@ -4040,10 +4020,11 @@ mod tests {
         let (mesh, operator, scene) = setup();
         let state = snapshot(&mesh, &operator, |point| point.x.powi(3));
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions {
                     minimum_edge_length: 0.005,
@@ -4070,10 +4051,11 @@ mod tests {
         let (mesh, operator, scene) = setup();
         let state = snapshot(&mesh, &operator, |point| point.x);
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions {
                     minimum_edge_length: 0.005,
@@ -4092,7 +4074,7 @@ mod tests {
 
     #[test]
     fn spatial_interpolation_cannot_escape_configured_size_limits() {
-        let mesh = square();
+        let mesh = Arc::new(square().mesh.clone());
         let field = AdaptiveSizeField::new(
             mesh,
             vec![[0.02, 0.02, 0.16], [0.16, 0.16, 0.16]],
@@ -4119,12 +4101,13 @@ mod tests {
         state.mesh_revision += 1;
         assert_eq!(
             run(
-                SolutionIndicatorJob::new(
-                    mesh.clone(),
+                SolutionIndicatorJob::new_topology(
+                    std::sync::Arc::new(mesh.mesh.clone()),
                     operator.clone(),
-                    scene.clone(),
+                    &mesh.plan,
+                    TopologyWaveModel::from_topology_scene(&scene),
                     state,
-                    SolutionIndicatorOptions::default(),
+                    SolutionIndicatorOptions::default()
                 ),
                 100,
             )
@@ -4135,12 +4118,13 @@ mod tests {
         state.velocity.pop();
         assert_eq!(
             run(
-                SolutionIndicatorJob::new(
-                    mesh.clone(),
+                SolutionIndicatorJob::new_topology(
+                    std::sync::Arc::new(mesh.mesh.clone()),
                     operator.clone(),
-                    scene.clone(),
+                    &mesh.plan,
+                    TopologyWaveModel::from_topology_scene(&scene),
                     state,
-                    SolutionIndicatorOptions::default(),
+                    SolutionIndicatorOptions::default()
                 ),
                 100,
             )
@@ -4151,12 +4135,13 @@ mod tests {
         state.acceleration[0] = f64::NAN;
         assert_eq!(
             run(
-                SolutionIndicatorJob::new(
-                    mesh,
+                SolutionIndicatorJob::new_topology(
+                    std::sync::Arc::new(mesh.mesh.clone()),
                     operator,
-                    scene,
+                    &mesh.plan,
+                    TopologyWaveModel::from_topology_scene(&scene),
                     state,
-                    SolutionIndicatorOptions::default(),
+                    SolutionIndicatorOptions::default()
                 ),
                 100,
             )
@@ -4168,23 +4153,19 @@ mod tests {
     #[test]
     fn constant_formulas_match_uniform_material_indicator() {
         let mesh = square();
-        let uniform_scene = Scene::default();
+        let uniform_scene = TopologyScene::default();
         let uniform_operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
-                &uniform_scene,
-                uniform_scene.outer_boundaries,
-            )
-            .unwrap(),
+            assembled_with(&mesh, &uniform_scene, uniform_scene.outer_boundaries).unwrap(),
         );
         let state = snapshot(&mesh, &uniform_operator, |point| {
             point.x * point.x + point.y
         });
         let uniform = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 uniform_operator,
-                uniform_scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&uniform_scene),
                 state.clone(),
                 SolutionIndicatorOptions::default(),
             ),
@@ -4192,23 +4173,19 @@ mod tests {
         )
         .unwrap();
 
-        let mut formula_scene = Scene::default();
+        let mut formula_scene = TopologyScene::default();
         formula_scene.materials[0].mass_density = crate::ScalarField::formula("1").unwrap();
         formula_scene.materials[0].stiffness = crate::ScalarField::formula("1").unwrap();
         formula_scene.materials[0].damping = crate::ScalarField::formula("0").unwrap();
         let formula_operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
-                &formula_scene,
-                formula_scene.outer_boundaries,
-            )
-            .unwrap(),
+            assembled_with(&mesh, &formula_scene, formula_scene.outer_boundaries).unwrap(),
         );
         let formula = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 formula_operator,
-                formula_scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&formula_scene),
                 state,
                 SolutionIndicatorOptions::default(),
             ),
@@ -4223,24 +4200,18 @@ mod tests {
     #[test]
     fn stiffness_gradient_completes_the_manufactured_cell_residual_in_a_rotated_frame() {
         let mesh = square();
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].stiffness = crate::ScalarField::formula("1 + x").unwrap();
         scene.regions[0].frame.angle_radians = std::f64::consts::FRAC_PI_2;
-        let operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
-                &scene,
-                scene.outer_boundaries,
-            )
-            .unwrap(),
-        );
+        let operator = Arc::new(assembled_with(&mesh, &scene, scene.outer_boundaries).unwrap());
         let mut state = snapshot(&mesh, &operator, |point| point.y);
         state.acceleration.fill(1.0);
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions::default(),
             ),
@@ -4256,22 +4227,16 @@ mod tests {
     #[test]
     fn spatial_wave_speed_caps_each_element_by_its_slowest_sample() {
         let mesh = square();
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].mass_density = crate::ScalarField::formula("1 + 3 * x").unwrap();
-        let operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
-                &scene,
-                scene.outer_boundaries,
-            )
-            .unwrap(),
-        );
+        let operator = Arc::new(assembled_with(&mesh, &scene, scene.outer_boundaries).unwrap());
         let state = snapshot(&mesh, &operator, |_| 0.0);
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions {
                     minimum_edge_length: 0.005,
@@ -4296,22 +4261,16 @@ mod tests {
     #[test]
     fn directional_wavelength_guard_uses_the_slow_principal_axis() {
         let mesh = square();
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].axis_ratio = crate::ScalarField::constant(4.0);
-        let operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
-                &scene,
-                scene.outer_boundaries,
-            )
-            .unwrap(),
-        );
+        let operator = Arc::new(assembled_with(&mesh, &scene, scene.outer_boundaries).unwrap());
         let state = snapshot(&mesh, &operator, |_| 0.0);
         let result = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions {
                     minimum_edge_length: 0.005,
@@ -4335,23 +4294,19 @@ mod tests {
     #[test]
     fn spatial_density_and_damping_enter_the_cell_residual() {
         let mesh = square();
-        let uniform_scene = Scene::default();
+        let uniform_scene = TopologyScene::default();
         let uniform_operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
-                &uniform_scene,
-                uniform_scene.outer_boundaries,
-            )
-            .unwrap(),
+            assembled_with(&mesh, &uniform_scene, uniform_scene.outer_boundaries).unwrap(),
         );
         let mut uniform_state = snapshot(&mesh, &uniform_operator, |_| 0.0);
         uniform_state.velocity.fill(1.0);
         uniform_state.acceleration.fill(1.0);
         let uniform = run(
-            SolutionIndicatorJob::new(
-                mesh.clone(),
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 uniform_operator,
-                uniform_scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&uniform_scene),
                 uniform_state,
                 SolutionIndicatorOptions::default(),
             ),
@@ -4359,25 +4314,21 @@ mod tests {
         )
         .unwrap();
 
-        let mut profile_scene = Scene::default();
+        let mut profile_scene = TopologyScene::default();
         profile_scene.materials[0].mass_density = crate::ScalarField::formula("1 + x").unwrap();
         profile_scene.materials[0].damping = crate::ScalarField::formula("y").unwrap();
         let profile_operator = Arc::new(
-            QuadraticWaveOperator::assemble_scene_with_boundaries(
-                &mesh,
-                &profile_scene,
-                profile_scene.outer_boundaries,
-            )
-            .unwrap(),
+            assembled_with(&mesh, &profile_scene, profile_scene.outer_boundaries).unwrap(),
         );
         let mut profile_state = snapshot(&mesh, &profile_operator, |_| 0.0);
         profile_state.velocity.fill(1.0);
         profile_state.acceleration.fill(1.0);
         let profile = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 profile_operator,
-                profile_scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&profile_scene),
                 profile_state,
                 SolutionIndicatorOptions::default(),
             ),
@@ -4396,10 +4347,11 @@ mod tests {
         scene.materials[0].stiffness = crate::ScalarField::formula("1 / x").unwrap();
         let state = snapshot(&mesh, &operator, |_| 0.0);
         let error = run(
-            SolutionIndicatorJob::new(
-                mesh,
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
                 operator,
-                scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 state,
                 SolutionIndicatorOptions::default(),
             ),
@@ -4419,10 +4371,10 @@ mod tests {
 
     #[test]
     fn canonical_supplement_is_zero_for_stationary_state_and_detects_drift_defect() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.outer_boundaries =
             OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &scene,
             91,
             MeshingOptions {
@@ -4431,13 +4383,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let canonical = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1).unwrap();
         let forcing = CanonicalForcing::none(&canonical);
         let snapshot = CanonicalIndicatorSnapshot {
             mesh_revision: mesh.mesh_revision,
@@ -4479,10 +4432,10 @@ mod tests {
 
     #[test]
     fn canonical_primary_rate_uses_balance_and_prescribed_derivative() {
-        let mut scene = Scene::initial();
+        let mut scene = initial();
         scene.outer_boundaries =
             OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
-        let mesh = mesh_scene(
+        let mesh = meshed(
             &scene,
             92,
             MeshingOptions {
@@ -4491,13 +4444,14 @@ mod tests {
             },
         )
         .unwrap();
-        let scalar = QuadraticWaveOperator::assemble_scene(
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let canonical = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
         )
         .unwrap();
-        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &scalar, &scene, 1).unwrap();
         let mut snapshot = CanonicalIndicatorSnapshot {
             mesh_revision: mesh.mesh_revision,
             primary_flux: vec![0.0; canonical.degrees_of_freedom()],

@@ -18,8 +18,7 @@
 //! beside a zero one on adjacent outer sides, which the corner rule refuses;
 //! and a thin gap beside an outgoing side, which the editor refuses. Forty
 //! mixed cases per scene from a fixed seed supplement it. The report per
-//! scene says what was covered; nothing mandatory is omitted. The `Scene`
-//! path's counterpart lives in `funfern-core`'s `canonical_wave` tests.
+//! scene says what was covered; nothing mandatory is omitted.
 //!
 //! Two refusals are predicted from the draft before validation runs, by the
 //! rules that make them: a driven Dirichlet beside a differently driven one

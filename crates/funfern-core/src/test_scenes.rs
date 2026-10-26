@@ -127,16 +127,70 @@ pub(crate) fn add_baffle(
     points: Vec<Point2>,
     behavior: SpanBehavior,
 ) {
-    let spline = CurveSpline::Open(OpenCubicSpline::uniform(points).unwrap());
-    let curve = TopologyCurve::new(id, spline.clone(), spans(id, &spline, behavior)).unwrap();
+    let spline = OpenCubicSpline::uniform(points).unwrap();
+    let behaviors = vec![behavior; spline.intervals().len()];
+    add_open_curve(scene, id, spline, behaviors);
+}
+
+/// Adds a free open curve over `spline`, its spans with `behaviors` in order.
+pub(crate) fn add_open_curve(
+    scene: &mut TopologyScene,
+    id: CurveId,
+    spline: OpenCubicSpline,
+    behaviors: Vec<SpanBehavior>,
+) {
+    let spans = behaviors
+        .into_iter()
+        .zip(0..)
+        .map(|(behavior, index)| CurveSpan {
+            id: CurveSpanId(100 * id.0 + index),
+            behavior,
+        })
+        .collect();
+    let curve = TopologyCurve::new(id, CurveSpline::Open(spline), spans).unwrap();
     scene.geometry.curves.push(curve);
 }
 
 /// A mesh with the plan it was meshed from, through which the assembly
 /// reads the walls and curve laws. It reads as the mesh it holds.
+#[derive(Clone)]
 pub(crate) struct Meshed {
     pub(crate) mesh: TriMesh,
     pub(crate) plan: TopologyMeshPlan,
+    /// The revision and options the plan was compiled and coarsened at,
+    /// when it came from a scene: how a law edit's plan is made for the
+    /// same mesh. A mesh built by hand has none.
+    pub(crate) source: Option<(u64, MeshingOptions)>,
+}
+
+impl Meshed {
+    /// A mesh built by hand, with the plan it stands for.
+    pub(crate) fn by_hand(mesh: TriMesh, plan: TopologyMeshPlan) -> Self {
+        Self {
+            mesh,
+            plan,
+            source: None,
+        }
+    }
+
+    /// The same mesh under `scene`'s plan, as the runtime keeps a mesh
+    /// across a law-only edit; an edit that is not one is refused.
+    pub(crate) fn under(&self, scene: &TopologyScene) -> Self {
+        let (revision, options) = self
+            .source
+            .expect("a mesh built by hand has no scene to plan again");
+        let plan = plan_of(scene, revision, options);
+        assert_eq!(
+            topology_mesh_update_action(&self.plan, &plan),
+            TopologyMeshUpdateAction::Reuse,
+            "not a law-only edit"
+        );
+        Self {
+            mesh: self.mesh.clone(),
+            plan,
+            source: self.source,
+        }
+    }
 }
 
 impl std::ops::Deref for Meshed {
@@ -147,6 +201,24 @@ impl std::ops::Deref for Meshed {
     }
 }
 
+/// The plan of `domain` with its one face the background's: what a mesh
+/// built by hand over that rectangle stands for.
+pub(crate) fn box_plan(domain: DomainRect) -> TopologyMeshPlan {
+    let geometry = TopologyGeometry {
+        domain,
+        ..TopologyGeometry::default()
+    };
+    let topology = compile_topology(&geometry, 1).unwrap();
+    TopologyMeshPlan::new(
+        &topology,
+        &[FaceRegionAssignment {
+            face: topology.faces[0].id,
+            region: Some(BACKGROUND_REGION),
+        }],
+    )
+    .unwrap()
+}
+
 /// `scene` compiled at `revision` and meshed with `options` as the runtime
 /// meshes it.
 pub(crate) fn meshed(
@@ -154,22 +226,63 @@ pub(crate) fn meshed(
     revision: u64,
     options: MeshingOptions,
 ) -> Result<Meshed, MeshError> {
+    let plan = plan_of(scene, revision, options);
+    let mesh = mesh_topology_plan(&plan, revision, options)?;
+    Ok(Meshed {
+        mesh,
+        plan,
+        source: Some((revision, options)),
+    })
+}
+
+/// `scene`'s plan compiled at `revision` and coarsened for `options`: the
+/// plan a mesh made with those options is assembled through, and a law-only
+/// edit's new one over the same mesh.
+pub(crate) fn plan_of(
+    scene: &TopologyScene,
+    revision: u64,
+    options: MeshingOptions,
+) -> TopologyMeshPlan {
     let compiled = scene.compile(revision).unwrap();
-    let plan = compiled
+    compiled
         .plan
         .coarsened(&compiled.topology, AtomCoarsening::from_meshing(options))
+        .unwrap()
+}
+
+/// Gives every span of the closed curve `id` `condition` on its outside, the
+/// right side, as the legacy hole's span conditions did.
+pub(crate) fn set_rim(scene: &mut TopologyScene, id: CurveId, condition: FaceBoundaryCondition) {
+    let curve = scene
+        .geometry
+        .curves
+        .iter_mut()
+        .find(|curve| curve.id == id)
         .unwrap();
-    let mesh = mesh_topology_plan(&plan, revision, options)?;
-    Ok(Meshed { mesh, plan })
+    for span in &mut curve.spans {
+        span.behavior = SpanBehavior::Separated {
+            left: FaceBoundaryCondition::Reflecting,
+            right: condition,
+            coupling: InternalBoundaryCoupling::Independent,
+        };
+    }
 }
 
 /// `scene`'s scalar operator on `meshed` with `walls`, whatever walls the
-/// scene has: what the `Scene` path's assembly took.
+/// scene has: what the `Scene` path's assembly took. The curve laws are the
+/// plan's, so a scene whose laws are not is refused: a law edit is
+/// assembled on [`Meshed::under`] it.
 pub(crate) fn assembled_with(
     meshed: &Meshed,
     scene: &TopologyScene,
     walls: OuterBoundaryConditions,
 ) -> Result<QuadraticWaveOperator, WaveError> {
+    if let Some((revision, options)) = meshed.source {
+        assert!(
+            plan_of(scene, revision, options) == meshed.plan,
+            "the scene's laws are not the mesh's plan's"
+        );
+    }
     let model = OwnedTopologyWaveModel {
         outer_boundaries: walls,
         ..TopologyWaveModel::from_topology_scene(scene).to_owned()
@@ -184,6 +297,29 @@ pub(crate) fn assembled(
     condition: OuterBoundaryCondition,
 ) -> Result<QuadraticWaveOperator, WaveError> {
     assembled_with(meshed, scene, OuterBoundaryConditions::uniform(condition))
+}
+
+/// `scene`'s scalar operator on a mesh built by hand, which has no plan,
+/// with `condition` on every wall: an outer edge takes its triangle's region.
+pub(crate) fn hand_assembled(
+    mesh: &TriMesh,
+    scene: &TopologyScene,
+    condition: OuterBoundaryCondition,
+) -> Result<QuadraticWaveOperator, WaveError> {
+    hand_assembled_with(mesh, scene, OuterBoundaryConditions::uniform(condition))
+}
+
+/// [`hand_assembled`] with a condition per wall.
+pub(crate) fn hand_assembled_with(
+    mesh: &TriMesh,
+    scene: &TopologyScene,
+    walls: OuterBoundaryConditions,
+) -> Result<QuadraticWaveOperator, WaveError> {
+    let model = OwnedTopologyWaveModel {
+        outer_boundaries: walls,
+        ..TopologyWaveModel::from_topology_scene(scene).to_owned()
+    };
+    QuadraticWaveOperator::assemble_model(mesh, model.as_model())
 }
 
 /// A scene meshed and assembled: the plan the mesh came from, the scalar

@@ -10574,9 +10574,9 @@ mod tests {
         let mut scene = initial();
         scene.materials[0].mass_law.drive = pump(0.2, 1.0, 0.0);
         // The static assembly reads the medium with its laws stripped, as
-        // production does: the TopologyScene path refuses a law as well (NUM-15 of
-        // the 2026-10-20 review), and the refusal under test is the
-        // compiler's own.
+        // production does: the assembly refuses a law as well (NUM-15 of the
+        // 2026-10-20 review), and the refusal under test is the compiler's
+        // own.
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
         let mesh = meshed(&base_scene, 1, MeshingOptions::default()).unwrap();

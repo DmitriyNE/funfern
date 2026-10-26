@@ -29998,3 +29998,46 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Legacy phase-out 3: canonical_wave, indicator, amr and probe off `Scene`
+
+- **Moved.** canonical_wave keeps 45 of its 46 tests, indicator 30 of 31,
+  amr 22 of 23 and probe 16 of 18. Every bound in them is unchanged.
+  Meshes built by hand are assembled through the test-only
+  `hand_assembled`, which has no plan. Where a topology job needs a plan,
+  the hand-built mesh carries `box_plan`, the one-face plan of the rectangle
+  it covers. The indicator and adaptation jobs go through `new_topology`.
+  The U-and-line scene became two free curves, and the trace report still
+  reads four pieces on it. The closed interface and the closed wall in amr
+  became a rim's span behaviour; hole rims and baffle sides took curve
+  labels.
+- **Dropped, as tests of the `Scene` path alone.**
+  - canonical_wave's sweep of every wall law on the `Scene` path. The
+    app's `wall_sweep.rs` covers the topology path on every gallery scene,
+    and the regression suite prepares the 12 October autosave that the
+    sweep's U-and-line scene re-created. `wall_sweep.rs` no longer points
+    to it.
+  - indicator's comparison of the topology indicator with the legacy
+    material path.
+  - amr's paired baffle trace, which
+    `topology_separated_baffle_refines_and_coarsens_both_traces_atomically`
+    covers.
+  - probe's two boundary stencils on legacy labels, which
+    `topology_line_samples_gap_at_a_curve_and_boundary_sides_stay_distinct`
+    and `topology_probes_follow_transmitting_face_assignments` cover.
+- **Law edits.** A test that changes only a span's law and reassembles on
+  the same mesh needs the new law's plan; the `Scene` path read the laws
+  from the scene. `Meshed` now carries the revision and options its plan
+  came from. `Meshed::under(scene)` gives that scene's plan over the same
+  mesh, and refuses an edit the mesh would not be kept across. The
+  fixtures' assembly refuses a scene whose laws are not the mesh's plan's,
+  so a forgotten re-plan fails rather than assembling the old laws.
+  canonical_temporal's 137 tests pass under that check.
+- **Corrections to the previous entry.** 130 of canonical_temporal's 137
+  tests reach a scene, directly or through the module's helpers. The 112
+  given there was the mapping's estimate. The conversion had also renamed
+  "the Scene path" in one comment to "the TopologyScene path"; it now reads
+  "the assembly".
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

@@ -1340,16 +1340,19 @@ fn rectangular_far_field_contour(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_scenes::*;
     use crate::{
         BACKGROUND_REGION, BoundaryEdge, CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline,
         DEFAULT_MATERIAL, FaceBoundaryCondition, FaceRegionAssignment, InternalBoundaryCoupling,
-        Material, MaterialId, MeshQuality, MeshTriangle, MeshVertex, ObstacleId, OpenCubicSpline,
+        Material, MaterialId, MeshQuality, MeshTriangle, MeshVertex, OpenCubicSpline,
         OuterBoundaryCondition, OuterSide, PeriodicCubicSpline, QuadraticWaveOperator, Region,
-        ScalarField, SpanBehavior, TimeSignal, TopologyCurve, TopologyGeometry, TopologyVertex,
-        TopologyVertexId, TopologyVertexLocation, compile_topology, mesh_topology_plan,
+        ScalarField, SpanBehavior, TimeSignal, TopologyCurve, TopologyGeometry, TopologyScene,
+        TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology,
+        mesh_topology_plan,
     };
 
-    fn fixture() -> (TriMesh, Scene, QuadraticWaveOperator) {
+    /// One triangle by hand, with the plan of the unit square it sits in.
+    fn fixture() -> (Meshed, TopologyScene, QuadraticWaveOperator) {
         let mesh = TriMesh {
             geometry_revision: 3,
             mesh_revision: 7,
@@ -1381,7 +1384,8 @@ mod tests {
                 maximum_edge_length: 2.0_f64.sqrt(),
             },
         };
-        let scene = Scene {
+        let mesh = Meshed::by_hand(mesh, box_plan(crate::DomainRect::new(0.0, 1.0, 0.0, 1.0)));
+        let scene = TopologyScene {
             materials: vec![Material {
                 mass_density: crate::ScalarField::constant(2.0),
                 stiffness: crate::ScalarField::constant(3.0),
@@ -1392,20 +1396,20 @@ mod tests {
                 material: DEFAULT_MATERIAL,
                 frame: crate::MaterialFrame::world(),
             }],
-            ..Scene::default()
+            ..TopologyScene::default()
         };
-        let operator = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
+        let operator = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
         (mesh, scene, operator)
     }
 
     fn topology_fixture(
         geometry: TopologyGeometry,
-    ) -> (TopologyMeshPlan, TriMesh, Scene, QuadraticWaveOperator) {
+    ) -> (
+        TopologyMeshPlan,
+        TriMesh,
+        TopologyScene,
+        QuadraticWaveOperator,
+    ) {
         let topology = compile_topology(&geometry, 40).unwrap();
         let assignments = topology
             .faces
@@ -1430,7 +1434,7 @@ mod tests {
             },
         )
         .unwrap();
-        let scene = Scene {
+        let scene = TopologyScene {
             regions: assignments
                 .iter()
                 .map(|assignment| Region {
@@ -1444,12 +1448,12 @@ mod tests {
                     frame: crate::MaterialFrame::world(),
                 }))
                 .collect(),
-            ..Scene::default()
+            ..TopologyScene::default()
         };
         let operator = QuadraticWaveOperator::assemble_topology(
             &mesh,
             &plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         (plan, mesh, scene, operator)
@@ -1554,7 +1558,14 @@ mod tests {
     fn samples_affine_field_and_local_energy() {
         let (mesh, scene, operator) = fixture();
         let point = Point2::new(0.2, 0.3);
-        let stencil = QuadraticPointStencil::build(&mesh, &operator, &scene, point).unwrap();
+        let stencil = QuadraticPointStencil::build_topology(
+            &mesh,
+            &operator,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&scene),
+            point,
+        )
+        .unwrap();
         let displacement = operator
             .node_points()
             .iter()
@@ -1573,14 +1584,16 @@ mod tests {
         let (mesh, mut scene, _) = fixture();
         scene.materials[0].mass_density = crate::ScalarField::formula("1 + x").unwrap();
         scene.materials[0].stiffness = crate::ScalarField::formula("2 + y").unwrap();
-        let operator = QuadraticWaveOperator::assemble_scene(
+        let operator = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let point = Point2::new(0.2, 0.3);
+        let stencil = QuadraticPointStencil::build_topology(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &operator,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&scene),
+            point,
         )
         .unwrap();
-        let point = Point2::new(0.2, 0.3);
-        let stencil = QuadraticPointStencil::build(&mesh, &operator, &scene, point).unwrap();
         let displacement = operator
             .node_points()
             .iter()
@@ -1596,14 +1609,15 @@ mod tests {
     fn point_probe_energy_uses_the_directional_quadratic_form() {
         let (mesh, mut scene, _) = fixture();
         scene.materials[0].axis_ratio = crate::ScalarField::constant(4.0);
-        let operator = QuadraticWaveOperator::assemble_scene(
+        let operator = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let stencil = QuadraticPointStencil::build_topology(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &operator,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&scene),
+            Point2::new(0.2, 0.3),
         )
         .unwrap();
-        let stencil =
-            QuadraticPointStencil::build(&mesh, &operator, &scene, Point2::new(0.2, 0.3)).unwrap();
         let displacement = operator
             .node_points()
             .iter()
@@ -1618,10 +1632,11 @@ mod tests {
     #[test]
     fn integrates_region_field_and_energy() {
         let (mesh, scene, operator) = fixture();
-        let stencil = QuadraticAreaStencil::build(
+        let stencil = QuadraticAreaStencil::build_topology(
             &mesh,
             &operator,
-            &scene,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&scene),
             AreaProbeShape::Region(BACKGROUND_REGION),
         )
         .unwrap();
@@ -1644,10 +1659,11 @@ mod tests {
     fn disk_uses_world_space_clipping_and_reports_coverage() {
         let (mesh, scene, operator) = fixture();
         let radius = 0.1;
-        let stencil = QuadraticAreaStencil::build(
+        let stencil = QuadraticAreaStencil::build_topology(
             &mesh,
             &operator,
-            &scene,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&scene),
             AreaProbeShape::Disk {
                 center: Point2::new(0.25, 0.25),
                 radius,
@@ -1665,10 +1681,11 @@ mod tests {
         assert!((sample.mean_energy_density - 9.0).abs() < 1.0e-11);
         assert!(sample.coverage > 0.998 && sample.coverage <= 1.0);
 
-        let partial = QuadraticAreaStencil::build(
+        let partial = QuadraticAreaStencil::build_topology(
             &mesh,
             &operator,
-            &scene,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&scene),
             AreaProbeShape::Disk {
                 center: Point2::new(0.0, 0.0),
                 radius,
@@ -1683,30 +1700,33 @@ mod tests {
     fn rejects_invalid_area_targets_and_fields() {
         let (mesh, scene, operator) = fixture();
         assert_eq!(
-            QuadraticAreaStencil::build(
+            QuadraticAreaStencil::build_topology(
                 &mesh,
                 &operator,
-                &scene,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
                 AreaProbeShape::Disk {
                     center: Point2::default(),
                     radius: 0.0,
-                },
+                }
             ),
             Err(AreaProbeError::InvalidTarget)
         );
         assert_eq!(
-            QuadraticAreaStencil::build(
+            QuadraticAreaStencil::build_topology(
                 &mesh,
                 &operator,
-                &scene,
-                AreaProbeShape::Region(RegionId(999)),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
+                AreaProbeShape::Region(RegionId(999))
             ),
             Err(AreaProbeError::MissingRegion)
         );
-        let stencil = QuadraticAreaStencil::build(
+        let stencil = QuadraticAreaStencil::build_topology(
             &mesh,
             &operator,
-            &scene,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&scene),
             AreaProbeShape::Region(BACKGROUND_REGION),
         )
         .unwrap();
@@ -1716,19 +1736,22 @@ mod tests {
     #[test]
     fn boundary_stencil_uses_selected_edge_and_outward_normal() {
         let (mut mesh, scene, operator) = fixture();
-        mesh.boundary_edges.push(BoundaryEdge {
+        mesh.mesh.boundary_edges.push(BoundaryEdge {
             vertices: [0, 1],
             label: BoundaryLabel::Outer(crate::OuterSide::Bottom),
             parameters: [0.0, 1.0],
         });
-        let sample = QuadraticBoundaryStencil::build(
+        let sample = QuadraticBoundaryStencil::build_topology(
             &mesh,
             &operator,
-            &scene,
-            BoundaryLabel::Outer(crate::OuterSide::Bottom),
-            0.25,
-            1.0,
-            BACKGROUND_REGION,
+            &mesh.plan,
+            TopologyWaveModel::from_topology_scene(&scene),
+            BoundaryStencilTarget {
+                label: BoundaryLabel::Outer(crate::OuterSide::Bottom),
+                parameter: 0.25,
+                period: None,
+                region: BACKGROUND_REGION,
+            },
         )
         .unwrap();
         assert!((sample.point - Point2::new(0.25, 0.0)).norm() < 1.0e-12);
@@ -1737,101 +1760,16 @@ mod tests {
     }
 
     #[test]
-    fn boundary_stencil_selects_material_interface_trace() {
-        let mut scene = Scene::initial();
-        let interior = RegionId(2);
-        scene.regions.push(Region {
-            id: interior,
-            material: DEFAULT_MATERIAL,
-            frame: crate::MaterialFrame::world(),
-        });
-        scene.obstacles[0].role = crate::LoopRole::MaterialInterface {
-            exterior: BACKGROUND_REGION,
-            interior,
-        };
-        let mesh = crate::mesh_scene(&scene, 4, crate::MeshingOptions::default()).unwrap();
-        let operator = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let parameter = 0.5;
-        let exterior = QuadraticBoundaryStencil::build(
-            &mesh,
-            &operator,
-            &scene,
-            BoundaryLabel::MaterialInterface(ObstacleId(1)),
-            parameter,
-            scene.obstacles[0].spline.period(),
-            BACKGROUND_REGION,
-        )
-        .unwrap();
-        let interior_sample = QuadraticBoundaryStencil::build(
-            &mesh,
-            &operator,
-            &scene,
-            BoundaryLabel::MaterialInterface(ObstacleId(1)),
-            parameter,
-            scene.obstacles[0].spline.period(),
-            interior,
-        )
-        .unwrap();
-        assert_eq!(exterior.stencil.region, BACKGROUND_REGION);
-        assert_eq!(interior_sample.stencil.region, interior);
-        assert!(exterior.outward_normal.dot(interior_sample.outward_normal) < -0.99);
-    }
-
-    #[test]
-    fn boundary_stencil_keeps_baffle_faces_distinct() {
-        let mut scene = Scene::default();
-        let spline = crate::OpenCubicSpline::uniform(vec![
-            Point2::new(-0.7, 0.0),
-            Point2::new(-0.25, 0.0),
-            Point2::new(0.25, 0.0),
-            Point2::new(0.7, 0.0),
-        ])
-        .unwrap();
-        let period = spline.period();
-        scene.internal_boundaries.push(crate::InternalBoundary {
-            id: crate::InternalBoundaryId(1),
-            spline,
-            region: BACKGROUND_REGION,
-            span_laws: vec![crate::InternalBoundaryLaw::REFLECTING],
-        });
-        let mesh = crate::mesh_scene(&scene, 5, crate::MeshingOptions::default()).unwrap();
-        let operator = QuadraticWaveOperator::assemble_scene(
-            &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
-        )
-        .unwrap();
-        let sample = |side| {
-            QuadraticBoundaryStencil::build(
-                &mesh,
-                &operator,
-                &scene,
-                BoundaryLabel::InternalBoundary {
-                    id: crate::InternalBoundaryId(1),
-                    side,
-                },
-                period * 0.5,
-                period,
-                BACKGROUND_REGION,
-            )
-            .unwrap()
-        };
-        let left = sample(crate::InternalBoundarySide::Left);
-        let right = sample(crate::InternalBoundarySide::Right);
-        assert!(left.outward_normal.dot(right.outward_normal) < -0.99);
-        assert_ne!(left.stencil.nodes, right.stencil.nodes);
-    }
-
-    #[test]
     fn rejects_points_outside_the_domain() {
         let (mesh, scene, operator) = fixture();
         assert_eq!(
-            QuadraticPointStencil::build(&mesh, &operator, &scene, Point2::new(2.0, 2.0)),
+            QuadraticPointStencil::build_topology(
+                &mesh,
+                &operator,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
+                Point2::new(2.0, 2.0)
+            ),
             Err(PointProbeError::OutsideDomain)
         );
     }
@@ -1839,13 +1777,24 @@ mod tests {
     #[test]
     fn rejects_a_point_on_a_two_trace_boundary() {
         let (mut mesh, scene, operator) = fixture();
-        mesh.boundary_edges.push(BoundaryEdge {
+        mesh.mesh.boundary_edges.push(BoundaryEdge {
             vertices: [0, 1],
-            label: BoundaryLabel::MaterialInterface(ObstacleId(3)),
+            label: BoundaryLabel::Curve {
+                curve: CurveId(3),
+                span: CurveSpanId(30),
+                side: crate::CurveTraceSide::Left,
+                separated: false,
+            },
             parameters: [0.0, 1.0],
         });
         assert_eq!(
-            QuadraticPointStencil::build(&mesh, &operator, &scene, Point2::new(0.4, 0.0)),
+            QuadraticPointStencil::build_topology(
+                &mesh,
+                &operator,
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(&scene),
+                Point2::new(0.4, 0.0)
+            ),
             Err(PointProbeError::AmbiguousBoundary)
         );
     }
@@ -1853,7 +1802,7 @@ mod tests {
     #[test]
     fn topology_point_and_area_stencils_use_active_face_regions() {
         let (plan, mesh, scene, operator) = topology_fixture(TopologyGeometry::default());
-        let model = TopologyWaveModel::from_scene(&scene);
+        let model = TopologyWaveModel::from_topology_scene(&scene);
         let point = Point2::new(0.2, 0.3);
         let stencil =
             QuadraticPointStencil::build_topology(&mesh, &operator, &plan, model, point).unwrap();
@@ -1882,7 +1831,7 @@ mod tests {
     #[test]
     fn topology_line_samples_gap_at_a_curve_and_boundary_sides_stay_distinct() {
         let (plan, mesh, scene, operator) = topology_fixture(topology_baffle());
-        let model = TopologyWaveModel::from_scene(&scene);
+        let model = TopologyWaveModel::from_topology_scene(&scene);
         let left_edge = mesh
             .boundary_edges
             .iter()
@@ -1974,7 +1923,7 @@ mod tests {
     #[test]
     fn topology_probes_follow_transmitting_face_assignments() {
         let (plan, mesh, scene, operator) = topology_fixture(topology_divider());
-        let model = TopologyWaveModel::from_scene(&scene);
+        let model = TopologyWaveModel::from_topology_scene(&scene);
         let regions = [Point2::new(-0.5, 0.2), Point2::new(0.5, 0.2)].map(|point| {
             QuadraticPointStencil::build_topology(&mesh, &operator, &plan, model, point)
                 .unwrap()
@@ -2062,7 +2011,7 @@ mod tests {
                 &mesh,
                 &operator,
                 &plan,
-                TopologyWaveModel::from_scene(&scene),
+                TopologyWaveModel::from_topology_scene(&scene),
                 FarFieldCompileOptions {
                     inset: 0.12,
                     sample_count: 64,
@@ -2095,7 +2044,7 @@ mod tests {
             &mesh,
             &operator,
             &plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
             FarFieldCompileOptions {
                 inset: 0.12,
                 sample_count: 64,
@@ -2163,14 +2112,14 @@ mod tests {
         let inclusion_operator = QuadraticWaveOperator::assemble_topology(
             &inclusion_mesh,
             &inclusion_plan,
-            TopologyWaveModel::from_scene(&inclusion_scene),
+            TopologyWaveModel::from_topology_scene(&inclusion_scene),
         )
         .unwrap();
         QuadraticFarFieldStencil::build_topology(
             &inclusion_mesh,
             &inclusion_operator,
             &inclusion_plan,
-            TopologyWaveModel::from_scene(&inclusion_scene),
+            TopologyWaveModel::from_topology_scene(&inclusion_scene),
             FarFieldCompileOptions {
                 inset: 0.12,
                 sample_count: 64,
@@ -2253,12 +2202,12 @@ mod tests {
     #[test]
     fn topology_far_field_rejects_nonuniform_driven_or_partitioned_exteriors() {
         let (plan, mesh, scene, operator) = topology_fixture(TopologyGeometry::default());
-        let compile = |scene: &Scene, sources: &[VolumeSource]| {
+        let compile = |scene: &TopologyScene, sources: &[VolumeSource]| {
             QuadraticFarFieldStencil::build_topology(
                 &mesh,
                 &operator,
                 &plan,
-                TopologyWaveModel::from_scene(scene),
+                TopologyWaveModel::from_topology_scene(scene),
                 FarFieldCompileOptions {
                     inset: 0.12,
                     sample_count: 64,
@@ -2343,7 +2292,7 @@ mod tests {
                 &mesh,
                 &operator,
                 &plan,
-                TopologyWaveModel::from_scene(&scene),
+                TopologyWaveModel::from_topology_scene(&scene),
                 FarFieldCompileOptions {
                     inset: 0.12,
                     sample_count: 64,
@@ -2365,7 +2314,7 @@ mod tests {
                 &divider_mesh,
                 &divider_operator,
                 &divider_plan,
-                TopologyWaveModel::from_scene(&divider_scene),
+                TopologyWaveModel::from_topology_scene(&divider_scene),
                 FarFieldCompileOptions {
                     inset: 0.12,
                     sample_count: 64,
@@ -2406,7 +2355,7 @@ mod tests {
                 &near_mesh,
                 &near_operator,
                 &near_plan,
-                TopologyWaveModel::from_scene(&near_scene),
+                TopologyWaveModel::from_topology_scene(&near_scene),
                 FarFieldCompileOptions {
                     inset: 0.12,
                     sample_count: 64,

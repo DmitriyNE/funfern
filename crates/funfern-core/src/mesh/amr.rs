@@ -2162,13 +2162,13 @@ impl MeshAdaptationJob {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_scenes::*;
     use crate::{
-        CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline, DEFAULT_MATERIAL,
-        FaceBoundaryCondition, FaceRegionAssignment, InternalBoundary, InternalBoundaryLaw,
-        Material, MaterialId, Obstacle, OpenCubicSpline, PeriodicCubicSpline, QuadraticTransferMap,
-        QuadraticWaveOperator, Region, SpanBehavior, TopologyCurve, TopologyGeometry,
-        TopologyVertex, TopologyVertexId, TopologyVertexLocation, TopologyWaveModel,
-        compile_topology, mesh_topology_plan,
+        CurveId, CurveNode, CurveSpan, CurveSpanId, CurveSpline, CurveTraceSide,
+        FaceBoundaryCondition, FaceRegionAssignment, Material, MaterialId, OpenCubicSpline,
+        PeriodicCubicSpline, QuadraticTransferMap, QuadraticWaveOperator, Region, SpanBehavior,
+        TopologyCurve, TopologyGeometry, TopologyScene, TopologyVertex, TopologyVertexId,
+        TopologyVertexLocation, TopologyWaveModel, compile_topology, mesh_topology_plan,
     };
 
     fn options(maximum: f64, minimum: f64) -> MeshAdaptationOptions {
@@ -2211,41 +2211,37 @@ mod tests {
         })
     }
 
-    fn two_region_scene(role: LoopRole) -> Scene {
-        Scene {
-            obstacles: vec![Obstacle::with_role(
-                ObstacleId(20),
-                PeriodicCubicSpline::rounded(Point2::default(), 0.42),
-                role,
-            )],
-            materials: vec![
-                Material::default_medium(),
-                Material {
-                    id: MaterialId(2),
-                    name: "Inclusion".into(),
-                    mass_density: crate::ScalarField::constant(1.0),
-                    stiffness: crate::ScalarField::constant(2.0),
-                    damping: crate::ScalarField::constant(0.0),
-                    axis_ratio: crate::ScalarField::constant(1.0),
-                    parameters: vec![],
-                    color: [180, 90, 70],
-                    ..Material::default_medium()
-                },
-            ],
-            regions: vec![
-                Region {
-                    id: BACKGROUND_REGION,
-                    material: DEFAULT_MATERIAL,
-                    frame: crate::MaterialFrame::world(),
-                },
-                Region {
-                    id: RegionId(2),
-                    material: MaterialId(2),
-                    frame: crate::MaterialFrame::world(),
-                },
-            ],
-            ..Scene::default()
+    /// A rounded closed curve around the origin with an inclusion of a
+    /// stiffer medium inside, every span of the rim with `behavior`.
+    fn two_region_scene(behavior: SpanBehavior) -> TopologyScene {
+        let mut scene = TopologyScene::default();
+        scene.materials.push(Material {
+            id: MaterialId(2),
+            name: "Inclusion".into(),
+            mass_density: crate::ScalarField::constant(1.0),
+            stiffness: crate::ScalarField::constant(2.0),
+            damping: crate::ScalarField::constant(0.0),
+            axis_ratio: crate::ScalarField::constant(1.0),
+            parameters: vec![],
+            color: [180, 90, 70],
+            ..Material::default_medium()
+        });
+        scene.regions.push(Region {
+            id: RegionId(2),
+            material: MaterialId(2),
+            frame: crate::MaterialFrame::world(),
+        });
+        add_inclusion(
+            &mut scene,
+            CurveId(20),
+            Point2::default(),
+            0.42,
+            RegionId(2),
+        );
+        for span in &mut scene.geometry.curves[0].spans {
+            span.behavior = behavior;
         }
+        scene
     }
 
     fn topology_setup(
@@ -2457,19 +2453,21 @@ mod tests {
 
     #[test]
     fn uniform_field_is_deterministic_and_mesh_revision_is_distinct() {
-        let scene = Scene::initial();
+        let scene = initial();
         let configuration = options(0.24, 0.08);
-        let source = Arc::new(
-            mesh_scene(&scene, 7, configuration.meshing)
-                .expect("initial mesh should be constructible"),
-        );
+        let Meshed {
+            mesh: source_mesh,
+            plan,
+            ..
+        } = meshed(&scene, 7, configuration.meshing).expect("initial mesh should be constructible");
+        let source = Arc::new(source_mesh);
         let mut no_collapse = configuration;
         no_collapse.collapse_ratio = 1.0e-6;
         let field: Arc<dyn MeshSizeField> = Arc::new(|_, _| 0.24);
         let one = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 source.clone(),
-                scene.clone(),
+                &plan,
                 MeshAdaptationState::from_mesh(&source),
                 21,
                 field.clone(),
@@ -2478,9 +2476,9 @@ mod tests {
             1,
         );
         let many = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 source.clone(),
-                scene,
+                &plan,
                 MeshAdaptationState::from_mesh(&source),
                 21,
                 field,
@@ -2502,13 +2500,18 @@ mod tests {
     /// work budget and surfaced as "Mesh adaptation work limit reached".
     #[test]
     fn a_pass_applies_every_candidate_instead_of_rescanning_per_change() {
-        let scene = Scene::initial();
+        let scene = initial();
         let configuration = options(0.24, 0.08);
-        let source = Arc::new(mesh_scene(&scene, 7, configuration.meshing).unwrap());
+        let Meshed {
+            mesh: source_mesh,
+            plan,
+            ..
+        } = meshed(&scene, 7, configuration.meshing).unwrap();
+        let source = Arc::new(source_mesh);
         let refined = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 source.clone(),
-                scene.clone(),
+                &plan,
                 MeshAdaptationState::from_mesh(&source),
                 31,
                 Arc::new(|_, _| 0.12),
@@ -2530,9 +2533,9 @@ mod tests {
         );
 
         let coarsened = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 Arc::new(refined.mesh.clone()),
-                scene,
+                &plan,
                 refined.state,
                 32,
                 Arc::new(|_, _| 0.24),
@@ -2920,17 +2923,17 @@ mod tests {
         }
         assert!(pairs.values().all(|sides| *sides == [true, true]));
 
-        let scene = Scene::default();
+        let scene = TopologyScene::default();
         let source_operator = QuadraticWaveOperator::assemble_topology(
             &source,
             &plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         let target_operator = QuadraticWaveOperator::assemble_topology(
             &coarse.mesh,
             &plan,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         let transfer =
@@ -3272,15 +3275,20 @@ mod tests {
     /// band at what adaptation wants there rather than at what it measures.
     #[test]
     fn adaptation_records_the_requested_size_on_every_triangle() {
-        let scene = Scene::initial();
+        let scene = initial();
         let configuration = options(0.24, 0.08);
-        let source = Arc::new(mesh_scene(&scene, 3, configuration.meshing).unwrap());
+        let Meshed {
+            mesh: source_mesh,
+            plan,
+            ..
+        } = meshed(&scene, 3, configuration.meshing).unwrap();
+        let source = Arc::new(source_mesh);
         assert!(source.requested_sizes.is_empty());
         let field = radial(Point2::new(-0.55, 0.45), 0.08, 0.24);
         let result = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 source.clone(),
-                scene,
+                &plan,
                 MeshAdaptationState::from_mesh(&source),
                 31,
                 field.clone(),
@@ -3311,13 +3319,18 @@ mod tests {
 
     #[test]
     fn moved_size_field_refines_then_coarsens_with_persistent_lineage() {
-        let scene = Scene::initial();
+        let scene = initial();
         let configuration = options(0.24, 0.08);
-        let source = Arc::new(mesh_scene(&scene, 3, configuration.meshing).unwrap());
+        let Meshed {
+            mesh: source_mesh,
+            plan,
+            ..
+        } = meshed(&scene, 3, configuration.meshing).unwrap();
+        let source = Arc::new(source_mesh);
         let first = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 source.clone(),
-                scene.clone(),
+                &plan,
                 MeshAdaptationState::from_mesh(&source),
                 31,
                 radial(Point2::new(-0.55, 0.45), 0.08, 0.24),
@@ -3334,9 +3347,9 @@ mod tests {
             .collect::<BTreeSet<_>>();
         let first_mesh = Arc::new(first.mesh);
         let second = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 first_mesh.clone(),
-                scene,
+                &plan,
                 first.state,
                 32,
                 radial(Point2::new(0.55, -0.45), 0.08, 0.24),
@@ -3365,14 +3378,19 @@ mod tests {
 
     #[test]
     fn coarsening_quota_preserves_capacity_for_refinement() {
-        let scene = Scene::initial();
+        let scene = initial();
         let mut configuration = options(0.24, 0.08);
         configuration.max_coarsening_changes = 0;
-        let source = Arc::new(mesh_scene(&scene, 33, configuration.meshing).unwrap());
+        let Meshed {
+            mesh: source_mesh,
+            plan,
+            ..
+        } = meshed(&scene, 33, configuration.meshing).unwrap();
+        let source = Arc::new(source_mesh);
         let result = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 source.clone(),
-                scene,
+                &plan,
                 MeshAdaptationState::from_mesh(&source),
                 34,
                 radial(Point2::new(-0.55, 0.45), 0.08, 0.24),
@@ -3387,15 +3405,20 @@ mod tests {
 
     #[test]
     fn zero_refinement_quota_makes_a_transaction_coarsening_only() {
-        let scene = Scene::initial();
+        let scene = initial();
         let mut configuration = options(0.24, 0.08);
         configuration.max_refinement_changes = 0;
         configuration.max_coarsening_changes = 0;
-        let source = Arc::new(mesh_scene(&scene, 33, configuration.meshing).unwrap());
+        let Meshed {
+            mesh: source_mesh,
+            plan,
+            ..
+        } = meshed(&scene, 33, configuration.meshing).unwrap();
+        let source = Arc::new(source_mesh);
         let result = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 source.clone(),
-                scene,
+                &plan,
                 MeshAdaptationState::from_mesh(&source),
                 34,
                 Arc::new(|_, _| 0.08),
@@ -3413,17 +3436,22 @@ mod tests {
 
     #[test]
     fn a_coarsening_only_transaction_does_not_split_its_fine_patch() {
-        let scene = Scene::initial();
+        let scene = initial();
         let mut configuration = options(0.24, 0.08);
         configuration.meshing.target_edge_length = 0.12;
         configuration.collapse_ratio = 0.65;
         configuration.max_refinement_changes = 0;
         configuration.max_coarsening_changes = 100;
-        let source = Arc::new(mesh_scene(&scene, 33, configuration.meshing).unwrap());
+        let Meshed {
+            mesh: source_mesh,
+            plan,
+            ..
+        } = meshed(&scene, 33, configuration.meshing).unwrap();
+        let source = Arc::new(source_mesh);
         let result = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 source.clone(),
-                scene,
+                &plan,
                 MeshAdaptationState::from_mesh(&source),
                 34,
                 radial(Point2::new(-0.55, 0.45), 0.08, 0.24),
@@ -3441,15 +3469,20 @@ mod tests {
 
     #[test]
     fn invalid_field_and_stale_state_are_rejected_without_touching_source() {
-        let scene = Scene::initial();
+        let scene = initial();
         let configuration = options(0.24, 0.08);
-        let source = Arc::new(mesh_scene(&scene, 4, configuration.meshing).unwrap());
+        let Meshed {
+            mesh: source_mesh,
+            plan,
+            ..
+        } = meshed(&scene, 4, configuration.meshing).unwrap();
+        let source = Arc::new(source_mesh);
         let before = source.as_ref().clone();
         let mut stale = MeshAdaptationState::from_mesh(&source);
         stale.mesh_revision += 1;
-        let mut job = MeshAdaptationJob::new(
+        let mut job = MeshAdaptationJob::new_topology(
             source.clone(),
-            scene.clone(),
+            &plan,
             stale,
             40,
             Arc::new(|_, _| 0.2),
@@ -3459,9 +3492,9 @@ mod tests {
             job.advance(1).unwrap().unwrap_err(),
             MeshAdaptationError::InvalidState
         );
-        let mut job = MeshAdaptationJob::new(
+        let mut job = MeshAdaptationJob::new_topology(
             source.clone(),
-            scene.clone(),
+            &plan,
             MeshAdaptationState::from_mesh(&source),
             source.mesh_revision,
             Arc::new(|_, _| 0.2),
@@ -3471,9 +3504,9 @@ mod tests {
             job.advance(1).unwrap().unwrap_err(),
             MeshAdaptationError::InvalidMeshRevision
         );
-        let mut job = MeshAdaptationJob::new(
+        let mut job = MeshAdaptationJob::new_topology(
             source.clone(),
-            scene,
+            &plan,
             MeshAdaptationState::from_mesh(&source),
             41,
             Arc::new(|_, _| f64::NAN),
@@ -3493,15 +3526,20 @@ mod tests {
 
     #[test]
     fn capacity_limit_commits_a_valid_partial_mesh_and_work_limit_aborts() {
-        let scene = Scene::initial();
+        let scene = initial();
         let mut configuration = options(0.24, 0.05);
-        let source = Arc::new(mesh_scene(&scene, 44, configuration.meshing).unwrap());
+        let Meshed {
+            mesh: source_mesh,
+            plan,
+            ..
+        } = meshed(&scene, 44, configuration.meshing).unwrap();
+        let source = Arc::new(source_mesh);
         configuration.meshing.max_vertices = source.vertices.len();
         configuration.meshing.max_triangles = source.triangles.len() + 4;
         let limited = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 source.clone(),
-                scene.clone(),
+                &plan,
                 MeshAdaptationState::from_mesh(&source),
                 45,
                 Arc::new(|_, _| 0.05),
@@ -3516,9 +3554,9 @@ mod tests {
         assert_eq!(limited.mesh.triangles, source.triangles);
 
         configuration.max_work_units = 1;
-        let mut job = MeshAdaptationJob::new(
+        let mut job = MeshAdaptationJob::new_topology(
             source.clone(),
-            scene,
+            &plan,
             MeshAdaptationState::from_mesh(&source),
             46,
             Arc::new(|_, _| 0.05),
@@ -3531,121 +3569,23 @@ mod tests {
     }
 
     #[test]
-    fn paired_baffle_trace_refines_and_coarsens_atomically() {
-        let mut scene = Scene::default();
-        scene.internal_boundaries.push(InternalBoundary {
-            id: InternalBoundaryId(9),
-            spline: OpenCubicSpline::uniform(vec![
-                Point2::new(-0.55, 0.0),
-                Point2::new(-0.2, 0.0),
-                Point2::new(0.2, 0.0),
-                Point2::new(0.55, 0.0),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![InternalBoundaryLaw::REFLECTING],
-        });
-        let configuration = options(0.28, 0.07);
-        let source = Arc::new(mesh_scene(&scene, 8, configuration.meshing).unwrap());
-        let fine: Arc<dyn MeshSizeField> = Arc::new(|point: Point2, _| {
-            if point.y.abs() < 0.2 && point.x.abs() < 0.7 {
-                0.07
-            } else {
-                0.28
-            }
-        });
-        let refined = run(
-            MeshAdaptationJob::new(
-                source.clone(),
-                scene.clone(),
-                MeshAdaptationState::from_mesh(&source),
-                81,
-                fine,
-                configuration,
-            ),
-            41,
-        );
-        assert!(
-            refined.report.boundary_insertions > 0,
-            "{:?}",
-            refined.report
-        );
-        let refined_segments = refined
-            .mesh
-            .boundary_edges
-            .iter()
-            .filter(|edge| matches!(edge.label, BoundaryLabel::InternalBoundary { .. }))
-            .count();
-        let refined_mesh = Arc::new(refined.mesh);
-        let coarse = run(
-            MeshAdaptationJob::new(
-                refined_mesh.clone(),
-                scene,
-                refined.state,
-                82,
-                Arc::new(|_, _| 0.28),
-                configuration,
-            ),
-            17,
-        );
-        assert!(coarse.report.boundary_collapses > 0, "{:?}", coarse.report);
-        let coarse_segments = coarse
-            .mesh
-            .boundary_edges
-            .iter()
-            .filter(|edge| matches!(edge.label, BoundaryLabel::InternalBoundary { .. }))
-            .count();
-        assert!(coarse_segments < refined_segments);
-        let mut paired = BTreeMap::<(u64, u64), [Option<BoundaryEdge>; 2]>::new();
-        for edge in &coarse.mesh.boundary_edges {
-            let BoundaryLabel::InternalBoundary { side, .. } = edge.label else {
-                continue;
-            };
-            let (key, face) = match side {
-                InternalBoundarySide::Left => (
-                    (edge.parameters[0].to_bits(), edge.parameters[1].to_bits()),
-                    0,
-                ),
-                InternalBoundarySide::Right => (
-                    (edge.parameters[1].to_bits(), edge.parameters[0].to_bits()),
-                    1,
-                ),
-            };
-            paired.entry(key).or_insert([None, None])[face] = Some(*edge);
-        }
-        assert!(!paired.is_empty());
-        for [left, right] in paired.values() {
-            let (left, right) = (left.unwrap(), right.unwrap());
-            assert_eq!(
-                coarse.mesh.vertices[left.vertices[0]].point,
-                coarse.mesh.vertices[right.vertices[1]].point
-            );
-            assert_eq!(
-                coarse.mesh.vertices[left.vertices[1]].point,
-                coarse.mesh.vertices[right.vertices[0]].point
-            );
-        }
-    }
-
-    #[test]
     fn material_interface_and_closed_wall_keep_their_topology_through_adaptation() {
-        for role in [
-            LoopRole::MaterialInterface {
-                exterior: BACKGROUND_REGION,
-                interior: RegionId(2),
-            },
-            LoopRole::Wall {
-                exterior: BACKGROUND_REGION,
-                interior: RegionId(2),
-            },
-        ] {
+        for role in [SpanBehavior::Transmitting, SpanBehavior::REFLECTING] {
             let scene = two_region_scene(role);
             let mut configuration = options(0.28, 0.02);
             configuration.meshing.curve_tolerance = 0.002;
             configuration.max_topology_changes = 15_000;
             configuration.max_work_units = 30_000_000;
-            let source = Arc::new(mesh_scene(&scene, 91, configuration.meshing).unwrap());
-            let focus = scene.obstacles[0].spline.evaluate(0.5);
+            let Meshed {
+                mesh: source_mesh,
+                plan,
+                ..
+            } = meshed(&scene, 91, configuration.meshing).unwrap();
+            let source = Arc::new(source_mesh);
+            let CurveSpline::Closed(rim) = &scene.geometry.curves[0].spline else {
+                unreachable!()
+            };
+            let focus = rim.evaluate(0.5);
             let fine: Arc<dyn MeshSizeField> = Arc::new(move |point: Point2, _| {
                 if (point - focus).norm() < 0.08 {
                     0.02
@@ -3654,9 +3594,9 @@ mod tests {
                 }
             });
             let refined = run(
-                MeshAdaptationJob::new(
+                MeshAdaptationJob::new_topology(
                     source.clone(),
-                    scene.clone(),
+                    &plan,
                     MeshAdaptationState::from_mesh(&source),
                     92,
                     fine,
@@ -3676,19 +3616,18 @@ mod tests {
                 .filter(|edge| {
                     matches!(
                         edge.label,
-                        BoundaryLabel::MaterialInterface(ObstacleId(20))
-                            | BoundaryLabel::Wall {
-                                loop_id: ObstacleId(20),
-                                ..
-                            }
+                        BoundaryLabel::Curve {
+                            curve: CurveId(20),
+                            ..
+                        }
                     )
                 })
                 .count();
             let refined_mesh = Arc::new(refined.mesh);
             let coarse = run(
-                MeshAdaptationJob::new(
+                MeshAdaptationJob::new_topology(
                     refined_mesh.clone(),
-                    scene,
+                    &plan,
                     refined.state,
                     93,
                     Arc::new(|_, _| 0.28),
@@ -3708,11 +3647,10 @@ mod tests {
                 .filter(|edge| {
                     matches!(
                         edge.label,
-                        BoundaryLabel::MaterialInterface(ObstacleId(20))
-                            | BoundaryLabel::Wall {
-                                loop_id: ObstacleId(20),
-                                ..
-                            }
+                        BoundaryLabel::Curve {
+                            curve: CurveId(20),
+                            ..
+                        }
                     )
                 })
                 .count();
@@ -3725,7 +3663,7 @@ mod tests {
                 .collect::<BTreeSet<_>>();
             assert_eq!(regions, BTreeSet::from([BACKGROUND_REGION, RegionId(2)]));
 
-            if matches!(role, LoopRole::Wall { .. }) {
+            if role == SpanBehavior::REFLECTING {
                 let exterior = coarse
                     .mesh
                     .boundary_edges
@@ -3733,8 +3671,8 @@ mod tests {
                     .filter(|edge| {
                         matches!(
                             edge.label,
-                            BoundaryLabel::Wall {
-                                side: BoundarySide::Exterior,
+                            BoundaryLabel::Curve {
+                                side: CurveTraceSide::Right,
                                 ..
                             }
                         )
@@ -3747,8 +3685,8 @@ mod tests {
                     .filter(|edge| {
                         matches!(
                             edge.label,
-                            BoundaryLabel::Wall {
-                                side: BoundarySide::Interior,
+                            BoundaryLabel::Curve {
+                                side: CurveTraceSide::Left,
                                 ..
                             }
                         )
@@ -3767,19 +3705,24 @@ mod tests {
 
     #[test]
     fn adaptive_mesh_transfer_reproduces_quadratic_state_without_exposed_nodes() {
-        let scene = Scene::initial();
+        let scene = initial();
         let configuration = options(0.24, 0.08);
-        let source = Arc::new(mesh_scene(&scene, 12, configuration.meshing).unwrap());
-        let source_operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
+        let Meshed {
+            mesh: source_mesh,
+            plan,
+            ..
+        } = meshed(&scene, 12, configuration.meshing).unwrap();
+        let source = Arc::new(source_mesh);
+        let source_operator = QuadraticWaveOperator::assemble_topology(
             &source,
-            &scene,
-            scene.outer_boundaries,
+            &plan,
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         let adapted = run(
-            MeshAdaptationJob::new(
+            MeshAdaptationJob::new_topology(
                 source.clone(),
-                scene.clone(),
+                &plan,
                 MeshAdaptationState::from_mesh(&source),
                 121,
                 radial(Point2::new(-0.5, 0.45), 0.08, 0.24),
@@ -3787,10 +3730,10 @@ mod tests {
             ),
             23,
         );
-        let target_operator = QuadraticWaveOperator::assemble_scene_with_boundaries(
+        let target_operator = QuadraticWaveOperator::assemble_topology(
             &adapted.mesh,
-            &scene,
-            scene.outer_boundaries,
+            &plan,
+            TopologyWaveModel::from_topology_scene(&scene),
         )
         .unwrap();
         let map =

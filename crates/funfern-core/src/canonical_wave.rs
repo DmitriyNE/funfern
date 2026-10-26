@@ -6319,11 +6319,12 @@ fn union(parent: &mut [usize], left: usize, right: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_scenes::*;
     use crate::{
-        BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, DampingLaw, LossChannel, MaterialFrame,
-        MeshQuality, MeshTriangle, MeshVertex, OuterBoundaryCondition, PulseEnvelope,
-        QuadraticWaveState, RateLaw, ScalarField, TimeDrive, VolumeSourceContribution,
-        VolumeSourceNode,
+        BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CurveId, DampingLaw, LossChannel,
+        MaterialFrame, MeshQuality, MeshTriangle, MeshVertex, OuterBoundaryCondition,
+        PulseEnvelope, QuadraticWaveState, RateLaw, ScalarField, SpanBehavior, TimeDrive,
+        TopologyScene, VolumeSourceContribution, VolumeSourceNode,
     };
 
     /// The one inversion has to give what the per-column solves gave, on a
@@ -6490,12 +6491,16 @@ mod tests {
         mesh
     }
 
-    fn compile(scene: &Scene) -> (QuadraticWaveOperator, CanonicalWaveOperator) {
+    fn compile(scene: &TopologyScene) -> (QuadraticWaveOperator, CanonicalWaveOperator) {
         let mesh = square();
-        let quadratic =
-            QuadraticWaveOperator::assemble_scene(&mesh, scene, OuterBoundaryCondition::Reflecting)
-                .unwrap();
-        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, scene, 29).unwrap();
+        let quadratic = hand_assembled(&mesh, scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let canonical = CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            29,
+        )
+        .unwrap();
         (quadratic, canonical)
     }
 
@@ -6509,7 +6514,7 @@ mod tests {
         let tm_physics = PhysicsModel::Electromagnetic {
             polarization: crate::ElectromagneticPolarization::Tm,
         };
-        let mut mechanical = Scene::default();
+        let mut mechanical = TopologyScene::default();
         mechanical.materials[0].mass_density = ScalarField::constant(4.0);
         mechanical.materials[0].damping = ScalarField::constant(0.4);
         let mut tm = mechanical.clone();
@@ -6517,7 +6522,7 @@ mod tests {
         tm.materials[0] = PhysicsModel::Mechanical
             .convert_material(tm_physics, &mechanical.materials[0])
             .unwrap();
-        let decay = |scene: &Scene| {
+        let decay = |scene: &TopologyScene| {
             let (_, operator) = compile(scene);
             let duration = 2.0;
             let steps = (duration / (0.2 * operator.maximum_time_step())).ceil() as usize;
@@ -6559,10 +6564,10 @@ mod tests {
         assert_eq!(stable_difference(3.0 * (1.0 + f64::EPSILON), 3.0), 0.0);
     }
 
-    fn configured_scene(physics: PhysicsModel) -> Scene {
-        let mut scene = Scene {
+    fn configured_scene(physics: PhysicsModel) -> TopologyScene {
+        let mut scene = TopologyScene {
             physics,
-            ..Scene::default()
+            ..TopologyScene::default()
         };
         scene.materials[0].mass_density = ScalarField::constant(2.5);
         scene.materials[0].stiffness = ScalarField::constant(1.7);
@@ -6666,18 +6671,22 @@ mod tests {
     fn resumable_compiler_owns_its_material_snapshot() {
         let mesh = Arc::new(square());
         let mut scene = configured_scene(PhysicsModel::Mechanical);
-        let quadratic = Arc::new(
-            QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &scene,
-                OuterBoundaryCondition::Reflecting,
-            )
-            .unwrap(),
-        );
-        let expected = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 43).unwrap();
-        let mut job =
-            CanonicalAssemblyJob::new(mesh, quadratic, TopologyWaveModel::from_scene(&scene), 43)
-                .unwrap();
+        let quadratic =
+            Arc::new(hand_assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap());
+        let expected = CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            43,
+        )
+        .unwrap();
+        let mut job = CanonicalAssemblyJob::new(
+            mesh,
+            quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            43,
+        )
+        .unwrap();
         scene.materials[0].mass_density = ScalarField::constant(99.0);
         assert!(job.advance(1).is_none());
         let actual = loop {
@@ -6745,15 +6754,17 @@ mod tests {
     /// The scene that failed to load on 12 October, in core terms: a U
     /// outgoing along the inside of its arms, a line between the arms
     /// outgoing along one side, the arms' ends 0.05 from the line's.
-    fn u_and_line_scene() -> Scene {
-        let one_sided = crate::InternalBoundaryLaw {
+    fn u_and_line_scene() -> TopologyScene {
+        let one_sided = SpanBehavior::Separated {
             left: crate::FaceBoundaryCondition::SecondOrderOutgoing,
-            ..crate::InternalBoundaryLaw::REFLECTING
+            right: crate::FaceBoundaryCondition::Reflecting,
+            coupling: crate::InternalBoundaryCoupling::Independent,
         };
-        let mut scene = Scene::default();
-        scene.internal_boundaries.push(crate::InternalBoundary {
-            id: crate::InternalBoundaryId(1),
-            spline: crate::OpenCubicSpline::new_with_multiplicities(
+        let mut scene = TopologyScene::default();
+        add_open_curve(
+            &mut scene,
+            CurveId(1),
+            crate::OpenCubicSpline::new_with_multiplicities(
                 vec![
                     Point2::new(0.0, 0.6),
                     Point2::new(-0.2833333333333333, 0.6),
@@ -6770,42 +6781,29 @@ mod tests {
                 vec![3, 3],
             )
             .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![one_sided, crate::InternalBoundaryLaw::REFLECTING, one_sided],
-        });
-        scene.internal_boundaries.push(crate::InternalBoundary {
-            id: crate::InternalBoundaryId(2),
-            spline: crate::OpenCubicSpline::uniform(vec![
+            vec![one_sided, SpanBehavior::REFLECTING, one_sided],
+        );
+        add_baffle(
+            &mut scene,
+            CurveId(2),
+            vec![
                 Point2::new(0.0, -0.55),
                 Point2::new(0.0, -0.55 / 3.0),
                 Point2::new(0.0, 0.55 / 3.0),
                 Point2::new(0.0, 0.55),
-            ])
-            .unwrap(),
-            region: BACKGROUND_REGION,
-            span_laws: vec![one_sided],
-        });
-        scene
-    }
-
-    /// The hole of `Scene::initial` moved to within an element of the top
-    /// wall, every span of it outgoing.
-    fn hole_by_the_wall_scene() -> Scene {
-        let mut scene = Scene::initial();
-        scene.obstacles[0].spline =
-            crate::PeriodicCubicSpline::rounded(Point2::new(0.0, 0.75), 0.15);
-        scene.obstacles[0].span_conditions =
-            vec![crate::FaceBoundaryCondition::SecondOrderOutgoing; 8];
+            ],
+            one_sided,
+        );
         scene
     }
 
     /// Meshes, assembles and compiles a scene at an edge sized for its
     /// domain, as the sweep prepares every case.
     fn prepare_scene(
-        scene: &Scene,
+        scene: &TopologyScene,
         edge: f64,
-    ) -> Result<(crate::TriMesh, QuadraticWaveOperator, CanonicalWaveOperator), String> {
-        let mesh = crate::mesh_scene(
+    ) -> Result<(Meshed, QuadraticWaveOperator, CanonicalWaveOperator), String> {
+        let mesh = meshed(
             scene,
             1,
             crate::MeshingOptions {
@@ -6813,17 +6811,18 @@ mod tests {
                 curve_tolerance: (edge * 0.02).min(5.0e-4),
                 ..crate::MeshingOptions::default()
             }
-            .sized_for_area(scene.domain.width() * scene.domain.height()),
+            .sized_for_area(scene.geometry.domain.width() * scene.geometry.domain.height()),
         )
         .map_err(|error| format!("meshing: {error}"))?;
-        let quadratic = QuadraticWaveOperator::assemble_scene_with_boundaries(
+        let quadratic = assembled_with(&mesh, scene, scene.outer_boundaries)
+            .map_err(|error| format!("assembly: {error}"))?;
+        let canonical = CanonicalWaveOperator::compile(
             &mesh,
-            scene,
-            scene.outer_boundaries,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(scene),
+            1,
         )
-        .map_err(|error| format!("assembly: {error}"))?;
-        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, scene, 1)
-            .map_err(|error| format!("compile: {error}"))?;
+        .map_err(|error| format!("compile: {error}"))?;
         Ok((mesh, quadratic, canonical))
     }
 
@@ -6834,7 +6833,7 @@ mod tests {
     #[test]
     fn the_outgoing_trace_report_reads_the_basis_against_its_operator() {
         for (name, scene, edge, pieces) in [
-            ("hole", Scene::initial(), 0.16, 1),
+            ("hole", initial(), 0.16, 1),
             ("U and line", u_and_line_scene(), 0.08, 4),
         ] {
             let (_, quadratic, canonical) = prepare_scene(&scene, edge).unwrap();
@@ -6870,220 +6869,6 @@ mod tests {
         }
     }
 
-    /// Every wall law on every side of every span the `Scene` path authors,
-    /// obstacle spans and internal boundaries, and every outer law on each
-    /// side and on all four, over the hole scene, the U-and-line scene and
-    /// the hole beside the wall, meshed at 0.2. Each case is classed before
-    /// it runs: it must prepare, or it must be refused by the structural rule
-    /// that names it, a thin gap beside a side that is not reflecting. A case
-    /// that prepares has its basis checked by its own report and by the dense
-    /// oracle. The count of successes must equal the count of must-succeed
-    /// cases, so a solver that politely refuses everything cannot pass. The
-    /// gallery's counterpart, through the app's own path, is
-    /// `crates/funfern-app/tests/wall_sweep.rs`.
-    #[test]
-    fn every_wall_law_on_every_side_of_the_scene_path_prepares() {
-        use crate::{FaceBoundaryCondition as Face, OuterBoundaryCondition as Outer};
-        let driven = TimeSignal::Harmonic {
-            offset: 0.0,
-            amplitude: 1.0,
-            frequency_hz: 2.0,
-            phase_radians: 0.0,
-        };
-        let outer_laws = [
-            Outer::Reflecting,
-            Outer::FirstOrderOutgoing,
-            Outer::SecondOrderOutgoing,
-            Outer::ElectricWall,
-            Outer::MagneticWall,
-            Outer::Neumann {
-                signal: TimeSignal::ZERO,
-            },
-            Outer::Neumann { signal: driven },
-            Outer::Dirichlet {
-                signal: TimeSignal::ZERO,
-            },
-            Outer::Dirichlet { signal: driven },
-        ];
-        let face_laws = [
-            Face::Reflecting,
-            Face::Impedance { ratio: 0.5 },
-            Face::SecondOrderOutgoing,
-            Face::ElectricWall,
-            Face::MagneticWall,
-            Face::Neumann {
-                signal: TimeSignal::ZERO,
-            },
-            Face::Neumann { signal: driven },
-            Face::Dirichlet {
-                signal: TimeSignal::ZERO,
-            },
-            Face::Dirichlet { signal: driven },
-        ];
-        let mut tm = Scene::initial();
-        tm.physics = crate::PhysicsModel::Electromagnetic {
-            polarization: crate::ElectromagneticPolarization::Tm,
-        };
-        let scenes = [
-            ("hole", Scene::initial()),
-            ("hole, TM", tm),
-            ("U and line", u_and_line_scene()),
-            ("hole by the wall", hole_by_the_wall_scene()),
-        ];
-        let mut total_must_succeed = 0;
-        let mut total_succeeded = 0;
-        for (name, base) in &scenes {
-            // (label, scene, must succeed)
-            let mut cases: Vec<(String, Scene, bool)> = Vec::new();
-            for law in outer_laws {
-                for side in 0..4 {
-                    let mut scene = base.clone();
-                    scene.outer_boundaries.sides[side] = law;
-                    cases.push((format!("outer side {side} {law:?}"), scene, true));
-                }
-                let mut scene = base.clone();
-                scene.outer_boundaries = crate::OuterBoundaryConditions::uniform(law);
-                cases.push((format!("outer all {law:?}"), scene, true));
-            }
-            for (obstacle, authored) in base.obstacles.iter().enumerate() {
-                for span in 0..authored.span_conditions.len() {
-                    for law in face_laws {
-                        let mut scene = base.clone();
-                        scene.obstacles[obstacle].span_conditions[span] = law;
-                        cases.push((
-                            format!("obstacle {obstacle} span {span} {law:?}"),
-                            scene,
-                            true,
-                        ));
-                    }
-                }
-            }
-            for (boundary, authored) in base.internal_boundaries.iter().enumerate() {
-                for span in 0..authored.span_laws.len() {
-                    for law in face_laws {
-                        for (which, left, right) in [
-                            ("left", law, Face::Reflecting),
-                            ("right", Face::Reflecting, law),
-                            ("both", law, law),
-                        ] {
-                            let mut scene = base.clone();
-                            scene.internal_boundaries[boundary].span_laws[span] =
-                                crate::InternalBoundaryLaw {
-                                    left,
-                                    right,
-                                    coupling: crate::InternalBoundaryCoupling::Independent,
-                                };
-                            cases.push((
-                                format!("boundary {boundary} span {span} {which} {law:?}"),
-                                scene,
-                                true,
-                            ));
-                        }
-                    }
-                    let mut scene = base.clone();
-                    scene.internal_boundaries[boundary].span_laws[span] =
-                        crate::InternalBoundaryLaw {
-                            left: Face::SecondOrderOutgoing,
-                            right: Face::Reflecting,
-                            coupling: crate::InternalBoundaryCoupling::ThinGap {
-                                stiffness_ratio: 25.0,
-                            },
-                        };
-                    cases.push((
-                        format!("boundary {boundary} span {span} thin gap beside an outgoing side"),
-                        scene,
-                        false,
-                    ));
-                }
-            }
-            let must_succeed = cases.iter().filter(|case| case.2).count();
-            let mut succeeded = 0;
-            let mut refused_as_named = 0;
-            let mut with_walls = 0;
-            let mut pieces = 0;
-            let mut residual = 0.0_f64;
-            let mut orthogonality = 0.0_f64;
-            for (label, scene, expected) in &cases {
-                if !expected {
-                    assert!(
-                        !scene.structure_valid(),
-                        "{name}: {label}: the rule does not name this refusal"
-                    );
-                    let error = prepare_scene(scene, 0.2).err().unwrap_or_else(|| {
-                        panic!("{name}: {label} prepared although its law is invalid")
-                    });
-                    // The structural rule speaks through the mesher, which
-                    // checks the scene first, or through the assembly.
-                    assert!(
-                        error.contains("invalid IDs, materials, regions")
-                            || error.contains("self-consistent"),
-                        "{name}: {label}: refused for another reason: {error}"
-                    );
-                    refused_as_named += 1;
-                    continue;
-                }
-                let (_, quadratic, canonical) = prepare_scene(scene, 0.2)
-                    .unwrap_or_else(|error| panic!("{name}: {label}: {error}"));
-                let Some(boundary) = canonical.outgoing_boundary_handle() else {
-                    succeeded += 1;
-                    continue;
-                };
-                with_walls += 1;
-                let report = boundary.trace_report();
-                assert_eq!(report.modes, report.trace_nodes, "{name}: {label}");
-                assert!(
-                    report.smallest_eigenvalue >= -2.0e-11 * report.largest_eigenvalue.max(1.0),
-                    "{name}: {label}: {report:?}"
-                );
-                assert!(report.residual < 1.0e-12, "{name}: {label}: {report:?}");
-                assert!(
-                    report.orthogonality < 1.0e-11,
-                    "{name}: {label}: {report:?}"
-                );
-                assert!(
-                    report.damping_defect < 1.0e-11,
-                    "{name}: {label}: {report:?}"
-                );
-                assert_eq!(
-                    report.auxiliary_count, report.auxiliaries_expected,
-                    "{name}: {label}"
-                );
-                let signature = outgoing_signature(&quadratic).unwrap().unwrap();
-                let count = signature.trace_nodes.len();
-                let mut dense = vec![0.0; count * count];
-                for &(row, column, value) in &signature.entries {
-                    let scale = (signature.damping[row as usize]
-                        * signature.damping[column as usize])
-                        .sqrt();
-                    dense[row as usize * count + column as usize] = value / scale;
-                }
-                let (values, _, _, _) = eigensolve(&dense, count);
-                let norm = report.largest_eigenvalue.max(1.0);
-                for (mode, value) in boundary.modes().iter().zip(&values) {
-                    assert!(
-                        (mode.eigenvalue - value).abs() <= 1.0e-12 * norm,
-                        "{name}: {label}: {} against the dense {value}",
-                        mode.eigenvalue
-                    );
-                }
-                pieces = pieces.max(report.pieces);
-                residual = residual.max(report.residual);
-                orthogonality = orthogonality.max(report.orthogonality);
-                succeeded += 1;
-            }
-            eprintln!(
-                "{name}: {succeeded} of {must_succeed} prepared, {refused_as_named} of {} refused as named, {with_walls} with outgoing walls, pieces up to {pieces}, residual {residual:e}, orthogonality {orthogonality:e}",
-                cases.len() - must_succeed
-            );
-            assert_eq!(succeeded, must_succeed, "{name}");
-            assert_eq!(refused_as_named, cases.len() - must_succeed, "{name}");
-            total_must_succeed += must_succeed;
-            total_succeeded += succeeded;
-        }
-        assert!(total_must_succeed > 300, "{total_must_succeed} cases");
-        assert_eq!(total_succeeded, total_must_succeed);
-    }
-
     /// The three refusals the outgoing boundary's builder keeps against an
     /// operator the assembly never produces, on operators crafted to produce
     /// them from a real one: every trace impedance zeroed under a tangential
@@ -7093,7 +6878,7 @@ mod tests {
     /// the operator as assembled builds.
     #[test]
     fn the_outgoing_builder_refuses_an_operator_the_assembly_never_produces() {
-        let scene = Scene::initial();
+        let scene = initial();
         let (_, quadratic, _) = prepare_scene(&scene, 0.16).unwrap();
         let build = |quadratic: &QuadraticWaveOperator| -> Result<(), String> {
             let mut job = CanonicalOutgoingBoundaryJob::new(quadratic)
@@ -7169,8 +6954,8 @@ mod tests {
     #[test]
     fn the_banded_trace_eigensolve_agrees_with_the_dense_oracle() {
         use crate::trace_eigen::tests as banded;
-        let trace_of = |scene: &Scene, edge: f64| {
-            let mesh = crate::mesh_scene(
+        let trace_of = |scene: &TopologyScene, edge: f64| {
+            let mesh = meshed(
                 scene,
                 1,
                 crate::MeshingOptions {
@@ -7179,12 +6964,8 @@ mod tests {
                 },
             )
             .unwrap();
-            let quadratic = QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                scene,
-                OuterBoundaryCondition::SecondOrderOutgoing,
-            )
-            .unwrap();
+            let quadratic =
+                assembled(&mesh, scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
             let signature = outgoing_signature(&quadratic).unwrap().unwrap();
             let count = signature.trace_nodes.len();
             let mut trace = vec![0.0; count * count];
@@ -7199,7 +6980,7 @@ mod tests {
             }
             (trace, entries, count, zeros)
         };
-        let (trace, trace_entries, count, _) = trace_of(&Scene::initial(), 0.16);
+        let (trace, trace_entries, count, _) = trace_of(&initial(), 0.16);
         assert!(count > 100, "{count} trace nodes");
         let (pieces, pieces_entries, pieces_count, pieces_zeros) =
             trace_of(&u_and_line_scene(), 0.08);
@@ -7383,15 +7164,16 @@ mod tests {
     #[test]
     fn stage_three_compiler_migrates_legacy_loss_as_a_primary_rate() {
         let mesh = square();
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].damping = ScalarField::constant(0.1);
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = hand_assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            7,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 7).unwrap();
         assert!(
             operator
                 .primary_loss_rate()
@@ -7464,14 +7246,16 @@ mod tests {
             let mut legacy_geometry = scene.clone();
             legacy_geometry.materials[0].electric_loss = None;
             legacy_geometry.materials[0].magnetic_loss = None;
-            let quadratic = QuadraticWaveOperator::assemble_scene(
+            let quadratic =
+                hand_assembled(&mesh, &legacy_geometry, OuterBoundaryCondition::Reflecting)
+                    .unwrap();
+            let operator = CanonicalWaveOperator::compile(
                 &mesh,
-                &legacy_geometry,
-                OuterBoundaryCondition::Reflecting,
+                &quadratic,
+                TopologyWaveModel::from_topology_scene(&scene),
+                13,
             )
             .unwrap();
-            let operator =
-                CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 13).unwrap();
             assert!(
                 operator
                     .primary_loss_rate()
@@ -7510,13 +7294,15 @@ mod tests {
         let mut legacy_geometry = scene.clone();
         legacy_geometry.materials[0].electric_loss = None;
         legacy_geometry.materials[0].magnetic_loss = None;
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic =
+            hand_assembled(&mesh, &legacy_geometry, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &legacy_geometry,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            19,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 19).unwrap();
         assert!(
             operator
                 .primary_loss_rate()
@@ -7556,7 +7342,7 @@ mod tests {
     /// with new parameters is refused.
     #[test]
     fn a_handoff_starts_new_harmonic_channels_at_rest_and_carries_the_rest() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let weights = operator.primary_mass().to_vec();
         let channel = |drive| CanonicalSource::new(&operator, weights.clone(), drive).unwrap();
         let harmonic = TimeSignal::harmonic(0.0, 2.0, 0.8, 0.3);
@@ -7638,7 +7424,7 @@ mod tests {
 
     #[test]
     fn legacy_source_integral_is_continuous_at_zero_frequency_and_drives_q_directly() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let signal = TimeSignal::harmonic(2.0, 3.0, 0.0, std::f64::consts::FRAC_PI_2);
         let drive = CanonicalRateDrive::legacy(signal, 0.0).unwrap();
         assert_eq!(drive.value(0.0).unwrap(), 0.0);
@@ -7666,7 +7452,7 @@ mod tests {
 
     #[test]
     fn legacy_volume_and_weak_boundary_sources_compile_to_integrated_q_weights() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let signal = TimeSignal::harmonic(0.2, 0.4, 1.3, 0.7);
         let volume = CompiledVolumeSources {
             signals: vec![signal],
@@ -7731,14 +7517,19 @@ mod tests {
         );
 
         let mesh = square_with_outer_boundary();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = hand_assembled(
             &mesh,
-            &Scene::default(),
+            &TopologyScene::default(),
             OuterBoundaryCondition::Neumann { signal },
         )
         .unwrap();
-        let canonical =
-            CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &Scene::default(), 17).unwrap();
+        let canonical = CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&TopologyScene::default()),
+            17,
+        )
+        .unwrap();
         let forcing =
             CanonicalForcing::from_legacy_boundaries(&canonical, &quadratic, 0.0).unwrap();
         assert_eq!(forcing.sources().len(), 4);
@@ -7777,7 +7568,7 @@ mod tests {
             CanonicalRateDrive::LegacyIntegratedHarmonic { .. }
         ));
 
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let elements = vec![true; operator.element_nodes().len()];
         let source = CanonicalForcing::point_source(
             &operator,
@@ -7830,14 +7621,19 @@ mod tests {
 
         // A pulsed Neumann side holds its flux as authored.
         let mesh = square_with_outer_boundary();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic = hand_assembled(
             &mesh,
-            &Scene::default(),
+            &TopologyScene::default(),
             OuterBoundaryCondition::Neumann { signal: pulse },
         )
         .unwrap();
-        let canonical =
-            CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &Scene::default(), 17).unwrap();
+        let canonical = CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&TopologyScene::default()),
+            17,
+        )
+        .unwrap();
         let walls = CanonicalForcing::from_legacy_boundaries(&canonical, &quadratic, 0.0).unwrap();
         assert!(!walls.sources().is_empty());
         assert!(
@@ -7867,7 +7663,7 @@ mod tests {
 
     #[test]
     fn point_source_support_is_structural_across_gaussian_underflow() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let elements = vec![true; operator.element_nodes().len()];
         let membership = vec![true; operator.degrees_of_freedom()];
         let first_point = operator.node_points()[0];
@@ -7910,7 +7706,7 @@ mod tests {
 
     #[test]
     fn pulse_and_prescribed_primary_use_explicit_constitutive_exchange() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let dt = 0.1 * operator.maximum_time_step();
         let signal = TimeSignal::harmonic(0.4, 0.0, 1.0, 0.0);
         let forcing = CanonicalForcing::from_prescribed(
@@ -7939,7 +7735,7 @@ mod tests {
 
     #[test]
     fn paired_filter_reduces_energy_preserves_total_and_leaves_stationary_flux() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let dt = 0.1 * operator.maximum_time_step();
         let primary = test_potential(&operator);
         let potential = primary
@@ -8048,7 +7844,7 @@ mod tests {
 
     #[test]
     fn paired_filter_holds_prescribed_primary_nodes_and_accounts_exchange() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let dt = 0.1 * operator.maximum_time_step();
         let signal = TimeSignal::harmonic(0.37, 0.0, 1.0, 0.0);
         let mut prescribed = vec![None; operator.degrees_of_freedom()];
@@ -8095,14 +7891,16 @@ mod tests {
     #[test]
     fn first_order_outgoing_uses_the_force_coupled_midpoint_kick() {
         let mesh = square_with_outer_boundary();
-        let scene = Scene::default();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let scene = TopologyScene::default();
+        let quadratic =
+            hand_assembled(&mesh, &scene, OuterBoundaryCondition::FirstOrderOutgoing).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::FirstOrderOutgoing,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            71,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 71).unwrap();
         assert!(
             operator
                 .first_order_boundary_damping()
@@ -8133,16 +7931,17 @@ mod tests {
     #[test]
     fn a_backend_state_exports_what_a_stepping_state_exports() {
         let mesh = Arc::new(square_with_outer_boundary());
-        let scene = Scene::default();
+        let scene = TopologyScene::default();
         let quadratic = Arc::new(
-            QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &scene,
-                OuterBoundaryCondition::SecondOrderOutgoing,
-            )
-            .unwrap(),
+            hand_assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap(),
         );
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 72).unwrap();
+        let operator = CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            72,
+        )
+        .unwrap();
         let step = operator.recommended_time_step();
 
         let stepping = CanonicalWaveState::zero(&operator, step).unwrap();
@@ -8225,21 +8024,22 @@ mod tests {
     #[test]
     fn canonical_reassembly_retains_an_identical_outgoing_trace_system() {
         let mesh = Arc::new(square_with_outer_boundary());
-        let scene = Scene::default();
+        let scene = TopologyScene::default();
         let quadratic = Arc::new(
-            QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &scene,
-                OuterBoundaryCondition::SecondOrderOutgoing,
-            )
-            .unwrap(),
+            hand_assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap(),
         );
-        let previous = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 72).unwrap();
+        let previous = CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            72,
+        )
+        .unwrap();
         let previous_boundary = previous.outgoing_boundary_handle().unwrap();
         let mut job = CanonicalAssemblyJob::new_with_outgoing_reuse(
             mesh.clone(),
             quadratic.clone(),
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
             73,
             Some(previous_boundary.clone()),
         )
@@ -8254,18 +8054,12 @@ mod tests {
             &reassembled.outgoing_boundary_handle().unwrap()
         ));
 
-        let reflecting = Arc::new(
-            QuadraticWaveOperator::assemble_scene(
-                &mesh,
-                &scene,
-                OuterBoundaryCondition::Reflecting,
-            )
-            .unwrap(),
-        );
+        let reflecting =
+            Arc::new(hand_assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap());
         let mut job = CanonicalAssemblyJob::new_with_outgoing_reuse(
             mesh,
             reflecting,
-            TopologyWaveModel::from_scene(&scene),
+            TopologyWaveModel::from_topology_scene(&scene),
             74,
             Some(previous_boundary),
         )
@@ -8280,7 +8074,7 @@ mod tests {
 
     #[test]
     fn invariant_maintenance_repairs_only_roundoff_sized_unaccounted_drift() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let forcing = CanonicalForcing::none(&operator);
         let dt = 0.1 * operator.maximum_time_step();
         let mut state = CanonicalWaveState::zero(&operator, dt).unwrap();
@@ -8311,14 +8105,16 @@ mod tests {
     #[test]
     fn the_device_sweeps_stop_at_f32_precision() {
         let mesh = square_with_outer_boundary();
-        let scene = Scene::default();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let scene = TopologyScene::default();
+        let quadratic =
+            hand_assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            73,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 73).unwrap();
         let boundary = operator.outgoing_boundary().unwrap();
         let dimension = boundary.trace_nodes().len() + boundary.auxiliary_count();
         let probe = (0..dimension)
@@ -8390,14 +8186,16 @@ mod tests {
     #[test]
     fn one_outgoing_preparation_solves_every_nodal_mass() {
         let mesh = square_with_outer_boundary();
-        let scene = Scene::default();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let scene = TopologyScene::default();
+        let quadratic =
+            hand_assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            73,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 73).unwrap();
         let boundary = operator.outgoing_boundary().unwrap();
         let dimension = boundary.trace_nodes().len() + boundary.auxiliary_count();
         let probe = (0..dimension)
@@ -8496,14 +8294,16 @@ mod tests {
     #[test]
     fn passive_second_order_trace_has_normalized_memory_and_contracts_long_runs() {
         let mesh = square_with_outer_boundary();
-        let scene = Scene::default();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let scene = TopologyScene::default();
+        let quadratic =
+            hand_assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            73,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 73).unwrap();
         let boundary = operator.outgoing_boundary().unwrap();
         assert!(!boundary.trace_nodes().is_empty());
         assert_eq!(boundary.modes().len(), boundary.trace_nodes().len());
@@ -8673,7 +8473,7 @@ mod tests {
 
     #[test]
     fn constant_primary_field_is_exactly_stationary() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let dt = 0.4 * operator.maximum_time_step();
         let primary = vec![0.7; operator.degrees_of_freedom()];
         let mut state = CanonicalWaveState::from_primary_and_potential(
@@ -8748,14 +8548,15 @@ mod tests {
     #[test]
     fn velocity_compatibility_is_enforced_per_free_component() {
         let mesh = disconnected_triangles();
-        let scene = Scene::default();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let scene = TopologyScene::default();
+        let quadratic = hand_assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::Reflecting,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            53,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 53).unwrap();
         assert_eq!(operator.component_count(), 2);
         let primary = vec![0.0; operator.degrees_of_freedom()];
         let globally_balanced = operator
@@ -8821,7 +8622,7 @@ mod tests {
 
     #[test]
     fn a_time_origin_is_where_the_states_clock_starts() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let dt = 0.2 * operator.maximum_time_step();
         let mut state = CanonicalWaveState::zero(&operator, dt)
             .unwrap()
@@ -8844,7 +8645,7 @@ mod tests {
 
     #[test]
     fn direct_state_retains_a_nonpotential_stationary_flux() {
-        let (_, operator) = compile(&Scene::default());
+        let (_, operator) = compile(&TopologyScene::default());
         let arbitrary = (0..operator.complementary_degrees_of_freedom())
             .map(|index| Point2::new((index as f64 + 0.3).sin(), (0.7 * index as f64).cos()))
             .collect::<Vec<_>>();
@@ -8967,8 +8768,8 @@ mod tests {
         sides: crate::OuterBoundaryConditions,
         edge: f64,
     ) -> (TriMesh, QuadraticWaveOperator, CanonicalWaveOperator) {
-        let scene = Scene::default();
-        let mesh = crate::mesh_scene(
+        let scene = TopologyScene::default();
+        let mesh = meshed(
             &scene,
             1,
             crate::MeshingOptions {
@@ -8977,10 +8778,15 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic =
-            QuadraticWaveOperator::assemble_scene_with_boundaries(&mesh, &scene, sides).unwrap();
-        let canonical = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 1).unwrap();
-        (mesh, quadratic, canonical)
+        let quadratic = assembled_with(&mesh, &scene, sides).unwrap();
+        let canonical = CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            1,
+        )
+        .unwrap();
+        (mesh.mesh, quadratic, canonical)
     }
 
     /// A second-order wall on the right side of the box, between two sides
@@ -9138,7 +8944,7 @@ mod tests {
     /// A pin now holds its signal through the loss stage.
     #[test]
     fn a_pinned_trace_beside_a_loss_steps_at_second_order() {
-        let mut scene = Scene::default();
+        let mut scene = TopologyScene::default();
         scene.materials[0].magnetic_loss = Some(crate::LossChannel {
             base_rate: crate::ScalarField::constant(2.0),
             law: crate::DampingLaw {
@@ -9147,7 +8953,7 @@ mod tests {
                 gate: None,
             },
         });
-        let mesh = crate::mesh_scene(
+        let mesh = meshed(
             &scene,
             31,
             crate::MeshingOptions {
@@ -9157,13 +8963,15 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(
+        let quadratic =
+            assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+        let operator = CanonicalWaveOperator::compile(
             &mesh,
-            &scene,
-            OuterBoundaryCondition::SecondOrderOutgoing,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            37,
         )
         .unwrap();
-        let operator = CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 37).unwrap();
         let prescribed = operator
             .node_points()
             .iter()
@@ -9220,8 +9028,8 @@ mod tests {
     }
 
     fn walled_square(condition: OuterBoundaryCondition, edge: f64) -> CanonicalWaveOperator {
-        let scene = Scene::default();
-        let mesh = crate::mesh_scene(
+        let scene = TopologyScene::default();
+        let mesh = meshed(
             &scene,
             31,
             crate::MeshingOptions {
@@ -9231,8 +9039,14 @@ mod tests {
             },
         )
         .unwrap();
-        let quadratic = QuadraticWaveOperator::assemble_scene(&mesh, &scene, condition).unwrap();
-        CanonicalWaveOperator::compile_scene(&mesh, &quadratic, &scene, 37).unwrap()
+        let quadratic = assembled(&mesh, &scene, condition).unwrap();
+        CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            37,
+        )
+        .unwrap()
     }
 
     /// A Gaussian bump of field off the box's centre, nothing at its walls.
