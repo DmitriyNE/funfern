@@ -100,7 +100,7 @@ pub struct TopologyMeshingJob {
 
 impl TopologyMeshingJob {
     pub fn new(plan: TopologyMeshPlan, mesh_revision: u64, options: super::MeshingOptions) -> Self {
-        let builder = MeshBuilder::new(options, plan.domain);
+        let builder = MeshBuilder::new(options);
         Self {
             plan,
             mesh_revision,
@@ -1167,7 +1167,6 @@ fn recover_slit_chain(
     builder.constraint_target_regions.push(region);
     builder.constraint_kinds.push(OpenConstraintKind::Baffle {
         id: crate::InternalBoundaryId(curve.0),
-        region,
     });
     builder.internal_chains.push(vec![]);
     builder.begin_constraint_points();

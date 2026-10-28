@@ -608,7 +608,7 @@ impl TopologyCarveJob {
                     options.max_triangles = options
                         .max_triangles
                         .saturating_add(self.previous.triangles.len());
-                    let mut builder = MeshBuilder::new(options, self.plan.domain);
+                    let mut builder = MeshBuilder::new(options);
                     for atom in &self.plan.boundaries {
                         let label = topology_label(*atom);
                         if let Some((_, regions)) = builder

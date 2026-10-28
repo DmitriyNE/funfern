@@ -529,7 +529,6 @@ impl MeshAdaptationJob {
         Self::from_input(
             source,
             Box::new(TopologyAdaptationContract::new(plan)),
-            plan.domain,
             state,
             target_mesh_revision,
             field,
@@ -540,7 +539,6 @@ impl MeshAdaptationJob {
     fn from_input(
         source: Arc<TriMesh>,
         contract: Box<TopologyAdaptationContract>,
-        domain: crate::DomainRect,
         state: MeshAdaptationState,
         target_mesh_revision: u64,
         field: Arc<dyn MeshSizeField>,
@@ -564,7 +562,7 @@ impl MeshAdaptationJob {
             field,
             options,
             phase: AdaptationPhase::ImportVertices(0),
-            builder: MeshBuilder::new(options.meshing, domain),
+            builder: MeshBuilder::new(options.meshing),
             state,
             next_generation,
             blocked: BTreeSet::new(),

@@ -30214,3 +30214,26 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-26 — Legacy phase-out 8: the legacy mesher
+
+- **Gone.** `mesh_scene` and `MeshingJob` with its state machine, about
+  1,450 lines, and what only they used:
+  - the builder's outer and obstacle polygons, domain preparation, material
+    interfaces and internal-boundary resampling;
+  - its loop, role and internal-boundary fields, which nothing else ever
+    set;
+  - the material arm of the open constraints;
+  - the two `MeshError` variants only the legacy job produced.
+  The topology mesher shares the rest of the builder.
+- **Simplified.**
+  - The region lookup's polygon branch read those empty fields and could
+    no longer run; the lookup is the topology's domain search.
+  - A label the plan's boundary regions do not name is relevant only as an
+    outer side of the background, as on the topology path before.
+  - The builder no longer takes the domain, which it never read.
+- **Docs.** docs/architecture.md describes `TopologyMeshingJob` and
+  `mesh_topology_plan` where it described the legacy job.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

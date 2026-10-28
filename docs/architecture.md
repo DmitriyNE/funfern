@@ -848,13 +848,15 @@ orientation, manifold edge adjacency, two incident triangles for a transmitting
 interface and one for each other boundary trace, region classification of every
 centroid, and configured size/angle targets.
 
-`MeshingJob` snapshots an accepted geometry revision. Validation, adaptive sampling,
-bridge visibility, ear clipping, legalization, and output verification resume
-across calls. Bridge and ear searches yield between segment/vertex tests. The
-bridge search tries the shortest pair first and falls back to a complete visible
-bridge search if it is blocked. Each legalization unit checks at most one edge;
-one insertion changes at most four triangles. The synchronous `mesh_scene` drives
-the same state machine, so slice sizes do not change results.
+`TopologyMeshingJob` meshes one plan of an accepted topology revision. Bridge
+visibility, ear clipping, legalization, refinement and output verification
+resume across calls. Bridge and ear searches yield between segment/vertex tests.
+The bridge search tries the shortest pair first and falls back to a complete
+visible bridge search if it is blocked. Each legalization unit checks at most
+one edge; one insertion changes at most four triangles. `mesh_topology_plan`
+drives the same state machine, so slice sizes do not change results. The
+legacy `Scene` mesher, `MeshingJob` and `mesh_scene`, was retired with the
+`Scene` model in October 2026.
 
 A document meshes to the same bits on every platform. Platform `libm` may round
 a transcendental function differently in the last bit (macOS and glibc on an
