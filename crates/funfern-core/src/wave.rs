@@ -392,9 +392,12 @@ impl PhysicsModel {
         // the integrated primary field with the primary row's authored mass,
         // and this conversion maps the primary field `u ↔ H_z` and its mass
         // `ρ ↔ μ` onto each other, so `ρ₀ r̈ + … + ρ₀V′(r)` is `μ₀ r̈ + … +
-        // μ₀V′(r)` in the other skin. Loss channels stay attached to their own
-        // physical field, and their rate conversion is a contract of its own,
-        // so they are refused rather than guessed at.
+        // μ₀V′(r)` in the other skin. A loss channel keeps its role: the
+        // primary field's channel goes to the other skin's primary field and
+        // the complementary to the complementary, its rate unchanged, as
+        // legacy damping crossed as the primary field's rate. TE's primary
+        // channel is magnetic like Mechanical's; TM's is electric, so a switch
+        // to or from TM trades the two (the user's call, 2026-10-26).
         for law in [&material.mass_law, &material.stiffness_law] {
             if matches!(law.field, FieldLaw::Linear) {
                 continue;
@@ -409,18 +412,15 @@ impl PhysicsModel {
                 ));
             }
         }
-        if material.electric_loss.is_some() || material.magnetic_loss.is_some() {
-            return Err(MaterialError::UnconvertibleMaterialLaw(
-                "a named loss channel",
-            ));
-        }
-
         // Legacy damping is the primary field's rate in every skin, as the
         // solver reads it, so it crosses unchanged. Converted as a coefficient,
         // `d/ρ` and back by the stiffness, a medium of density 4 decayed four
         // times more slowly after a switch to TM (NUM-5 of the 2026-10-20
         // review).
         let mut converted = material.clone();
+        if crate::primary_loss_is_electric(self) != crate::primary_loss_is_electric(target) {
+            std::mem::swap(&mut converted.electric_loss, &mut converted.magnetic_loss);
+        }
         if crossing_to_em {
             converted.mass_density = material.stiffness.reciprocal()?;
             converted.stiffness = material.mass_density.clone();
@@ -2182,22 +2182,47 @@ mod tests {
             tm.convert_material(mechanical, &converted).unwrap(),
             restoring
         );
+    }
 
-        let mut lossy = base;
-        lossy.electric_loss = Some(crate::LossChannel {
-            base_rate: ScalarField::constant(0.1),
+    /// A loss channel keeps its role across a Mechanical ↔ electromagnetic
+    /// switch, the primary field's channel landing on the other skin's
+    /// primary field and the complementary on the complementary, as legacy
+    /// damping crossed as the primary field's rate (NUM-5 of the 2026-10-20
+    /// review). TE's primary field is magnetic like Mechanical's, so its
+    /// channels stay; TM's is electric, so they trade places. Between TM and
+    /// TE a channel follows its field.
+    #[test]
+    fn a_skin_change_carries_each_loss_channel_by_its_role() {
+        use crate::ScalarField;
+        let mechanical = PhysicsModel::Mechanical;
+        let [tm, te] = [
+            ElectromagneticPolarization::Tm,
+            ElectromagneticPolarization::Te,
+        ]
+        .map(|polarization| PhysicsModel::Electromagnetic { polarization });
+        let channel = |rate: f64| crate::LossChannel {
+            base_rate: ScalarField::constant(rate),
             law: crate::DampingLaw {
                 rate: crate::RateLaw::Constant,
                 drive: crate::TimeDrive::None,
                 gate: None,
             },
-        });
-        assert_eq!(
-            mechanical.convert_material(tm, &lossy),
-            Err(MaterialError::UnconvertibleMaterialLaw(
-                "a named loss channel"
-            ))
-        );
+        };
+        let mut lossy = Material::default_medium();
+        lossy.magnetic_loss = Some(channel(0.4));
+        lossy.electric_loss = Some(channel(0.1));
+
+        let in_tm = mechanical.convert_material(tm, &lossy).unwrap();
+        assert_eq!(in_tm.electric_loss, Some(channel(0.4)));
+        assert_eq!(in_tm.magnetic_loss, Some(channel(0.1)));
+        assert_eq!(tm.convert_material(mechanical, &in_tm).unwrap(), lossy);
+
+        let in_te = mechanical.convert_material(te, &lossy).unwrap();
+        assert_eq!(in_te.magnetic_loss, Some(channel(0.4)));
+        assert_eq!(in_te.electric_loss, Some(channel(0.1)));
+        assert_eq!(te.convert_material(mechanical, &in_te).unwrap(), lossy);
+
+        assert_eq!(tm.convert_material(te, &in_tm).unwrap(), in_tm);
     }
 
     #[test]

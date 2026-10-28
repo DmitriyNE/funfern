@@ -6535,6 +6535,56 @@ mod tests {
         );
     }
 
+    /// A named loss channel decays alike across a skin switch, as legacy
+    /// damping does above: a Mechanical medium of density 4 with a magnetic
+    /// loss of 0.4, its primary field's, switched to TM, where the primary
+    /// field is electric. The switch refused any named channel until the
+    /// legacy damping went (the user's call, 2026-10-26).
+    #[test]
+    fn a_loss_channel_decays_alike_across_a_skin_switch() {
+        let tm_physics = PhysicsModel::Electromagnetic {
+            polarization: crate::ElectromagneticPolarization::Tm,
+        };
+        let mut mechanical = TopologyScene::default();
+        mechanical.materials[0].mass_density = ScalarField::constant(4.0);
+        mechanical.materials[0].magnetic_loss = Some(LossChannel {
+            base_rate: ScalarField::constant(0.4),
+            law: DampingLaw::constant(),
+        });
+        let mut tm = mechanical.clone();
+        tm.physics = tm_physics;
+        tm.materials[0] = PhysicsModel::Mechanical
+            .convert_material(tm_physics, &mechanical.materials[0])
+            .unwrap();
+        let decay = |scene: &TopologyScene| {
+            let (_, operator) = compile(scene);
+            let duration = 2.0;
+            let steps = (duration / (0.2 * operator.maximum_time_step())).ceil() as usize;
+            let time_step = duration / steps as f64;
+            let mode = operator
+                .node_points()
+                .iter()
+                .map(|point| (0.5 * std::f64::consts::PI * (point.x + 1.0)).cos())
+                .collect::<Vec<_>>();
+            let potential = vec![0.0; operator.degrees_of_freedom()];
+            let mut state = CanonicalWaveState::from_primary_and_potential(
+                &operator, time_step, &mode, &potential,
+            )
+            .unwrap();
+            let start = state.energy(&operator).unwrap();
+            for _ in 0..steps {
+                state.step(&operator).unwrap();
+            }
+            -(state.energy(&operator).unwrap() / start).ln() / duration
+        };
+        let (mechanical_rate, tm_rate) = (decay(&mechanical), decay(&tm));
+        assert!(mechanical_rate > 0.05, "{mechanical_rate}");
+        assert!(
+            (tm_rate - mechanical_rate).abs() <= 0.02 * mechanical_rate,
+            "Mechanical decays at {mechanical_rate}, TM at {tm_rate}"
+        );
+    }
+
     /// NUM-12 of the 2026-10-20 review: the roundoff `stable_difference`
     /// suppresses had a floor of 1, so in a scene authored at small amplitude
     /// every difference under 1.8e-15 was dropped and the CPU reference stood

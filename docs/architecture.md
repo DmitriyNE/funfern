@@ -1192,10 +1192,12 @@ arithmetic: Metal and SwiftShader read the same errors at the same arguments.
 
 The laws compile into a `CanonicalTemporalWaveOperator` over the same base as
 the fixed operator, which the application assembles from the law-stripped
-model. Every coefficient is evaluated at its own stage instant. Named loss
-channels (electric, magnetic) follow their physical field across skins. The
-channel on the primary field is what legacy `damping` means, and the two
-cannot both be active. The timestep ceiling covers the whole coefficient
+model. Every coefficient is evaluated at its own stage instant. Between TM
+and TE a named loss channel (electric, magnetic) follows its physical field; a
+switch between Mechanical and either electromagnetic skin carries each by its
+role, the primary field's channel to the other skin's primary field, as legacy
+`damping` crossed. The channel on the primary field is what legacy `damping`
+means, and the two cannot both be active. The timestep ceiling covers the whole coefficient
 trajectory: each row's lowest tangent factor over every drive phase, Switch
 state and admitted amplitude.
 

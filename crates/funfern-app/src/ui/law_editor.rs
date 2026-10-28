@@ -749,8 +749,7 @@ fn loss_hover(physics: PhysicsModel, row: LawPresetRow, legacy: bool) -> String 
         format!(
             "A rate per second that damps {field}. This material still carries the older \
              Damping σ, which damps whichever field the skin makes primary; editing it \
-             moves it to the {channel} loss, which stays on its physical field across a \
-             skin change."
+             moves it to the {channel} loss, which keeps that role across a skin change."
         )
     } else {
         format!("The {channel} loss: a rate per second that damps {field} in this skin.")

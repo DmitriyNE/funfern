@@ -30237,3 +30237,32 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-28 — Legacy phase-out 9: loss channels carried across a skin switch by role
+
+- **The rule.** For the day the legacy `damping` goes, the user chose (2026-10-26) that a Mechanical ↔ electromagnetic switch carries each named
+  loss channel by its role, with its rate unchanged. The primary field's
+  channel goes to the other skin's primary field and the complementary to
+  the complementary, as legacy damping crossed as the primary field's rate
+  (NUM-5). Until now the switch refused any named channel, so every lossy
+  material the damping's migration will give a channel would have blocked
+  it.
+- **Which channels move.** TE's primary channel is magnetic, like
+  Mechanical's, so its channels stay. TM's is electric, so a switch to or
+  from TM trades the two. Between TM and TE a channel follows its field, as
+  before.
+- **Test first.** Two tests failed on the refusal before the change and
+  pass after it:
+  - `a_skin_change_carries_each_loss_channel_by_its_role` covers both
+    channels, both skins, the round trips and TM ↔ TE;
+  - `a_loss_channel_decays_alike_across_a_skin_switch` takes density 4 with
+    a magnetic loss of 0.4 and decays within 2% after a switch to TM, as
+    legacy damping does.
+  The refusal test lost its channel case. The app's 783 library tests pass,
+  the randomized panel sequences among them.
+- **The words.** The material panel's hover on a legacy damping said the
+  named loss it moves to stays on its physical field across a skin change;
+  it now says it keeps that role. docs/architecture.md says the same.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
