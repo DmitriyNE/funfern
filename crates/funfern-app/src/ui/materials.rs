@@ -1965,34 +1965,6 @@ mod tests {
         }
     }
 
-    /// Editing a legacy material's loss moves it to its named channel in one
-    /// step, and the solver's rates are the same before and after.
-    #[test]
-    fn a_legacy_damping_moves_to_its_channel_with_the_same_rates() {
-        let mut state = Playground::default();
-        let mut material = state.editor.document.model.draft.materials[0].clone();
-        material.damping = ScalarField::constant(0.3);
-        state.editor.update_material(material.clone()).unwrap();
-        settle(&mut state.editor);
-        let legacy = activate(&mut state);
-        let physics = state.editor.document.model.draft.physics;
-        law_editor::adopt_legacy_damping(&mut material, physics);
-        state.editor.update_material(material).unwrap();
-        settle(&mut state.editor);
-        let named = activate(&mut state);
-        let rates = |prepared: &PreparedTopology| {
-            (
-                prepared.canonical_operator.primary_loss_rate().to_vec(),
-                prepared
-                    .canonical_operator
-                    .complementary_loss_rate()
-                    .to_vec(),
-            )
-        };
-        assert!(rates(&legacy).0.iter().any(|rate| *rate > 0.0));
-        assert_eq!(rates(&legacy), rates(&named));
-    }
-
     #[test]
     fn the_advanced_view_is_presentation_not_an_edit() {
         let mut state = Playground::default();
@@ -2400,7 +2372,7 @@ mod tests {
             law_editor::set_self_oscillating(
                 &mut constant,
                 physics,
-                law_editor::legacy_damping_row(physics),
+                funfern_core::primary_coefficient_row(physics),
                 true,
             );
             assert_eq!(identify_medium_preset(&constant, physics), None);
@@ -3253,7 +3225,6 @@ mod tests {
             MaterialEditorLabels {
                 mass: "Density ρ₀",
                 stiffness: "Stiffness k₀",
-                damping: "Damping σ",
                 axis_ratio: "Stiffness axis ratio",
             }
         );
@@ -3266,7 +3237,6 @@ mod tests {
                 MaterialEditorLabels {
                     mass: "Permittivity ε",
                     stiffness: "Permeability μ",
-                    damping: "Loss rate α",
                     axis_ratio: "Constitutive axis ratio",
                 }
             );

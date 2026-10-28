@@ -3293,7 +3293,6 @@ mod tests {
             name: "Profile interior".into(),
             mass_density: crate::ScalarField::constant(1.0),
             stiffness: crate::ScalarField::formula("2 + 0.1 * x").unwrap(),
-            damping: crate::ScalarField::constant(0.0),
             axis_ratio: crate::ScalarField::constant(1.0),
             parameters: vec![],
             color: [80, 120, 160],
@@ -3960,7 +3959,11 @@ mod tests {
         let mut formula_scene = TopologyScene::default();
         formula_scene.materials[0].mass_density = crate::ScalarField::formula("1").unwrap();
         formula_scene.materials[0].stiffness = crate::ScalarField::formula("1").unwrap();
-        formula_scene.materials[0].damping = crate::ScalarField::formula("0").unwrap();
+        set_primary_loss(
+            &mut formula_scene.materials[0],
+            formula_scene.physics,
+            crate::ScalarField::formula("0").unwrap(),
+        );
         let formula_operator = Arc::new(
             assembled_with(&mesh, &formula_scene, formula_scene.outer_boundaries).unwrap(),
         );
@@ -4100,7 +4103,11 @@ mod tests {
 
         let mut profile_scene = TopologyScene::default();
         profile_scene.materials[0].mass_density = crate::ScalarField::formula("1 + x").unwrap();
-        profile_scene.materials[0].damping = crate::ScalarField::formula("y").unwrap();
+        set_primary_loss(
+            &mut profile_scene.materials[0],
+            profile_scene.physics,
+            crate::ScalarField::formula("y").unwrap(),
+        );
         let profile_operator = Arc::new(
             assembled_with(&mesh, &profile_scene, profile_scene.outer_boundaries).unwrap(),
         );

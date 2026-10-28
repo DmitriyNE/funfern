@@ -333,8 +333,8 @@ transient boundary-selection type. Viewport hit testing creates that selection a
 one inspector dispatches to the conditions supported by its target; selection is
 excluded from scene files and document history.
 
-The replacement topology document has a strict scene JSON version 22. It is a
-deliberate compatibility break: its decoder accepts only version 22, rejects unknown
+The replacement topology document's scene JSON broke compatibility at version
+22, deliberately: its decoder accepts versions 22 and 23 only, rejects unknown
 fields and malformed or excessive data before replacement, and has no versions 1–21
 adapter. Both draft and accepted authored topology are stored, so an invalid but
 structurally sound draft survives a round trip while the accepted scene must compile.
@@ -355,17 +355,20 @@ with empty history. The eight built-in examples are authored directly as topolog
 documents and exercise geometry, sources, probes, spatial materials, EM modes,
 far-field settings, and presentation presets without a legacy conversion layer.
 
-The production application reads and writes only version 22, and that is the only
-decoder in the tree. The pre-cutover `editor` and `persistence` modules were
+The production application writes version 23 and reads versions 22 and 23,
+through the only decoder in the tree. The pre-cutover `editor` and `persistence` modules were
 removed once the value codecs they held — physics, material coefficients, time
 signals, wall and face conditions, splines, presentation, sampling presets —
 moved into `topology_persistence`, beside the schema that is their only caller.
-There is no compatibility adapter and no migration code: a file that is not
-version 22 is turned away by its version header, and version 22's own decoder
-accepts only the tagged value shapes it writes. Several presentation keys carry
+There is no compatibility adapter before version 22: an older file is turned away
+by its version header, and the decoder accepts only the tagged value shapes it
+writes. Version 23 (2026-10-29) dropped the material's legacy `damping`, the
+primary field's rate in every skin; a version-22 file's damping opens as the
+skin's primary loss channel at the same rate, a zero one goes, and one beside
+that channel is refused by the material's name. Several presentation keys carry
 serde defaults so that a version-22 file written by an earlier build still loads,
 and the retired adaptation-target flag still migrates to the material overlay it
-became; those are the only tolerances inside the version.
+became; those and the damping are the only tolerances.
 
 Versions 1 to 21 are recorded below because they explain the shape of the current
 file, not because anything still reads them. Version 21 added open
@@ -1196,8 +1199,8 @@ model. Every coefficient is evaluated at its own stage instant. Between TM
 and TE a named loss channel (electric, magnetic) follows its physical field; a
 switch between Mechanical and either electromagnetic skin carries each by its
 role, the primary field's channel to the other skin's primary field, as legacy
-`damping` crossed. The channel on the primary field is what legacy `damping`
-means, and the two cannot both be active. The timestep ceiling covers the whole coefficient
+`damping` crossed. A version-22 file's legacy `damping` opens as the
+channel on the primary field. The timestep ceiling covers the whole coefficient
 trajectory: each row's lowest tangent factor over every drive phase, Switch
 state and admitted amplitude.
 

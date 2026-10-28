@@ -117,7 +117,6 @@ pub struct Material {
     pub name: String,
     pub mass_density: ScalarField,
     pub stiffness: ScalarField,
-    pub damping: ScalarField,
     pub axis_ratio: ScalarField,
     pub parameters: Vec<MaterialParameter>,
     pub color: [u8; 3],
@@ -258,7 +257,6 @@ impl Material {
             name: "Ambient".into(),
             mass_density: ScalarField::constant(1.0),
             stiffness: ScalarField::constant(1.0),
-            damping: ScalarField::constant(0.0),
             axis_ratio: ScalarField::constant(1.0),
             parameters: vec![],
             // Readable against the dark canvas at the overlay's default opacity
@@ -276,27 +274,22 @@ impl Material {
 
     /// Every parameter any coefficient or law of the material refers to.
     pub fn parameter_names(&self) -> impl Iterator<Item = &str> {
-        [
-            &self.mass_density,
-            &self.stiffness,
-            &self.damping,
-            &self.axis_ratio,
-        ]
-        .into_iter()
-        .flat_map(ScalarField::parameter_names)
-        .chain(self.mass_law.parameter_names())
-        .chain(self.stiffness_law.parameter_names())
-        .chain(
-            self.electric_loss
-                .iter()
-                .flat_map(LossChannel::parameter_names),
-        )
-        .chain(
-            self.magnetic_loss
-                .iter()
-                .flat_map(LossChannel::parameter_names),
-        )
-        .chain(self.restoring.parameter_names())
+        [&self.mass_density, &self.stiffness, &self.axis_ratio]
+            .into_iter()
+            .flat_map(ScalarField::parameter_names)
+            .chain(self.mass_law.parameter_names())
+            .chain(self.stiffness_law.parameter_names())
+            .chain(
+                self.electric_loss
+                    .iter()
+                    .flat_map(LossChannel::parameter_names),
+            )
+            .chain(
+                self.magnetic_loss
+                    .iter()
+                    .flat_map(LossChannel::parameter_names),
+            )
+            .chain(self.restoring.parameter_names())
     }
 
     /// Whether any law changes what the material does beyond its base values.
@@ -353,24 +346,15 @@ impl Material {
                 .constant_value()
                 .is_none_or(|value| value.is_finite() && value > 0.0)
             && self
-                .damping
-                .constant_value()
-                .is_none_or(|value| value.is_finite() && value >= 0.0)
-            && self
                 .axis_ratio
                 .constant_value()
                 .is_none_or(|value| value.is_finite() && value >= 1.0)
     }
 
     pub fn varying(&self) -> bool {
-        [
-            &self.mass_density,
-            &self.stiffness,
-            &self.damping,
-            &self.axis_ratio,
-        ]
-        .into_iter()
-        .any(|field| field.constant_value().is_none())
+        [&self.mass_density, &self.stiffness, &self.axis_ratio]
+            .into_iter()
+            .any(|field| field.constant_value().is_none())
             || self.mass_law.varies_in_space()
             || self.stiffness_law.varies_in_space()
             || self
@@ -414,12 +398,10 @@ impl Material {
     ///
     /// Like [`Self::evaluate`], but a constant named loss channel is not a
     /// law it has to refuse: it is a rate, and the channel on the field the
-    /// skin makes primary is exactly what legacy `damping` means - TM's
-    /// electric loss, TE's and Mechanical's magnetic loss. That channel's rate
-    /// stands in for `damping`. The complementary channel has no place in a
-    /// scalar operator and is left to the canonical solver, which applies
-    /// both. Legacy damping beside a named channel is refused, as the
-    /// canonical compiler refuses it.
+    /// skin makes primary - TM's electric loss, TE's and Mechanical's
+    /// magnetic loss - is the scalar operator's `damping`. The complementary
+    /// channel has no place in a scalar operator and is left to the canonical
+    /// solver, which applies both.
     pub fn evaluate_static(
         &self,
         physics: crate::PhysicsModel,
@@ -439,9 +421,6 @@ impl Material {
         let mut values = self.evaluate_base(frame, point)?;
         if self.electric_loss.is_none() && self.magnetic_loss.is_none() {
             return Ok(values);
-        }
-        if values.damping != 0.0 {
-            return Err(MaterialError::InvalidValue);
         }
         let primary = match physics {
             crate::PhysicsModel::Electromagnetic {
@@ -476,7 +455,9 @@ impl Material {
         let values = EvaluatedMaterial {
             mass_density: self.mass_density.evaluate(coordinates, &self.parameters)?,
             stiffness: self.stiffness.evaluate(coordinates, &self.parameters)?,
-            damping: self.damping.evaluate(coordinates, &self.parameters)?,
+            // The primary field's loss rate is the primary channel's, which
+            // the base leaves out and `evaluate_static` adds.
+            damping: 0.0,
             axis_ratio: self.axis_ratio.evaluate(coordinates, &self.parameters)?,
         };
         values
@@ -492,7 +473,7 @@ impl Material {
         let values = EvaluatedMaterial {
             mass_density: self.mass_density.constant_value()?,
             stiffness: self.stiffness.constant_value()?,
-            damping: self.damping.constant_value()?,
+            damping: 0.0,
             axis_ratio: self.axis_ratio.constant_value()?,
         };
         values.valid().then_some(values)
@@ -513,7 +494,6 @@ impl Material {
         let old = self.parameters[index].name.clone();
         let mass_density = self.mass_density.rename_parameter(&old, &name)?;
         let stiffness = self.stiffness.rename_parameter(&old, &name)?;
-        let damping = self.damping.rename_parameter(&old, &name)?;
         let axis_ratio = self.axis_ratio.rename_parameter(&old, &name)?;
         let mass_law = self.mass_law.rename_parameter(&old, &name)?;
         let stiffness_law = self.stiffness_law.rename_parameter(&old, &name)?;
@@ -530,7 +510,6 @@ impl Material {
         let restoring = self.restoring.rename_parameter(&old, &name)?;
         self.mass_density = mass_density;
         self.stiffness = stiffness;
-        self.damping = damping;
         self.axis_ratio = axis_ratio;
         self.mass_law = mass_law;
         self.stiffness_law = stiffness_law;

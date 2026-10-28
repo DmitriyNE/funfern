@@ -131,8 +131,9 @@ device reads each loss stage's rate from per-site loss records at the stage's
 own instant, and weighs a node shared by several materials by the masses in
 force. Before that it packed authored rates at compile time and dropped the
 drive; `canonical_gpu_long_run` with `LONG_RUN_LOSS` is the gate. Each row has
-one loss in the editor, the channel on its physical field. Legacy `damping` is
-the channel on the primary field, and the first loss edit moves it there.
+one loss in the editor, the channel on its physical field. The legacy
+`damping` was the primary field's rate; a file that holds one opens with it as
+the channel on the primary field.
 
 D3 is a deliberate instability, so it is explicit: its own loss kind on the
 primary row, with its energy in an active-gain lane of either sign rather than
@@ -159,7 +160,7 @@ own store, and its cap sees the effective mass and stiffness the law reaches
 | --- | --- |
 | `canonical_wave.rs`, `linear_material_sample` | a non-linear `mass_law` or `stiffness_law`, and any restoring law. Admits loss channels. `is_linear()` includes `drive.is_none()`, which is why a driven generation assembles from a stripped model and compiles its laws separately. |
 | `wave.rs`, `evaluate_timed_directional_material_library_at` | nothing past the two constitutive rows. A loss channel changes neither and is read past: the canonical supplement takes the contraction a complementary loss puts on `b` out of its drift defect, and the scalar term that reads `damping` is off wherever a supplement is attached. A restoring law changes no coefficient and is read past (the size rule can only over-resolve a Klein-Gordon medium); its store and force are in the canonical supplement. Field laws are read at their small-signal limit; the size rule applies the primary row's tangent separately. |
-| `geometry.rs`, `Material::evaluate_static` | anything but constant loss channels beside linear rows, and legacy damping beside a named channel. It reads the primary field's channel as the static scalar operator's damping. |
+| `geometry.rs`, `Material::evaluate_static` | anything but constant loss channels beside linear rows. It reads the primary field's channel as the static scalar operator's damping. |
 
 A preset whose law is not **runs** is filtered out of the selector rather than
 offered and refused, so every document a user can author assembles.

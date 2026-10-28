@@ -2090,7 +2090,10 @@ mod tests {
     fn time_invariance_separates_driven_media_from_merely_varying_ones() {
         let fixed = Material {
             mass_density: ScalarField::formula("1 + 0.1 * x").unwrap(),
-            damping: ScalarField::constant(0.3),
+            magnetic_loss: Some(crate::LossChannel {
+                base_rate: ScalarField::constant(0.3),
+                law: crate::DampingLaw::constant(),
+            }),
             axis_ratio: ScalarField::constant(1.4),
             ..Material::default_medium()
         };

@@ -1,15 +1,21 @@
-//! Version-22 persistence for the unified topology document.
+//! Version-23 persistence for the unified topology document.
 //!
-//! This is deliberately a hard schema boundary: production accepts only version
-//! 22, and there is no legacy geometry adapter behind it. The whole schema
-//! lives here, value codecs included, so a field that changes shape changes in
-//! one file.
+//! Version 22 is the last break: nothing older opens, and there is no legacy
+//! geometry adapter behind it. The whole schema lives here, value codecs
+//! included, so a field that changes shape changes in one file.
 //!
-//! Version 22 is the last break. Files, links and autosaves written from here
-//! on are users' work and must keep opening: a new key arrives with a serde
-//! default that means what files without it meant, and a change of meaning or
-//! shape takes a new version with a migration from every version before it,
-//! never a reinterpreted field or a dropped decoder.
+//! Files, links and autosaves written since version 22 are users' work and
+//! must keep opening: a new key arrives with a serde default that means what
+//! files without it meant, and a change of meaning or shape takes a new
+//! version with a migration from every version before it, never a
+//! reinterpreted field or a dropped decoder.
+//!
+//! Version 23 dropped the material's legacy `damping`, the primary field's
+//! rate in every skin. A version-22 file's damping becomes the skin's
+//! primary loss channel at the same rate: the magnetic channel in Mechanical
+//! and TE, the electric one in TM. A zero damping goes. A material that
+//! holds a damping beside its primary channel is refused by name, as the
+//! solver refused it.
 
 use crate::document::{
     AdaptationSettings, DEFAULT_TRANSFER_SEGMENT, LineProbeQuantity, LineProbeRepresentation,
@@ -25,7 +31,9 @@ use funfern_core::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const TOPOLOGY_FILE_VERSION: u32 = 22;
+pub const TOPOLOGY_FILE_VERSION: u32 = 23;
+/// The oldest version that opens, migrated on reading.
+const OLDEST_FILE_VERSION: u32 = 22;
 /// What a scene file, autosave or unpacked link may hold. A scene at the
 /// topology limits takes about 3 MiB written out, so the room is ample; it
 /// was 2 MiB, which such a scene could pass on saving and then not open.
@@ -49,7 +57,7 @@ struct Header {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileV22 {
+struct StoredFile {
     version: u32,
     model: StoredTopologyDocumentModel,
     presentation: StoredPresentation,
@@ -97,7 +105,9 @@ struct StoredMaterial {
     name: String,
     mass_density: StoredScalarField,
     stiffness: StoredScalarField,
-    damping: StoredScalarField,
+    /// Version 22's legacy damping, migrated on reading; never written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    damping: Option<StoredScalarField>,
     axis_ratio: StoredScalarField,
     parameters: Vec<StoredParameter>,
     color: [u8; 3],
@@ -475,13 +485,14 @@ pub fn parse_document(bytes: &[u8]) -> Result<TopologyDocument, String> {
         return Err(format!("Scene file exceeds {MAX_FILE_MIB} MiB"));
     }
     let header: Header = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
-    if header.version != TOPOLOGY_FILE_VERSION {
+    if !(OLDEST_FILE_VERSION..=TOPOLOGY_FILE_VERSION).contains(&header.version) {
         return Err(format!(
-            "Unsupported scene version {}; Funfern now requires version {TOPOLOGY_FILE_VERSION}",
+            "Unsupported scene version {}; Funfern opens versions {OLDEST_FILE_VERSION} to \
+             {TOPOLOGY_FILE_VERSION}",
             header.version
         ));
     }
-    let file: FileV22 = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+    let file: StoredFile = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
     let document = decode_document(file)?;
     validate_document(&document)?;
     Ok(document)
@@ -510,8 +521,8 @@ pub fn candidate(document: TopologyDocument) -> TopologyLoadCandidate {
     }
 }
 
-fn encode_document(document: &TopologyDocument) -> FileV22 {
-    FileV22 {
+fn encode_document(document: &TopologyDocument) -> StoredFile {
+    StoredFile {
         version: TOPOLOGY_FILE_VERSION,
         model: StoredTopologyDocumentModel {
             draft: encode_scene(&document.model.draft),
@@ -766,7 +777,7 @@ fn is_zero(value: &f64) -> bool {
     *value == 0.0
 }
 
-fn decode_document(mut file: FileV22) -> Result<TopologyDocument, String> {
+fn decode_document(mut file: StoredFile) -> Result<TopologyDocument, String> {
     let every_material_advanced = file.presentation.advanced_materials;
     let mut readouts = ProbeReadouts {
         far_field: file
@@ -785,7 +796,8 @@ fn decode_document(mut file: FileV22) -> Result<TopologyDocument, String> {
         }
         readouts.probes.insert(id, decode_readout(entry.readout));
     }
-    let draft = decode_scene(file.model.draft)?;
+    let version = file.version;
+    let draft = decode_scene(file.model.draft, version)?;
     let region_names = region_names(file.model.region_names, &draft)?;
     let mut presentation = decode_presentation(file.presentation)?;
     presentation.advanced_materials = shown_materials(
@@ -796,7 +808,7 @@ fn decode_document(mut file: FileV22) -> Result<TopologyDocument, String> {
     let document = TopologyDocument {
         model: TopologyDocumentModel {
             draft,
-            accepted: decode_scene(file.model.accepted)?,
+            accepted: decode_scene(file.model.accepted, version)?,
             probes: file
                 .model
                 .probes
@@ -869,7 +881,7 @@ fn encode_scene(scene: &TopologyScene) -> StoredTopologyScene {
                 name: material.name.clone(),
                 mass_density: encode_scalar_field(&material.mass_density),
                 stiffness: encode_scalar_field(&material.stiffness),
-                damping: encode_scalar_field(&material.damping),
+                damping: None,
                 axis_ratio: encode_scalar_field(&material.axis_ratio),
                 parameters: encode_parameters(&material.parameters),
                 color: material.color,
@@ -937,7 +949,8 @@ fn encode_scene(scene: &TopologyScene) -> StoredTopologyScene {
     }
 }
 
-fn decode_scene(stored: StoredTopologyScene) -> Result<TopologyScene, String> {
+fn decode_scene(stored: StoredTopologyScene, version: u32) -> Result<TopologyScene, String> {
+    let physics = decode_physics(stored.physics);
     let domain = DomainRect {
         min_x: stored.domain[0],
         max_x: stored.domain[1],
@@ -978,17 +991,17 @@ fn decode_scene(stored: StoredTopologyScene) -> Result<TopologyScene, String> {
                 })
                 .collect(),
         },
-        physics: decode_physics(stored.physics),
+        physics,
         materials: stored
             .materials
             .into_iter()
             .map(|material| {
-                Ok(Material {
+                let damping = material.damping.map(decode_scalar_field).transpose()?;
+                let decoded = Material {
                     id: MaterialId(material.id),
                     name: material.name,
                     mass_density: decode_scalar_field(material.mass_density)?,
                     stiffness: decode_scalar_field(material.stiffness)?,
-                    damping: decode_scalar_field(material.damping)?,
                     axis_ratio: decode_scalar_field(material.axis_ratio)?,
                     parameters: decode_parameters(material.parameters),
                     color: material.color,
@@ -1005,7 +1018,8 @@ fn decode_scene(stored: StoredTopologyScene) -> Result<TopologyScene, String> {
                     restoring: decode_restoring_law(material.restoring)?,
                     switch_ramp: material.switch_ramp,
                     short_wave_loss: material.short_wave_loss,
-                })
+                };
+                migrate_damping(decoded, damping, physics, version)
             })
             .collect::<Result<_, String>>()?,
         regions: stored
@@ -1044,6 +1058,45 @@ fn decode_scene(stored: StoredTopologyScene) -> Result<TopologyScene, String> {
     };
     validate_scene_structure(&scene)?;
     Ok(scene)
+}
+
+/// A material read from a file of `version`, with version 22's legacy
+/// `damping` moved into the skin's primary loss channel at the same rate. A
+/// later version holds no damping.
+fn migrate_damping(
+    mut material: Material,
+    damping: Option<ScalarField>,
+    physics: PhysicsModel,
+    version: u32,
+) -> Result<Material, String> {
+    let Some(damping) = damping else {
+        return Ok(material);
+    };
+    if version > 22 {
+        return Err(format!(
+            "Material {} holds a damping, which version {version} does not",
+            material.name
+        ));
+    }
+    if damping.constant_value() == Some(0.0) {
+        return Ok(material);
+    }
+    let (primary, field) = if primary_loss_is_electric(physics) {
+        (&mut material.electric_loss, "electric")
+    } else {
+        (&mut material.magnetic_loss, "magnetic")
+    };
+    if primary.is_some() {
+        return Err(format!(
+            "Material {} holds a legacy damping beside its {field} loss channel",
+            material.name
+        ));
+    }
+    *primary = Some(LossChannel {
+        base_rate: damping,
+        law: DampingLaw::constant(),
+    });
+    Ok(material)
 }
 
 fn encode_curve(curve: &TopologyCurve) -> StoredCurve {
@@ -2451,7 +2504,7 @@ fn encode_presentation(settings: PresentationSettings) -> StoredPresentation {
                 StoredMaterialOverlay::Property(match property {
                     MaterialProperty::Density => StoredMaterialProperty::Density,
                     MaterialProperty::Stiffness => StoredMaterialProperty::Stiffness,
-                    MaterialProperty::Damping => StoredMaterialProperty::Damping,
+                    MaterialProperty::LossRate => StoredMaterialProperty::Damping,
                     MaterialProperty::WaveSpeed => StoredMaterialProperty::WaveSpeed,
                     MaterialProperty::Impedance => StoredMaterialProperty::Impedance,
                     MaterialProperty::Anisotropy => StoredMaterialProperty::Anisotropy,
@@ -2542,7 +2595,7 @@ fn decode_presentation(stored: StoredPresentation) -> Result<PresentationSetting
                 MaterialOverlay::Property(match property {
                     StoredMaterialProperty::Density => MaterialProperty::Density,
                     StoredMaterialProperty::Stiffness => MaterialProperty::Stiffness,
-                    StoredMaterialProperty::Damping => MaterialProperty::Damping,
+                    StoredMaterialProperty::Damping => MaterialProperty::LossRate,
                     StoredMaterialProperty::WaveSpeed => MaterialProperty::WaveSpeed,
                     StoredMaterialProperty::Impedance => MaterialProperty::Impedance,
                     StoredMaterialProperty::Anisotropy => MaterialProperty::Anisotropy,
@@ -2659,10 +2712,10 @@ mod tests {
     }
 
     #[test]
-    fn version_22_default_document_round_trips_exactly() {
+    fn the_default_document_round_trips_exactly() {
         let document = TopologyDocument::default();
         let pretty = save(&document).unwrap();
-        assert!(pretty.contains("\"version\": 22"));
+        assert!(pretty.contains("\"version\": 23"));
         assert_eq!(parse_document(pretty.as_bytes()).unwrap(), document);
         let compact = save_compact(&document).unwrap();
         assert_eq!(parse_document(&compact).unwrap(), document);
@@ -2915,7 +2968,7 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
         value["version"] = 21.into();
         let issue = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap_err();
-        assert!(issue.contains("requires version 22"));
+        assert!(issue.contains("opens versions 22 to 23"), "{issue}");
 
         value["version"] = TOPOLOGY_FILE_VERSION.into();
         value["unexpected"] = true.into();
@@ -2924,6 +2977,105 @@ mod tests {
         value.as_object_mut().unwrap().remove("unexpected");
         value["model"]["accepted"]["domain"] = serde_json::json!([1.0, -1.0, -1.0, 1.0]);
         assert!(parse_document(serde_json::to_string(&value).unwrap().as_bytes()).is_err());
+    }
+
+    /// Version 23 moved the legacy damping, the primary field's rate in every
+    /// skin, into the skin's primary loss channel: magnetic in Mechanical and
+    /// TE, electric in TM, at the same rate, a formula staying a formula. It
+    /// writes back as version 23 without the damping.
+    #[test]
+    fn a_version_22_damping_opens_as_the_primary_loss_channel() {
+        let rate = serde_json::json!({ "kind": "formula", "source": "0.3 + 0.1 * x" });
+        let expected = Some(LossChannel {
+            base_rate: ScalarField::formula("0.3 + 0.1 * x").unwrap(),
+            law: DampingLaw::constant(),
+        });
+        for (physics, electric) in [
+            (PhysicsModel::Mechanical, false),
+            (
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Tm,
+                },
+                true,
+            ),
+            (
+                PhysicsModel::Electromagnetic {
+                    polarization: ElectromagneticPolarization::Te,
+                },
+                false,
+            ),
+        ] {
+            let mut document = TopologyDocument::default();
+            document.model.draft.physics = physics;
+            document.model.accepted.physics = physics;
+            let mut value: serde_json::Value =
+                serde_json::from_str(&save(&document).unwrap()).unwrap();
+            value["version"] = 22.into();
+            for scene in ["draft", "accepted"] {
+                value["model"][scene]["materials"][0]["damping"] = rate.clone();
+            }
+            let opened = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap();
+            let material = &opened.model.draft.materials[0];
+            let (primary, complementary) = if electric {
+                (&material.electric_loss, &material.magnetic_loss)
+            } else {
+                (&material.magnetic_loss, &material.electric_loss)
+            };
+            assert_eq!(primary, &expected, "{physics:?}");
+            assert_eq!(complementary, &None, "{physics:?}");
+            assert_eq!(&opened.model.accepted.materials[0], material);
+
+            let written: serde_json::Value = serde_json::from_str(&save(&opened).unwrap()).unwrap();
+            assert_eq!(written["version"], TOPOLOGY_FILE_VERSION);
+            assert!(
+                written["model"]["draft"]["materials"][0]
+                    .get("damping")
+                    .is_none()
+            );
+            assert_eq!(
+                parse_document(save(&opened).unwrap().as_bytes()).unwrap(),
+                opened
+            );
+        }
+    }
+
+    /// A zero damping goes without a channel; one beside the primary channel
+    /// is refused by the material's name, as the solver refused it; and a
+    /// version-23 file holds no damping at all.
+    #[test]
+    fn a_version_22_damping_that_cannot_migrate_is_refused_by_name() {
+        let open = |value: &serde_json::Value| {
+            parse_document(serde_json::to_string(value).unwrap().as_bytes())
+        };
+        let document = TopologyDocument::default();
+        let mut value: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
+        value["version"] = 22.into();
+        for scene in ["draft", "accepted"] {
+            value["model"][scene]["materials"][0]["damping"] =
+                serde_json::json!({ "kind": "constant", "value": 0.0 });
+        }
+        assert_eq!(open(&value).unwrap(), document);
+
+        let mut lossy = TopologyDocument::default();
+        for scene in [&mut lossy.model.draft, &mut lossy.model.accepted] {
+            scene.materials[0].magnetic_loss = Some(LossChannel {
+                base_rate: ScalarField::constant(0.1),
+                law: DampingLaw::constant(),
+            });
+        }
+        let mut value: serde_json::Value = serde_json::from_str(&save(&lossy).unwrap()).unwrap();
+        value["version"] = 22.into();
+        value["model"]["draft"]["materials"][0]["damping"] =
+            serde_json::json!({ "kind": "constant", "value": 0.2 });
+        let issue = open(&value).unwrap_err();
+        assert!(
+            issue.contains("Ambient") && issue.contains("magnetic loss channel"),
+            "{issue}"
+        );
+
+        value["version"] = TOPOLOGY_FILE_VERSION.into();
+        let issue = open(&value).unwrap_err();
+        assert!(issue.contains("does not"), "{issue}");
     }
 
     #[test]
@@ -3085,7 +3237,7 @@ mod tests {
             MaterialOverlay::AdaptationTarget,
             MaterialOverlay::Property(MaterialProperty::Density),
             MaterialOverlay::Property(MaterialProperty::Stiffness),
-            MaterialOverlay::Property(MaterialProperty::Damping),
+            MaterialOverlay::Property(MaterialProperty::LossRate),
             MaterialOverlay::Property(MaterialProperty::WaveSpeed),
             MaterialOverlay::Property(MaterialProperty::Impedance),
             MaterialOverlay::Property(MaterialProperty::Anisotropy),
@@ -3351,9 +3503,11 @@ mod tests {
         let document = TopologyDocument::default();
         let original: serde_json::Value = serde_json::from_str(&save(&document).unwrap()).unwrap();
 
-        // Damping, because zero damping is otherwise a legal material: the
-        // rejection has to come from the formula and not from a later guard.
+        // A version-22 damping, because zero damping is otherwise a legal
+        // material: the rejection has to come from the formula and not from a
+        // later guard.
         let mut value = original.clone();
+        value["version"] = 22.into();
         value["model"]["draft"]["materials"][0]["damping"] =
             serde_json::json!({ "kind": "formula", "source": "1 +" });
         let issue = parse_document(serde_json::to_string(&value).unwrap().as_bytes()).unwrap_err();

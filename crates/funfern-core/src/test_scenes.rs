@@ -247,6 +247,21 @@ pub fn plan_of(scene: &TopologyScene, revision: u64, options: MeshingOptions) ->
         .unwrap()
 }
 
+/// Gives `material` a constant loss of `rate` on `physics`'s primary field,
+/// what the legacy `damping` was: the magnetic channel in Mechanical and TE,
+/// the electric one in TM.
+pub fn set_primary_loss(material: &mut Material, physics: PhysicsModel, rate: ScalarField) {
+    let channel = Some(LossChannel {
+        base_rate: rate,
+        law: DampingLaw::constant(),
+    });
+    if primary_loss_is_electric(physics) {
+        material.electric_loss = channel;
+    } else {
+        material.magnetic_loss = channel;
+    }
+}
+
 /// A hole's span with `condition` on its outside, the right side, as the
 /// legacy hole's span conditions were.
 pub fn rim(condition: FaceBoundaryCondition) -> SpanBehavior {

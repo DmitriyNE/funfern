@@ -371,9 +371,10 @@ fn loss_rows() -> Vec<(&'static str, TopologyScene, bool)> {
             gate: None,
         },
     };
-    // The mechanical skin's complementary row carries the electric channel.
+    // The mechanical skin's primary row carries the magnetic channel, its
+    // complementary row the electric one.
     let primary_loss = |mut scene: TopologyScene| {
-        scene.materials[0].damping = ScalarField::constant(0.45);
+        scene.materials[0].magnetic_loss = Some(constant_loss(0.45));
         scene
     };
     let complementary_loss = |mut scene: TopologyScene| {
@@ -544,7 +545,6 @@ fn interface_scene(driven: bool) -> TopologyScene {
         mass_density: ScalarField::constant(1.0),
         // A contrast worth resolving: the wave speed steps by 1.6.
         stiffness: ScalarField::constant(2.5),
-        damping: ScalarField::constant(0.0),
         axis_ratio: ScalarField::constant(1.0),
         parameters: vec![],
         color: [80, 120, 160],

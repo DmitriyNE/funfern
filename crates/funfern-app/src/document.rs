@@ -52,7 +52,9 @@ impl MaterialOverlay {
 pub enum MaterialProperty {
     Density,
     Stiffness,
-    Damping,
+    /// The primary field's loss rate: its loss channel's base rate. Stored
+    /// as `Damping`, the legacy coefficient that held it before version 23.
+    LossRate,
     WaveSpeed,
     Impedance,
     Anisotropy,
@@ -63,7 +65,7 @@ impl MaterialProperty {
     pub const ALL: [Self; 7] = [
         Self::Density,
         Self::Stiffness,
-        Self::Damping,
+        Self::LossRate,
         Self::WaveSpeed,
         Self::Impedance,
         Self::Anisotropy,
@@ -74,7 +76,7 @@ impl MaterialProperty {
         match self {
             Self::Density => "Density",
             Self::Stiffness => "Stiffness",
-            Self::Damping => "Damping",
+            Self::LossRate => "Loss rate",
             Self::WaveSpeed => "Wave speed",
             Self::Impedance => "Impedance",
             Self::Anisotropy => "Material anisotropy",
@@ -88,7 +90,7 @@ impl MaterialProperty {
             PhysicsModel::Electromagnetic { .. } => match self {
                 Self::Density => "Permittivity ε",
                 Self::Stiffness => "Permeability μ",
-                Self::Damping => "Loss rate α",
+                Self::LossRate => "Loss rate α",
                 Self::WaveSpeed => "Wave speed",
                 Self::Impedance => "Wave impedance",
                 Self::Anisotropy => "Material anisotropy",
@@ -101,7 +103,7 @@ impl MaterialProperty {
         match self {
             Self::Density => 0,
             Self::Stiffness => 1,
-            Self::Damping => 2,
+            Self::LossRate => 2,
             Self::WaveSpeed => 3,
             Self::Impedance => 4,
             Self::Anisotropy => 5,

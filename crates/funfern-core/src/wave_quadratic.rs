@@ -1234,7 +1234,8 @@ fn evaluate_directional_material(
     let properties = crate::EvaluatedMaterial {
         mass_density: evaluate(&material.mass_density, "density", true)?,
         stiffness: evaluate(&material.stiffness, "stiffness", true)?,
-        damping: evaluate(&material.damping, "damping", false)?,
+        // Loss is the channels', which name their own failures.
+        damping: 0.0,
         axis_ratio: evaluate(&material.axis_ratio, "axis ratio", true)?,
     };
     if properties.axis_ratio < 1.0 {
@@ -2900,7 +2901,10 @@ mod tests {
                     name: "Left".into(),
                     mass_density: crate::ScalarField::constant(2.0),
                     stiffness: crate::ScalarField::constant(3.0),
-                    damping: crate::ScalarField::constant(0.5),
+                    magnetic_loss: Some(crate::LossChannel {
+                        base_rate: crate::ScalarField::constant(0.5),
+                        law: crate::DampingLaw::constant(),
+                    }),
                     axis_ratio: crate::ScalarField::constant(1.0),
                     parameters: vec![],
                     color: [1, 2, 3],
@@ -2911,7 +2915,10 @@ mod tests {
                     name: "Right".into(),
                     mass_density: crate::ScalarField::constant(4.0),
                     stiffness: crate::ScalarField::constant(7.0),
-                    damping: crate::ScalarField::constant(1.5),
+                    magnetic_loss: Some(crate::LossChannel {
+                        base_rate: crate::ScalarField::constant(1.5),
+                        law: crate::DampingLaw::constant(),
+                    }),
                     axis_ratio: crate::ScalarField::constant(1.0),
                     parameters: vec![],
                     color: [4, 5, 6],
@@ -3139,7 +3146,10 @@ mod tests {
         let material = &mut scene.materials[0];
         material.mass_density = crate::ScalarField::formula("1 + x").unwrap();
         material.stiffness = crate::ScalarField::formula("2 + x").unwrap();
-        material.damping = crate::ScalarField::formula("y").unwrap();
+        material.magnetic_loss = Some(crate::LossChannel {
+            base_rate: crate::ScalarField::formula("y").unwrap(),
+            law: crate::DampingLaw::constant(),
+        });
         let operator =
             hand_assembled(&square(), &scene, OuterBoundaryCondition::Reflecting).unwrap();
 
@@ -3163,37 +3173,25 @@ mod tests {
     /// a material's four base fields itself, so a constant loss channel was
     /// dropped and a material with a law was assembled as a static medium,
     /// where the topology path reads `Material::evaluate_static`. Held on the
-    /// topology path since the `Scene` path's retirement: the primary
-    /// channel's rate stands in for `damping`, and a law is refused.
+    /// topology path since the `Scene` path's retirement: each region's
+    /// primary channel is its lumped damping, half a unit triangle at 0.5
+    /// and half at 1.5, and a law is refused.
     #[test]
     fn the_assembly_reads_materials_as_the_static_evaluator_does() {
-        let mut legacy = two_material_scene();
-        let mut channel = legacy.clone();
-        for material in &mut channel.materials {
-            let rate = std::mem::replace(&mut material.damping, crate::ScalarField::constant(0.0));
-            material.magnetic_loss = Some(crate::LossChannel {
-                base_rate: rate,
-                law: crate::DampingLaw::constant(),
-            });
-        }
+        let mut scene = two_material_scene();
         let mut mesh = square();
         mesh.triangles[1].region = RegionId(2);
         let assemble = |scene: &TopologyScene| {
             hand_assembled(&mesh, scene, OuterBoundaryCondition::Reflecting)
         };
-        let legacy_operator = assemble(&legacy).unwrap();
-        let channel_operator = assemble(&channel).unwrap();
-        assert_eq!(
-            channel_operator.lumped_damping(),
-            legacy_operator.lumped_damping()
-        );
-        assert!((legacy_operator.lumped_damping().iter().sum::<f64>() - 1.0).abs() < 1.0e-13);
-        legacy.materials[0].mass_law.drive = crate::TimeDrive::ParametricPump {
+        let operator = assemble(&scene).unwrap();
+        assert!((operator.lumped_damping().iter().sum::<f64>() - 1.0).abs() < 1.0e-13);
+        scene.materials[0].mass_law.drive = crate::TimeDrive::ParametricPump {
             depth: crate::ScalarField::constant(0.1),
             frequency_hz: crate::ScalarField::constant(1.0),
             phase_radians: crate::ScalarField::constant(0.0),
         };
-        assert!(assemble(&legacy).is_err(), "a law is not a static medium");
+        assert!(assemble(&scene).is_err(), "a law is not a static medium");
     }
 
     /// Reported by the 2026-10-20 review (NUM-16): the `Scene` path sampled
@@ -4647,12 +4645,18 @@ mod tests {
         let mut scene = TopologyScene::default();
         scene.materials[0].mass_density = crate::ScalarField::constant(4.0);
         scene.materials[0].stiffness = crate::ScalarField::constant(9.0);
-        scene.materials[0].damping = crate::ScalarField::constant(0.5);
         for (polarization, expected_mass, expected_damping) in [
             (crate::ElectromagneticPolarization::Tm, 4.0, 2.0),
             (crate::ElectromagneticPolarization::Te, 9.0, 4.5),
         ] {
             scene.physics = PhysicsModel::Electromagnetic { polarization };
+            scene.materials[0].electric_loss = None;
+            scene.materials[0].magnetic_loss = None;
+            set_primary_loss(
+                &mut scene.materials[0],
+                scene.physics,
+                crate::ScalarField::constant(0.5),
+            );
             let operator =
                 hand_assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
             assert!((operator.lumped_mass().iter().sum::<f64>() - expected_mass).abs() < 1e-12);

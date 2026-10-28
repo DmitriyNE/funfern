@@ -2227,42 +2227,6 @@ pub fn coefficient_law_roles(
     }
 }
 
-/// Versioned migration of the legacy normalized primary damping field into one
-/// physically named channel. The full symbolic field moves once; it is never
-/// duplicated onto both electric and magnetic loss.
-pub fn migrate_legacy_material_loss(
-    material: &Material,
-    physics: PhysicsModel,
-) -> Result<Material, MaterialError> {
-    if material.electric_loss.is_some() || material.magnetic_loss.is_some() {
-        return Err(MaterialError::InvalidValue);
-    }
-    let mut migrated = material.clone();
-    let identically_zero = material.damping.constant_value() == Some(0.0);
-    migrated.damping = ScalarField::constant(0.0);
-    if identically_zero {
-        return Ok(migrated);
-    }
-    let channel = LossChannel {
-        base_rate: material.damping.clone(),
-        law: DampingLaw {
-            rate: RateLaw::Constant,
-            drive: TimeDrive::None,
-            gate: None,
-        },
-    };
-    match physics {
-        PhysicsModel::Mechanical
-        | PhysicsModel::Electromagnetic {
-            polarization: ElectromagneticPolarization::Te,
-        } => migrated.magnetic_loss = Some(channel),
-        PhysicsModel::Electromagnetic {
-            polarization: ElectromagneticPolarization::Tm,
-        } => migrated.electric_loss = Some(channel),
-    }
-    Ok(migrated)
-}
-
 /// A gate in words: its envelope, when the first pulse starts and how often
 /// the train repeats.
 pub fn pulse_train_text(train: PulseTrain) -> String {
@@ -2338,12 +2302,6 @@ mod tests {
         assert_eq!(damping(&material, te), Ok(0.3));
         assert_eq!(damping(&material, PhysicsModel::Mechanical), Ok(0.3));
 
-        material.damping = ScalarField::constant(0.1);
-        assert!(
-            damping(&material, tm).is_err(),
-            "legacy damping beside a channel"
-        );
-        material.damping = ScalarField::constant(0.0);
         material.electric_loss.as_mut().unwrap().law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.2),
             frequency_hz: ScalarField::constant(1.0),
@@ -3307,39 +3265,6 @@ mod tests {
         assert_eq!(te[0].placement, ConstitutivePlacement::ComplementaryVector);
         assert_eq!(tm[1].argument, PhysicalFieldArgument::Magnetic);
         assert_eq!(te[1].argument, PhysicalFieldArgument::Magnetic);
-    }
-
-    #[test]
-    fn legacy_loss_migration_moves_the_symbolic_rate_to_exactly_one_physical_channel() {
-        for (physics, electric) in [
-            (PhysicsModel::Mechanical, false),
-            (
-                PhysicsModel::Electromagnetic {
-                    polarization: ElectromagneticPolarization::Tm,
-                },
-                true,
-            ),
-            (
-                PhysicsModel::Electromagnetic {
-                    polarization: ElectromagneticPolarization::Te,
-                },
-                false,
-            ),
-        ] {
-            let mut material = Material::default_medium();
-            material.damping = ScalarField::formula("0.2 + 0.1*r").unwrap();
-            let migrated = migrate_legacy_material_loss(&material, physics).unwrap();
-            assert_eq!(migrated.damping, ScalarField::constant(0.0));
-            assert_eq!(migrated.electric_loss.is_some(), electric);
-            assert_eq!(migrated.magnetic_loss.is_some(), !electric);
-            let channel = migrated
-                .electric_loss
-                .as_ref()
-                .or(migrated.magnetic_loss.as_ref())
-                .unwrap();
-            assert_eq!(channel.base_rate, material.damping);
-            assert!(channel.law.is_constant());
-        }
     }
 
     #[test]

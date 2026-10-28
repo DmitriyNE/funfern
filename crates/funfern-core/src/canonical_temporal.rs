@@ -6768,31 +6768,6 @@ fn loss_for(
     coordinates: MaterialCoordinates,
     point: Point2,
 ) -> Result<TemporalLossSample, WaveError> {
-    let physical = material.electric_loss.is_some() || material.magnetic_loss.is_some();
-    if !physical {
-        if !primary {
-            return Ok(TemporalLossSample::zero(material.id, point, coordinates));
-        }
-        let base_rate = evaluated_nonnegative(
-            material,
-            &material.damping,
-            "legacy damping",
-            coordinates,
-            point,
-        )?;
-        return Ok(TemporalLossSample {
-            material: material.id,
-            point,
-            coordinates,
-            drive: None,
-            base_rate,
-            law: DampingLawValues {
-                rate: RateLawValues::Constant,
-                drive: TimeDriveValues::None,
-                gate: None,
-            },
-        });
-    }
     let (channel, drive) = match (physics, primary) {
         (PhysicsModel::Mechanical, true)
         | (
@@ -8298,7 +8273,11 @@ mod tests {
     #[test]
     fn an_inert_constant_loss_decays_exactly_as_the_fixed_path_does() {
         let mut scene = TopologyScene::default();
-        scene.materials[0].damping = ScalarField::constant(0.45);
+        set_primary_loss(
+            &mut scene.materials[0],
+            scene.physics,
+            ScalarField::constant(0.45),
+        );
         let operator = compile(&scene).unwrap();
         let base = operator.base();
         let forcing = CanonicalForcing::none(base);
@@ -9681,7 +9660,11 @@ mod tests {
     fn temporal_energy_breakdown_refuses_a_composed_system() {
         let mut scene = initial();
         scene.materials[0].mass_law.drive = pump(0.2, 0.6, 0.0);
-        scene.materials[0].damping = ScalarField::constant(0.35);
+        set_primary_loss(
+            &mut scene.materials[0],
+            scene.physics,
+            ScalarField::constant(0.35),
+        );
         let operator = compile(&scene).unwrap();
         let runtime = operator.initial_runtime();
         let primary = vec![0.1; operator.base().degrees_of_freedom()];
@@ -10884,7 +10867,11 @@ mod tests {
         // dissipation lane, so what it loses is the conservative-bulk claim
         // rather than the ability to run.
         let mut lossy_scene = initial();
-        lossy_scene.materials[0].damping = ScalarField::constant(0.1);
+        set_primary_loss(
+            &mut lossy_scene.materials[0],
+            lossy_scene.physics,
+            ScalarField::constant(0.1),
+        );
         let lossy = compile(&lossy_scene).unwrap();
         assert!(lossy.has_loss());
         assert!(!lossy.conservative_bulk_supported());
@@ -13131,7 +13118,11 @@ mod tests {
             thin_gap(120.0),
         );
         let mut lossy = TopologyScene::default();
-        lossy.materials[0].damping = ScalarField::constant(0.45);
+        set_primary_loss(
+            &mut lossy.materials[0],
+            lossy.physics,
+            ScalarField::constant(0.45),
+        );
         vec![
             (
                 "first-order wall",
@@ -14436,7 +14427,11 @@ mod tests {
         // Just off the top, with a loss to settle into.
         let mut scene = TopologyScene::default();
         scene.materials[0].restoring = phi4(lambda, 1.6);
-        scene.materials[0].damping = ScalarField::constant(2.0);
+        set_primary_loss(
+            &mut scene.materials[0],
+            scene.physics,
+            ScalarField::constant(2.0),
+        );
         let mut base_scene = scene.clone();
         strip_temporal_laws(&mut base_scene.materials);
         let mesh = meshed(
@@ -16370,7 +16365,11 @@ mod tests {
             let mut stiffness_pumped = TopologyScene::default();
             stiffness_pumped.materials[0].stiffness_law.drive = pump(0.25, 0.7, -0.3);
             let mut lossy_pumped = pumped.clone();
-            lossy_pumped.materials[0].damping = ScalarField::constant(0.45);
+            set_primary_loss(
+                &mut lossy_pumped.materials[0],
+                lossy_pumped.physics,
+                ScalarField::constant(0.45),
+            );
             let mut kerr_medium = TopologyScene::default();
             kerr_medium.materials[0].mass_law.field = kerr(0.8);
             kerr_medium.materials[0].stiffness_law.field = kerr(20.0);
@@ -16686,7 +16685,13 @@ mod tests {
             case("thin gap", gapped, reflecting),
             case(
                 "loss",
-                with(&|scene| scene.materials[0].damping = ScalarField::constant(0.45)),
+                with(&|scene| {
+                    set_primary_loss(
+                        &mut scene.materials[0],
+                        scene.physics,
+                        ScalarField::constant(0.45),
+                    )
+                }),
                 reflecting,
             ),
             FourthOrderCase {

@@ -96,11 +96,10 @@ pub(super) enum FiredDrive {
 /// "Fire now" commits this at once rather than at Apply, whose moment would
 /// otherwise decide when the pulse runs. The drive goes with its gate as its
 /// editor shows them, so what fires is what is on screen; the material's
-/// other edits stay pending. A loss drive goes with its channel, which the
-/// edit may have just made out of a legacy damping. The parameters those
-/// formulas name go with them at their edited values: kept at the applied
-/// ones, a pump at `rate` edited from 1 to 4 fired at 1 Hz, and one at a
-/// parameter the edit had just added was refused as invalid.
+/// other edits stay pending. A loss drive goes with its channel. The
+/// parameters those formulas name go with them at their edited values: kept
+/// at the applied ones, a pump at `rate` edited from 1 to 4 fired at 1 Hz,
+/// and one at a parameter the edit had just added was refused as invalid.
 pub(super) fn with_fired_drive(
     applied: &Material,
     edited: &Material,
@@ -124,31 +123,13 @@ pub(super) fn with_fired_drive(
             source.drive.parameter_names().map(str::to_owned).collect()
         }
         FiredDrive::Loss(row) => {
-            material.damping = edited.damping.clone();
-            // The edit moved a legacy damping into the primary row's channel
-            // (`adopt_legacy_damping`); committed without it, firing the other
-            // row's drive dropped the primary loss from the solver and Revert
-            // lost it for good (UI-7 of the 2026-10-20 review).
-            let primary = legacy_damping_row(physics);
-            let mut rows = vec![row];
-            if primary != row && applied.damping != ScalarField::constant(0.0) {
-                rows.push(primary);
-            }
-            let mut names: BTreeSet<String> = edited
-                .damping
-                .parameter_names()
+            let channel = row_channel(&mut edited, physics, row).clone();
+            let names = channel
+                .iter()
+                .flat_map(LossChannel::parameter_names)
                 .map(str::to_owned)
                 .collect();
-            for row in rows {
-                let channel = row_channel(&mut edited, physics, row).clone();
-                names.extend(
-                    channel
-                        .iter()
-                        .flat_map(LossChannel::parameter_names)
-                        .map(str::to_owned),
-                );
-                *row_channel(&mut material, physics, row) = channel;
-            }
+            *row_channel(&mut material, physics, row) = channel;
             names
         }
     };
@@ -248,12 +229,6 @@ pub(super) fn row_is_electric(physics: PhysicsModel, row: LawPresetRow) -> bool 
     }
 }
 
-/// The row legacy `damping` acts on: the primary one, which is ε in TM, μ in
-/// TE and the density in Mechanical - the skin's primary coefficient row.
-pub(super) fn legacy_damping_row(physics: PhysicsModel) -> LawPresetRow {
-    funfern_core::primary_coefficient_row(physics)
-}
-
 fn row_channel(
     material: &mut Material,
     physics: PhysicsModel,
@@ -266,34 +241,9 @@ fn row_channel(
     }
 }
 
-/// Moves a legacy `damping` into the named channel of the row it acts on, so
-/// the two can never be authored together. Called only when a loss is edited;
-/// opening a legacy material does not rewrite it.
-pub(super) fn adopt_legacy_damping(material: &mut Material, physics: PhysicsModel) {
-    if material.damping == ScalarField::constant(0.0) {
-        return;
-    }
-    let rate = std::mem::replace(&mut material.damping, ScalarField::constant(0.0));
-    let channel = row_channel(material, physics, legacy_damping_row(physics));
-    match channel {
-        Some(channel) => channel.base_rate = rate,
-        None => {
-            *channel = Some(LossChannel {
-                base_rate: rate,
-                law: DampingLaw {
-                    rate: RateLaw::Constant,
-                    drive: TimeDrive::None,
-                    gate: None,
-                },
-            })
-        }
-    }
-}
-
-/// One row's loss rate. It shows the row's named channel, or a legacy
-/// `damping` where that is what acts on this row, and any edit writes the
-/// named channel. A rate edited back to zero with no drive removes the
-/// channel, so an untouched material and one set back to zero are the same.
+/// One row's loss rate: the row's named channel, which any edit writes. A
+/// rate edited back to zero with no drive removes the channel, so an
+/// untouched material and one set back to zero are the same.
 pub(super) fn loss_rate_editor(
     ui: &mut egui::Ui,
     material: &mut Material,
@@ -309,21 +259,15 @@ pub(super) fn loss_rate_editor(
     } else {
         ELECTRIC_LOSS
     };
-    let legacy =
-        row == legacy_damping_row(physics) && material.damping != ScalarField::constant(0.0);
-    let shown = if legacy {
-        material.damping.clone()
-    } else {
-        row_channel(material, physics, row)
-            .as_ref()
-            .map_or(ScalarField::constant(0.0), |channel| {
-                channel.base_rate.clone()
-            })
-    };
+    let shown = row_channel(material, physics, row)
+        .as_ref()
+        .map_or(ScalarField::constant(0.0), |channel| {
+            channel.base_rate.clone()
+        });
     let mut edited = shown.clone();
     let parameters = material.parameters.clone();
     // Gate O: the primary row's loss may self-oscillate instead.
-    let primary = row == legacy_damping_row(physics);
+    let primary = row == funfern_core::primary_coefficient_row(physics);
     let active = primary
         && row_channel(material, physics, row)
             .as_ref()
@@ -340,9 +284,7 @@ pub(super) fn loss_rate_editor(
     if active && !advanced {
         return;
     }
-    let label = if legacy {
-        "Loss rate (legacy)"
-    } else if active {
+    let label = if active {
         "Gain rate γ₀"
     } else {
         "Loss rate"
@@ -356,9 +298,8 @@ pub(super) fn loss_rate_editor(
         0.0,
         formulas,
     )
-    .on_hover_text(loss_hover(physics, row, legacy));
+    .on_hover_text(loss_hover(physics, row));
     if edited != shown {
-        adopt_legacy_damping(material, physics);
         let channel = row_channel(material, physics, row);
         match channel {
             Some(found) => found.base_rate = edited,
@@ -427,7 +368,6 @@ pub(super) fn loss_rate_editor(
             timing.fired = Some(FiredDrive::Loss(row));
         }
         if (drive.clone(), gate) != before {
-            adopt_legacy_damping(material, physics);
             if let Some(found) = row_channel(material, physics, row) {
                 found.law.drive = drive;
                 found.law.gate = gate;
@@ -474,16 +414,15 @@ fn loss_kind_editor(
     set_self_oscillating(material, physics, row, chosen);
 }
 
-/// Makes a row's loss self-oscillating or constant again. A legacy damping
-/// moves into the named channel first; a channel's rate carries across, and a
-/// fresh one starts at a gain of 0.5 per second against a threshold of 1.
+/// Makes a row's loss self-oscillating or constant again. A channel's rate
+/// carries across, and a fresh one starts at a gain of 0.5 per second against
+/// a threshold of 1.
 pub(super) fn set_self_oscillating(
     material: &mut Material,
     physics: PhysicsModel,
     row: LawPresetRow,
     chosen: bool,
 ) {
-    adopt_legacy_damping(material, physics);
     let channel = row_channel(material, physics, row);
     if chosen {
         let rate = channel
@@ -711,7 +650,7 @@ fn restoring_slots_editor(ui: &mut egui::Ui, material: &mut Material, formulas: 
     }
 }
 
-fn loss_hover(physics: PhysicsModel, row: LawPresetRow, legacy: bool) -> String {
+fn loss_hover(physics: PhysicsModel, row: LawPresetRow) -> String {
     let field = match (physics, row) {
         (PhysicsModel::Mechanical, LawPresetRow::Stiffness) => "the stress-like complementary flux",
         (PhysicsModel::Mechanical, _) => "the displacement flux",
@@ -745,15 +684,7 @@ fn loss_hover(physics: PhysicsModel, row: LawPresetRow, legacy: bool) -> String 
     } else {
         "magnetic"
     };
-    if legacy {
-        format!(
-            "A rate per second that damps {field}. This material still carries the older \
-             Damping σ, which damps whichever field the skin makes primary; editing it \
-             moves it to the {channel} loss, which keeps that role across a skin change."
-        )
-    } else {
-        format!("The {channel} loss: a rate per second that damps {field} in this skin.")
-    }
+    format!("The {channel} loss: a rate per second that damps {field} in this skin.")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1269,22 +1200,25 @@ mod tests {
         );
     }
 
-    /// Firing a loss drive that the edit made out of a legacy damping takes
-    /// the channel with it, so the committed material stays valid; firing a
-    /// coefficient's drive takes that drive and its gate and nothing else.
+    /// Firing a loss drive takes its channel with it, so the committed
+    /// material stays valid; firing a coefficient's drive takes that drive
+    /// and its gate and nothing else.
     #[test]
     fn a_fired_drive_takes_what_its_editor_shows_and_nothing_else() {
         let physics = PhysicsModel::Mechanical;
         let mut applied = Material::default_medium();
-        applied.damping = ScalarField::constant(0.2);
+        funfern_core::test_scenes::set_primary_loss(
+            &mut applied,
+            physics,
+            ScalarField::constant(0.2),
+        );
         let gate = Some(PulseTrain {
             envelope: PulseEnvelope::Gaussian { width: 0.1 },
             start: 4.0,
             repeat: 0.0,
         });
         let mut edited = applied.clone();
-        adopt_legacy_damping(&mut edited, physics);
-        let primary = legacy_damping_row(physics);
+        let primary = funfern_core::primary_coefficient_row(physics);
         let channel = row_channel(&mut edited, physics, primary).as_mut().unwrap();
         channel.law.drive = TimeDrive::ParametricPump {
             depth: ScalarField::constant(0.5),
@@ -1295,7 +1229,6 @@ mod tests {
         edited.mass_density = ScalarField::constant(3.0);
         let fired = with_fired_drive(&applied, &edited, physics, FiredDrive::Loss(primary));
         assert!(fired.valid());
-        assert_eq!(fired.damping, ScalarField::constant(0.0));
         assert_eq!(
             row_channel(&mut fired.clone(), physics, primary)
                 .as_ref()
@@ -1323,24 +1256,24 @@ mod tests {
             FiredDrive::Coefficient(LawPresetRow::Stiffness),
         );
         assert_eq!(fired.stiffness_law, edited.stiffness_law);
-        assert_eq!(fired.damping, applied.damping);
         assert_eq!(fired.magnetic_loss, applied.magnetic_loss);
         assert_eq!(fired.mass_density, applied.mass_density);
     }
 
-    /// UI-7 of the 2026-10-20 review: editing a loss of a legacy-damping
-    /// material moves the damping into the primary row's channel, and firing
-    /// the other row's drive committed the zeroed damping with only that
-    /// row's channel: the primary loss left the solver, and Revert lost it
-    /// for good. The adopted channel is committed with the fired one.
+    /// Firing the other row's loss drive keeps the primary channel. UI-7 of
+    /// the 2026-10-20 review lost it that way where an edit had just moved a
+    /// legacy damping into it; the damping has since gone.
     #[test]
-    fn firing_the_other_rows_loss_keeps_the_adopted_primary_channel() {
+    fn firing_the_other_rows_loss_keeps_the_primary_channel() {
         let physics = PhysicsModel::Mechanical;
         let mut applied = Material::default_medium();
-        applied.damping = ScalarField::constant(0.2);
+        funfern_core::test_scenes::set_primary_loss(
+            &mut applied,
+            physics,
+            ScalarField::constant(0.2),
+        );
         let mut edited = applied.clone();
-        adopt_legacy_damping(&mut edited, physics);
-        let primary = legacy_damping_row(physics);
+        let primary = funfern_core::primary_coefficient_row(physics);
         let other = match primary {
             LawPresetRow::Mass => LawPresetRow::Stiffness,
             _ => LawPresetRow::Mass,
@@ -1359,7 +1292,6 @@ mod tests {
         });
         let fired = with_fired_drive(&applied, &edited, physics, FiredDrive::Loss(other));
         assert!(fired.valid());
-        assert_eq!(fired.damping, ScalarField::constant(0.0));
         assert_eq!(
             row_channel(&mut fired.clone(), physics, primary)
                 .as_ref()
@@ -1571,7 +1503,12 @@ mod tests {
         for physics in SKINS {
             let mut material =
                 apply_restoring_preset(sine_gordon, &Material::default_medium()).unwrap();
-            set_self_oscillating(&mut material, physics, legacy_damping_row(physics), true);
+            set_self_oscillating(
+                &mut material,
+                physics,
+                funfern_core::primary_coefficient_row(physics),
+                true,
+            );
             let before = material.clone();
             for advanced in [false, true] {
                 let (mut edit, mut error) = edits();
@@ -1594,16 +1531,19 @@ mod tests {
     }
 
     /// Self-oscillation lands on the primary row's own channel in each skin -
-    /// electric in TM, magnetic in TE and Mechanical - takes a legacy damping
-    /// along, and switching back keeps the rate as a constant loss.
+    /// electric in TM, magnetic in TE and Mechanical - takes the channel's
+    /// rate along, and switching back keeps the rate as a constant loss.
     #[test]
     fn self_oscillation_sits_on_the_primary_channel() {
         for physics in SKINS {
             let mut material = Material::default_medium();
-            material.damping = ScalarField::constant(0.3);
-            let row = legacy_damping_row(physics);
+            funfern_core::test_scenes::set_primary_loss(
+                &mut material,
+                physics,
+                ScalarField::constant(0.3),
+            );
+            let row = funfern_core::primary_coefficient_row(physics);
             set_self_oscillating(&mut material, physics, row, true);
-            assert_eq!(material.damping, ScalarField::constant(0.0));
             let electric = physics
                 == PhysicsModel::Electromagnetic {
                     polarization: ElectromagneticPolarization::Tm,
@@ -1630,38 +1570,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn viewing_a_legacy_damping_leaves_it_where_it_is() {
-        let mut material = Material::default_medium();
-        material.damping = ScalarField::constant(0.3);
-        let before = material.clone();
-        for physics in SKINS {
-            for advanced in [false, true] {
-                let (mut edit, mut error) = edits();
-                let context = egui::Context::default();
-                for _ in 0..2 {
-                    let _ = context.run_ui(egui::RawInput::default(), |ui| {
-                        rows(
-                            ui,
-                            &mut material,
-                            physics,
-                            advanced,
-                            &[],
-                            &mut FormulaEdits {
-                                edits: &mut edit,
-                                errors: &mut error,
-                            },
-                        );
-                    });
-                }
-                assert_eq!(material, before, "{physics:?}, advanced {advanced}");
-            }
-        }
-    }
-
     /// The electric channel sits with ε and the magnetic with μ in both EM
-    /// polarizations; Mechanical puts magnetic on the density. Legacy damping
-    /// belongs to the primary row, and adopting it lands in that row's channel.
+    /// polarizations; Mechanical puts magnetic on the density.
     #[test]
     fn each_row_owns_the_loss_channel_of_its_field() {
         use LawPresetRow::{Mass, Stiffness};
@@ -1670,27 +1580,10 @@ mod tests {
             assert!(row_is_electric(*physics, Mass) && !row_is_electric(*physics, Stiffness));
         }
         assert_eq!(
-            SKINS.map(legacy_damping_row),
+            SKINS.map(funfern_core::primary_coefficient_row),
             [Mass, Mass, Stiffness],
             "the primary row: density, ε for TM, μ for TE"
         );
-        for (physics, electric) in [(SKINS[0], false), (SKINS[1], true), (SKINS[2], false)] {
-            let mut material = Material::default_medium();
-            material.damping = ScalarField::constant(0.3);
-            adopt_legacy_damping(&mut material, physics);
-            assert_eq!(material.damping, ScalarField::constant(0.0));
-            let (moved, other) = if electric {
-                (&material.electric_loss, &material.magnetic_loss)
-            } else {
-                (&material.magnetic_loss, &material.electric_loss)
-            };
-            assert_eq!(
-                moved.as_ref().map(|channel| channel.base_rate.clone()),
-                Some(ScalarField::constant(0.3)),
-                "{physics:?}"
-            );
-            assert!(other.is_none(), "{physics:?}");
-        }
     }
 
     /// An edited `s₀` is written back as the reciprocal it names, with the

@@ -2811,7 +2811,12 @@ mod tests {
             .unwrap();
 
         let mut document = editor.document.clone();
-        document.model.accepted.materials[0].damping = ScalarField::constant(0.02);
+        let physics = document.model.accepted.physics;
+        funfern_core::test_scenes::set_primary_loss(
+            &mut document.model.accepted.materials[0],
+            physics,
+            ScalarField::constant(0.02),
+        );
         document.model.draft = document.model.accepted.clone();
         let compiled = document.model.accepted.compile(7).unwrap();
         let second = runtime

@@ -228,7 +228,7 @@ mod tests {
         let fragment = format!("{PREFIX}{}", base64_encode(&encoder.finish().unwrap()));
         let bytes = decode(&fragment).unwrap();
         let issue = persistence::parse(&bytes).err().unwrap();
-        assert!(issue.contains("version 21") && issue.contains("requires version 22"));
+        assert!(issue.contains("version 21") && issue.contains("opens versions 22 to 23"));
     }
 
     #[test]

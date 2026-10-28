@@ -1517,7 +1517,6 @@ mod tests {
                     name: "Inside".into(),
                     mass_density: crate::ScalarField::constant(1.0),
                     stiffness: crate::ScalarField::constant(1.0),
-                    damping: crate::ScalarField::constant(0.0),
                     axis_ratio: crate::ScalarField::constant(1.0),
                     parameters: vec![],
                     color: [1, 2, 3],

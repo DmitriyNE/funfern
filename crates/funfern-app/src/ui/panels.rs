@@ -171,7 +171,7 @@ impl Playground {
         const PROPERTIES: [MaterialProperty; 7] = [
             MaterialProperty::Density,
             MaterialProperty::Stiffness,
-            MaterialProperty::Damping,
+            MaterialProperty::LossRate,
             MaterialProperty::WaveSpeed,
             MaterialProperty::Impedance,
             MaterialProperty::Anisotropy,

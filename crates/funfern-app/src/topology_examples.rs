@@ -1305,7 +1305,6 @@ pub fn guide_scene() -> TopologyDocument {
         name: "Glass".into(),
         mass_density: ScalarField::constant(2.25),
         stiffness: ScalarField::constant(1.0),
-        damping: ScalarField::constant(0.0),
         axis_ratio: ScalarField::constant(1.0),
         parameters: vec![],
         color: [61, 116, 139],
@@ -1436,7 +1435,6 @@ fn material_lens_with(lens: bool) -> TopologyDocument {
         name: "Glass".into(),
         mass_density: ScalarField::constant(if lens { 4.0 } else { 1.0 }),
         stiffness: ScalarField::constant(1.0),
-        damping: ScalarField::constant(0.0),
         axis_ratio: ScalarField::constant(1.0),
         parameters: vec![],
         color: [61, 116, 139],
@@ -1528,7 +1526,6 @@ fn grin_rod_with(dn: f64) -> TopologyDocument {
         name: "GRIN profile".into(),
         mass_density: ScalarField::formula("(1 + dn * max(0, 1 - (y / H)^2))^2").unwrap(),
         stiffness: ScalarField::constant(1.0),
-        damping: ScalarField::constant(0.0),
         axis_ratio: ScalarField::constant(1.0),
         parameters: vec![
             MaterialParameter {
@@ -1590,7 +1587,6 @@ fn anisotropic_crystal() -> TopologyDocument {
         name: "Rotated crystal".into(),
         mass_density: ScalarField::constant(1.0),
         stiffness: ScalarField::constant(1.0),
-        damping: ScalarField::constant(0.0),
         axis_ratio: ScalarField::constant(2.4),
         parameters: vec![],
         color: [54, 125, 126],
@@ -1666,7 +1662,6 @@ fn luneburg_lens_with(lens: bool) -> TopologyDocument {
         mass_density: ScalarField::formula(if lens { "max(2 - (r / R)^2, 1)" } else { "1" })
             .unwrap(),
         stiffness: ScalarField::constant(1.0),
-        damping: ScalarField::constant(0.0),
         axis_ratio: ScalarField::constant(1.0),
         parameters: vec![MaterialParameter {
             name: "R".into(),
@@ -10711,12 +10706,17 @@ mod tests {
             side: OuterSide::Bottom,
             fraction: left / (left + 1.0),
         };
-        builder.scene.materials[0].damping = ScalarField::formula(format!(
-            "{} * smoothstep({}, {left}, -x)",
-            angle.sponge,
-            1.5 + shift
-        ))
-        .unwrap();
+        let physics = builder.scene.physics;
+        funfern_core::test_scenes::set_primary_loss(
+            &mut builder.scene.materials[0],
+            physics,
+            ScalarField::formula(format!(
+                "{} * smoothstep({}, {left}, -x)",
+                angle.sponge,
+                1.5 + shift
+            ))
+            .unwrap(),
+        );
         let mut boundaries = channel();
         boundaries.sides[OuterSide::Right.index()] = wall;
         builder.scene.outer_boundaries = boundaries;
@@ -15173,8 +15173,12 @@ mod tests {
             side: OuterSide::Bottom,
             fraction: length / (length + 1.0),
         };
-        builder.scene.materials[0].damping =
-            ScalarField::formula(format!("smoothstep({sponge}, {length}, -x)")).unwrap();
+        let physics = builder.scene.physics;
+        funfern_core::test_scenes::set_primary_loss(
+            &mut builder.scene.materials[0],
+            physics,
+            ScalarField::formula(format!("smoothstep({sponge}, {length}, -x)")).unwrap(),
+        );
         let mut boundaries = channel();
         boundaries.sides[OuterSide::Right.index()] = wall;
         builder.scene.outer_boundaries = boundaries;

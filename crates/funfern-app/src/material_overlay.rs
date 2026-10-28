@@ -227,10 +227,20 @@ pub fn sample(
     };
     let mut values = [None; 7];
     let mut errors: [Option<String>; 7] = std::array::from_fn(|_| None);
+    // The loss rate is the primary field's: its channel's base rate, which
+    // the legacy damping was until version 23 moved it there.
+    let primary_loss = if funfern_core::primary_loss_is_electric(scene.physics) {
+        &material.electric_loss
+    } else {
+        &material.magnetic_loss
+    };
+    let no_loss = funfern_core::ScalarField::constant(0.0);
     let fields = [
         &material.mass_density,
         &material.stiffness,
-        &material.damping,
+        primary_loss
+            .as_ref()
+            .map_or(&no_loss, |channel| &channel.base_rate),
     ];
     for (index, field) in fields.into_iter().enumerate() {
         match field.evaluate(coordinates, &material.parameters) {
@@ -411,7 +421,11 @@ mod tests {
         };
         scene.materials[0].mass_density = funfern_core::ScalarField::constant(4.0);
         scene.materials[0].stiffness = funfern_core::ScalarField::constant(9.0);
-        scene.materials[0].damping = funfern_core::ScalarField::constant(0.25);
+        funfern_core::test_scenes::set_primary_loss(
+            &mut scene.materials[0],
+            scene.physics,
+            funfern_core::ScalarField::constant(0.25),
+        );
         let sample = sample(
             &scene,
             funfern_core::BACKGROUND_REGION,
@@ -419,7 +433,7 @@ mod tests {
         );
         assert_eq!(sample.value(MaterialProperty::Density), Ok(4.0));
         assert_eq!(sample.value(MaterialProperty::Stiffness), Ok(9.0));
-        assert_eq!(sample.value(MaterialProperty::Damping), Ok(0.25));
+        assert_eq!(sample.value(MaterialProperty::LossRate), Ok(0.25));
         assert!((sample.value(MaterialProperty::WaveSpeed).unwrap() - 1.0 / 6.0).abs() < 1e-15);
         assert!((sample.value(MaterialProperty::Impedance).unwrap() - 1.5).abs() < 1e-15);
     }

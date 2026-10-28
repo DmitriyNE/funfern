@@ -30266,3 +30266,52 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-29 — Legacy phase-out 10: the legacy damping, and file version 23
+
+- **Gone.** `Material::damping`, the primary field's loss rate in every
+  skin from before the named loss channels (the user's call, 2026-10-24),
+  and everything that kept the two apart:
+  - the solvers' legacy-loss branches in `linear_material_sample` and the
+    temporal compiler's `loss_for`, and their refusal of a damping beside a
+    channel, which `evaluate_static` also held;
+  - `migrate_legacy_material_loss`, which nothing called;
+  - the material panel's "Loss rate (legacy)" row, its hover and
+    `adopt_legacy_damping`, which moved a damping into its channel on the
+    first loss edit, and the extra channel "Fire now" carried for it (UI-7);
+  - the self-oscillation preset's reset of the damping;
+  - the editor labels' unread `Damping σ` / `Loss rate α`.
+  The scalar operator's `damping` stays: it is the primary channel's rate,
+  as before.
+- **File version 23.** Files are written without the damping, and versions
+  22 and 23 open. A version-22 damping becomes the skin's primary loss
+  channel at the same rate, a formula staying a formula: magnetic in
+  Mechanical and TE, electric in TM. A zero one goes. One beside that
+  channel is refused by the material's name, as the solver refused it, and
+  a version-23 file holding one is refused too. A version-22 damping beside
+  only the complementary channel, which the solver also refused and the
+  panel never wrote, opens with both. The material overlay's "Damping"
+  reads the primary channel and is called "Loss rate"; its stored key is
+  unchanged. The user's autosave holds a zero damping only.
+- **Tests.**
+  - `a_version_22_damping_opens_as_the_primary_loss_channel` covers all
+    three skins and the write-back; `…that_cannot_migrate_is_refused_by_name`
+    the zero, the refusal and a version-23 damping. Both failed with the
+    migration put on the magnetic channel and the refusal skipped, and
+    pass without.
+  - The 45 frozen version-22 scenes open through the migration and read
+    back as version 23 writes them. The 45 example files are re-blessed:
+    the version, and 150 zero dampings gone.
+  - Tests that set a damping set the primary channel through
+    `test_scenes::set_primary_loss`; the TM/TE assembly test sets it per
+    polarization. Gone with the damping: the skin-switch decay test, whose
+    channel twin stays; the panel's adoption, viewing and same-rates tests;
+    the beside-a-channel case.
+  - Core library 579 passed, app library 783, and the nine integration
+    binaries.
+- **Docs.** docs/architecture.md's file versions, docs/user-guide.md, the
+  material-law catalogue and the plan's phase-out item, which keeps the
+  `Scene` model.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

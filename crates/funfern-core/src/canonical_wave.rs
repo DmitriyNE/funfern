@@ -5051,7 +5051,8 @@ fn linear_material_sample(
     let properties = crate::EvaluatedMaterial {
         mass_density: evaluate(&material.mass_density, "density", true)?,
         stiffness: evaluate(&material.stiffness, "stiffness", true)?,
-        damping: evaluate(&material.damping, "legacy damping", false)?,
+        // The primary field's loss is its channel's, below.
+        damping: 0.0,
         axis_ratio: evaluate(&material.axis_ratio, "axis ratio", true)?,
     };
     if properties.axis_ratio < 1.0 {
@@ -5060,15 +5061,6 @@ fn linear_material_sample(
             coefficient: "axis ratio",
             point,
             reason: "value must be at least one; the ratio names the stiffer axis".into(),
-        });
-    }
-    let has_physical_loss = material.electric_loss.is_some() || material.magnetic_loss.is_some();
-    if has_physical_loss && properties.damping != 0.0 {
-        return Err(WaveError::MaterialEvaluation {
-            material: material.name.clone(),
-            coefficient: "loss",
-            point,
-            reason: "legacy damping and named physical loss cannot both be active".into(),
         });
     }
     let electric = linear_loss_rate(
@@ -5083,20 +5075,14 @@ fn linear_material_sample(
         region.frame,
         point,
     )?;
-    let (primary_loss, complementary_loss) = if has_physical_loss {
-        match model.physics {
-            PhysicsModel::Mechanical => (magnetic, electric),
-            PhysicsModel::Electromagnetic {
-                polarization: ElectromagneticPolarization::Tm,
-            } => (electric, magnetic),
-            PhysicsModel::Electromagnetic {
-                polarization: ElectromagneticPolarization::Te,
-            } => (magnetic, electric),
-        }
-    } else {
-        // Version-22 damping was a normalized primary-field rate. Migration
-        // assigns it to exactly that physical channel, never to both sides.
-        (properties.damping, 0.0)
+    let (primary_loss, complementary_loss) = match model.physics {
+        PhysicsModel::Mechanical => (magnetic, electric),
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        } => (electric, magnetic),
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        } => (magnetic, electric),
     };
     Ok((
         model
@@ -6488,58 +6474,12 @@ mod tests {
         (quadratic, canonical)
     }
 
-    /// NUM-5 of the 2026-10-20 review: a skin switch converted legacy damping
-    /// as a coefficient, `d/ρ` into the electromagnetic skins and back by the
-    /// stiffness, but the solver reads it as the primary field's rate in every
-    /// skin. A Mechanical medium of density 4 with damping 0.4, switched to TM,
-    /// decayed four times more slowly.
-    #[test]
-    fn legacy_damping_decays_alike_across_a_skin_switch() {
-        let tm_physics = PhysicsModel::Electromagnetic {
-            polarization: crate::ElectromagneticPolarization::Tm,
-        };
-        let mut mechanical = TopologyScene::default();
-        mechanical.materials[0].mass_density = ScalarField::constant(4.0);
-        mechanical.materials[0].damping = ScalarField::constant(0.4);
-        let mut tm = mechanical.clone();
-        tm.physics = tm_physics;
-        tm.materials[0] = PhysicsModel::Mechanical
-            .convert_material(tm_physics, &mechanical.materials[0])
-            .unwrap();
-        let decay = |scene: &TopologyScene| {
-            let (_, operator) = compile(scene);
-            let duration = 2.0;
-            let steps = (duration / (0.2 * operator.maximum_time_step())).ceil() as usize;
-            let time_step = duration / steps as f64;
-            let mode = operator
-                .node_points()
-                .iter()
-                .map(|point| (0.5 * std::f64::consts::PI * (point.x + 1.0)).cos())
-                .collect::<Vec<_>>();
-            let potential = vec![0.0; operator.degrees_of_freedom()];
-            let mut state = CanonicalWaveState::from_primary_and_potential(
-                &operator, time_step, &mode, &potential,
-            )
-            .unwrap();
-            let start = state.energy(&operator).unwrap();
-            for _ in 0..steps {
-                state.step(&operator).unwrap();
-            }
-            -(state.energy(&operator).unwrap() / start).ln() / duration
-        };
-        let (mechanical_rate, tm_rate) = (decay(&mechanical), decay(&tm));
-        assert!(mechanical_rate > 0.05, "{mechanical_rate}");
-        assert!(
-            (tm_rate - mechanical_rate).abs() <= 0.02 * mechanical_rate,
-            "Mechanical decays at {mechanical_rate}, TM at {tm_rate}"
-        );
-    }
-
-    /// A named loss channel decays alike across a skin switch, as legacy
-    /// damping does above: a Mechanical medium of density 4 with a magnetic
-    /// loss of 0.4, its primary field's, switched to TM, where the primary
-    /// field is electric. The switch refused any named channel until the
-    /// legacy damping went (the user's call, 2026-10-26).
+    /// A loss channel decays alike across a skin switch: a Mechanical medium
+    /// of density 4 with a magnetic loss of 0.4, its primary field's,
+    /// switched to TM, where the primary field is electric. NUM-5 of the
+    /// 2026-10-20 review found the legacy damping converted as a coefficient
+    /// there, decaying four times more slowly; the switch now carries each
+    /// channel by its role (the user's call, 2026-10-26).
     #[test]
     fn a_loss_channel_decays_alike_across_a_skin_switch() {
         let tm_physics = PhysicsModel::Electromagnetic {
@@ -7196,10 +7136,14 @@ mod tests {
     }
 
     #[test]
-    fn stage_three_compiler_migrates_legacy_loss_as_a_primary_rate() {
+    fn a_primary_loss_channel_decays_the_primary_field_at_its_rate() {
         let mesh = square();
         let mut scene = TopologyScene::default();
-        scene.materials[0].damping = ScalarField::constant(0.1);
+        set_primary_loss(
+            &mut scene.materials[0],
+            scene.physics,
+            ScalarField::constant(0.1),
+        );
         let quadratic = hand_assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
         let operator = CanonicalWaveOperator::compile(
             &mesh,

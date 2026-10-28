@@ -1228,15 +1228,15 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
 ## Maintenance
 
 - [ ] Phase out the legacy parts, next after the 2026-10-20 review's fixes
-  (the user's call, 2026-10-23). The `Scene` model, the
+  (the user's call, 2026-10-23). Left: the `Scene` model, the
   obstacle-and-internal-boundary scene of the editor before the topology
-  editor, goes with `mesh_scene` and its validation: the app builds every mesh
-  from a `TopologyScene`, and the device examples and many host tests still
-  build theirs through `Scene`, so they move first. Its local repair,
+  editor, with `assemble_scene`, its validation and the boundary labels only
+  it uses. The tests and device examples moved off it and the scene adapters
+  and `mesh_scene` went (2026-10-26 to 10-28); its local repair,
   `MeshUpdateJob`, went in area 5 of those fixes. The legacy `damping`
-  coefficient goes too, for the named loss channels (the user, 2026-10-24);
-  until then it is the primary field's rate in every skin and a skin switch
-  carries it unchanged (NUM-5).
+  coefficient went for the named loss channels in file version 23
+  (2026-10-29), which opens a version-22 damping as the skin's primary loss
+  channel.
 - [ ] Give the second-order outgoing wall's auxiliary state an energy of its
   own, after the review's fixes and the legacy phase-out (the user's call,
   2026-10-25). `discrete_energy_with_auxiliary` adds `½ψᵀK_auxψ`, where `ψ`

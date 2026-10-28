@@ -1,5 +1,5 @@
 {
-  "version": 22,
+  "version": 23,
   "model": {
     "draft": {
       "domain": [
@@ -23,10 +23,6 @@
           "stiffness": {
             "kind": "constant",
             "value": 1.0
-          },
-          "damping": {
-            "kind": "constant",
-            "value": 0.0
           },
           "axis_ratio": {
             "kind": "constant",
@@ -76,10 +72,6 @@
             "kind": "constant",
             "value": 1.0
           },
-          "damping": {
-            "kind": "constant",
-            "value": 0.0
-          },
           "axis_ratio": {
             "kind": "constant",
             "value": 1.0
@@ -127,10 +119,6 @@
           "stiffness": {
             "kind": "constant",
             "value": 1.0
-          },
-          "damping": {
-            "kind": "constant",
-            "value": 0.0
           },
           "axis_ratio": {
             "kind": "constant",
@@ -491,10 +479,6 @@
             "kind": "constant",
             "value": 1.0
           },
-          "damping": {
-            "kind": "constant",
-            "value": 0.0
-          },
           "axis_ratio": {
             "kind": "constant",
             "value": 1.0
@@ -543,10 +527,6 @@
             "kind": "constant",
             "value": 1.0
           },
-          "damping": {
-            "kind": "constant",
-            "value": 0.0
-          },
           "axis_ratio": {
             "kind": "constant",
             "value": 1.0
@@ -594,10 +574,6 @@
           "stiffness": {
             "kind": "constant",
             "value": 1.0
-          },
-          "damping": {
-            "kind": "constant",
-            "value": 0.0
           },
           "axis_ratio": {
             "kind": "constant",

@@ -1345,7 +1345,7 @@ mod tests {
     #[test]
     fn a_file_that_does_not_open_leaves_the_document_untouched() {
         for (bytes, reason) in [
-            (version_21_bytes(), "requires version 22"),
+            (version_21_bytes(), "opens versions 22 to 23"),
             (b"not a scene".to_vec(), "expected"),
         ] {
             let mut state = Playground::default();

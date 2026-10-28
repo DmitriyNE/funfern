@@ -412,11 +412,11 @@ impl PhysicsModel {
                 ));
             }
         }
-        // Legacy damping is the primary field's rate in every skin, as the
-        // solver reads it, so it crosses unchanged. Converted as a coefficient,
-        // `d/ρ` and back by the stiffness, a medium of density 4 decayed four
-        // times more slowly after a switch to TM (NUM-5 of the 2026-10-20
-        // review).
+        // A loss rate is the field's rate in every skin, as the solver reads
+        // it, so it crosses unchanged. The legacy damping, converted as a
+        // coefficient, `d/ρ` and back by the stiffness, left a medium of
+        // density 4 decaying four times more slowly after a switch to TM
+        // (NUM-5 of the 2026-10-20 review).
         let mut converted = material.clone();
         if crate::primary_loss_is_electric(self) != crate::primary_loss_is_electric(target) {
             std::mem::swap(&mut converted.electric_loss, &mut converted.magnetic_loss);
@@ -1974,7 +1974,10 @@ mod tests {
         let mut material = Material::default_medium();
         material.mass_density = ScalarField::formula("2 + 0.2*x*x").unwrap();
         material.stiffness = ScalarField::formula("5 - 0.3*y").unwrap();
-        material.damping = ScalarField::formula("0.1 + 0.02*r").unwrap();
+        material.magnetic_loss = Some(crate::LossChannel {
+            base_rate: ScalarField::formula("0.1 + 0.02*r").unwrap(),
+            law: crate::DampingLaw::constant(),
+        });
         material.axis_ratio = ScalarField::formula("1 + abs(x)").unwrap();
 
         let electromagnetic = mechanical.convert_material(tm, &material).unwrap();
@@ -1988,8 +1991,8 @@ mod tests {
             Point2::new(0.4, 0.8),
         ] {
             let frame = crate::MaterialFrame::world();
-            let old = material.evaluate(frame, point).unwrap();
-            let new = electromagnetic.evaluate(frame, point).unwrap();
+            let old = material.evaluate_static(mechanical, frame, point).unwrap();
+            let new = electromagnetic.evaluate_static(tm, frame, point).unwrap();
             assert_eq!(old.axis_ratio, new.axis_ratio);
             let old = WaveCoefficients {
                 mass_density: old.mass_density,
@@ -2003,7 +2006,8 @@ mod tests {
             };
             assert!((mechanical.wave_speed(old) - tm.wave_speed(new)).abs() < 1.0e-14);
             assert!((mechanical.impedance(old) - tm.impedance(new)).abs() < 1.0e-14);
-            assert_eq!(old.damping, new.damping);
+            assert!(old.damping > 0.0);
+            assert_eq!(old.damping, new.damping, "the primary field's loss");
         }
 
         let mut physics = tm;
@@ -2011,7 +2015,14 @@ mod tests {
         let initial_lengths = [
             cycled.mass_density.source().unwrap().len(),
             cycled.stiffness.source().unwrap().len(),
-            cycled.damping.source().unwrap().len(),
+            cycled
+                .electric_loss
+                .as_ref()
+                .unwrap()
+                .base_rate
+                .source()
+                .unwrap()
+                .len(),
         ];
         for _ in 0..32 {
             cycled = physics.convert_material(mechanical, &cycled).unwrap();
@@ -2023,7 +2034,14 @@ mod tests {
             [
                 cycled.mass_density.source().unwrap().len(),
                 cycled.stiffness.source().unwrap().len(),
-                cycled.damping.source().unwrap().len(),
+                cycled
+                    .electric_loss
+                    .as_ref()
+                    .unwrap()
+                    .base_rate
+                    .source()
+                    .unwrap()
+                    .len(),
             ],
             initial_lengths
         );

@@ -1971,7 +1971,6 @@ mod tests {
             name: "Inclusion".into(),
             mass_density: crate::ScalarField::constant(1.0),
             stiffness: crate::ScalarField::constant(2.0),
-            damping: crate::ScalarField::constant(0.0),
             axis_ratio: crate::ScalarField::constant(1.0),
             parameters: vec![],
             color: [180, 90, 70],

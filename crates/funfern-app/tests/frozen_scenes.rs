@@ -1,7 +1,8 @@
 //! Version 22 is the last break: files, links and autosaves written from it on
 //! must keep opening. `tests/fixtures/scenes-v22` holds every gallery scene as
 //! version 22 wrote it on 2026-10-03, frozen, unlike `examples/`, which follows
-//! the catalog. Never regenerate them; see the folder's README.
+//! the catalog. Never regenerate them; see the folder's README. They open
+//! through version 23's migration, and read back as it writes them.
 
 use funfern_app::topology_persistence;
 use serde_json::Value;
@@ -60,6 +61,25 @@ fn changed(held: &Value, read: &Value, path: &str, out: &mut Vec<String>) {
     }
 }
 
+/// What a version-22 file holds once version 23 reads it: the version moves
+/// on, and each material's legacy damping goes. Every frozen scene's is zero,
+/// which leaves nothing behind; a nonzero one becomes a loss channel, which
+/// the persistence module's own tests hold.
+fn as_version_23(mut held: Value) -> Value {
+    assert_eq!(held["version"], 22);
+    held["version"] = 23.into();
+    for scene in ["draft", "accepted"] {
+        for material in held["model"][scene]["materials"].as_array_mut().unwrap() {
+            let damping = material.as_object_mut().unwrap().remove("damping");
+            assert_eq!(
+                damping,
+                Some(serde_json::json!({"kind": "constant", "value": 0.0}))
+            );
+        }
+    }
+    held
+}
+
 #[test]
 fn every_frozen_scene_is_there() {
     assert_eq!(frozen_scenes().len(), 45);
@@ -90,7 +110,7 @@ fn opens_with_what_it_held(scenes: Vec<(String, Vec<u8>)>) {
                 continue;
             }
         };
-        let held: Value = serde_json::from_slice(&bytes).unwrap();
+        let held = as_version_23(serde_json::from_slice(&bytes).unwrap());
         let read: Value =
             serde_json::from_slice(&topology_persistence::save_compact(&document).unwrap())
                 .unwrap();

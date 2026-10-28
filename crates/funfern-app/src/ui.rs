@@ -1194,7 +1194,6 @@ const FORMULA_FUNCTIONS: [(&str, &str, &str); 11] = [
 struct MaterialEditorLabels {
     mass: &'static str,
     stiffness: &'static str,
-    damping: &'static str,
     axis_ratio: &'static str,
 }
 
@@ -1205,13 +1204,11 @@ const fn material_editor_labels(physics: PhysicsModel) -> MaterialEditorLabels {
         PhysicsModel::Mechanical => MaterialEditorLabels {
             mass: "Density ρ₀",
             stiffness: "Stiffness k₀",
-            damping: "Damping σ",
             axis_ratio: "Stiffness axis ratio",
         },
         PhysicsModel::Electromagnetic { .. } => MaterialEditorLabels {
             mass: "Permittivity ε",
             stiffness: "Permeability μ",
-            damping: "Loss rate α",
             axis_ratio: "Constitutive axis ratio",
         },
     }

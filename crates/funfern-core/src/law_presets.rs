@@ -1031,8 +1031,6 @@ fn apply_self_oscillation(
                 return;
             }
             let field = |index: usize| ScalarField::formula(&names[index]).expect("parameter name");
-            // A legacy damping on the same field would sum with the gain.
-            material.damping = ScalarField::constant(0.0);
             *primary_loss_mut(material, physics) = Some(LossChannel {
                 base_rate: field(0),
                 law: DampingLaw {
