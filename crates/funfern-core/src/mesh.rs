@@ -2,10 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
 use crate::WORLD_TOLERANCE;
-use crate::{
-    BACKGROUND_REGION, InternalBoundaryId, ObstacleId, Point2, PredicateSign, RegionId, Sample,
-    incircle, orient2d,
-};
+use crate::{BACKGROUND_REGION, Point2, PredicateSign, RegionId, Sample, incircle, orient2d};
 mod amr;
 mod carve;
 mod topology_plan;
@@ -17,16 +14,11 @@ pub(super) fn boundary_adjacency(label: BoundaryLabel) -> usize {
     match label {
         BoundaryLabel::Curve {
             separated: false, ..
-        }
-        | BoundaryLabel::MaterialInterface(_)
-        | BoundaryLabel::OpenMaterialInterface(_) => 2,
+        } => 2,
         BoundaryLabel::Curve {
             separated: true, ..
         }
-        | BoundaryLabel::Outer(_)
-        | BoundaryLabel::Obstacle(_)
-        | BoundaryLabel::Wall { .. }
-        | BoundaryLabel::InternalBoundary { .. } => 1,
+        | BoundaryLabel::Outer(_) => 1,
     }
 }
 
@@ -63,17 +55,6 @@ impl OuterSide {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundaryLabel {
     Outer(OuterSide),
-    Obstacle(ObstacleId),
-    MaterialInterface(ObstacleId),
-    OpenMaterialInterface(crate::MaterialInterfaceId),
-    Wall {
-        loop_id: ObstacleId,
-        side: BoundarySide,
-    },
-    InternalBoundary {
-        id: InternalBoundaryId,
-        side: InternalBoundarySide,
-    },
     /// Boundary chain emitted by the unified topology compiler. Transmitting
     /// chains have one shared trace; separated chains have one label per side.
     Curve {
@@ -82,18 +63,6 @@ pub enum BoundaryLabel {
         side: CurveTraceSide,
         separated: bool,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BoundarySide {
-    Exterior,
-    Interior,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InternalBoundarySide {
-    Left,
-    Right,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -319,7 +288,6 @@ struct MeshBuilder {
     internal_samples: Vec<Vec<Sample>>,
     internal_chains: Vec<Vec<(usize, f64)>>,
     internal_trace_vertices: BTreeSet<usize>,
-    constraint_kinds: Vec<OpenConstraintKind>,
     constraint_target_regions: Vec<RegionId>,
     domains: Vec<TriangulationDomain>,
     options: MeshingOptions,
@@ -466,11 +434,6 @@ impl VertexGrid {
         }
         None
     }
-}
-
-#[derive(Clone, Copy)]
-enum OpenConstraintKind {
-    Baffle { id: InternalBoundaryId },
 }
 
 /// Deterministic counters for profiling without introducing a clock dependency.
@@ -691,7 +654,6 @@ impl MeshBuilder {
             internal_samples: vec![],
             internal_chains: vec![],
             internal_trace_vertices: BTreeSet::new(),
-            constraint_kinds: vec![],
             constraint_target_regions: vec![],
             domains: vec![],
             options,
@@ -1939,7 +1901,14 @@ impl MeshBuilder {
         Ok(edge_key(c, d))
     }
 
-    fn cut_internal_boundary(&mut self, index: usize) -> Result<(), MeshError> {
+    /// Cuts the mesh along constraint `index`'s recovered chain, giving each
+    /// side its own vertices; `label` names a side's label at a curve
+    /// parameter, for the faces and the vertices along them.
+    fn cut_internal_boundary(
+        &mut self,
+        index: usize,
+        label: &dyn Fn(CurveTraceSide, f64) -> Result<BoundaryLabel, MeshError>,
+    ) -> Result<(), MeshError> {
         let chain = self.internal_chains[index].clone();
         if chain.len() < 3 {
             return Err(MeshError::Topology(
@@ -1960,35 +1929,24 @@ impl MeshBuilder {
         if self.vertices.len() + chain.len() - 2 > self.options.max_vertices {
             return Err(self.capacity_error());
         }
-        let OpenConstraintKind::Baffle { id } = self.constraint_kinds[index];
-        let left_label = BoundaryLabel::InternalBoundary {
-            id,
-            side: InternalBoundarySide::Left,
-        };
-        let right_label = BoundaryLabel::InternalBoundary {
-            id,
-            side: InternalBoundarySide::Right,
-        };
         let mut duplicates = BTreeMap::new();
         self.internal_trace_vertices
             .extend(chain.iter().map(|(vertex, _)| *vertex));
-        self.vertices[chain[0].0].boundary = Some(BoundaryPoint {
-            label: left_label,
-            parameter: chain[0].1,
-        });
-        self.vertices[chain[chain.len() - 1].0].boundary = Some(BoundaryPoint {
-            label: left_label,
-            parameter: chain[chain.len() - 1].1,
-        });
+        for (vertex, parameter) in [chain[0], chain[chain.len() - 1]] {
+            self.vertices[vertex].boundary = Some(BoundaryPoint {
+                label: label(CurveTraceSide::Left, parameter)?,
+                parameter,
+            });
+        }
         for &(vertex, parameter) in &chain[1..chain.len() - 1] {
             self.vertices[vertex].boundary = Some(BoundaryPoint {
-                label: left_label,
+                label: label(CurveTraceSide::Left, parameter)?,
                 parameter,
             });
             let duplicate = self.add_vertex(
                 self.point(vertex),
                 Some(BoundaryPoint {
-                    label: right_label,
+                    label: label(CurveTraceSide::Right, parameter)?,
                     parameter,
                 }),
             )?;
@@ -2068,14 +2026,15 @@ impl MeshBuilder {
             duplicates.get(&vertex).copied().unwrap_or(vertex)
         };
         for local in 0..chain.len() - 1 {
+            let middle = 0.5 * (chain[local].1 + chain[local + 1].1);
             self.add_boundary_edge(BoundaryEdge {
                 vertices: [chain[local].0, chain[local + 1].0],
-                label: left_label,
+                label: label(CurveTraceSide::Left, middle)?,
                 parameters: [chain[local].1, chain[local + 1].1],
             });
             self.add_boundary_edge(BoundaryEdge {
                 vertices: [right_vertex(local + 1), right_vertex(local)],
-                label: right_label,
+                label: label(CurveTraceSide::Right, middle)?,
                 parameters: [chain[local + 1].1, chain[local].1],
             });
         }
@@ -2190,9 +2149,6 @@ impl MeshBuilder {
             }
         }
         if let Some(edge_index) = self.boundary_edges.iter().position(|edge| {
-            if matches!(edge.label, BoundaryLabel::InternalBoundary { .. }) {
-                return false;
-            }
             if !self.boundary_relevant_to_region(edge.label, triangle.region) {
                 return false;
             }

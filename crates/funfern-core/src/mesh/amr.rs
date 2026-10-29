@@ -1022,14 +1022,6 @@ impl MeshAdaptationJob {
 
     fn canonical_boundary_face(&self, label: BoundaryLabel, parameter: f64) -> bool {
         match label {
-            BoundaryLabel::InternalBoundary {
-                side: InternalBoundarySide::Right,
-                ..
-            }
-            | BoundaryLabel::Wall {
-                side: BoundarySide::Interior,
-                ..
-            } => false,
             BoundaryLabel::Curve {
                 side: CurveTraceSide::Right,
                 separated: true,
@@ -1198,20 +1190,6 @@ impl MeshAdaptationJob {
     /// on its left along one stretch and on its right along another.
     fn paired_label(&self, label: BoundaryLabel, parameter: f64) -> Option<BoundaryLabel> {
         let pair = match label {
-            BoundaryLabel::InternalBoundary {
-                id,
-                side: InternalBoundarySide::Left,
-            } => Some(BoundaryLabel::InternalBoundary {
-                id,
-                side: InternalBoundarySide::Right,
-            }),
-            BoundaryLabel::Wall {
-                loop_id,
-                side: BoundarySide::Exterior,
-            } => Some(BoundaryLabel::Wall {
-                loop_id,
-                side: BoundarySide::Interior,
-            }),
             BoundaryLabel::Curve {
                 curve,
                 span,
@@ -1340,14 +1318,10 @@ impl MeshAdaptationJob {
                     self.builder.vertices[*vertex]
                         .boundary
                         .map(|point| point.label),
-                    Some(
-                        BoundaryLabel::InternalBoundary { .. }
-                            | BoundaryLabel::Wall { .. }
-                            | BoundaryLabel::Curve {
-                                separated: true,
-                                ..
-                            }
-                    )
+                    Some(BoundaryLabel::Curve {
+                        separated: true,
+                        ..
+                    })
                 ) || self.builder.boundary_edges.iter().any(|edge| {
                     edge.vertices.contains(vertex)
                         && matches!(
@@ -1573,20 +1547,6 @@ impl MeshAdaptationJob {
                 found
             } else {
                 let canonical = match boundary.label {
-                    BoundaryLabel::InternalBoundary {
-                        id,
-                        side: InternalBoundarySide::Right,
-                    } => BoundaryLabel::InternalBoundary {
-                        id,
-                        side: InternalBoundarySide::Left,
-                    },
-                    BoundaryLabel::Wall {
-                        loop_id,
-                        side: BoundarySide::Interior,
-                    } => BoundaryLabel::Wall {
-                        loop_id,
-                        side: BoundarySide::Exterior,
-                    },
                     BoundaryLabel::Curve {
                         curve,
                         span,

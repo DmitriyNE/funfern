@@ -9,9 +9,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     BoundaryEdge, BoundaryLabel, BoundaryPoint, BridgeSearch, EarSearch, EarStage, MeshBuilder,
-    MeshError, MeshQuality, MeshTriangle, MeshingStats, OpenConstraintKind, PolygonLocation,
-    SegmentRelation, TriMesh, TriangulationDomain, boundary_adjacency, bridge_copy, edge_key,
-    point_in_triangle, segment_relation, valid_options,
+    MeshError, MeshQuality, MeshTriangle, MeshingStats, PolygonLocation, SegmentRelation, TriMesh,
+    TriangulationDomain, boundary_adjacency, bridge_copy, edge_key, point_in_triangle,
+    segment_relation, valid_options,
 };
 use crate::{
     CompiledBoundaryStep, CompiledEdge, CompiledEdgeSource, CurveId, CurveSpanId, FaceId, Point2,
@@ -1165,9 +1165,6 @@ fn recover_slit_chain(
         .internal_samples
         .push(samples.iter().map(|(sample, _)| *sample).collect());
     builder.constraint_target_regions.push(region);
-    builder.constraint_kinds.push(OpenConstraintKind::Baffle {
-        id: crate::InternalBoundaryId(curve.0),
-    });
     builder.internal_chains.push(vec![]);
     builder.begin_constraint_points();
     for (sample, trace) in samples {
@@ -1332,9 +1329,29 @@ fn cut_free_slit(
         chain,
         left,
     } = recover_slit_chain(builder, region, steps, trace_vertices)?;
-    builder.cut_internal_boundary(constraint)?;
+    // Each face takes the span its parameter falls in, on its own side.
+    let label = |side: CurveTraceSide, parameter: f64| {
+        let planned = left
+            .iter()
+            .find(|step| {
+                let [a, b] = step.boundary.parameter;
+                parameter >= a.min(b) && parameter <= a.max(b)
+            })
+            .ok_or(MeshError::Topology("free-slit span lineage is missing"))?;
+        let span = match planned.boundary.source {
+            PlannedBoundarySource::Curve { span, .. } => span,
+            PlannedBoundarySource::Outer(_) => unreachable!(),
+        };
+        Ok(BoundaryLabel::Curve {
+            curve,
+            span,
+            side,
+            separated: true,
+        })
+    };
+    let first_cut_edge = builder.boundary_edges.len();
+    builder.cut_internal_boundary(constraint, &label)?;
 
-    let legacy_id = crate::InternalBoundaryId(curve.0);
     for endpoint in [0, chain.len() - 1] {
         let left_vertex = chain[endpoint].0;
         let point = builder.point(left_vertex);
@@ -1355,37 +1372,15 @@ fn cut_free_slit(
         if let Some(replacement) = right_trace.and_then(|trace| trace_vertices.get(&trace).copied())
             && replacement != left_vertex
         {
-            rewire_attached_slit_endpoint(builder, legacy_id, left_vertex, replacement)?;
+            rewire_attached_slit_endpoint(builder, first_cut_edge, left_vertex, replacement)?;
         }
     }
-    for edge in &mut builder.boundary_edges {
-        let BoundaryLabel::InternalBoundary { id, side } = edge.label else {
-            continue;
-        };
-        if id != legacy_id {
-            continue;
-        }
-        let parameter = 0.5 * (edge.parameters[0] + edge.parameters[1]);
-        let planned = left
-            .iter()
-            .find(|step| {
-                let [a, b] = step.boundary.parameter;
-                parameter >= a.min(b) && parameter <= a.max(b)
-            })
-            .ok_or(MeshError::Topology("free-slit span lineage is missing"))?;
-        let span = match planned.boundary.source {
-            PlannedBoundarySource::Curve { span, .. } => span,
-            PlannedBoundarySource::Outer(_) => unreachable!(),
-        };
-        edge.label = BoundaryLabel::Curve {
-            curve,
-            span,
-            side: match side {
-                super::InternalBoundarySide::Left => CurveTraceSide::Left,
-                super::InternalBoundarySide::Right => CurveTraceSide::Right,
-            },
-            separated: true,
-        };
+    // A vertex of the cut without a trace takes the label of the last face
+    // along it. A trace vertex keeps the cut's: its left side at its own
+    // parameter, which named the internal boundary until the cut labelled
+    // its faces itself.
+    let cut_edges = builder.boundary_edges[first_cut_edge..].to_vec();
+    for edge in cut_edges {
         for endpoint in 0..2 {
             let vertex = edge.vertices[endpoint];
             if builder.vertices[vertex].trace.is_none() {
@@ -1396,9 +1391,6 @@ fn cut_free_slit(
             }
         }
     }
-    builder.boundary_regions.retain(|(label, _)| {
-        !matches!(label, BoundaryLabel::InternalBoundary { id, .. } if *id == legacy_id)
-    });
     for side in [CurveTraceSide::Left, CurveTraceSide::Right] {
         for step in &left {
             let PlannedBoundarySource::Curve { span, .. } = step.boundary.source else {
@@ -1675,23 +1667,28 @@ fn split_slit_trace_vertices(
     Ok(())
 }
 
+/// Moves an attached slit's right face off `endpoint` onto `replacement`,
+/// the vertex the plan gives that side. The cut's own faces start at
+/// `first_cut_edge`.
 fn rewire_attached_slit_endpoint(
     builder: &mut MeshBuilder,
-    id: crate::InternalBoundaryId,
+    first_cut_edge: usize,
     endpoint: usize,
     replacement: usize,
 ) -> Result<(), MeshError> {
-    let boundary_index = builder
-        .boundary_edges
+    let boundary_index = builder.boundary_edges[first_cut_edge..]
         .iter()
         .position(|edge| {
             edge.vertices.contains(&endpoint)
-                && edge.label
-                    == BoundaryLabel::InternalBoundary {
-                        id,
-                        side: super::InternalBoundarySide::Right,
+                && matches!(
+                    edge.label,
+                    BoundaryLabel::Curve {
+                        side: CurveTraceSide::Right,
+                        ..
                     }
+                )
         })
+        .map(|found| first_cut_edge + found)
         .ok_or(MeshError::Topology(
             "attached slit has no right endpoint edge",
         ))?;

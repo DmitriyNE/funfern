@@ -435,13 +435,7 @@ impl QuadraticPointStencil {
             return Err(PointProbeError::InvalidMesh);
         }
         for edge in &mesh.boundary_edges {
-            if !matches!(
-                edge.label,
-                BoundaryLabel::MaterialInterface(_)
-                    | BoundaryLabel::Wall { .. }
-                    | BoundaryLabel::InternalBoundary { .. }
-                    | BoundaryLabel::Curve { .. }
-            ) {
+            if !matches!(edge.label, BoundaryLabel::Curve { .. }) {
                 continue;
             }
             let [a, b] = edge.vertices;

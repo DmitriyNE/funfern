@@ -30369,3 +30369,46 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-29 — Legacy phase-out 12: the legacy boundary labels
+
+- **Gone.** The boundary labels only the `Scene` model produced:
+  - `BoundaryLabel`'s obstacle, material-interface, open-interface, wall and
+    internal-boundary variants, their three ids and two side types;
+  - the arms that read them in the mesher, AMR, the carve, the probe, the
+    indicator and the field transfer, with the transfer's internal trace key;
+  - the transfer's merge of regions across a material interface. A mesh
+    built by hand, with neither traces nor curve labels, still transfers
+    within each region.
+  The carve's label key can no longer fail, so its "needs a topology mesh"
+  refusal went too.
+  The phase-out the user called on 2026-10-23 is done; the plan's item is
+  closed.
+- **The free-slit cut** labelled its faces with an internal-boundary label,
+  and the plan relabelled them as the curve's straight after. It now labels
+  them itself through a function naming a side's label at a curve
+  parameter, and the relabelling of the cut's vertices keeps its rule: a
+  vertex without a trace takes the label of the last face along it, and a
+  trace vertex keeps the cut's. That left a trace vertex holding the
+  internal-boundary label for good; it now holds the same side's curve
+  label at the same parameter.
+- **Checked against the meshes.** Every gallery scene was meshed at edge
+  0.08 before and after through the application's runtime, and each
+  vertex, triangle, boundary edge and label compared: all identical but for
+  two vertices in the Fresnel zone plate, slit ends on the outer wall,
+  whose internal-boundary label is now the curve's. An intermediate draft
+  labelled every cut vertex from its last face: 50 trace vertices changed
+  side or span, and one end then named a face a later split moves away,
+  so the old rule stayed.
+- **Tests.** The transfer's coincident-baffle-face test went with the label
+  it was written for; its twin on curve labels and traces stays. The app's
+  failed-carve test broke the carve with a legacy label; it now does so with
+  an edge naming a vertex the mesh does not hold, and the runtime falls back
+  to a full rebuild as before. Workspace: 1423 passed. The plan's
+  source-audit test for legacy names was left out: the compiler already
+  refuses every use of the removed items.
+- **Device suite** not rerun: no shader changed, the device reads the
+  operator and not the labels, and the gallery's meshes are unchanged.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

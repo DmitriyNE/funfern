@@ -4248,10 +4248,11 @@ mod tests {
     fn a_failed_repair_falls_back_to_a_full_rebuild() {
         let (mut editor, curve, mut runtime) = hole_runtime();
         {
-            // A mesh the carve cannot read: one boundary edge with a legacy label.
+            // A mesh the carve cannot read: a boundary edge names a vertex
+            // the mesh does not hold.
             let active = Arc::make_mut(runtime.active.as_mut().unwrap());
             let mesh = Arc::make_mut(&mut active.mesh);
-            mesh.boundary_edges[0].label = BoundaryLabel::Obstacle(ObstacleId(7));
+            mesh.boundary_edges[0].vertices[0] = mesh.vertices.len();
         }
         nudge(&mut editor, curve);
         let token = runtime
@@ -4274,7 +4275,7 @@ mod tests {
             rebuilt
                 .repair_fallback
                 .as_deref()
-                .is_some_and(|message| message.contains("topology plan")),
+                .is_some_and(|message| message.contains("invalid boundary edge")),
             "{:?}",
             rebuilt.repair_fallback
         );

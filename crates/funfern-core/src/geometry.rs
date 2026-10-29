@@ -89,12 +89,6 @@ impl Default for DomainRect {
         Self::UNIT
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ObstacleId(pub u64);
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct InternalBoundaryId(pub u64);
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct MaterialInterfaceId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RegionId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

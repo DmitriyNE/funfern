@@ -99,23 +99,20 @@ enum LabelKey {
     },
 }
 
-fn label_key(label: BoundaryLabel) -> Result<LabelKey, MeshError> {
+fn label_key(label: BoundaryLabel) -> LabelKey {
     match label {
-        BoundaryLabel::Outer(side) => Ok(LabelKey::Outer(side)),
+        BoundaryLabel::Outer(side) => LabelKey::Outer(side),
         BoundaryLabel::Curve {
             curve,
             span,
             side,
             separated,
-        } => Ok(LabelKey::Curve {
+        } => LabelKey::Curve {
             curve,
             span,
             side,
             separated,
-        }),
-        _ => Err(MeshError::Topology(
-            "carving needs a mesh built from a topology plan",
-        )),
+        },
     }
 }
 
@@ -764,7 +761,6 @@ impl TopologyCarveJob {
             self.incident = vec![vec![]; mesh.vertices.len()];
             self.areas = Vec::with_capacity(mesh.triangles.len());
             for (index, edge) in mesh.boundary_edges.iter().enumerate() {
-                label_key(edge.label)?;
                 if edge
                     .vertices
                     .iter()
@@ -875,14 +871,14 @@ impl TopologyCarveJob {
             for atom in &changed_old {
                 let [a, b] = atom.parameter;
                 ranges
-                    .entry(label_key(topology_label(*atom))?)
+                    .entry(label_key(topology_label(*atom)))
                     .or_default()
                     .push([a.min(b), a.max(b)]);
             }
             let mut changed_edge = vec![false; mesh.boundary_edges.len()];
             for (index, edge) in mesh.boundary_edges.iter().enumerate() {
                 let middle = 0.5 * (edge.parameters[0] + edge.parameters[1]);
-                changed_edge[index] = ranges.get(&label_key(edge.label)?).is_some_and(|ranges| {
+                changed_edge[index] = ranges.get(&label_key(edge.label)).is_some_and(|ranges| {
                     ranges
                         .iter()
                         .any(|[low, high]| middle >= *low && middle <= *high)
@@ -1014,7 +1010,7 @@ impl TopologyCarveJob {
                 if changed_edge[index] {
                     continue;
                 }
-                let key = label_key(edge.label)?;
+                let key = label_key(edge.label);
                 for endpoint in 0..2 {
                     endpoints
                         .entry(key)
@@ -1030,7 +1026,7 @@ impl TopologyCarveJob {
                 .iter()
                 .filter(|atom| !changed_new_keys.contains(&atom_key(atom)))
             {
-                let key = label_key(topology_label(*atom))?;
+                let key = label_key(topology_label(*atom));
                 for endpoint in 0..2 {
                     let Some(vertex) = endpoint_vertex(&endpoints, key, atom.parameter[endpoint])
                     else {
@@ -1112,7 +1108,7 @@ impl TopologyCarveJob {
         let builder = self.builder.as_mut().unwrap();
         let mut endpoints = BTreeMap::<LabelKey, Vec<(f64, usize)>>::new();
         for edge in &builder.boundary_edges {
-            let key = label_key(edge.label)?;
+            let key = label_key(edge.label);
             for endpoint in 0..2 {
                 endpoints
                     .entry(key)
@@ -1126,7 +1122,7 @@ impl TopologyCarveJob {
             .iter()
             .filter(|atom| !self.changed_new_keys.contains(&atom_key(atom)))
         {
-            let key = label_key(topology_label(*atom))?;
+            let key = label_key(topology_label(*atom));
             for endpoint in 0..2 {
                 let vertex = endpoint_vertex(&endpoints, key, atom.parameter[endpoint]).ok_or(
                     MeshError::Topology("a kept atom endpoint is missing from the previous mesh"),
@@ -1368,7 +1364,6 @@ impl TopologyCarveJob {
                     CurveTraceSide::Right
                 },
             },
-            _ => return Err(MeshError::Topology("carving needs a topology mesh")),
         };
         self.plan
             .boundary_at(source, 0.5 * (start + end))

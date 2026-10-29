@@ -2,16 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::{
-    BoundaryLabel, CurveId, CurveTraceSide, InternalBoundaryId, InternalBoundarySide, Point2,
-    QuadraticWaveOperator, TraceVertexId, TriMesh, enriched_quadratic_basis,
+    BoundaryLabel, CurveId, CurveTraceSide, Point2, QuadraticWaveOperator, TraceVertexId, TriMesh,
+    enriched_quadratic_basis,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum BoundaryTraceKey {
-    Internal {
-        id: InternalBoundaryId,
-        right: bool,
-    },
     Curve {
         curve: CurveId,
         side: CurveTraceSide,
@@ -21,10 +17,6 @@ enum BoundaryTraceKey {
 impl BoundaryTraceKey {
     fn from_label(label: BoundaryLabel) -> Option<Self> {
         match label {
-            BoundaryLabel::InternalBoundary { id, side } => Some(Self::Internal {
-                id,
-                right: side == InternalBoundarySide::Right,
-            }),
             BoundaryLabel::Curve {
                 curve,
                 side,
@@ -463,14 +455,12 @@ fn behind_the_wall(
     target: &TargetTracePreference,
     held: impl Fn(&BoundaryTraceKey) -> bool,
 ) -> bool {
-    target.boundaries.iter().any(|key| match key {
-        BoundaryTraceKey::Curve { curve, side } => {
-            held(&BoundaryTraceKey::Curve {
-                curve: *curve,
-                side: side.opposite(),
-            }) && !held(key)
-        }
-        BoundaryTraceKey::Internal { .. } => false,
+    target.boundaries.iter().any(|key| {
+        let BoundaryTraceKey::Curve { curve, side } = key;
+        held(&BoundaryTraceKey::Curve {
+            curve: *curve,
+            side: side.opposite(),
+        }) && !held(key)
     })
 }
 
@@ -527,13 +517,11 @@ impl QuadraticTransferWork {
                 // sector trace lineage. Region IDs may legitimately appear or
                 // disappear when a transmitting divider splits or merges a face,
                 // so spatial transfer must not require the same RegionId on both
-                // revisions. Legacy meshes retain their region-component
-                // restriction for closed two-sided walls.
+                // revisions. A mesh built by hand, which has neither, transfers
+                // within each region.
                 let unified_topology =
                     has_unified_topology(source_mesh) || has_unified_topology(target_mesh);
-                self.region_groups = (!unified_topology)
-                    .then(|| region_components(target_mesh))
-                    .transpose()?;
+                self.region_groups = (!unified_topology).then(|| region_groups(target_mesh));
                 self.target_groups = vec![None; target_operator.degrees_of_freedom()];
                 if let Some(region_groups) = &self.region_groups {
                     for (triangle, nodes) in target_mesh
@@ -1013,41 +1001,12 @@ fn bin_index(point: Point2, minimum: Point2, cell: Point2, dimension: usize) -> 
     ]
 }
 
-fn region_components(
-    mesh: &TriMesh,
-) -> Result<std::collections::BTreeMap<crate::RegionId, crate::RegionId>, TransferError> {
-    let mut groups = mesh
-        .triangles
+/// Each region its own group: the transfer stays within a region.
+fn region_groups(mesh: &TriMesh) -> BTreeMap<crate::RegionId, crate::RegionId> {
+    mesh.triangles
         .iter()
         .map(|triangle| (triangle.region, triangle.region))
-        .collect::<std::collections::BTreeMap<_, _>>();
-    for boundary in &mesh.boundary_edges {
-        if !matches!(boundary.label, crate::BoundaryLabel::MaterialInterface(_)) {
-            continue;
-        }
-        let adjacent = mesh
-            .triangles
-            .iter()
-            .filter(|triangle| {
-                triangle.vertices.contains(&boundary.vertices[0])
-                    && triangle.vertices.contains(&boundary.vertices[1])
-            })
-            .map(|triangle| triangle.region)
-            .collect::<Vec<_>>();
-        if adjacent.len() != 2 {
-            return Err(TransferError::InvalidTarget);
-        }
-        let a = groups[&adjacent[0]];
-        let b = groups[&adjacent[1]];
-        let keep = a.min(b);
-        let replace = a.max(b);
-        for group in groups.values_mut() {
-            if *group == replace {
-                *group = keep;
-            }
-        }
-    }
-    Ok(groups)
+        .collect()
 }
 
 fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
@@ -1574,55 +1533,6 @@ mod tests {
         for node in target_operator.element_nodes()[1] {
             assert!((transferred[node as usize] - 9.0).abs() < 1.0e-12);
         }
-    }
-
-    #[test]
-    fn quadratic_transfer_keeps_coincident_baffle_faces_separate() {
-        let points = [
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-        ];
-        let mut source = mesh(3, &points, &[[0, 1, 2], [3, 4, 5]]);
-        source.boundary_edges = vec![
-            BoundaryEdge {
-                vertices: [0, 1],
-                label: BoundaryLabel::InternalBoundary {
-                    id: InternalBoundaryId(4),
-                    side: InternalBoundarySide::Left,
-                },
-                parameters: [0.0, 1.0],
-            },
-            BoundaryEdge {
-                vertices: [4, 3],
-                label: BoundaryLabel::InternalBoundary {
-                    id: InternalBoundaryId(4),
-                    side: InternalBoundarySide::Right,
-                },
-                parameters: [1.0, 0.0],
-            },
-        ];
-        let mut target = source.clone();
-        target.geometry_revision = 8;
-        let source_operator =
-            QuadraticWaveOperator::assemble(&source, WaveCoefficients::default()).unwrap();
-        let target_operator =
-            QuadraticWaveOperator::assemble(&target, WaveCoefficients::default()).unwrap();
-        let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
-            .unwrap();
-        let left = source_operator.element_nodes()[0][3] as usize;
-        let right = source_operator.element_nodes()[1][3] as usize;
-        let target_left = target_operator.element_nodes()[0][3] as usize;
-        let target_right = target_operator.element_nodes()[1][3] as usize;
-        let mut values = vec![0.0; source_operator.degrees_of_freedom()];
-        values[left] = 1.0;
-        values[right] = 9.0;
-        let transferred = map.interpolate(&values, -1.0).unwrap();
-        assert!((transferred[target_left] - 1.0).abs() < 1.0e-12);
-        assert!((transferred[target_right] - 9.0).abs() < 1.0e-12);
     }
 
     #[test]

@@ -1468,7 +1468,6 @@ impl SolutionIndicatorJob {
                 PlannedBoundarySource::Curve { curve, span, side },
                 !separated,
             ),
-            _ => return Err(SolutionIndicatorError::InvalidTopology),
         };
         let planned = plan
             .boundary_at(source, midpoint)
