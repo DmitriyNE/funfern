@@ -30315,3 +30315,34 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-29 — The topology assembly names a material that fails
+
+- **Found** moving the material-failure test off the `Scene` path
+  (2026-10-26). Every way a material could fail where the scalar assembly
+  samples it reached the user as "Cannot assemble wave operator: a triangle
+  has an unknown or invalid region material". That names no material,
+  coefficient or point. A density formula of `x` passes validation and
+  failed the application's assembly job with it. The static evaluator the
+  assembly reads says only that a value is invalid, and the topology arm
+  mapped that, and a missing region, to the one sentence.
+- **The fix.** A missing region says so. A material the evaluator refuses
+  goes through the canonical compiler's field-by-field pass, which checks
+  all the evaluator does: the coefficient laws, density, stiffness, axis
+  ratio, and the loss laws and rates. It reports, for instance, "Material
+  `Ambient` density is invalid at (0.0000, 0.0000): value must be
+  positive". Should that pass find nothing, the material is still named
+  with the evaluator's reason. A material that samples cleanly takes the
+  same path as before, so no assembled value changes.
+- **Test first.** On the topology path, both failed before the fix and pass
+  after it:
+  - `spatial_material_failure_identifies_coefficient_material_and_point`
+    names density, stiffness, axis ratio, loss rate and a pumped mass law,
+    each in "Ambient". The loss rate is also named through a planned mesh,
+    the path the application assembles through.
+  - `the_assembly_rejects_an_unknown_triangle_region`.
+  The two `Scene`-path tests they replace go; the core library's 579 tests
+  pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

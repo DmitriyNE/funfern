@@ -4983,7 +4983,7 @@ pub(crate) fn grid_filter_reach(
 /// constant physical loss channels. The legacy scalar evaluator intentionally
 /// continues to reject any authored law, so the production solver cannot
 /// silently ignore these channels.
-fn linear_material_sample(
+pub(crate) fn linear_material_sample(
     model: TopologyWaveModel<'_>,
     region_id: crate::RegionId,
     point: Point2,

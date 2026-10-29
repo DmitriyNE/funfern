@@ -1187,9 +1187,28 @@ impl CoefficientProvider<'_> {
                 }
             }
             Self::Topology(model) => {
-                model.directional_material_at(region, point).map_err(|_| {
-                    WaveError::InvalidMesh("a triangle has an unknown or invalid region material")
-                })?
+                let found = model
+                    .region(region)
+                    .ok_or(WaveError::InvalidMesh("a triangle has an unknown region"))?;
+                match model.directional_material_at(region, point) {
+                    Ok(values) => values,
+                    // The evaluator says only that a value is invalid, which
+                    // reached the user as an unknown or invalid region
+                    // material. The canonical compiler's field-by-field pass,
+                    // which checks all the evaluator does, names the material,
+                    // the coefficient and the point.
+                    Err(error) => {
+                        crate::canonical_wave::linear_material_sample(model, region, point)?;
+                        return Err(WaveError::MaterialEvaluation {
+                            material: model
+                                .material(found.material)
+                                .map_or_else(String::new, |material| material.name.clone()),
+                            coefficient: "material",
+                            point,
+                            reason: error.to_string(),
+                        });
+                    }
+                }
             }
         };
         if !values.valid() {
@@ -3236,54 +3255,86 @@ mod tests {
         }
     }
 
-    /// On the legacy path until the topology assembly names a failing
-    /// material as this one does: it reports an unknown or invalid region
-    /// material instead (found moving this test, 2026-10-26).
+    /// A material that fails where the assembly samples it is named with the
+    /// coefficient and the point. The topology assembly said only that a
+    /// triangle had an unknown or invalid region material, so the user could
+    /// not tell which material or row to fix (found moving this test off the
+    /// `Scene` path, 2026-10-26).
     #[test]
     fn spatial_material_failure_identifies_coefficient_material_and_point() {
-        let mut scene = crate::Scene::default();
-        scene.materials[0].mass_density = crate::ScalarField::formula("x").unwrap();
-        let error = QuadraticWaveOperator::assemble_scene(
-            &square(),
+        // Negative on the left half of the unit square.
+        let x = || crate::ScalarField::formula("x - 0.5").unwrap();
+        type Breaks = fn(&mut Material, crate::ScalarField);
+        let cases: [(&str, Breaks); 5] = [
+            ("density", |material, x| material.mass_density = x),
+            ("stiffness", |material, x| material.stiffness = x),
+            ("axis ratio", |material, _| {
+                material.axis_ratio = crate::ScalarField::constant(0.5)
+            }),
+            ("loss rate", |material, x| {
+                set_primary_loss(material, PhysicsModel::Mechanical, x)
+            }),
+            ("mass law", |material, _| {
+                material.mass_law.drive = crate::TimeDrive::ParametricPump {
+                    depth: crate::ScalarField::constant(0.1),
+                    frequency_hz: crate::ScalarField::constant(1.0),
+                    phase_radians: crate::ScalarField::constant(0.0),
+                }
+            }),
+        ];
+        for (named, break_material) in cases {
+            let mut scene = TopologyScene::default();
+            break_material(&mut scene.materials[0], x());
+            let error =
+                hand_assembled(&square(), &scene, OuterBoundaryCondition::Reflecting).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    WaveError::MaterialEvaluation {
+                        material,
+                        coefficient,
+                        ..
+                    } if material == "Ambient" && *coefficient == named
+                ),
+                "{named}: {error}"
+            );
+        }
+
+        // The planned path the application assembles through.
+        let base = meshed(&TopologyScene::default(), 6, MeshingOptions::default()).unwrap();
+        let mut scene = TopologyScene::default();
+        set_primary_loss(&mut scene.materials[0], scene.physics, x());
+        let error = assembled(
+            &base.under(&scene),
             &scene,
             OuterBoundaryCondition::Reflecting,
         )
         .unwrap_err();
-        assert!(matches!(
-            error,
-            WaveError::MaterialEvaluation {
-                material,
-                coefficient: "density",
-                point: Point2 { x: 0.0, y: 0.0 },
-                ..
-            } if material == "Ambient"
-        ));
+        assert!(
+            matches!(
+                &error,
+                WaveError::MaterialEvaluation {
+                    material,
+                    coefficient: "loss rate",
+                    point,
+                    ..
+                } if material == "Ambient" && point.x < 0.5
+            ),
+            "{error}"
+        );
     }
 
-    /// On the legacy path with the test above, for the same reason.
+    /// A triangle whose region the scene does not hold is reported as that,
+    /// not as an invalid material.
     #[test]
-    fn scene_assembly_rejects_an_unknown_triangle_region() {
+    fn the_assembly_rejects_an_unknown_triangle_region() {
         let mut mesh = square();
         mesh.triangles[0].region = RegionId(99);
-        let media = two_material_scene();
-        let scene = crate::Scene {
-            obstacles: vec![crate::Obstacle::with_role(
-                crate::ObstacleId(1),
-                PeriodicCubicSpline::rounded(Point2::new(0.5, 0.5), 0.2),
-                crate::LoopRole::MaterialInterface {
-                    exterior: BACKGROUND_REGION,
-                    interior: RegionId(2),
-                },
-            )],
-            materials: media.materials,
-            regions: media.regions,
-            ..crate::Scene::default()
-        };
         assert!(matches!(
-            QuadraticWaveOperator::assemble_scene(
+            hand_assembled(
                 &mesh,
-                &scene,
-                OuterBoundaryCondition::Reflecting,
+                &two_material_scene(),
+                OuterBoundaryCondition::Reflecting
             ),
             Err(WaveError::InvalidMesh("a triangle has an unknown region"))
         ));
