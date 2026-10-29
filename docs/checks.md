@@ -1145,9 +1145,11 @@ medium at 0.86 to 0.90. An argument runs only the rows whose label contains
 it.
 
 `wave_boundary_reflection` sends finite Gaussian P2e packets at the outer box and
-compares first- and second-order residual-energy reflection at two angles and two
-wavelengths, alongside the ideal continuous plane-wave coefficients and a
-long-time finite-state check.
+compares the first-order wall's residual-energy reflection at two angles and two
+wavelengths with the ideal continuous plane-wave coefficient. Its second-order
+rows stepped the scalar stepper's Engquist-Majda wall, which went on
+2026-10-29; the production second-order wall's planar reflection is
+docs/spikes/funfern-boundary-scattering-spike.md's study.
 Omit `--slices` for per-phase profiling.
 
 The `--mesh-edit-benchmark`, `--wave-gpu-check`, `--wave-transfer-check` and

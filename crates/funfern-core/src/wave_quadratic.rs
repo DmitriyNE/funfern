@@ -538,25 +538,6 @@ impl QuadraticWaveOperator {
         Ok(result)
     }
 
-    pub fn apply_auxiliary_stiffness(&self, values: &[f64]) -> Result<Vec<f64>, WaveError> {
-        if values.len() != self.degrees_of_freedom() {
-            return Err(WaveError::SizeMismatch {
-                expected: self.degrees_of_freedom(),
-                actual: values.len(),
-            });
-        }
-        if values.iter().any(|value| !value.is_finite()) {
-            return Err(WaveError::InvalidState);
-        }
-        let mut result = vec![0.0; values.len()];
-        for (row, output) in result.iter_mut().enumerate() {
-            *output = (self.row_offsets[row] as usize..self.row_offsets[row + 1] as usize)
-                .map(|entry| self.auxiliary_stiffness[entry] * values[self.columns[entry] as usize])
-                .sum();
-        }
-        Ok(result)
-    }
-
     /// Removes the part of a two-level state that this mesh cannot carry.
     ///
     /// Nothing in the scheme dissipates at any wavelength, and the top of the
@@ -666,28 +647,6 @@ impl QuadraticWaveOperator {
                 .map(|(current, force)| current * force)
                 .sum::<f64>();
         let energy = kinetic + potential;
-        energy
-            .is_finite()
-            .then_some(energy)
-            .ok_or(WaveError::InvalidState)
-    }
-
-    pub fn discrete_energy_with_auxiliary(
-        &self,
-        current: &[f64],
-        previous: &[f64],
-        auxiliary: &[f64],
-        time_step: f64,
-    ) -> Result<f64, WaveError> {
-        let interior = self.discrete_energy(current, previous, time_step)?;
-        let auxiliary_force = self.apply_auxiliary_stiffness(auxiliary)?;
-        let boundary = 0.5
-            * auxiliary
-                .iter()
-                .zip(auxiliary_force)
-                .map(|(value, force)| value * force)
-                .sum::<f64>();
-        let energy = interior + boundary;
         energy
             .is_finite()
             .then_some(energy)
@@ -853,66 +812,48 @@ pub struct QuadraticWaveState {
     current: Vec<f64>,
     previous: Vec<f64>,
     scratch: Vec<f64>,
-    auxiliary: Vec<f64>,
     time_step: f64,
     steps: u64,
     grid_scale_filter: f64,
 }
 
 impl QuadraticWaveState {
+    /// A state of `operator` from a displacement and a velocity. A
+    /// second-order outgoing wall is refused: its law here was Engquist and
+    /// Majda's truncation, which has no energy it dissipates
+    /// (docs/spikes/funfern-boundary-auxiliary-spike.md, §2), and the
+    /// canonical solver steps the passive wall the application runs.
     pub fn new(
-        operator: &QuadraticWaveOperator,
-        time_step: f64,
-        displacement: Vec<f64>,
-        velocity: Vec<f64>,
-    ) -> Result<Self, WaveError> {
-        Self::new_with_auxiliary(
-            operator,
-            time_step,
-            displacement,
-            velocity,
-            vec![0.0; operator.degrees_of_freedom()],
-        )
-    }
-
-    pub fn new_with_auxiliary(
         operator: &QuadraticWaveOperator,
         time_step: f64,
         mut displacement: Vec<f64>,
         velocity: Vec<f64>,
-        auxiliary: Vec<f64>,
     ) -> Result<Self, WaveError> {
+        if operator.auxiliary_active.iter().any(|active| *active) {
+            return Err(WaveError::Unsupported(
+                "the scalar stepper has no second-order wall; the canonical solver steps one",
+            ));
+        }
         operator.validate_levels(&displacement, &velocity, time_step)?;
-        if auxiliary.len() != operator.degrees_of_freedom() {
-            return Err(WaveError::SizeMismatch {
-                expected: operator.degrees_of_freedom(),
-                actual: auxiliary.len(),
-            });
-        }
-        if auxiliary.iter().any(|value| !value.is_finite()) {
-            return Err(WaveError::InvalidState);
-        }
         for (node, value) in displacement.iter_mut().enumerate() {
             if let Some(prescribed) = operator.prescribed_value(node, 0.0) {
                 *value = prescribed;
             }
         }
         let stiffness = operator.apply_stiffness(&displacement)?;
-        let auxiliary_force = operator.apply_auxiliary_stiffness(&auxiliary)?;
         let previous = displacement
             .iter()
             .zip(&velocity)
             .zip(stiffness)
-            .zip(auxiliary_force)
             .zip(&operator.lumped_mass)
             .zip(&operator.lumped_damping)
             .enumerate()
             .map(
-                |(node, (((((displacement, velocity), stiffness), auxiliary), mass), damping))| {
+                |(node, ((((displacement, velocity), stiffness), mass), damping))| {
                     if let Some(prescribed) = operator.prescribed_value(node, -time_step) {
                         prescribed
                     } else {
-                        let acceleration = (-stiffness - auxiliary - damping * velocity) / mass
+                        let acceleration = (-stiffness - damping * velocity) / mass
                             + operator.neumann_acceleration(node, 0.0);
                         displacement - time_step * velocity
                             + 0.5 * time_step * time_step * acceleration
@@ -927,7 +868,6 @@ impl QuadraticWaveState {
             current: displacement,
             previous,
             scratch: vec![0.0; operator.degrees_of_freedom()],
-            auxiliary,
             time_step,
             steps: 0,
             grid_scale_filter: 0.0,
@@ -951,10 +891,6 @@ impl QuadraticWaveState {
         &self.previous
     }
 
-    pub fn auxiliary(&self) -> &[f64] {
-        &self.auxiliary
-    }
-
     pub fn time_step(&self) -> f64 {
         self.time_step
     }
@@ -968,12 +904,7 @@ impl QuadraticWaveState {
     }
 
     pub fn energy(&self, operator: &QuadraticWaveOperator) -> Result<f64, WaveError> {
-        operator.discrete_energy_with_auxiliary(
-            &self.current,
-            &self.previous,
-            &self.auxiliary,
-            self.time_step,
-        )
+        operator.discrete_energy(&self.current, &self.previous, self.time_step)
     }
 
     pub fn step(
@@ -999,41 +930,29 @@ impl QuadraticWaveState {
                 self.scratch[i] = prescribed;
                 continue;
             }
-            // Both operators annihilate constants, so `K u` is evaluated on the
+            // The stiffness annihilates constants, so `K u` is evaluated on the
             // differences `u_j - u_i`. That form is exactly zero on a constant
             // field in floating point, where the plain row product leaves a
             // rounding residual that acts as a permanent force on the free
-            // constant mode of a Neumann cavity. `wave.wgsl` uses the same form.
-            let (displacement, memory) = (self.current[i], self.auxiliary[i]);
-            let (stiffness, auxiliary) = (operator.row_offsets[i] as usize
+            // constant mode of a Neumann cavity.
+            let displacement = self.current[i];
+            let stiffness = (operator.row_offsets[i] as usize
                 ..operator.row_offsets[i + 1] as usize)
-                .fold((0.0, 0.0), |(stiffness, auxiliary), entry| {
-                    let column = operator.columns[entry] as usize;
-                    (
-                        stiffness
-                            + operator.stiffness[entry] * (self.current[column] - displacement),
-                        auxiliary
-                            + operator.auxiliary_stiffness[entry]
-                                * (self.auxiliary[column] - memory),
-                    )
-                });
+                .map(|entry| {
+                    operator.stiffness[entry]
+                        * (self.current[operator.columns[entry] as usize] - displacement)
+                })
+                .sum::<f64>();
             let gamma = operator.lumped_damping[i] / operator.lumped_mass[i];
             let source = acceleration.get(i).copied().unwrap_or(0.0)
                 + operator.neumann_acceleration(i, time);
             self.scratch[i] = (2.0 * self.current[i]
                 - (1.0 - 0.5 * gamma * dt) * self.previous[i]
-                - dt2 * (stiffness + auxiliary) / operator.lumped_mass[i]
+                - dt2 * stiffness / operator.lumped_mass[i]
                 + dt2 * source)
                 / (1.0 + 0.5 * gamma * dt);
             if !self.scratch[i].is_finite() {
                 return Err(WaveError::InvalidState);
-            }
-        }
-        for i in 0..self.auxiliary.len() {
-            if operator.auxiliary_active[i] && operator.dirichlet_signals[i].is_none() {
-                self.auxiliary[i] += 0.5 * dt * (self.current[i] + self.scratch[i]);
-            } else {
-                self.auxiliary[i] = 0.0;
             }
         }
         std::mem::swap(&mut self.previous, &mut self.current);
@@ -2243,8 +2162,8 @@ mod tests {
         BACKGROUND_REGION, BoundaryEdge, CanonicalWaveOperator, CanonicalWaveState, CurveId,
         CurveNode, CurveSpan, CurveSpanId, CurveSpline, CurveTraceSide, FaceRegionAssignment,
         Material, MaterialId, MeshQuality, MeshTriangle, MeshVertex, MeshingOptions,
-        OpenCubicSpline, OuterSide, PeriodicCubicSpline, Region, TopologyCurve, TopologyGeometry,
-        TopologyScene, TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology,
+        OpenCubicSpline, OuterSide, Region, TopologyCurve, TopologyGeometry, TopologyScene,
+        TopologyVertex, TopologyVertexId, TopologyVertexLocation, compile_topology,
         mesh_topology_plan,
     };
 
@@ -3118,7 +3037,8 @@ mod tests {
         boundaries.sides[OuterSide::Top.index()] =
             OuterBoundaryCondition::Neumann { signal: neumann };
         boundaries.sides[OuterSide::Right.index()] = OuterBoundaryCondition::FirstOrderOutgoing;
-        boundaries.sides[OuterSide::Left.index()] = OuterBoundaryCondition::SecondOrderOutgoing;
+        // The left reflects: this stepper has no second-order wall.
+        boundaries.sides[OuterSide::Left.index()] = OuterBoundaryCondition::Reflecting;
         let operator = hand_assembled_with(&mesh, &TopologyScene::default(), boundaries).unwrap();
 
         for (node, point) in operator.node_points().iter().enumerate() {
@@ -3178,174 +3098,6 @@ mod tests {
             signal: crate::TimeSignal::harmonic(9.0, 0.0, 1.0, 0.0),
         };
         assert!(hand_assembled_with(&mesh, &TopologyScene::default(), contradictory,).is_err());
-    }
-
-    #[test]
-    fn second_order_auxiliary_state_remains_bounded_and_loses_energy() {
-        let operator = QuadraticWaveOperator::assemble_with_boundary(
-            &square_with_outer_boundary(),
-            WaveCoefficients::default(),
-            OuterBoundaryCondition::SecondOrderOutgoing,
-        )
-        .unwrap();
-        let dt = operator.recommended_time_step();
-        let initial = operator
-            .node_points()
-            .iter()
-            .map(|point| (-4.0 * (point.x * point.x + point.y * point.y)).exp())
-            .collect();
-        let mut state = QuadraticWaveState::new(
-            &operator,
-            dt,
-            initial,
-            vec![0.0; operator.degrees_of_freedom()],
-        )
-        .unwrap();
-        // The interior's discrete energy, with its growth bounded: the state's
-        // `energy` adds the auxiliary memory's `½ψᵀK_auxψ`, an energy times a
-        // time, which no law conserves or dissipates, until the wall has an
-        // energy of its own (VER-63 of the 2026-10-20 review, docs/plan.md).
-        let interior = |state: &QuadraticWaveState| {
-            operator
-                .discrete_energy(state.current(), state.previous(), dt)
-                .unwrap()
-        };
-        let initial_energy = interior(&state);
-        let mut peak = initial_energy;
-        for step in 1..=10_000 {
-            state.step(&operator, &[]).unwrap();
-            if step % 50 == 0 {
-                peak = peak.max(interior(&state));
-            }
-        }
-        let final_energy = interior(&state);
-        assert!(peak <= initial_energy * (1.0 + 1.0e-9));
-        assert!(final_energy < initial_energy * 1.0e-3);
-        assert!(state.auxiliary().iter().all(|value| value.is_finite()));
-    }
-
-    /// Second-order outgoing faces on curved and baffle spans. A hole bounded
-    /// by second-order faces and a curved baffle with second-order faces sit
-    /// in a reflecting cavity, meshed through the topology path the app uses,
-    /// and a pulse is released beside them. The absorbers may only remove
-    /// energy.
-    ///
-    /// Written on 2026-09-15 to reproduce a divergence, the energy growing by
-    /// eighteen orders of magnitude within 8,000 steps (the engineering log
-    /// for that day), and kept ignored while it did. The divergence has since
-    /// gone: on 2026-10-26 the interior's energy never rose and ended at 0.7%
-    /// of its start, and the test runs with the rest.
-    #[test]
-    fn second_order_curved_and_baffle_faces_never_add_energy() {
-        let second_order = SpanBehavior::Separated {
-            left: FaceBoundaryCondition::SecondOrderOutgoing,
-            right: FaceBoundaryCondition::SecondOrderOutgoing,
-            coupling: InternalBoundaryCoupling::Independent,
-        };
-        let hole_spline = PeriodicCubicSpline::rounded(Point2::new(0.1, -0.05), 0.3);
-        let hole_spans = (0..hole_spline.intervals().len())
-            .map(|index| topology_span(index as u64 + 1, second_order))
-            .collect();
-        let hole =
-            TopologyCurve::new(CurveId(1), CurveSpline::Closed(hole_spline), hole_spans).unwrap();
-        let baffle = TopologyCurve::new(
-            CurveId(2),
-            CurveSpline::Open(
-                OpenCubicSpline::uniform(vec![
-                    Point2::new(-0.7, 0.4),
-                    Point2::new(-0.3, 0.6),
-                    Point2::new(0.2, 0.55),
-                    Point2::new(0.6, 0.4),
-                ])
-                .unwrap(),
-            ),
-            vec![topology_span(20, second_order)],
-        )
-        .unwrap();
-        let topology = compile_topology(
-            &TopologyGeometry {
-                curves: vec![hole, baffle],
-                ..TopologyGeometry::default()
-            },
-            61,
-        )
-        .unwrap();
-        let inside = topology.face_at(Point2::new(0.1, -0.05)).unwrap();
-        let assignments = topology
-            .faces
-            .iter()
-            .map(|face| FaceRegionAssignment {
-                face: face.id,
-                region: (face.id != inside).then_some(BACKGROUND_REGION),
-            })
-            .collect::<Vec<_>>();
-        let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
-        let mesh = mesh_topology_plan(
-            &plan,
-            161,
-            MeshingOptions {
-                target_edge_length: 0.15,
-                minimum_angle_degrees: 12.0,
-                max_vertices: 40_000,
-                max_triangles: 80_000,
-                max_refinement_steps: 40_000,
-                ..MeshingOptions::default()
-            },
-        )
-        .unwrap();
-        let scene = TopologyScene::default();
-        let operator = QuadraticWaveOperator::assemble_topology(
-            &mesh,
-            &plan,
-            TopologyWaveModel::from_topology_scene(&scene),
-        )
-        .unwrap();
-        assert!(operator.auxiliary_active().iter().any(|active| *active));
-
-        let dt = operator.recommended_time_step();
-        let initial = operator
-            .node_points()
-            .iter()
-            .map(|point| {
-                let (dx, dy) = (point.x + 0.55, point.y + 0.35);
-                (-(dx * dx + dy * dy) / 0.02).exp()
-            })
-            .collect();
-        let mut state = QuadraticWaveState::new(
-            &operator,
-            dt,
-            initial,
-            vec![0.0; operator.degrees_of_freedom()],
-        )
-        .unwrap();
-        // The interior's discrete energy, its growth bounded, until the
-        // wall's auxiliary state has an energy of its own (VER-63 of the
-        // 2026-10-20 review, docs/plan.md).
-        let interior = |state: &QuadraticWaveState| {
-            operator
-                .discrete_energy(state.current(), state.previous(), dt)
-                .unwrap()
-        };
-        let initial_energy = interior(&state);
-        let mut peak = initial_energy;
-        for step in 1..=8_000 {
-            state.step(&operator, &[]).unwrap();
-            if step % 50 == 0 {
-                let energy = interior(&state);
-                assert!(energy.is_finite(), "energy diverged at step {step}");
-                peak = peak.max(energy);
-            }
-        }
-        let final_energy = interior(&state);
-        assert!(
-            peak <= initial_energy * (1.0 + 1.0e-9),
-            "the absorbers added energy: peak {peak:e} against {initial_energy:e}"
-        );
-        assert!(
-            final_energy < initial_energy * 0.5,
-            "the absorbers removed too little: {final_energy:e} of {initial_energy:e}"
-        );
-        assert!(state.auxiliary().iter().all(|value| value.is_finite()));
     }
 
     #[test]
@@ -4483,19 +4235,16 @@ mod tests {
             operator.apply_stiffness(&invalid),
             Err(WaveError::InvalidState)
         ));
+        // The second-order wall is the canonical solver's.
+        let walled = QuadraticWaveOperator::assemble_with_boundary(
+            &square_with_outer_boundary(),
+            WaveCoefficients::default(),
+            OuterBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
         assert!(matches!(
-            QuadraticWaveState::new_with_auxiliary(
-                &operator,
-                operator.recommended_time_step(),
-                vec![0.0; operator.degrees_of_freedom()],
-                vec![0.0; operator.degrees_of_freedom()],
-                vec![0.0; operator.degrees_of_freedom() - 1],
-            ),
-            Err(WaveError::SizeMismatch { .. })
-        ));
-        assert!(matches!(
-            operator.apply_auxiliary_stiffness(&invalid),
-            Err(WaveError::InvalidState)
+            QuadraticWaveState::zero(&walled, walled.recommended_time_step()),
+            Err(WaveError::Unsupported(_))
         ));
 
         let sliver = TriMesh {

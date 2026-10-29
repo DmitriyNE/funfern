@@ -30460,3 +30460,37 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-29 — The scalar stepper retires its Engquist-Majda wall
+
+- **Gone.** `QuadraticWaveState`'s second-order wall: the memory `ψ`, which
+  integrated the trace field and pushed back through the tangential
+  stiffness, `new_with_auxiliary`, and `discrete_energy_with_auxiliary` with
+  its `½ψᵀK_auxψ`, an energy times a time (VER-63 of the 2026-10-20 review).
+  `apply_auxiliary_stiffness` served only them and went too. That wall was
+  Engquist and Majda's truncation, with no energy it dissipates
+  (docs/spikes/funfern-boundary-auxiliary-spike.md, §2), and only tests and
+  `wave_boundary_reflection` stepped it; the application's wall is the
+  canonical solver's passive one, checked in the entry before.
+- **Refused, not downgraded.** The stepper would otherwise have stepped a
+  second-order wall as its trace damping alone, a first-order wall under
+  the other's name, so it now refuses an operator with one and names the
+  canonical solver. `rejects_invalid_mesh_coefficients_state_and_timestep`
+  checks the refusal in place of the memory's size and finiteness checks; it
+  failed with the refusal disabled. The operator still assembles the
+  tangential stiffness, which the canonical wall reads.
+- **Tests.** The two scalar second-order tests went: their canonical twins
+  landed with the entry before. The mixed-sides test's left side reflects
+  instead of carrying a second-order wall; the test is about the Dirichlet
+  and Neumann data. The step's comment no longer names `wave.wgsl`, which
+  the topology cutover retired. Core library 579 passed.
+- **`wave_boundary_reflection`** keeps its first-order rows and drops the
+  second-order ones and the long-time second-order check (the user's call,
+  2026-10-29). It reads the first-order wall's |R| at 0.0257 and 0.0981
+  for λ = 0.40, and 0.0107 and 0.0978 for λ = 0.20, at 0° and 30°.
+- **Docs.** docs/checks.md says where the production wall's planar
+  reflection is measured, docs/user-guide.md no longer calls that wall
+  Engquist and Majda's, and the plan's item is closed.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

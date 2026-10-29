@@ -1237,18 +1237,17 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   fixes. The legacy `damping` coefficient went for the named loss channels
   in file version 23 (2026-10-29), which opens a version-22 damping as the
   skin's primary loss channel.
-- [ ] Retire the scalar stepper's second-order wall, after the review's fixes
+- [x] Retire the scalar stepper's second-order wall, after the review's fixes
   and the legacy phase-out (the user's call, 2026-10-25; reshaped 2026-10-29).
   VER-63 of the 2026-10-20 review asked for that wall's own energy:
-  `discrete_energy_with_auxiliary` adds `½ψᵀK_auxψ`, where `ψ` integrates `u`
-  over time, an energy times a time. The wall is Engquist and Majda's
-  truncation `1 + a²/(2s²)`, whose real part is negative at low frequency
-  (docs/spikes/funfern-boundary-auxiliary-spike.md, §2), so it has no energy
-  it dissipates. The production wall, that spike's passive fraction,
-  dissipates its own, `½zᵀz` beside the bulk's: checked on a box and on
-  curved and baffle faces (2026-10-29). Left: `QuadraticWaveState` drops `ψ`,
-  which only tests and `wave_boundary_reflection` step, and the example its
-  second-order rows (the user's call, 2026-10-29).
+  `discrete_energy_with_auxiliary` added `½ψᵀK_auxψ`, an energy times a time.
+  The wall was Engquist and Majda's truncation `1 + a²/(2s²)`, whose real
+  part is negative at low frequency (docs/spikes/funfern-boundary-auxiliary-spike.md,
+  §2), so it had no energy it dissipates. The production wall, that spike's
+  passive fraction, dissipates its own, `½zᵀz` beside the bulk's: checked on
+  a box and on curved and baffle faces, and `QuadraticWaveState`, which only
+  tests and `wave_boundary_reflection` stepped, refuses a second-order wall
+  (2026-10-29).
 - [ ] Refill a repair's band by a free tip as well as a full build meshes it.
   Dragging a welded baffle 0.025 to 0.038 a step, the refill beside its free
   tip reaches 4.2° to 8° where a full build of the same scene has 16° to 22°.

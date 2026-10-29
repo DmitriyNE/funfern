@@ -45,18 +45,14 @@ fn main() {
             OuterBoundaryCondition::Reflecting,
         )
         .unwrap();
-        let outgoing = [
+        // The second-order wall is the canonical solver's; its planar
+        // reflection is docs/spikes/funfern-boundary-scattering-spike.md's.
+        let outgoing = QuadraticWaveOperator::assemble_with_boundary(
+            &mesh,
+            WaveCoefficients::default(),
             OuterBoundaryCondition::FirstOrderOutgoing,
-            OuterBoundaryCondition::SecondOrderOutgoing,
-        ]
-        .map(|boundary| {
-            QuadraticWaveOperator::assemble_with_boundary(
-                &mesh,
-                WaveCoefficients::default(),
-                boundary,
-            )
-            .unwrap()
-        });
+        )
+        .unwrap();
         println!(
             "λ={wavelength:.2}, parent h≤{parent_edge:.2}: {} DOFs, {} triangles, mesh/operators {:.3} s",
             reflecting.degrees_of_freedom(),
@@ -75,38 +71,21 @@ fn main() {
             let angle = angle_degrees.to_radians();
             let hit_time = 1.0 / angle.cos();
             let target_time = hit_time + 3.5 * width;
-            for operator in &outgoing {
-                let measurement = measure(packet, target_time, &reflecting, operator);
-                let cosine = angle.cos();
-                let impedance = match operator.outer_boundary() {
-                    OuterBoundaryCondition::FirstOrderOutgoing => 1.0,
-                    OuterBoundaryCondition::SecondOrderOutgoing => 1.0 - 0.5 * angle.sin().powi(2),
-                    OuterBoundaryCondition::Reflecting
-                    | OuterBoundaryCondition::Neumann { .. }
-                    | OuterBoundaryCondition::Dirichlet { .. }
-                    | OuterBoundaryCondition::ElectricWall
-                    | OuterBoundaryCondition::MagneticWall => unreachable!(),
-                };
-                let ideal = ((cosine - impedance) / (cosine + impedance)).abs();
-                println!(
-                    "  {:<22} angle {angle_degrees:>4.0}°, t={:.3}: |R| measured {:.4}, ideal {:.4}; energy {:.3e}, reflecting {:.6}",
-                    operator.outer_boundary().label(),
-                    measurement.time,
-                    measurement.reflection_amplitude,
-                    ideal,
-                    measurement.outgoing_energy_ratio,
-                    measurement.reflecting_energy_ratio,
-                );
-            }
+            let measurement = measure(packet, target_time, &reflecting, &outgoing);
+            let cosine = angle.cos();
+            let ideal = ((cosine - 1.0) / (cosine + 1.0)).abs();
+            println!(
+                "  {:<22} angle {angle_degrees:>4.0}°, t={:.3}: |R| measured {:.4}, ideal {:.4}; energy {:.3e}, reflecting {:.6}",
+                outgoing.outer_boundary().label(),
+                measurement.time,
+                measurement.reflection_amplitude,
+                ideal,
+                measurement.outgoing_energy_ratio,
+                measurement.reflecting_energy_ratio,
+            );
         }
         println!();
     }
-
-    let long_time = long_time_check();
-    println!(
-        "Long-time second-order normal packet at λ=.40, t={:.3}: energy ratio {:.3e}, finite {}",
-        long_time.time, long_time.energy_ratio, long_time.finite
-    );
 }
 
 struct Measurement {
@@ -141,55 +120,6 @@ fn measure(
         reflection_amplitude: (outgoing_ratio / reflecting_ratio).max(0.0).sqrt(),
         outgoing_energy_ratio: outgoing_ratio,
         reflecting_energy_ratio: reflecting_ratio,
-    }
-}
-
-struct LongTimeMeasurement {
-    time: f64,
-    energy_ratio: f64,
-    finite: bool,
-}
-
-fn long_time_check() -> LongTimeMeasurement {
-    let mesh = support::meshed(
-        &TopologyScene::default(),
-        1,
-        MeshingOptions {
-            curve_tolerance: 1.5e-3,
-            target_edge_length: 0.08 / 1.05,
-            minimum_angle_degrees: 12.0,
-            max_vertices: 50_000,
-            max_triangles: 100_000,
-            max_refinement_steps: 50_000,
-        },
-    )
-    .unwrap();
-    let operator = QuadraticWaveOperator::assemble_with_boundary(
-        &mesh,
-        WaveCoefficients::default(),
-        OuterBoundaryCondition::SecondOrderOutgoing,
-    )
-    .unwrap();
-    let packet = Packet {
-        wavelength: 0.4,
-        angle_degrees: 0.0,
-        origin: Point2::new(0.0, 0.0),
-        longitudinal_width: 0.24,
-        transverse_width: 0.16,
-    };
-    let (displacement, velocity) = initial_packet(&operator, packet);
-    let dt = TEMPORAL_FRACTION * operator.maximum_time_step();
-    let mut state = QuadraticWaveState::new(&operator, dt, displacement, velocity).unwrap();
-    let initial = state.energy(&operator).unwrap();
-    let steps = (10.0 / dt).round() as u64;
-    for _ in 0..steps {
-        state.step(&operator, &[]).unwrap();
-    }
-    let energy = state.energy(&operator).unwrap();
-    LongTimeMeasurement {
-        time: state.time(),
-        energy_ratio: energy / initial,
-        finite: energy.is_finite() && state.current().iter().all(|value| value.is_finite()),
     }
 }
 

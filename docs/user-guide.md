@@ -709,7 +709,8 @@ names or with every expression evaluated at the material frame's origin. Each ro
   first-order outgoing, or second-order outgoing behavior. Prescribed data uses
   `offset + amplitude · sin(2π f t + phase)`; zero amplitude gives a constant.
   Adjacent Dirichlet sides must agree at their shared corner. The second-order
-  Engquist-Majda condition adds tangential propagation and reduces oblique
+  condition, a passive approximation that keeps Engquist and Majda's
+  tangential term, adds tangential propagation and reduces oblique
   reflection. Hole and baffle spans support reflecting or local first-order
   impedance conditions; closed walls remain reflecting and material interfaces
   transmit. Changes reuse the mesh and transactionally transfer the live field.
