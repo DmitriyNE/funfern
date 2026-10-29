@@ -30494,3 +30494,60 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-29 — A crossing beside hidden samples of both curves is compiled (MESH-9, second part)
+
+- **The defect.** MESH-9's first part moved a transmitting crossing within
+  the tolerance of a hidden sample onto that sample: the sample's two
+  segments end there, and the crossed segment is cut at its foot, taking
+  its point. Where the crossed segment had a hidden sample of its own within
+  the tolerance of the first curve, that sample was left beside a curve it
+  did not meet, and the pair was refused as a touch with no junction. A
+  circle of radius 0.37 dragged across one of 0.45 along three lines was
+  refused at 140 of 6,000 positions, scattered along the drag, most of them
+  shallow crossings by the circles' tangency, where the curves stay within
+  the tolerance of each other for a long stretch.
+- **Test first.** `a_crossing_beside_hidden_samples_of_both_curves_is_compiled`
+  drags the circle across 3,000 positions. With the centres 0.1 apart or
+  more, each must compile; nearer, a position may be refused only as a near
+  contact. A compiled position must have the faces its crossings make, k + 2
+  for k crossings and 3 for none, and every vertex within the tolerance of
+  its own curve's samples. Before the fix, 24 positions with the centres 0.1
+  apart or more were refused.
+- **Fix.** `snapped_crossing` returns the cuts of every segment that meets at
+  the junction. Where the crossed segment has one hidden end within the
+  tolerance of the junction's two segments, `merged_sample` merges that
+  sample into the junction: its two segments end at the junction's point,
+  in place of the cut. `snapped_onto` accepts a sample near a segment when a
+  crossing of its segment, or the one past it, with that segment or one
+  beside it has a junction both of them meet. Every pair recomputes the
+  junction from the same crossing, so all the pairs touching either sample
+  agree on the merge.
+- **How far a sample moves.** At a crossing of 3° a merged sample slides
+  along its curve by up to 31 tolerances. The junction lies within the
+  tolerance of the sample's segment, so over the sweep the curve moves
+  across itself by at most 0.9 of the tolerance, about what the first part's
+  cut moves it. A bound of 1 or 2 tolerances on the slide would have left
+  120 or 96 of the 140 positions refused.
+- **Still refused.** 28 of the 6,000 positions, in one unbroken band at each
+  place the circles touch inside, 0.0018 to 0.0054 wide in the moving
+  centre. In 5 of them the circles come within the tolerance without
+  crossing. The other 23 cross at under 10°, with two samples of one curve
+  within the tolerance of the other; merging them would collapse a segment.
+- **Junctions that disagree are refused.** Every cut a junction makes now
+  names its point, and `finish_arrangement` refuses two junctions that put
+  one cut at different points, as a near contact.
+  `junctions_that_place_a_sample_apart_are_refused` bends a line through a
+  straight one just beside its node, its own node 1.25 tolerances from it.
+  Each of the two crossings would merge the other's sample onto its own, and
+  with the samples' own segments naming no point, the draft compiled with
+  each curve moved onto the other's sample. Before this change it compiled
+  by cutting each curve at the other's sample, so the two shared an edge
+  1.25 tolerances long: a collinear overlap past the tolerance, which the
+  compiler refuses elsewhere.
+- **Nothing else moves.** Lines at 2,000 heights and four slopes: none
+  refused, before and after. The 92 regression, frozen and gallery scenes
+  prepare to the same mesh hashes as before.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

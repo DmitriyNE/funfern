@@ -1256,15 +1256,17 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   (one move in 32 of `a_refill_under_the_floor_carves_again_with_a_wider_cavity`);
   a refill that matched the fresh mesher there would spare that rebuild and
   keep the step a sliver shortens (2026-10-23).
-- [ ] Accept a crossing near a hidden sample of both curves. MESH-9 of the
+- [x] Accept a crossing near a hidden sample of both curves. MESH-9 of the
   2026-10-20 review moved a transmitting crossing within the tolerance of one
   curve's hidden sample onto that sample, which took a line swept across a
   circle from 47 refused heights in 1,000 to none. Where a sample of each
-  curve lies within the tolerance, the two samples would have to merge into
-  one vertex, and the draft is still refused as a near contact: 9 of 2,000
-  positions of one circle across another, against 447 before. Every pair of
-  segments touching either sample would have to agree on the merge, so it was
-  left for now (2026-10-23).
+  curve lay within the tolerance, the draft was still refused as a near
+  contact: 9 of 2,000 positions of one circle across another, against 447
+  before (2026-10-23). The crossed curve's sample now merges into the
+  junction, and every pair of segments touching either sample recomputes the
+  junction from the same crossing, so they agree: a circle dragged across
+  another along three lines went from 140 refused positions in 6,000 to 28,
+  all where the circles touch inside (2026-10-29).
 - [ ] Testing campaign, structure first: configuration sweeps at the
   preparation layer, regression scenes that prepare, an audit of what the
   tests feed the solvers and mutations that prove the gate bites, then the

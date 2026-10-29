@@ -683,7 +683,8 @@ struct SampledCurve {
 
 /// Where a segment is cut. A crossing moved onto a hidden sample, see
 /// [`snapped_crossing`], cuts the crossed segment at the sample's own point
-/// rather than at its foot.
+/// rather than at its foot, or ends the segments of a sample merged into
+/// that junction there.
 #[derive(Clone, Copy)]
 struct Split {
     parameter: f64,
@@ -695,6 +696,14 @@ impl Split {
         Self {
             parameter,
             point: None,
+        }
+    }
+
+    /// A cut at `parameter` that a junction places at `point`.
+    fn through(parameter: f64, point: Point2) -> Self {
+        Self {
+            parameter,
+            point: Some(point),
         }
     }
 }
@@ -997,13 +1006,26 @@ fn finish_arrangement(
     for (segment_index, segment) in raw.iter().enumerate() {
         let mut cuts = splits[segment_index].clone();
         cuts.sort_by(|left, right| left.parameter.total_cmp(&right.parameter));
+        // Two junctions placing one cut at different points would leave the
+        // curves apart where each assumed they meet.
+        let mut conflict = false;
         cuts.dedup_by(|later, kept| {
             let same = (later.parameter - kept.parameter).abs() <= 1.0e-12;
-            if same && kept.point.is_none() {
-                kept.point = later.point;
+            if same {
+                match (kept.point, later.point) {
+                    (None, point) => kept.point = point,
+                    (Some(kept), Some(later)) if kept != later => conflict = true,
+                    _ => {}
+                }
             }
             same
         });
+        if conflict {
+            return Err(TopologyIssue::NearContact {
+                first: segment.source,
+                second: segment.source,
+            });
+        }
         let point = |cut: Split| {
             cut.point
                 .unwrap_or_else(|| segment.points[0].lerp(segment.points[1], cut.parameter))
@@ -1170,20 +1192,28 @@ fn sample_on(raw: &[RawSegment], owner: usize, end: usize, other: usize) -> Opti
 }
 
 /// A proper crossing within the tolerance of a hidden sample of either
-/// segment, moved onto the nearest such sample: its own segment is cut at
-/// that end and the other at the sample's foot, taking the sample's point.
-/// Left where it fell, it was refused, as a cut shorter than the vertex merge
-/// or as the sample's other segment passing the crossed one with no
-/// junction, so a drag flickered between valid and invalid (MESH-9 of the
-/// 2026-10-20 review). Called with `first < second`, as pairs are inspected,
-/// so ties resolve the same way from either side.
+/// segment, moved onto the nearest such sample: its two segments end there
+/// and the other segment is cut at the sample's foot, taking the sample's
+/// point. Left where it fell, it was refused, as a cut shorter than the
+/// vertex merge or as the sample's other segment passing the crossed one
+/// with no junction, so a drag flickered between valid and invalid (MESH-9
+/// of the 2026-10-20 review). Returns the cuts of every segment that meets
+/// at the junction, each placed at the junction's point, so two junctions
+/// that place one cut apart are refused in `finish_arrangement` rather than
+/// built apart. Called with `first < second`, as pairs are inspected, so
+/// ties resolve the same way from either side.
+///
+/// The crossed segment may have a hidden sample of its own within the
+/// tolerance of the junction's two segments, and cut, it would still pass
+/// them there with no junction. That sample merges into the junction
+/// instead, see [`merged_sample`].
 fn snapped_crossing(
     raw: &[RawSegment],
     first: usize,
     second: usize,
     tolerance: f64,
-) -> Option<[(usize, Split); 2]> {
-    let mut nearest: Option<(f64, [(usize, Split); 2])> = None;
+) -> Option<Vec<(usize, Split)>> {
+    let mut nearest: Option<(f64, usize, usize, usize, Split)> = None;
     for (owner, other) in [(first, second), (second, first)] {
         let [o0, o1] = raw[other].points;
         for end in 0..2 {
@@ -1191,17 +1221,73 @@ fn snapped_crossing(
                 continue;
             };
             let distance = point_segment_distance(raw[owner].points[end], o0, o1);
-            if distance <= tolerance && nearest.is_none_or(|(best, _)| distance < best) {
-                nearest = Some((distance, [(owner, Split::at(end as f64)), (other, cut)]));
+            if distance <= tolerance && nearest.is_none_or(|(best, ..)| distance < best) {
+                nearest = Some((distance, owner, end, other, cut));
             }
         }
     }
-    nearest.map(|(_, splits)| splits)
+    let (_, owner, end, other, cut) = nearest?;
+    let beside = neighbor_segment(raw, owner, end)?;
+    let point = raw[owner].points[end];
+    let mut splits = vec![
+        (owner, Split::through(end as f64, point)),
+        (beside, Split::through((1 - end) as f64, point)),
+    ];
+    match merged_sample(raw, [owner, beside], other, tolerance) {
+        Some((other_end, other_beside)) => splits.extend([
+            (other, Split::through(other_end as f64, point)),
+            (other_beside, Split::through((1 - other_end) as f64, point)),
+        ]),
+        None => splits.push((other, cut)),
+    }
+    Some(splits)
 }
 
-/// Whether the hidden sample at `end` of `owner`, near `other`, is where the
-/// crossing of its neighbouring segment with `other` is snapped: the curve
-/// then meets `other` at that sample.
+/// The end of `other` at its one hidden sample within the tolerance of
+/// `junction`, the two segments meeting where a crossing was moved onto a
+/// sample, and the segment past that end. The sample merges into the
+/// junction, its two segments ending at the junction's point. At a crossing
+/// of a few degrees it slides along its curve by up to the crossed segment's
+/// length, but the junction lies within the tolerance of that segment, so
+/// the curve moves across itself by about the tolerance, as the cut it
+/// replaces would. With hidden samples within the tolerance at both ends,
+/// the curves run together past a whole segment and there is no one point
+/// to merge into.
+fn merged_sample(
+    raw: &[RawSegment],
+    junction: [usize; 2],
+    other: usize,
+    tolerance: f64,
+) -> Option<(usize, usize)> {
+    let near = |point: Point2| {
+        junction.iter().any(|segment| {
+            let [a, b] = raw[*segment].points;
+            point_segment_distance(point, a, b) <= tolerance
+        })
+    };
+    let mut ends = (0..2).filter(|end| {
+        raw[other].endpoint_vertices[*end].is_none()
+            && neighbor_segment(raw, other, *end).is_some()
+            && near(raw[other].points[*end])
+    });
+    let end = ends.next()?;
+    if ends.next().is_some() {
+        return None;
+    }
+    Some((end, neighbor_segment(raw, other, end)?))
+}
+
+/// Whether segments `a` and `b` cross at a point inside both.
+fn properly_crossing(raw: &[RawSegment], a: usize, b: usize) -> bool {
+    let [p0, p1] = raw[a.min(b)].points;
+    let [q0, q1] = raw[a.max(b)].points;
+    opposite(orient2d(p0, p1, q0), orient2d(p0, p1, q1))
+        && opposite(orient2d(q0, q1, p0), orient2d(q0, q1, p1))
+}
+
+/// Whether the hidden sample at `end` of `owner`, near `other`, lies at a
+/// junction `other` meets: that of a crossing of `owner`, or of the segment
+/// past the sample, with `other` or a segment beside it.
 fn snapped_onto(
     raw: &[RawSegment],
     owner: usize,
@@ -1209,16 +1295,23 @@ fn snapped_onto(
     other: usize,
     tolerance: f64,
 ) -> bool {
-    let Some(neighbor) = neighbor_segment(raw, owner, end) else {
-        return false;
-    };
-    let (low, high) = (neighbor.min(other), neighbor.max(other));
-    let [n0, n1] = raw[low].points;
-    let [o0, o1] = raw[high].points;
-    opposite(orient2d(n0, n1, o0), orient2d(n0, n1, o1))
-        && opposite(orient2d(o0, o1, n0), orient2d(o0, o1, n1))
-        && snapped_crossing(raw, low, high, tolerance)
-            .is_some_and(|[_, (_, cut)]| cut.point == Some(raw[owner].points[end]))
+    let owners = [Some(owner), neighbor_segment(raw, owner, end)];
+    let others = [
+        Some(other),
+        neighbor_segment(raw, other, 0),
+        neighbor_segment(raw, other, 1),
+    ];
+    owners.into_iter().flatten().any(|crossing| {
+        others.into_iter().flatten().any(|crossed| {
+            properly_crossing(raw, crossing, crossed)
+                && snapped_crossing(raw, crossing.min(crossed), crossing.max(crossed), tolerance)
+                    .is_some_and(|splits| {
+                        splits.iter().any(|(segment, split)| {
+                            *segment == owner && split.parameter == end as f64
+                        }) && splits.iter().any(|(segment, _)| *segment == other)
+                    })
+        })
+    })
 }
 
 /// A transmitting curve passing exactly through another transmitting
@@ -1251,7 +1344,10 @@ fn crossing_through_sample(
         return None;
     }
     let cut = sample_on(raw, owner, end, other)?;
-    Some([(owner, Split::at(end as f64)), (other, cut)])
+    Some([
+        (owner, Split::through(end as f64, raw[owner].points[end])),
+        (other, cut),
+    ])
 }
 
 fn authorized_contact(
@@ -2403,6 +2499,153 @@ mod tests {
             "{} refused, first {:?}",
             refused.len(),
             refused.first()
+        );
+    }
+
+    /// The segments `geometry` is compiled from, sampled as a `TopologyJob`
+    /// samples them, and the arrangement's tolerance.
+    fn raw_segments(geometry: &TopologyGeometry) -> (Vec<RawSegment>, f64) {
+        let tolerance = arrangement_tolerance(geometry.domain);
+        let options = SamplingOptions {
+            tolerance: tolerance * 0.25,
+            ..SamplingOptions::default()
+        };
+        let sampled = geometry
+            .curves
+            .iter()
+            .map(|curve| {
+                let mut sampler = curve.spline.sample(options);
+                while !sampler.step() {}
+                SampledCurve {
+                    samples: sampler.finish().unwrap(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let raw = build_raw_segments(geometry, &sampled, tolerance).unwrap();
+        (raw, tolerance)
+    }
+
+    /// MESH-9 of the 2026-10-20 review, its second part: a circle dragged
+    /// across another, its centre along three lines. A crossing within the
+    /// tolerance of a hidden sample of each curve was moved onto one of them,
+    /// and the other was left within the tolerance of a curve it did not
+    /// meet, refused as a touch with no junction. With the centres 0.1 apart
+    /// or more, every position compiles. Nearer, by the circles' tangency, a
+    /// position may be refused as a near contact: one curve runs within the
+    /// tolerance of the other past more than one of its samples. A compiled
+    /// position has the faces its crossings make, and no vertex leaves the
+    /// tolerance of its own curve's samples.
+    #[test]
+    fn a_crossing_beside_hidden_samples_of_both_curves_is_compiled() {
+        let fixed = TopologyCurve::new(
+            CurveId(1),
+            CurveSpline::Closed(PeriodicCubicSpline::rounded(Point2::new(0.0, 0.0), 0.45)),
+            spans(1, 8, SpanBehavior::Transmitting),
+        )
+        .unwrap();
+        let mut refused = vec![];
+        for height in [0.0, 0.07, 0.19] {
+            for step in 0..1000 {
+                let x = -0.6 + 1.2 * step as f64 / 1000.0;
+                let moving = TopologyCurve::new(
+                    CurveId(2),
+                    CurveSpline::Closed(PeriodicCubicSpline::rounded(Point2::new(x, height), 0.37)),
+                    spans(20, 8, SpanBehavior::Transmitting),
+                )
+                .unwrap();
+                let geometry = TopologyGeometry {
+                    curves: vec![fixed.clone(), moving],
+                    ..TopologyGeometry::default()
+                };
+                let snapshot = match compile_topology(&geometry, 0) {
+                    Ok(snapshot) => snapshot,
+                    Err(issue) => {
+                        assert!(
+                            matches!(issue, TopologyIssue::NearContact { .. }),
+                            "at ({x}, {height}): {issue}"
+                        );
+                        if x.hypot(height) >= 0.1 {
+                            refused.push((x, height));
+                        }
+                        continue;
+                    }
+                };
+                let (raw, tolerance) = raw_segments(&geometry);
+                let curve = |id: CurveId| {
+                    raw.iter()
+                        .filter(|segment| segment.curve_id == Some(id))
+                        .collect::<Vec<_>>()
+                };
+                let (first, second) = (curve(CurveId(1)), curve(CurveId(2)));
+                let crossings = first
+                    .iter()
+                    .flat_map(|a| second.iter().map(move |b| (a, b)))
+                    .filter(|(a, b)| {
+                        let ([a0, a1], [b0, b1]) = (a.points, b.points);
+                        opposite(orient2d(a0, a1, b0), orient2d(a0, a1, b1))
+                            && opposite(orient2d(b0, b1, a0), orient2d(b0, b1, a1))
+                    })
+                    .count();
+                // Two closed curves apart or nested make three faces of the
+                // domain, and crossing k times, k + 2.
+                let faces = if crossings == 0 { 3 } else { crossings + 2 };
+                assert_eq!(snapshot.faces.len(), faces, "at ({x}, {height})");
+                for edge in &snapshot.edges {
+                    let Some(id) = edge.curve else {
+                        continue;
+                    };
+                    let own = if id == CurveId(1) { &first } else { &second };
+                    for point in edge.points {
+                        let distance = own
+                            .iter()
+                            .map(|segment| {
+                                point_segment_distance(point, segment.points[0], segment.points[1])
+                            })
+                            .fold(f64::INFINITY, f64::min);
+                        assert!(
+                            distance <= tolerance,
+                            "at ({x}, {height}) a vertex is {distance:e} from its curve"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            refused.is_empty(),
+            "{} refused, first {:?}",
+            refused.len(),
+            refused.first()
+        );
+    }
+
+    /// Two crossings among the same four segments, each moved onto a hidden
+    /// sample of its own and merging the other's: a line bent through a
+    /// straight one just beside its node, its own node below. Each junction
+    /// would move the other's sample onto its own, leaving the two curves
+    /// apart where each assumed they meet, so the draft is refused as a near
+    /// contact.
+    #[test]
+    fn junctions_that_place_a_sample_apart_are_refused() {
+        let straight = open(
+            1,
+            1,
+            &[[-0.5, 0.0], [0.0, 0.0], [0.5, 0.0]],
+            SpanBehavior::Transmitting,
+        );
+        let bent = open(
+            2,
+            10,
+            &[[-0.3, 0.3], [0.0002, -0.00015], [0.3, 0.3]],
+            SpanBehavior::Transmitting,
+        );
+        let geometry = TopologyGeometry {
+            curves: vec![straight, bent],
+            ..TopologyGeometry::default()
+        };
+        let issue = compile_topology(&geometry, 0).unwrap_err();
+        assert!(
+            matches!(issue, TopologyIssue::NearContact { .. }),
+            "{issue}"
         );
     }
 
