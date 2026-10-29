@@ -6291,10 +6291,14 @@ mod tests {
     use super::*;
     use crate::test_scenes::*;
     use crate::{
-        BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CurveId, DampingLaw, LossChannel,
-        MaterialFrame, MeshQuality, MeshTriangle, MeshVertex, OuterBoundaryCondition,
-        PulseEnvelope, QuadraticWaveState, RateLaw, ScalarField, SpanBehavior, TimeDrive,
-        TopologyScene, VolumeSourceContribution, VolumeSourceNode,
+        BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CurveId, CurveSpan, CurveSpanId,
+        CurveSpline, DampingLaw, FaceBoundaryCondition, FaceRegionAssignment,
+        InternalBoundaryCoupling, LossChannel, MaterialFrame, MeshQuality, MeshTriangle,
+        MeshVertex, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition,
+        OuterBoundaryConditions, PeriodicCubicSpline, PulseEnvelope, QuadraticWaveState, RateLaw,
+        ScalarField, SpanBehavior, TimeDrive, TopologyCurve, TopologyGeometry, TopologyMeshPlan,
+        TopologyScene, VolumeSourceContribution, VolumeSourceNode, compile_topology,
+        mesh_topology_plan,
     };
 
     /// The one inversion has to give what the per-column solves gave, on a
@@ -8267,6 +8271,242 @@ mod tests {
         let oracle = solve_dense(constrained, probe.clone(), dimension).unwrap();
         let swept = export.solve(&travelling, boundary, &probe).unwrap();
         assert!(maximum_difference(&swept, &oracle) < 2.0e-11);
+    }
+
+    /// Steps `primary`, released from rest, through `steps` steps of the
+    /// production integrator, and returns the energy at the start, its peak
+    /// and the energy at the end. The energy is the wall's too: the outgoing
+    /// memory's `½zᵀz` beside the bulk's.
+    fn wall_energy_run(
+        operator: &CanonicalWaveOperator,
+        primary: &[f64],
+        steps: usize,
+    ) -> (f64, f64, f64) {
+        let dt = operator.recommended_time_step();
+        let mut state = CanonicalWaveState::from_primary_and_potential(
+            operator,
+            dt,
+            primary,
+            &vec![0.0; operator.degrees_of_freedom()],
+        )
+        .unwrap();
+        let initial = state.energy(operator).unwrap();
+        let mut peak = initial;
+        for step in 1..=steps {
+            state.step(operator).unwrap();
+            let energy = state.energy(operator).unwrap();
+            assert!(energy.is_finite(), "energy diverged at step {step}");
+            peak = peak.max(energy);
+        }
+        (initial, peak, state.energy(operator).unwrap())
+    }
+
+    /// A hole bounded by `faces` and a curved baffle with `faces` on both
+    /// sides, in a cavity whose outer walls reflect, meshed through the
+    /// topology path the application uses, compiled for the canonical solver.
+    fn hole_and_baffle(faces: FaceBoundaryCondition, edge: f64) -> CanonicalWaveOperator {
+        let behavior = SpanBehavior::Separated {
+            left: faces,
+            right: faces,
+            coupling: InternalBoundaryCoupling::Independent,
+        };
+        let span = |id: u64| CurveSpan {
+            id: CurveSpanId(id),
+            behavior,
+        };
+        let hole_spline = PeriodicCubicSpline::rounded(Point2::new(0.1, -0.05), 0.3);
+        let hole_spans = (0..hole_spline.intervals().len())
+            .map(|index| span(index as u64 + 1))
+            .collect();
+        let hole =
+            TopologyCurve::new(CurveId(1), CurveSpline::Closed(hole_spline), hole_spans).unwrap();
+        let baffle = TopologyCurve::new(
+            CurveId(2),
+            CurveSpline::Open(
+                OpenCubicSpline::uniform(vec![
+                    Point2::new(-0.7, 0.4),
+                    Point2::new(-0.3, 0.6),
+                    Point2::new(0.2, 0.55),
+                    Point2::new(0.6, 0.4),
+                ])
+                .unwrap(),
+            ),
+            vec![span(20)],
+        )
+        .unwrap();
+        let topology = compile_topology(
+            &TopologyGeometry {
+                curves: vec![hole, baffle],
+                ..TopologyGeometry::default()
+            },
+            61,
+        )
+        .unwrap();
+        let inside = topology.face_at(Point2::new(0.1, -0.05)).unwrap();
+        let assignments = topology
+            .faces
+            .iter()
+            .map(|face| FaceRegionAssignment {
+                face: face.id,
+                region: (face.id != inside).then_some(BACKGROUND_REGION),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
+        let mesh = mesh_topology_plan(
+            &plan,
+            161,
+            MeshingOptions {
+                target_edge_length: edge,
+                minimum_angle_degrees: 12.0,
+                max_vertices: 40_000,
+                max_triangles: 80_000,
+                max_refinement_steps: 40_000,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scene = TopologyScene {
+            outer_boundaries: OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting),
+            ..TopologyScene::default()
+        };
+        let model = TopologyWaveModel::from_topology_scene(&scene);
+        let quadratic = QuadraticWaveOperator::assemble_topology(&mesh, &plan, model).unwrap();
+        CanonicalWaveOperator::compile(&mesh, &quadratic, model, 161).unwrap()
+    }
+
+    /// A pulse released beside the hole and the baffle.
+    fn pulse_beside_the_baffle(operator: &CanonicalWaveOperator) -> Vec<f64> {
+        operator
+            .node_points()
+            .iter()
+            .map(|point| {
+                let (dx, dy) = (point.x + 0.55, point.y + 0.35);
+                (-(dx * dx + dy * dy) / 0.02).exp()
+            })
+            .collect()
+    }
+
+    /// The largest eigenvalue of the energy-weighted symmetric part of the
+    /// wall's generator, over the largest in magnitude: the energy the wall
+    /// can add per unit of energy it holds.
+    fn wall_gain(operator: &CanonicalWaveOperator) -> f64 {
+        let boundary = operator.outgoing_boundary().unwrap();
+        let mass = operator.primary_mass();
+        let generator = outgoing_generator(operator, boundary, mass).unwrap();
+        let trace = boundary.trace_nodes().len();
+        let dimension = trace + boundary.auxiliary_count();
+        // The energy is `½Σ Q²/M` over the trace and `½zᵀz` over the memory.
+        let weight = |row: usize| {
+            if row < trace {
+                1.0 / mass[boundary.trace_nodes()[row] as usize]
+            } else {
+                1.0
+            }
+        };
+        let mut symmetric = vec![0.0; dimension * dimension];
+        for row in 0..dimension {
+            for column in 0..dimension {
+                symmetric[row * dimension + column] = 0.5
+                    * (weight(row) * generator[row * dimension + column]
+                        + weight(column) * generator[column * dimension + row]);
+            }
+        }
+        let (values, _, _, _) = eigensolve(&symmetric, dimension);
+        let largest = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let magnitude = values.iter().map(|value| value.abs()).fold(0.0, f64::max);
+        largest / magnitude
+    }
+
+    /// VER-63 of the 2026-10-20 review asked for the second-order wall's own
+    /// energy. The scalar stepper's wall, Engquist and Majda's truncation,
+    /// has none it dissipates: its response `1 + a²/(2s²)` has a negative
+    /// real part at low frequency (docs/spikes/funfern-boundary-auxiliary-spike.md,
+    /// §2). The production wall is that spike's passive fraction, whose
+    /// memory stores `½zᵀz`; with the trace's `½Σ Q²/M` it may only fall, so
+    /// the energy-weighted symmetric part of the wall's generator has no
+    /// positive direction. Here on a box and on curved and baffle faces, the
+    /// gain is roundoff: 1.2e-16 and 4.9e-15 of the generator's scale. Made
+    /// active at low frequency, the middle residue -9/7 for -8/7, the box's
+    /// reads 1.2e-3, which a released pulse's energy did not show.
+    #[test]
+    fn the_second_order_wall_dissipates_its_own_energy() {
+        let mesh = square_with_outer_boundary();
+        let scene = TopologyScene::default();
+        let quadratic =
+            hand_assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+        let operator = CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            73,
+        )
+        .unwrap();
+        let gain = wall_gain(&operator);
+        assert!(gain <= 1.0e-12, "the box's wall gains {gain:e}");
+        let gain = wall_gain(&hole_and_baffle(
+            FaceBoundaryCondition::SecondOrderOutgoing,
+            0.3,
+        ));
+        assert!(gain <= 1.0e-12, "the curved and baffle faces gain {gain:e}");
+    }
+
+    /// The production step on second-order faces bounding a hole and a curved
+    /// baffle, in a cavity that reflects. The scalar stepper's own
+    /// Engquist-Majda wall grew this scene's energy by eighteen orders in
+    /// 8,000 steps on 2026-09-15. The total energy, the wall's included,
+    /// never rises further above its start than the step's own wobble, which
+    /// the twin whose faces reflect measures: 1.57e-6 against the twin's
+    /// 1.68e-6, a symplectic step's, not a gain. The faces take 61% of it
+    /// out over the run.
+    #[test]
+    fn the_second_order_wall_never_adds_energy_on_curved_and_baffle_faces() {
+        let absorbing = hole_and_baffle(FaceBoundaryCondition::SecondOrderOutgoing, 0.15);
+        let reflecting = hole_and_baffle(FaceBoundaryCondition::Reflecting, 0.15);
+        assert!(absorbing.outgoing_boundary().is_some());
+        assert!(reflecting.outgoing_boundary().is_none());
+        let (initial, peak, last) =
+            wall_energy_run(&absorbing, &pulse_beside_the_baffle(&absorbing), 8_000);
+        let (twin_initial, twin_peak, twin_last) =
+            wall_energy_run(&reflecting, &pulse_beside_the_baffle(&reflecting), 8_000);
+        assert!((twin_last / twin_initial - 1.0).abs() < 1.0e-5);
+        let (rise, wobble) = (peak / initial - 1.0, twin_peak / twin_initial - 1.0);
+        assert!(
+            rise <= 1.1 * wobble,
+            "the faces added energy: up {rise:e}, where the step alone goes {wobble:e}"
+        );
+        assert!(
+            last < 0.5 * initial,
+            "the faces removed too little: {last:e} of {initial:e}"
+        );
+    }
+
+    /// The box twin of the curved faces' run: from a pulse released at rest,
+    /// the energy never rises above its start over 10,000 steps, and ends at
+    /// 1.7% of it.
+    #[test]
+    fn the_second_order_wall_drains_a_box() {
+        let mesh = square_with_outer_boundary();
+        let scene = TopologyScene::default();
+        let quadratic =
+            hand_assembled(&mesh, &scene, OuterBoundaryCondition::SecondOrderOutgoing).unwrap();
+        let operator = CanonicalWaveOperator::compile(
+            &mesh,
+            &quadratic,
+            TopologyWaveModel::from_topology_scene(&scene),
+            73,
+        )
+        .unwrap();
+        let primary = operator
+            .node_points()
+            .iter()
+            .map(|point| (-4.0 * (point.x * point.x + point.y * point.y)).exp())
+            .collect::<Vec<_>>();
+        let (initial, peak, last) = wall_energy_run(&operator, &primary, 10_000);
+        assert!(
+            peak <= initial * (1.0 + 1.0e-9),
+            "{peak:e} over {initial:e}"
+        );
+        assert!(last < 0.05 * initial, "{last:e} of {initial:e}");
     }
 
     #[test]

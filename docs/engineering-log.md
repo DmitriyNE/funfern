@@ -30412,3 +30412,51 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-29 — The production second-order wall dissipates its own energy
+
+- **VER-63** of the 2026-10-20 review asked for the second-order wall's own
+  energy, since `discrete_energy_with_auxiliary` adds `½ψᵀK_auxψ`, an energy
+  times a time. That is the scalar stepper's wall, Engquist and Majda's
+  truncation `1 + a²/(2s²)` of the exact `√(1 + a²/s²)`, carried as the
+  memory `ψ̇ = u`. Its real part `1 − a²/(2ω²)` is negative below
+  `ω = a/√2`, so no energy it always dissipates exists
+  (docs/spikes/funfern-boundary-auxiliary-spike.md, §2). The application
+  never steps it: the canonical solver runs that spike's passive fraction,
+  which keeps the truncation's `a²/(2s²)` term per tangential mode and
+  stores `½zᵀz`. What the spike left open was its original topology case,
+  the hole and curved baffle that had diverged; it had only run on the
+  scalar wall, judged by the interior's energy.
+- **Three tests on the canonical solver.**
+  - `the_second_order_wall_dissipates_its_own_energy`: with the energy
+    `½Σ Q²/M` over the trace and `½zᵀz` over the memory, the symmetric part
+    of the wall's generator has no positive eigenvalue past roundoff, 1.2e-16
+    of its scale on a box and 4.9e-15 on the hole and baffle.
+  - `the_second_order_wall_never_adds_energy_on_curved_and_baffle_faces`:
+    the production step, 8,000 steps of a pulse beside the hole and the
+    baffle in a cavity whose outer walls reflect, every face of both
+    second-order. The total energy, the wall's included, rises at most
+    1.57e-6 above its start, where the same scene with reflecting faces
+    rises 1.68e-6: the symplectic step's own wobble, which a closed cavity
+    shows too. The faces take 61% out.
+  - `the_second_order_wall_drains_a_box`: never above the start over 10,000
+    steps, ending at 1.7%.
+- **They bite.** With the middle residue −9/7 for −8/7, the wall's real part
+  turns negative at low frequency, like the truncation's. The box's gain
+  reads 1.2e-3, failing the first test. The two energy runs did not show it,
+  a released pulse carrying too little low frequency to the wall, which is
+  why the generator is checked directly. At −24/7 the trace solve no longer
+  converges and the solver refuses the wall.
+- **The step's energy is not monotone.** Measured on the hole and baffle
+  with the outer walls of the faces' kind, the peak above the start is
+  1.68e-6 with everything reflecting, 1.43e-6 first-order and 1.50e-6
+  second-order, so the test compares
+  against the reflecting twin rather than demanding a fall at every step. The
+  scalar test's comment had the outer walls reflecting; they were the
+  document's default second-order walls, and the new test reflects them.
+- **Next:** `QuadraticWaveState` drops `ψ`, and `wave_boundary_reflection`
+  its second-order rows (the user's call, 2026-10-29). docs/plan.md's item
+  says so.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
