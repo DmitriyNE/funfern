@@ -400,7 +400,7 @@ presentation preset, and starts a fresh zero field; it does not transfer the fie
 from the previously open scene. Ordinary edits and AMR retain their normal
 field-preserving handoff.
 
-Physics is part of the undoable `Scene` and operator equality, while geometry
+Physics is part of the undoable `TopologyScene` and operator equality, while geometry
 equality deliberately ignores it. A physics or polarization change reassembles
 the presentation-specific coefficient roles on the existing mesh and transfers
 the live canonical state at the same accepted-step boundary as other generation
@@ -625,9 +625,10 @@ future extension.
 
 ## Milestone 1 spline and document model
 
-`funfern-core` is dependency-free. It owns `Point2`, `PeriodicCubicSpline`,
-`ObstacleId`, `Scene`, parameter-bearing samples, and structured validation
-results. Controls and one period of positive nonuniform knot intervals are f64.
+`funfern-core` is dependency-free. It owns `Point2`, `PeriodicCubicSpline` and
+parameter-bearing samples; this milestone's `Scene`, `ObstacleId` and
+structured validation results went with the `Scene` model in October 2026.
+Controls and one period of positive nonuniform knot intervals are f64.
 There are 4–128 controls, each associated with its same-index knot. Knots and
 controls extend periodically; de Boor evaluates positions and the differentiated
 control/knot sequences. Intervals below 1e-12 of a period are rejected as
@@ -658,19 +659,13 @@ Adaptive sampling handles each knot span using its exact cubic Bezier control
 hull and requires monotone projection onto the chord. This catches inflections
 and small reversals that a midpoint-only flatness test can miss. Every sample
 retains its parameter. Rendering uses a 0.6 logical-pixel tolerance, up to 2,048
-points per obstacle at depth 14, cached by revision and scale. Validation uses
-an independent fixed world-space sampling tolerance of 0.000025, depth 16, and
-4,096 points per obstacle. Exhaustion is an unaccepted result.
+points per obstacle at depth 14, cached by revision and scale.
 
-`ValidationJob::advance` processes a caller-supplied work budget. Sampling,
-segment construction, pair tests, and containment tests resume across frames;
-the application gives each job 12,000 operations per frame. Disjoint loop bounds
-skip segment blocks and containment tests. A 50-million-operation ceiling rejects
-unreasonably expensive scenes. Contact clearance is `1e-4` of the larger domain extent,
-with sampling uncertainty added. Self-contact checks distinguish nearby samples
-along one local arc from nonlocal contact, so very short spans introduced by knot
-insertion do not falsely reject an unchanged curve. Crossings are still tested.
-These approximate predicates are editor guards, not a meshing certificate.
+The `Scene` model's `ValidationJob` checked contact and crossings within a
+caller-supplied work budget, as an editor guard rather than a meshing
+certificate. It was retired with that model in October 2026; a topology
+document is checked by `TopologyJob`, which resumes across calls under a work
+budget in the same way.
 
 The application owns a `Document { draft, accepted }`. Every edit advances a
 monotonic revision and invalidates outstanding draft validation. At the end of

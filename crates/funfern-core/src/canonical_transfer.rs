@@ -1448,7 +1448,6 @@ pub struct CanonicalHistoryTransferReport {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum GapGroup {
-    Legacy(crate::InternalBoundaryId),
     Topology(crate::CurveId, crate::CurveSpanId),
 }
 
@@ -2285,17 +2284,6 @@ impl CanonicalOutgoingNormalizedTransferJob {
 
 fn gap_key_parts(key: ThinGapTraceKey) -> (GapGroup, f64, f64, u8) {
     match key {
-        ThinGapTraceKey::Legacy {
-            boundary,
-            start_bits,
-            end_bits,
-            local,
-        } => (
-            GapGroup::Legacy(boundary),
-            f64::from_bits(start_bits),
-            f64::from_bits(end_bits),
-            local,
-        ),
         ThinGapTraceKey::Topology {
             curve,
             span,
@@ -2624,7 +2612,7 @@ mod tests {
     use crate::{
         BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalAuxiliaryState, CanonicalForcing,
         CanonicalStepAccounting, CanonicalTemporalWaveState, CanonicalWaveOperator,
-        CanonicalWaveState, CurveId, DrivenHandoff, InternalBoundaryId, MeshQuality, MeshTriangle,
+        CanonicalWaveState, CurveId, CurveSpanId, DrivenHandoff, MeshQuality, MeshTriangle,
         MeshVertex, MeshingOptions, OuterBoundaryCondition, OuterSide, QuadraticWaveOperator,
         TimeDriveValues, TimeSignal, TopologyScene, TopologyWaveModel,
     };
@@ -3362,8 +3350,9 @@ mod tests {
     #[test]
     fn thin_gap_history_handles_split_reverse_new_and_deleted_energy() {
         let sample = |start: f64, end: f64, local: u8, stiffness: f64| ThinGapSample {
-            key: ThinGapTraceKey::Legacy {
-                boundary: InternalBoundaryId(4),
+            key: ThinGapTraceKey::Topology {
+                curve: CurveId(4),
+                span: CurveSpanId(1),
                 start_bits: start.to_bits(),
                 end_bits: end.to_bits(),
                 local,

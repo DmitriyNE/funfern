@@ -30346,3 +30346,26 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-29 — Legacy phase-out 11: the `Scene` model and `assemble_scene`
+
+- **Gone,** about 1,900 lines. Nothing called them once the tests had moved
+  and the topology assembly named a failing material:
+  - geometry.rs's `Scene` with its obstacles, internal boundaries, material
+    interfaces and junctions, their ids, roles and span laws, and its
+    validation job with the issue and result types;
+  - `assemble_scene` and `assemble_scene_with_boundaries`, the assembly's
+    `Scene` coefficient arm and field-by-field evaluator, and its hole and
+    internal-boundary passes;
+  - the thin-gap trace key and gap group those passes alone produced. The
+    gap-history test keys its samples by a curve span instead.
+  - the obstacle, internal-boundary, material-interface and junction limits.
+    `MAX_VOLUME_SOURCES`, which was the obstacle limit plus one, keeps its 33
+    as its own value, so the files written under it keep opening.
+- **Still standing:** the boundary labels only that model produced, next.
+- **Docs.** docs/architecture.md's milestone-1 section records the model
+  and its validation job as retired. The plan's phase-out item now leaves
+  only the labels.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

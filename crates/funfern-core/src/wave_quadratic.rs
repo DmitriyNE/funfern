@@ -3,9 +3,8 @@ use std::sync::Arc;
 
 use crate::{
     BACKGROUND_REGION, BoundaryLabel, DirectionalWaveCoefficients, FaceBoundaryCondition,
-    InternalBoundaryCoupling, InternalBoundaryId, InternalBoundarySide, Material,
-    OuterBoundaryCondition, OuterBoundaryConditions, OuterSide, PhysicsModel,
-    PlannedBoundarySource, Point2, Region, RegionId, Scene, SpanBehavior, SymmetricTensor2,
+    InternalBoundaryCoupling, Material, OuterBoundaryCondition, OuterBoundaryConditions, OuterSide,
+    PhysicsModel, PlannedBoundarySource, Point2, Region, RegionId, SpanBehavior, SymmetricTensor2,
     TimeSignal, TopologyMeshPlan, TriMesh, WaveCoefficients, WaveError,
 };
 
@@ -42,12 +41,6 @@ pub struct BoundaryLoad {
 /// stored orientation is always authored left minus right.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ThinGapTraceKey {
-    Legacy {
-        boundary: crate::InternalBoundaryId,
-        start_bits: u64,
-        end_bits: u64,
-        local: u8,
-    },
     Topology {
         curve: crate::CurveId,
         span: crate::CurveSpanId,
@@ -236,39 +229,6 @@ impl QuadraticWaveOperator {
             BTreeMap::from([(BACKGROUND_REGION, coefficients)]),
             coefficients,
             OuterBoundaryConditions::uniform(outer_boundary),
-            None,
-        )
-    }
-
-    pub fn assemble_scene(
-        mesh: &TriMesh,
-        scene: &Scene,
-        outer_boundary: OuterBoundaryCondition,
-    ) -> Result<Self, WaveError> {
-        Self::assemble_scene_with_boundaries(
-            mesh,
-            scene,
-            OuterBoundaryConditions::uniform(outer_boundary),
-        )
-    }
-
-    pub fn assemble_scene_with_boundaries(
-        mesh: &TriMesh,
-        scene: &Scene,
-        outer_boundaries: OuterBoundaryConditions,
-    ) -> Result<Self, WaveError> {
-        if !scene.structure_valid() {
-            return Err(WaveError::Unsupported(
-                "the scene's regions and materials are not self-consistent",
-            ));
-        }
-        Self::assemble_with_provider(
-            mesh,
-            CoefficientProvider::Scene(scene),
-            outer_boundaries,
-            Some(scene),
-            None,
-            scene.physics,
         )
     }
 
@@ -288,7 +248,6 @@ impl QuadraticWaveOperator {
             mesh,
             CoefficientProvider::Topology(model),
             *model.outer_boundaries,
-            None,
             Some(plan),
             model.physics,
         )
@@ -307,7 +266,6 @@ impl QuadraticWaveOperator {
             CoefficientProvider::Topology(model),
             *model.outer_boundaries,
             None,
-            None,
             model.physics,
         )
     }
@@ -317,7 +275,6 @@ impl QuadraticWaveOperator {
         coefficients_by_region: BTreeMap<RegionId, WaveCoefficients>,
         outer_coefficients: WaveCoefficients,
         outer_boundaries: OuterBoundaryConditions,
-        scene: Option<&Scene>,
     ) -> Result<Self, WaveError> {
         validate_coefficients(outer_coefficients)?;
         if !outer_boundaries.valid() {
@@ -338,9 +295,8 @@ impl QuadraticWaveOperator {
             mesh,
             CoefficientProvider::Constant(&coefficients_by_region),
             outer_boundaries,
-            scene,
             None,
-            scene.map_or(PhysicsModel::Mechanical, |scene| scene.physics),
+            PhysicsModel::Mechanical,
         )
     }
 
@@ -348,13 +304,12 @@ impl QuadraticWaveOperator {
         mesh: &TriMesh,
         coefficients: CoefficientProvider<'_>,
         outer_boundaries: OuterBoundaryConditions,
-        scene: Option<&Scene>,
         topology: Option<&TopologyMeshPlan>,
         physics: PhysicsModel,
     ) -> Result<Self, WaveError> {
         let mut work = QuadraticAssemblyWork::new(outer_boundaries, physics)?;
         loop {
-            if let Some(operator) = work.step(mesh, coefficients, scene, topology, physics)? {
+            if let Some(operator) = work.step(mesh, coefficients, topology, physics)? {
                 return Ok(operator);
             }
         }
@@ -1138,7 +1093,6 @@ type TraceNodes = ([usize; 3], f64);
 #[derive(Clone, Copy)]
 enum CoefficientProvider<'a> {
     Constant(&'a BTreeMap<RegionId, WaveCoefficients>),
-    Scene(&'a Scene),
     Topology(TopologyWaveModel<'a>),
 }
 
@@ -1153,37 +1107,6 @@ impl CoefficientProvider<'_> {
                     mass_density: value.mass_density,
                     stiffness: SymmetricTensor2::isotropic(value.stiffness),
                     damping: value.damping,
-                }
-            }
-            Self::Scene(scene) => {
-                let region = scene
-                    .region(region)
-                    .ok_or(WaveError::InvalidMesh("a triangle has an unknown region"))?;
-                let material = scene
-                    .material(region.material)
-                    .ok_or(WaveError::Unsupported(
-                        "a region names a material the scene does not hold",
-                    ))?;
-                // What the topology path reads: the primary channel's rate
-                // for `damping`, a law refused. Sampling the base fields
-                // here dropped a constant loss channel and assembled a law
-                // as a static medium (NUM-15 of the 2026-10-20 review).
-                match material.evaluate_static(scene.physics, region.frame, point) {
-                    Ok(properties) => scene
-                        .physics
-                        .directional_wave_coefficients(properties, region.frame),
-                    // The evaluator says only that a value is invalid; the
-                    // field-by-field pass names the coefficient and the
-                    // point when one of them is what failed.
-                    Err(error) => {
-                        evaluate_directional_material(scene.physics, material, *region, point)?;
-                        return Err(WaveError::MaterialEvaluation {
-                            material: material.name.clone(),
-                            coefficient: "material laws",
-                            point,
-                            reason: error.to_string(),
-                        });
-                    }
                 }
             }
             Self::Topology(model) => {
@@ -1220,54 +1143,6 @@ impl CoefficientProvider<'_> {
     }
 }
 
-fn evaluate_directional_material(
-    physics: PhysicsModel,
-    material: &Material,
-    region: Region,
-    point: Point2,
-) -> Result<DirectionalWaveCoefficients, WaveError> {
-    let coordinates = region.frame.coordinates(point);
-    let evaluate = |field: &crate::ScalarField, coefficient: &'static str, positive: bool| {
-        let value = field
-            .evaluate(coordinates, &material.parameters)
-            .map_err(|error| WaveError::MaterialEvaluation {
-                material: material.name.clone(),
-                coefficient,
-                point,
-                reason: error.to_string(),
-            })?;
-        if (positive && value <= 0.0) || (!positive && value < 0.0) {
-            return Err(WaveError::MaterialEvaluation {
-                material: material.name.clone(),
-                coefficient,
-                point,
-                reason: if positive {
-                    "value must be positive".into()
-                } else {
-                    "value must be nonnegative".into()
-                },
-            });
-        }
-        Ok(value)
-    };
-    let properties = crate::EvaluatedMaterial {
-        mass_density: evaluate(&material.mass_density, "density", true)?,
-        stiffness: evaluate(&material.stiffness, "stiffness", true)?,
-        // Loss is the channels', which name their own failures.
-        damping: 0.0,
-        axis_ratio: evaluate(&material.axis_ratio, "axis ratio", true)?,
-    };
-    if properties.axis_ratio < 1.0 {
-        return Err(WaveError::MaterialEvaluation {
-            material: material.name.clone(),
-            coefficient: "axis ratio",
-            point,
-            reason: "value must be at least one".into(),
-        });
-    }
-    Ok(physics.directional_wave_coefficients(properties, region.frame))
-}
-
 struct BoundaryAssembly<'a> {
     edge_nodes: &'a BTreeMap<(usize, usize), usize>,
     rows: &'a mut [BTreeMap<usize, f64>],
@@ -1280,236 +1155,6 @@ struct BoundaryAssembly<'a> {
     second_order_boundary_damping: &'a mut [f64],
     second_order_boundary_length: &'a mut [f64],
     thin_gap_samples: &'a mut Vec<ThinGapSample>,
-}
-
-fn assemble_hole_boundary_conditions(
-    mesh: &TriMesh,
-    scene: &Scene,
-    coefficients: CoefficientProvider<'_>,
-    assembly: &mut BoundaryAssembly<'_>,
-) -> Result<(), WaveError> {
-    for edge in &mesh.boundary_edges {
-        let BoundaryLabel::Obstacle(id) = edge.label else {
-            continue;
-        };
-        let obstacle = scene
-            .obstacles
-            .iter()
-            .find(|obstacle| obstacle.id == id)
-            .ok_or(WaveError::InvalidMesh(
-                "a hole boundary edge has an unknown ID",
-            ))?;
-        let crate::LoopRole::Hole { exterior } = obstacle.role else {
-            return Err(WaveError::InvalidMesh(
-                "a hole boundary edge references a non-hole loop",
-            ));
-        };
-        let [a, b] = edge.vertices;
-        if a >= mesh.vertices.len() || b >= mesh.vertices.len() || a == b {
-            return Err(WaveError::InvalidMesh(
-                "a hole boundary edge has invalid vertex indices",
-            ));
-        }
-        let key = if a < b { (a, b) } else { (b, a) };
-        let midpoint = *assembly.edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
-            "a hole boundary edge does not belong to a triangle",
-        ))?;
-        let [parameter_a, parameter_b] = edge.parameters;
-        if !parameter_a.is_finite() || !parameter_b.is_finite() || parameter_a == parameter_b {
-            return Err(WaveError::InvalidMesh(
-                "a hole boundary edge has invalid parameters",
-            ));
-        }
-        let span = obstacle
-            .spline
-            .span_index(0.5 * (parameter_a + parameter_b))
-            .ok_or(WaveError::InvalidMesh(
-                "a hole boundary edge has an invalid spline parameter",
-            ))?;
-        let condition = obstacle.span_conditions[span];
-        let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
-        if !length.is_finite() || length <= 0.0 {
-            return Err(WaveError::InvalidMesh(
-                "a hole boundary edge has invalid length",
-            ));
-        }
-        let nodes = [a, midpoint, b];
-        let values = [
-            coefficients.at(exterior, mesh.vertices[a].point)?,
-            coefficients.at(
-                exterior,
-                (mesh.vertices[a].point + mesh.vertices[b].point) / 2.0,
-            )?,
-            coefficients.at(exterior, mesh.vertices[b].point)?,
-        ];
-        let tangent = (mesh.vertices[b].point - mesh.vertices[a].point) / length;
-        assemble_face_condition(
-            condition.resolved(scene.physics),
-            nodes,
-            length,
-            values,
-            Point2::new(-tangent.y, tangent.x),
-            assembly,
-        )?;
-    }
-    Ok(())
-}
-
-fn assemble_internal_boundary_laws(
-    mesh: &TriMesh,
-    scene: &Scene,
-    coefficients: CoefficientProvider<'_>,
-    assembly: &mut BoundaryAssembly<'_>,
-) -> Result<(), WaveError> {
-    let mut traces = BTreeMap::<(InternalBoundaryId, u64, u64), [Option<TraceNodes>; 2]>::new();
-    for edge in &mesh.boundary_edges {
-        let BoundaryLabel::InternalBoundary { id, side } = edge.label else {
-            continue;
-        };
-        let boundary = scene
-            .internal_boundaries
-            .iter()
-            .find(|boundary| boundary.id == id)
-            .ok_or(WaveError::InvalidMesh(
-                "an internal-boundary edge has an unknown ID",
-            ))?;
-        let [a, b] = edge.vertices;
-        if a >= mesh.vertices.len() || b >= mesh.vertices.len() || a == b {
-            return Err(WaveError::InvalidMesh(
-                "an internal-boundary edge has invalid vertex indices",
-            ));
-        }
-        let key = if a < b { (a, b) } else { (b, a) };
-        let midpoint = *assembly.edge_nodes.get(&key).ok_or(WaveError::InvalidMesh(
-            "an internal-boundary edge does not belong to a triangle",
-        ))?;
-        let [parameter_a, parameter_b] = edge.parameters;
-        if !parameter_a.is_finite() || !parameter_b.is_finite() || parameter_a == parameter_b {
-            return Err(WaveError::InvalidMesh(
-                "an internal-boundary edge has invalid parameters",
-            ));
-        }
-        let parameter = 0.5 * (parameter_a + parameter_b);
-        let span = boundary
-            .spline
-            .span_index(parameter)
-            .ok_or(WaveError::InvalidMesh(
-                "an internal-boundary edge is outside its spline parameter range",
-            ))?;
-        let law = boundary.span_laws[span];
-        let condition = match side {
-            InternalBoundarySide::Left => law.left,
-            InternalBoundarySide::Right => law.right,
-        };
-        let length = (mesh.vertices[b].point - mesh.vertices[a].point).norm();
-        if !length.is_finite() || length <= 0.0 {
-            return Err(WaveError::InvalidMesh(
-                "an internal-boundary edge has invalid length",
-            ));
-        }
-        let nodes = if parameter_a < parameter_b {
-            [a, midpoint, b]
-        } else {
-            [b, midpoint, a]
-        };
-        let values = [
-            coefficients.at(
-                boundary.region,
-                assembly_point(nodes[0], mesh, midpoint, a, b),
-            )?,
-            coefficients.at(
-                boundary.region,
-                assembly_point(nodes[1], mesh, midpoint, a, b),
-            )?,
-            coefficients.at(
-                boundary.region,
-                assembly_point(nodes[2], mesh, midpoint, a, b),
-            )?,
-        ];
-        let tangent = (mesh.vertices[b].point - mesh.vertices[a].point) / length;
-        assemble_face_condition(
-            condition.resolved(scene.physics),
-            nodes,
-            length,
-            values,
-            Point2::new(-tangent.y, tangent.x),
-            assembly,
-        )?;
-        let (start, end) = if parameter_a < parameter_b {
-            (parameter_a, parameter_b)
-        } else {
-            (parameter_b, parameter_a)
-        };
-        let pair = traces
-            .entry((id, start.to_bits(), end.to_bits()))
-            .or_default();
-        let slot = match side {
-            InternalBoundarySide::Left => 0,
-            InternalBoundarySide::Right => 1,
-        };
-        if pair[slot].replace((nodes, length)).is_some() {
-            return Err(WaveError::InvalidMesh(
-                "an internal-boundary trace edge is duplicated",
-            ));
-        }
-    }
-
-    for ((id, start, end), pair) in traces {
-        let [Some((left, left_length)), Some((right, right_length))] = pair else {
-            return Err(WaveError::InvalidMesh(
-                "an internal-boundary segment is missing one face",
-            ));
-        };
-        if (left_length - right_length).abs() > 1.0e-10 * left_length.max(right_length).max(1.0) {
-            return Err(WaveError::InvalidMesh(
-                "paired internal-boundary faces have different lengths",
-            ));
-        }
-        let boundary = scene
-            .internal_boundaries
-            .iter()
-            .find(|boundary| boundary.id == id)
-            .unwrap();
-        let parameter = 0.5 * (f64::from_bits(start) + f64::from_bits(end));
-        let span = boundary.spline.span_index(parameter).unwrap();
-        let InternalBoundaryCoupling::ThinGap { stiffness_ratio } =
-            boundary.span_laws[span].coupling
-        else {
-            continue;
-        };
-        let point = boundary.spline.evaluate(parameter);
-        let spring = stiffness_ratio
-            * coefficients
-                .at(boundary.region, point)?
-                .geometric_mean_stiffness();
-        for (local, ((left_node, right_node), weight)) in left
-            .into_iter()
-            .zip(right)
-            .zip([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0])
-            .enumerate()
-        {
-            if left_node == right_node {
-                continue;
-            }
-            let scale = spring * 0.5 * (left_length + right_length) * weight;
-            *assembly.rows[left_node].entry(left_node).or_default() += scale;
-            *assembly.rows[left_node].entry(right_node).or_default() -= scale;
-            *assembly.rows[right_node].entry(left_node).or_default() -= scale;
-            *assembly.rows[right_node].entry(right_node).or_default() += scale;
-            assembly.thin_gap_samples.push(ThinGapSample {
-                key: ThinGapTraceKey::Legacy {
-                    boundary: id,
-                    start_bits: start,
-                    end_bits: end,
-                    local: local as u8,
-                },
-                left_node: left_node as u32,
-                right_node: right_node as u32,
-                stiffness: scale,
-            });
-        }
-    }
-    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1933,7 +1578,6 @@ impl QuadraticAssemblyWork {
         &mut self,
         mesh: &TriMesh,
         coefficients: CoefficientProvider<'_>,
-        scene: Option<&Scene>,
         topology: Option<&TopologyMeshPlan>,
         physics: PhysicsModel,
     ) -> Result<Option<QuadraticWaveOperator>, WaveError> {
@@ -1941,7 +1585,7 @@ impl QuadraticAssemblyWork {
             AssemblyPhase::Numbering(index) => self.number(mesh, index)?,
             AssemblyPhase::Elements(index) => self.element(mesh, coefficients, index)?,
             AssemblyPhase::Boundary => {
-                self.boundaries(mesh, coefficients, scene, topology, physics)?;
+                self.boundaries(mesh, coefficients, topology, physics)?;
             }
             AssemblyPhase::Csr(row) => self.compress(row)?,
             AssemblyPhase::Finish => return self.finish(mesh).map(Some),
@@ -2093,13 +1737,12 @@ impl QuadraticAssemblyWork {
         Ok(())
     }
 
-    /// Applies the outer, hole, baffle, and topology boundary laws, normalises
+    /// Applies the outer and topology boundary laws, normalises
     /// the boundary loads by the lumped mass, and sizes the compressed rows.
     fn boundaries(
         &mut self,
         mesh: &TriMesh,
         coefficients: CoefficientProvider<'_>,
-        scene: Option<&Scene>,
         topology: Option<&TopologyMeshPlan>,
         physics: PhysicsModel,
     ) -> Result<(), WaveError> {
@@ -2131,10 +1774,10 @@ impl QuadraticAssemblyWork {
                 ));
             }
             let nodes = [a, b, midpoint];
-            // The Scene path reads the region of the triangle the edge
-            // belongs to; it read the background's along every side, so a
-            // side another region met absorbed with the background's
-            // impedance (NUM-16 of the 2026-10-20 review).
+            // A mesh without a plan reads the region of the triangle the edge
+            // belongs to. The retired `Scene` path read the background's along
+            // every side, so a side another region met absorbed with the
+            // background's impedance (NUM-16 of the 2026-10-20 review).
             let region = if let Some(plan) = topology {
                 topology_outer_region(plan, side, boundary.parameters)?
             } else {
@@ -2202,23 +1845,6 @@ impl QuadraticAssemblyWork {
                     &mut self.auxiliary_active,
                 );
             }
-        }
-        if let Some(scene) = scene {
-            let mut assembly = BoundaryAssembly {
-                edge_nodes: &self.edge_nodes,
-                rows: &mut self.rows,
-                auxiliary_rows: &mut self.auxiliary_rows,
-                auxiliary_active: &mut self.auxiliary_active,
-                dirichlet_signals: &mut self.dirichlet_signals,
-                face_neumann_loads: &mut self.face_neumann_loads,
-                damping: &mut self.damping,
-                first_order_boundary_damping: &mut self.first_order_boundary_damping,
-                second_order_boundary_damping: &mut self.second_order_boundary_damping,
-                second_order_boundary_length: &mut self.second_order_boundary_length,
-                thin_gap_samples: &mut self.thin_gap_samples,
-            };
-            assemble_hole_boundary_conditions(mesh, scene, coefficients, &mut assembly)?;
-            assemble_internal_boundary_laws(mesh, scene, coefficients, &mut assembly)?;
         }
         if let Some(plan) = topology {
             let mut assembly = BoundaryAssembly {
@@ -2420,7 +2046,6 @@ impl QuadraticAssemblyJob {
             match self.work.step(
                 &self.mesh,
                 CoefficientProvider::Topology(model),
-                None,
                 Some(&self.plan),
                 model.physics,
             ) {
