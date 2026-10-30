@@ -4818,9 +4818,9 @@ mod tests {
     /// with two.
     const PINNED_DIGESTS: [u64; 4] = [
         0x5131_04f0_bb40_dd41,
-        0xaf1d_5f7e_65d6_4fe2,
+        0x39e8_03b2_ec7b_6aee,
         0xc9c7_76eb_cd0e_b1ef,
-        0x8f78_cc60_a87e_9280,
+        0x6216_ef04_be95_45b1,
     ];
 
     /// Welds one or two baffles to the walls, meshes, then moves the first
@@ -4942,9 +4942,11 @@ mod tests {
     /// MESH-14 of the 2026-10-20 review: a repair's refill was held to half
     /// the previous mesh's worst angle, so every sliver a repair accepted
     /// lowered the next floor, and over a drag of welded baffles the worst
-    /// angle sank to 4.17° where the full build had 16° to 22°. Repairs are
-    /// held to the last full build's worst angle, which none of them lowers;
-    /// a move whose refill cannot meet it is rebuilt in full.
+    /// angle sank to 4.17°. Repairs are held to the last full build's worst
+    /// angle, which every repair carries on and none of them lowers; a move
+    /// whose refill cannot meet it is rebuilt in full. Since the chain cut
+    /// stopped leaving a short atom at the free tip, this drag puts no refill
+    /// under either floor; the carve's own tests hold the floor itself.
     #[test]
     fn repairs_over_a_drag_hold_the_floor_of_the_last_full_build() {
         let minimum = options().minimum_angle_degrees;
@@ -4953,16 +4955,21 @@ mod tests {
             for count in [1, 2] {
                 let mut reference = f64::INFINITY;
                 move_welded_baffles(count, spacing, 8, |step, prepared| {
-                    let worst = (0..prepared.mesh.triangles.len())
-                        .filter_map(|index| prepared.mesh.triangle_quality(index))
-                        .map(|quality| quality.minimum_angle_degrees)
-                        .fold(f64::INFINITY, f64::min);
+                    let worst = worst_angle(&prepared.mesh);
                     if matches!(
                         prepared.mesh_action,
                         TopologyMeshUpdateAction::FullRebuild(_)
                     ) {
-                        reference = worst;
-                    } else if worst < 0.5 * minimum.min(reference) {
+                        reference = prepared.full_build_worst_angle;
+                        return;
+                    }
+                    if prepared.full_build_worst_angle != reference {
+                        failures.push(format!(
+                            "{count} welded at {spacing}, move {step}: carries {:.2}° for a full build of {reference:.2}°",
+                            prepared.full_build_worst_angle
+                        ));
+                    }
+                    if worst < 0.5 * minimum.min(reference) {
                         failures.push(format!(
                             "{count} welded at {spacing}, move {step}: {worst:.2}° under the floor of {:.2}°",
                             0.5 * minimum.min(reference)
@@ -4974,48 +4981,49 @@ mod tests {
         assert!(failures.is_empty(), "{failures:#?}");
     }
 
-    /// A refill refused for an element under the quality floor is carved
-    /// again with the cavity a ring wider, as many times as it takes up to
-    /// the limit, before a full rebuild. Moving a welded baffle 0.025 and
-    /// 0.038 a step, with one baffle and two, puts first refills under the
-    /// floor that extra rings carve. A few refills by a free tip stay under
-    /// the last full build's floor at every width and are rebuilt in full,
-    /// with the reason kept (MESH-14 of the 2026-10-20 review).
+    fn worst_angle(mesh: &TriMesh) -> f64 {
+        (0..mesh.triangles.len())
+            .filter_map(|index| mesh.triangle_quality(index))
+            .map(|quality| quality.minimum_angle_degrees)
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Dragging a welded baffle by its free tip, 0.01 to 0.05 a step, with
+    /// one baffle and two, every move is repaired, and neither the repair nor
+    /// a full build of the moved scene has an element under 5°. The chain cut
+    /// left an atom of 0.011 at the tip with nothing to grade the elements
+    /// beside it: full builds of 9 of these 160 moves fell as low as 4.48°,
+    /// refills by the tip as low, and one move was rebuilt in full for it.
     #[test]
-    fn a_refill_under_the_floor_carves_again_with_a_wider_cavity() {
-        let (mut retried, mut rebuilt) = (0, 0);
-        for spacing in [0.025, 0.038] {
+    fn a_welded_baffle_dragged_by_its_tip_meshes_over_five_degrees() {
+        let mut failures = vec![];
+        for spacing in [
+            0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.038, 0.04, 0.045, 0.05,
+        ] {
             for count in [1, 2] {
                 move_welded_baffles(count, spacing, 8, |step, prepared| {
                     if step == 0 {
                         return;
                     }
-                    match prepared.carve {
-                        Some(carve) => retried += usize::from(carve.quality_retries > 0),
-                        None => {
-                            assert_eq!(
-                                prepared.mesh_action,
-                                TopologyMeshUpdateAction::FullRebuild(
-                                    TopologyFullRebuildReason::RepairFailed
-                                ),
-                                "{count} welded at {spacing}, move {step}"
-                            );
-                            assert!(
-                                prepared
-                                    .repair_fallback
-                                    .as_deref()
-                                    .is_some_and(|reason| reason.contains("degenerate")),
-                                "{:?}",
-                                prepared.repair_fallback
-                            );
-                            rebuilt += 1;
+                    if prepared.carve.is_none() {
+                        failures.push(format!(
+                            "{count} welded at {spacing}, move {step} rebuilt: {:?}",
+                            prepared.repair_fallback
+                        ));
+                    }
+                    let full = mesh_topology_plan(&prepared.bundle.plan, 1, options()).unwrap();
+                    for (kind, mesh) in [("repair", &*prepared.mesh), ("full build", &full)] {
+                        let worst = worst_angle(mesh);
+                        if worst < 5.0 {
+                            failures.push(format!(
+                                "{count} welded at {spacing}, move {step}: {kind} at {worst:.2}°"
+                            ));
                         }
                     }
                 });
             }
         }
-        assert!(retried >= 3, "only {retried} carves needed a wider cavity");
-        assert!(rebuilt <= 4, "{rebuilt} of 32 moves were rebuilt in full");
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     /// Adaptation checks every constrained edge against the plan it came from,

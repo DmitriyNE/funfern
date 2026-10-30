@@ -30551,3 +30551,107 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-30 — A curve's chain is cut so that no short atom is left at its end
+
+- **The premise.** The plan's item had a repair refilling the band by a
+  welded baffle's free tip at 4.2° to 8° while a full build meshed it at 16°
+  to 22° (2026-10-23). The 16° to 22° were the drag's first full build,
+  before any move. A full build of each moved scene was as thin, 4.48° at
+  worst, so the refill was not the defect.
+- **The defect.** `split_chain` cut a chain greedily from one end and left
+  the remainder at the other. At one baffle moved 0.038 a step, step 3, the
+  atoms ran 0.168, 0.151, 0.105, 0.089, 0.087, 0.076, 0.078 and 0.011. The
+  bend near the tip caps the runs there at about 0.08 by the chord
+  tolerance, so the even cut, 0.096 each, fell outside it and the greedy cut
+  stayed. A slit is cut in after refinement, so nothing graded the elements
+  beside the 0.011 edge, and a triangle there read 4.48°.
+- **Test first.** `a_balanced_cut_replaces_a_remainder_an_even_cut_cannot`
+  (core) moves the tip 0.025 and 0.038 a step over eight steps and requires
+  every atom over 0.05; before the fix the shortest was 0.0107.
+  `a_welded_baffle_dragged_by_its_tip_meshes_over_five_degrees` (app) drags
+  one baffle and two at ten spacings from 0.01 to 0.05 over eight steps, 160
+  moves, each to be carved, with the repair and a full build of the moved
+  scene both at 5° or more. Before the fix 9 full builds read under 5°
+  (4.48° the worst), one move was rebuilt in full after its refills reached
+  3.47° against a floor of 5°, and refills were accepted at 4.48° and 4.25°.
+- **Fix.** `balanced_cut` finds, by dynamic programming over the chain's
+  joints, the cut into the fewest runs within the tolerance and the cap
+  whose shortest atom is the longest. It replaces the greedy or the even cut
+  where it takes no more runs and its shortest atom is longer by more than
+  the chord tolerance. With no margin 26 of the 92 scenes changed, with
+  steps from 0.825 to 1.191 of before: cuts that only reordered atoms of the
+  same lengths won by rounding.
+- **The drag.** Over the 160 moves, full builds under 5° went from 9 to none
+  (6.55° the worst), refills under 5° from one at 4.25° to none (5.12°),
+  moves carved wider from 8 to none and rebuilt in full from one to none.
+- **Scenes.** 7 of the 92 regression, frozen and gallery scenes mesh
+  differently, none with a shorter step: Bent fiber (its tip's remainder
+  0.0273 to 0.0404, the same step; its worst angle 20.53° to 16.19° and
+  shortest edge 0.0223 to 0.0152), Ellipse flash (1.004 times the step),
+  Pinned domain wall (shortest atom 0.0180 to 0.0225, 1.127 times), their
+  three version-22 copies, and the version-22 material lens (0.0199 to
+  0.0298, 1.185 times).
+- **The carve tests move.** The drag no longer puts a refill under either
+  floor, and natural retries are rare: 4 in 3,200 ten-step drags over edges
+  0.12 to 0.22 in four directions. The wider carve and MESH-14's floor moved
+  to core, on a welded baffle whose last span is a few thousandths long
+  (`short_tip_geometry`). `a_refill_under_the_floor_carves_again_with_a_wider_cavity`
+  carves a gap of 0.008 wider once and one of 0.006 three times, and refuses
+  0.006 with the tip at 0.1 after six; with the margin capped at 2 the 0.006
+  case fails. `a_repair_after_an_accepted_sliver_is_held_to_the_quality_reference`
+  accepts a first carve at a sliver and holds the second to the full
+  build's 15.72°: 0.008 carves wider to 6.75°, 0.006 is refused against
+  5°, where without the reference they accepted 3.55° and 2.68°. A floor of
+  the reference's and the previous mesh's lesser accepts the 0.008 case
+  without a retry. `repairs_over_a_drag_hold_the_floor_of_the_last_full_build`
+  now also requires each repair to carry the last full build's worst angle,
+  which fails when a carve folds its own in.
+- **Pins.** `welded_baffles_mesh_the_same_on_every_platform`: both drags'
+  last meshes change, their first stay.
+- **The observables channel.** Its transmitting circle's eight spans were
+  each cut 0.0265, five of 0.0332 and 0.0199, and are now 0.0265, four of
+  0.0332 and two of 0.0265. The step grows 21%, 5.54e-3 to 6.69e-3, the
+  channel remeshes (1914 to 1935 vertices), and the fixture runs its 8 s in
+  1195 steps, not 1440. The twins' test then read the upstream point's
+  transverse field 9.0e-3 off an amplitude of 0.5, against a bound of 4e-3
+  (1.9e-3 before), and the density and the flow, which take it in, 4.6e-3
+  and 4.5e-3. The step is not the cause: the new mesh at the old step reads
+  8.9e-3. The point lies 0.004 from its element's edge in barycentric terms,
+  where the quadratic through the element's six samples is extrapolated;
+  that element's centroid reads 5.0e-3, and on the old mesh the point moved
+  onto an edge read 5.0e-3. The three bounds are 1.2e-2, 6e-3 and 6e-3, the
+  reading is listed as worth checking, and recovering it from the
+  neighbours' samples is a spike under Maintenance, measured on a variety of
+  unstructured meshes before anything is built.
+- **The fixture's records.** The app keeps the last 512 records of a line
+  probe, and at 60 Hz its stride, round(1/(60 Δt)), went from 3 steps to 2,
+  so the 512 cover 6.85 s of the 8 s run, where they covered 8.5 s. A line's
+  records may now be the latest 512 in place of the whole run, still a stride
+  apart to the endpoint, and Poynting round the loop is held over the steps
+  the loop still holds. Points and areas keep 4096 and still cover the run.
+- **The disc and the channel re-recorded.** `src/ui/e2e.rs` records the
+  meshes the fixtures run on; the disc's (`switch`, `handoff-driven`) and the
+  channel's changed. On the M1 Max `switch` reads Q 7.6e-7 and b 1.0e-6
+  (7.4e-7 and 9.4e-7), `handoff-driven` 9.6e-7 and 1.1e-6 (8.5e-7 and
+  1.0e-6), and `observables` its state at 2.1e-6 (4.4e-6), its points 2.8e-5
+  (2.2e-5), lines 6.1e-6 (8.6e-6), the rate against `u̇` half a step back
+  4.7e-3 (4.2e-3) and Poynting round the loop 7.5e-3 (5.4e-3) of 1e-2, 7.9e-6
+  from the twin's at the same records. Poynting is the mesh's own: the twin's
+  residual over every step rose with it, from 1.8e-3 to 2.1e-3, 8.4e-3 in the
+  fixture's scale.
+- **The stamp test.** `probe_stamps_keep_their_precision_however_long_the_run`
+  held the old step. At 6.69e-3 a stamp reads 2.3e-5 s off, from the local
+  time's f32 near 256 s, within the 3e-5 `stamp_seconds` states, which the
+  test now holds.
+- **Device suite:** 113 of 113 once the two meshes were re-recorded. Against
+  the examples run at the commit before, only `canonical_gpu_oscillator_handoff`'s
+  opened mode meshes differently, 3838 nodes to 3780 where it had 3792 to
+  3742, and reads b 5.0e-5 (4.9e-5) of 1e-4; the other 93 print the same
+  figures.
+- **Left open.** A span much shorter than the elements beside it at a free
+  tip still meshes slivers, in a full build as in a repair; only authored
+  geometry makes one now (Worth checking sometime).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

@@ -3365,4 +3365,141 @@ mod tests {
             assert!(sides(CurveTraceSide::Left) > 0);
         }
     }
+
+    /// One baffle welded to the ceiling at x = 0, its free tip at `tip` and a
+    /// node `gap` above it, so its last span is shorter than any cut of the
+    /// chains may merge, and the elements beside it are slivers.
+    fn short_tip_geometry(tip: Point2, gap: f64) -> TopologyGeometry {
+        let mut geometry = welded_geometry(&[0.0], &[tip]);
+        let spline = OpenCubicSpline::polyline(vec![
+            Point2::new(0.0, 1.0),
+            tip + Point2::new(0.0, gap),
+            tip,
+        ])
+        .unwrap();
+        geometry.curves[0] = TopologyCurve::new(
+            CurveId(60),
+            CurveSpline::Open(spline),
+            spans(600, 2, SpanBehavior::REFLECTING),
+        )
+        .unwrap();
+        geometry.curves[0].nodes[0].vertex = Some(TopologyVertexId(60));
+        geometry.synchronize_vertices().unwrap();
+        geometry
+    }
+
+    /// Carves `previous` towards `geometry` with the refill held to
+    /// `reference`, returning the outcome, the new plan and the report.
+    fn carve_held_to(
+        previous: &TriMesh,
+        previous_plan: &TopologyMeshPlan,
+        geometry: &TopologyGeometry,
+        reference: f64,
+        options: MeshingOptions,
+    ) -> (Result<TriMesh, MeshError>, TopologyMeshPlan, CarveReport) {
+        let revision = previous.mesh_revision + 1;
+        let topology = compile_topology(geometry, revision).unwrap();
+        let plan = single_face_plan(&topology, options);
+        let mut job = TopologyCarveJob::new(
+            Arc::new(previous.clone()),
+            previous_plan,
+            plan.clone(),
+            Arc::new(topology),
+            revision,
+            options,
+            true,
+        )
+        .with_quality_reference(reference);
+        loop {
+            if let Some(result) = job.advance(4096) {
+                return (result, plan, job.report());
+            }
+        }
+    }
+
+    /// The mesh of one baffle welded to the ceiling, hanging straight down
+    /// to y = 0.25, with its plan.
+    fn hanging_baffle(options: MeshingOptions) -> (TriMesh, TopologyMeshPlan) {
+        let topology =
+            compile_topology(&welded_geometry(&[0.0], &[Point2::new(0.0, 0.25)]), 1).unwrap();
+        let plan = single_face_plan(&topology, options);
+        (mesh_topology_plan(&plan, 10, options).unwrap(), plan)
+    }
+
+    /// A refill refused for an element under the quality floor is carved
+    /// again with the cavity a ring wider, as many times as it takes up to
+    /// the limit, before the carve gives up for a full rebuild. Moving a
+    /// welded baffle's tip right and giving it a last span a few thousandths
+    /// long puts the first refill under the floor: one extra ring carves it
+    /// with the span 0.008 long, three with it 0.006 long, and none does with
+    /// the span 0.006 long and the tip moved twice as far.
+    #[test]
+    fn a_refill_under_the_floor_carves_again_with_a_wider_cavity() {
+        let options = options(0.12);
+        let (before, before_plan) = hanging_baffle(options);
+        let full = worst_angle(&before);
+        let floor = 0.5 * options.minimum_angle_degrees.min(full);
+        for (gap, tip, carves) in [
+            (0.008, 0.05, true),
+            (0.006, 0.05, true),
+            (0.006, 0.1, false),
+        ] {
+            let geometry = short_tip_geometry(Point2::new(tip, 0.25), gap);
+            let (result, _, report) =
+                carve_held_to(&before, &before_plan, &geometry, full, options);
+            match (result, carves) {
+                (Ok(carved), true) => {
+                    assert!(report.quality_retries > 0, "{gap} from a tip at {tip}");
+                    assert!(worst_angle(&carved) >= floor, "{gap} from a tip at {tip}");
+                }
+                (Err(MeshError::DegenerateRepair { .. }), false) => {
+                    assert_eq!(report.quality_retries, MAX_CARVE_MARGIN);
+                }
+                (result, _) => panic!(
+                    "{gap} from a tip at {tip}: {:?} after {} retries",
+                    result.map(|carved| worst_angle(&carved)),
+                    report.quality_retries
+                ),
+            }
+        }
+    }
+
+    /// MESH-14 of the 2026-10-20 review: a refill held to half the previous
+    /// mesh's worst angle sank with every sliver an earlier repair accepted.
+    /// A welded baffle with a last span a few thousandths long meshes slivers
+    /// at its tip, and a repair held to 1° accepts them; the next move, held
+    /// to the full build's worst angle, carves a ring wider and clears half
+    /// of it with the span 0.008 long, and is refused for a full rebuild with
+    /// it 0.006 long. Held to the previous mesh, they accepted 3.55° and
+    /// 2.68°.
+    #[test]
+    fn a_repair_after_an_accepted_sliver_is_held_to_the_quality_reference() {
+        let options = options(0.12);
+        let (before, before_plan) = hanging_baffle(options);
+        let full = worst_angle(&before);
+        let floor = 0.5 * options.minimum_angle_degrees.min(full);
+        for (gap, carves) in [(0.008, true), (0.006, false)] {
+            let geometry = short_tip_geometry(Point2::new(0.05, 0.25), gap);
+            let (first, first_plan, _) =
+                carve_held_to(&before, &before_plan, &geometry, 1.0, options);
+            let first = first.unwrap();
+            assert!(worst_angle(&first) < floor, "{gap}: no sliver to carry");
+            let geometry = short_tip_geometry(Point2::new(0.1, 0.25), gap);
+            let (result, _, report) = carve_held_to(&first, &first_plan, &geometry, full, options);
+            match (result, carves) {
+                (Ok(carved), true) => {
+                    assert!(report.quality_retries > 0, "{gap}");
+                    assert!(worst_angle(&carved) >= floor, "{gap}");
+                }
+                (Err(MeshError::DegenerateRepair { floor_degrees, .. }), false) => {
+                    assert_eq!(floor_degrees, floor);
+                }
+                (result, _) => panic!(
+                    "{gap}: {:?} after {} retries",
+                    result.map(|carved| worst_angle(&carved)),
+                    report.quality_retries
+                ),
+            }
+        }
+    }
 }

@@ -3067,12 +3067,12 @@ mod tests {
     /// test held another split than the device's, VER-45 of the 2026-10-20
     /// review), the local time `steps × dt` in f32, the fine part their f32
     /// sum. Up to 36 hours in, at the observables fixture's step, every stamp
-    /// is within 2e-5 s of the clock, inside the 3e-5 `stamp_seconds` states;
-    /// the single f32 was 3.9e-3 s off at 36 hours, 35% of a 120 Hz record's
-    /// spacing.
+    /// is within the 3e-5 s of the clock that `stamp_seconds` states (2.3e-5,
+    /// the local time's f32 near 256 s); the single f32 was 6.3e-3 s off at 36
+    /// hours, three quarters of a 120 Hz record's spacing.
     #[test]
     fn probe_stamps_keep_their_precision_however_long_the_run() {
-        let dt = 5.5416e-3_f64;
+        let dt = 6.6931e-3_f64;
         let mut single_worst = 0.0_f64;
         for hours in [0.0, 1.0, 10.0, 18.2, 36.0] {
             let start = hours * 3600.0;
@@ -3085,7 +3085,7 @@ mod tests {
                 let exact = origin + f64::from(step) * dt;
                 let read = stamp_seconds(hi, lo + local);
                 assert!(
-                    (read - exact).abs() < 2.0e-5,
+                    (read - exact).abs() < 3.0e-5,
                     "{hours} h, step {step}: {read} against {exact}"
                 );
                 let single = f64::from(hi + lo + local);

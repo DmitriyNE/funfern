@@ -285,9 +285,9 @@ enum MemoryHandoff {
 /// and CI's x86_64 runner holds them each run. A change to the mesher made on
 /// purpose records them again here.
 const CAVITY_MESH: &str = "fdbd8736b4d960ea/c57811e22d49eb75";
-const DISC_MESH: &str = "abf88c2e20bff3c6/8496257d436c195f";
+const DISC_MESH: &str = "b7183a42450e64cb/70e06866ae57b36a";
 const FINER_CAVITY_MESH: &str = "2a08c7884de88562/d105b9149fd88df1";
-const CHANNEL_MESH: &str = "04a488da9d8b2953/5072aa0afe3822b5";
+const CHANNEL_MESH: &str = "87169bdb09e61b78/b63cee07f5ecf758";
 const HOLE_MESH: &str = "f84998df08704d66/34b4ee47d28f53ae";
 
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
@@ -389,7 +389,7 @@ impl Fixture {
     /// looked at, not given more.
     fn tolerance(self) -> f64 {
         match self {
-            // 1440 and 1150 steps, not 256: the M1 Max reads 4.4e-6 on the
+            // 1195 and 1150 steps, not 256: the M1 Max reads 2.1e-6 on the
             // first.
             Fixture::Observables | Fixture::FarField => 2.0e-5,
             // Late in an epoch the local time is one f32 near 256 s, 3e-5 s

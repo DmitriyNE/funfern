@@ -2654,7 +2654,14 @@ fn segment_distance(a: [Point2; 2], b: [Point2; 2]) -> f64 {
 /// circle a little longer than the cap ended in a single arrangement segment.
 /// So the chain is also cut into as many runs at the joints nearest equal arc
 /// lengths, and that cut is kept when every run of it is within the tolerance
-/// and the cap and its shortest atom is the longer.
+/// and the cap and its shortest atom is the longer. Where a bend near one end
+/// caps the runs there, equal arc lengths fall outside the tolerance and the
+/// remainder stayed: a welded baffle dragged by its free tip ended in an atom
+/// of 0.011 beside atoms of 0.08, and as a slit is cut in after refinement,
+/// nothing graded the elements beside it, which fell to 4.5°. So the
+/// [`balanced_cut`] replaces either cut where it takes no more runs and its
+/// shortest atom is longer by more than the tolerance; without that margin,
+/// cuts reordering atoms of the same lengths won by rounding.
 fn split_chain(
     topology: &TopologySnapshot,
     chain: &[usize],
@@ -2716,11 +2723,59 @@ fn split_chain(
     let valid = even
         .iter()
         .all(|run| chord_within(topology, run, coarsening));
-    if valid && shortest(&even) > shortest(&greedy) {
+    let cut = if valid && shortest(&even) > shortest(&greedy) {
         even
     } else {
         greedy
+    };
+    let balanced = balanced_cut(topology, chain, coarsening);
+    if balanced.len() <= cut.len() && shortest(&balanced) > shortest(&cut) + coarsening.tolerance {
+        balanced
+    } else {
+        cut
     }
+}
+
+/// The cut of `chain` into the fewest runs within the tolerance and the cap
+/// and, of those, the one whose shortest atom is the longest. A single
+/// segment is a run whatever its length, as in the greedy cut.
+fn balanced_cut(
+    topology: &TopologySnapshot,
+    chain: &[usize],
+    coarsening: AtomCoarsening,
+) -> Vec<Vec<usize>> {
+    let chord = |start: usize, end: usize| {
+        (topology.edges[chain[end - 1]].points[1] - topology.edges[chain[start]].points[0]).norm()
+    };
+    // `best[end]`: the fewest runs the first `end` segments cut into, the
+    // longest shortest atom of such a cut, and where its last run starts.
+    let mut best = vec![None::<(usize, f64, usize)>; chain.len() + 1];
+    best[0] = Some((0, f64::INFINITY, 0));
+    for end in 1..=chain.len() {
+        for start in (0..end).rev() {
+            if start + 1 < end && !chord_within(topology, &chain[start..end], coarsening) {
+                break;
+            }
+            let Some((runs, shortest, _)) = best[start] else {
+                continue;
+            };
+            let candidate = (runs + 1, shortest.min(chord(start, end)), start);
+            if best[end].is_none_or(|(runs, shortest, _)| {
+                candidate.0 < runs || (candidate.0 == runs && candidate.1 > shortest)
+            }) {
+                best[end] = Some(candidate);
+            }
+        }
+    }
+    let mut runs = vec![];
+    let mut end = chain.len();
+    while end > 0 {
+        let (_, _, start) = best[end].expect("every segment ends a run");
+        runs.push(chain[start..end].to_vec());
+        end = start;
+    }
+    runs.reverse();
+    runs
 }
 
 impl TopologyMeshPlan {
@@ -2729,12 +2784,13 @@ impl TopologyMeshPlan {
     /// used every one of those segments as a boundary edge, which pinned the
     /// boundary resolution and the time step far below the target. Runs merge
     /// while their joints stay within the chord tolerance and the chord under
-    /// the cap, cut evenly along each chain that may merge ([`split_chain`]);
-    /// they never cross an authored vertex, a span boundary, an outer
-    /// corner, a change of the faces or behaviour beside them, or any trace
-    /// vertex shared with another source. Both sides of a span merge over the
-    /// same runs, so paired traces stay paired. Face cycles, boundary atoms and
-    /// trace vertices are rewritten consistently; junctions are unchanged.
+    /// the cap, cut along each chain that may merge so that none is left
+    /// short ([`split_chain`]); they never cross an authored vertex, a span
+    /// boundary, an outer corner, a change of the faces or behaviour beside
+    /// them, or any trace vertex shared with another source. Both sides of a
+    /// span merge over the same runs, so paired traces stay paired. Face
+    /// cycles, boundary atoms and trace vertices are rewritten consistently;
+    /// junctions are unchanged.
     pub fn coarsened(
         &self,
         topology: &TopologySnapshot,
@@ -3525,6 +3581,83 @@ mod tests {
         assert!(
             runs.iter()
                 .all(|run| chord_within(&topology, run, coarsening))
+        );
+    }
+
+    /// A bend near a chain's end caps the runs there, so an even cut is
+    /// outside the tolerance, and the greedy runs left the remainder at that
+    /// end. A baffle welded to the ceiling and dragged right by its free tip,
+    /// as the app's drag tests move it, ended in an atom of 0.011 beside
+    /// atoms of 0.08, and the elements beside it fell under 5°, in a full
+    /// build as in a repair: a slit is cut in after refinement, so nothing
+    /// grades them.
+    #[test]
+    fn a_balanced_cut_replaces_a_remainder_an_even_cut_cannot() {
+        let coarsening = AtomCoarsening {
+            tolerance: 1.0e-3,
+            maximum_chord: 0.18,
+        };
+        let (from, to) = (Point2::new(0.0, 0.9), Point2::new(0.0, 0.25));
+        let mut shortest = (f64::INFINITY, 0.0);
+        for spacing in [0.025, 0.038] {
+            for step in 1..=8 {
+                let tip = Point2::new(spacing * step as f64, 0.25);
+                let spline = OpenCubicSpline::new(
+                    vec![
+                        Point2::new(0.0, 1.0),
+                        from.lerp(to, 1.0 / 3.0),
+                        from.lerp(to, 2.0 / 3.0),
+                        tip,
+                    ],
+                    vec![(to - from).norm()],
+                )
+                .unwrap();
+                let mut curve = TopologyCurve::new(
+                    CurveId(60),
+                    CurveSpline::Open(spline),
+                    spans(600, 1, SpanBehavior::REFLECTING),
+                )
+                .unwrap();
+                curve.nodes[0].vertex = Some(TopologyVertexId(60));
+                let mut geometry = TopologyGeometry {
+                    curves: vec![curve],
+                    vertices: vec![TopologyVertex {
+                        id: TopologyVertexId(60),
+                        location: TopologyVertexLocation::Outer {
+                            side: crate::OuterSide::Top,
+                            fraction: 0.5,
+                        },
+                    }],
+                    ..TopologyGeometry::default()
+                };
+                geometry.synchronize_vertices().unwrap();
+                let topology = compile_topology(&geometry, 1).unwrap();
+                let mut chain = (0..topology.edges.len())
+                    .filter(|index| {
+                        matches!(topology.edges[*index].source, CompiledEdgeSource::Curve(_))
+                    })
+                    .collect::<Vec<_>>();
+                chain.sort_by(|a, b| {
+                    topology.edges[*a].parameter[0].total_cmp(&topology.edges[*b].parameter[0])
+                });
+                let runs = split_chain(&topology, &chain, coarsening);
+                assert_eq!(runs.concat(), chain);
+                for run in &runs {
+                    assert!(chord_within(&topology, run, coarsening));
+                    let length = (topology.edges[run[run.len() - 1]].points[1]
+                        - topology.edges[run[0]].points[0])
+                        .norm();
+                    if length < shortest.0 {
+                        shortest = (length, tip.x);
+                    }
+                }
+            }
+        }
+        assert!(
+            shortest.0 > 0.05,
+            "an atom of {:.4} with the tip at x = {:.3}",
+            shortest.0,
+            shortest.1
         );
     }
 

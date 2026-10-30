@@ -55,8 +55,8 @@ an action lands at a step both sides know and the reference takes it there.
 `switch` adds a disc of the switchable medium to the cavity and presses Switch's
 hotkey at step 128 of 256, once the pulse's wave has reached the disc; the
 reference throws the Switch the app records sending, with the material's ramp,
-at the same step. It reads Q `7.4e-7` and b `9.4e-7`, and the run without the
-Switch stands `8.8e-2` off, which the fixture requires to be a hundred
+at the same step. It reads Q `7.6e-7` and b `1.0e-6`, and the run without the
+Switch stands `1.7e-1` off, which the fixture requires to be a hundred
 tolerances or more, so a Switch the device ignored cannot pass. A reference
 that omits the Switch, throws it the other way, or throws it a step late fails.
 `handoff` raises the cavity medium's permittivity by half at step 128, as the
@@ -69,7 +69,7 @@ on the old step fails at 1.1. `handoff-driven` is `handoff` with a disc of the
 parametric pump, a medium driven from the run's start: the same edit hands one
 driven generation to another, its candidate packed against the time the run
 had reached, and the reference carries its state by the core's driven
-handoff, the pump's runtime with it. Q reads `8.5e-7` and b `1.0e-6`, the run
+handoff, the pump's runtime with it. Q reads `9.6e-7` and b `1.1e-6`, the run
 without the edit `1.6` off. Until 2026-10-20 the app refused every driven
 handoff once a run had advanced, and the fixture timed out waiting for it.
 `handoff-driven-pins` makes the cavity's whole medium the parametric pump and
@@ -811,19 +811,21 @@ side drives a 2 Hz burst into a first-order outgoing wall on its right, with:
 It runs 8 s at the app's own pacing. Every trace the readouts draw is then
 held to the recorders' f64 twins, read off the reference after every step:
 - **Coverage:** each kind's records a stride apart from the run's start to
-  its end, none missing.
-- **Values:** within 1e-4 of their scale. The M1 Max reads 2.2e-5 at worst,
-  a point's; lines 8.6e-6, their readout integrals 7.9e-6, areas 8.7e-7.
-- **Stamps:** within 2e-6 s of the f64 clock (3.9e-7).
+  its end, none missing. A line's may instead be the latest 512 records, all
+  the app keeps of one: at the channel's step, 60 Hz is a stride of 2 and the
+  last 6.85 s of the run.
+- **Values:** within 1e-4 of their scale. The M1 Max reads 2.8e-5 at worst,
+  a point's; lines 6.1e-6, their readout integrals 4.1e-6, areas 4.7e-7.
+- **Stamps:** within 2e-6 s of the f64 clock (3.0e-7).
 - **Poynting's theorem round the loop:** what leaves it against what the
   region inside loses, within 1e-2 by a trapezoid over the records' stride
-  (5.4e-3), and within 1e-4 of the twin's (6.4e-6).
+  (7.5e-3), and within 1e-4 of the twin's (7.9e-6).
 - **The readouts' estimators on the device's records:** the upstream point's
-  spectrum peaks within 1e-2 of the drive's amplitude (0.49787 of 0.5), and
+  spectrum peaks within 1e-2 of the drive's amplitude (0.49969 of 0.5), and
   the Welch transfer to the downstream point, a pure delay, reads one within
-  2e-3 (0.99951).
+  2e-3 (0.99955).
 - **The rate:** read within 1e-2 of `u̇` half a step before its stamp
-  (4.2e-3). At the stamp it reads 3.7e-2 off, the half step's `ωΔt/2`.
+  (4.7e-3). At the stamp it reads 4.4e-2 off, the half step's `ωΔt/2`.
 
 The same run with no probes then ends on the same bits. It takes 25 s on
 Metal, 290 s on lavapipe and 27 s in Chrome on Metal, which reads what the
@@ -836,15 +838,22 @@ isolated, beside the worker pool, where it ran out of time on 2026-10-19 and
 
 The twins are held to the wave on the CPU at the same mesh and step
 (`the_twins_meet_the_wave_on_the_observables_channel`):
-- the points' field within 2.5e-3 of an amplitude of 0.5 (1.2e-3), the
-  segment across within 1.5e-3 (7.0e-4), Poynting within 4e-3 (1.8e-3);
-- the wall's ledger booking `2∫g²` within 5e-4 (1.8e-4);
+- the points' field within 2.5e-3 of an amplitude of 0.5 (6.9e-4), the
+  segment across within 1.5e-3 (8.4e-4), Poynting within 4e-3 (2.1e-3);
+- the points' transverse field within 1.2e-2 (9.0e-3), and the density and
+  the flow built on it within 6e-3 (4.6e-3 and 4.5e-3);
+- the wall's ledger booking `2∫g²` within 5e-4 (2.1e-4);
 - the spectrum and the transfer as on the device.
 
 The segment down the wall carries 1.5% more than the ledger books. The
 transverse field on the wall's elements reads 1.5% high at the wall and 0.7%
 low half an element in, where the field reads exact, falling four times as
-the edge halves. It is held within 3% and listed as worth checking. The
+the edge halves. It is held within 3% and listed as worth checking. A
+point's transverse field, the quadratic through its element's six samples,
+reads 0.4% to 1.8% of the amplitude off by where the point falls in the
+element: the upstream point, near an edge of its element, reads 9.0e-3, that
+element's centroid about 5e-3. It is listed as worth checking too, with a
+spike to recover it from the neighbours' samples. The
 mutation `curve-probe-flux-reversed`, the line recorder's normal flux with
 its sign turned, reads the lines 2.1 off.
 

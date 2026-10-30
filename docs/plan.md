@@ -1248,14 +1248,20 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   a box and on curved and baffle faces, and `QuadraticWaveState`, which only
   tests and `wave_boundary_reflection` stepped, refuses a second-order wall
   (2026-10-29).
-- [ ] Refill a repair's band by a free tip as well as a full build meshes it.
+- [x] Refill a repair's band by a free tip as well as a full build meshes it.
   Dragging a welded baffle 0.025 to 0.038 a step, the refill beside its free
-  tip reaches 4.2° to 8° where a full build of the same scene has 16° to 22°.
-  MESH-14 of the 2026-10-20 review holds refills to half the last full build's
-  worst angle, so the worst of them are carved again wider or rebuilt in full
-  (one move in 32 of `a_refill_under_the_floor_carves_again_with_a_wider_cavity`);
-  a refill that matched the fresh mesher there would spare that rebuild and
-  keep the step a sliver shortens (2026-10-23).
+  tip reached 4.2° to 8°, against 16° to 22° in the drag's first full build
+  (2026-10-23). A full build of each moved scene was as thin, 4.48° at worst:
+  the chain cut left the remainder at the tip as one atom, 0.011 beside atoms
+  of 0.08, and a slit is cut in after refinement, so nothing graded the
+  elements beside it. The cut now takes the fewest runs with the longest
+  shortest atom where that gains more than the chord tolerance. Over 160
+  moves at 0.01 to 0.05 a step, with one baffle and two, full builds under 5°
+  went from 9 to none (6.55° the worst), refills from one at 4.25° to none
+  (5.12°), moves carved wider from 8 to none and rebuilt in full from one to
+  none. Of the 92 regression and gallery scenes, 7 mesh differently, none
+  with a shorter step. The wider carve and MESH-14's floor keep their tests
+  on a baffle whose last span is a few thousandths long (2026-10-30).
 - [x] Accept a crossing near a hidden sample of both curves. MESH-9 of the
   2026-10-20 review moved a transmitting crossing within the tolerance of one
   curve's hidden sample onto that sample, which took a line swept across a
@@ -1292,6 +1298,21 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   directory and checks the linked app for its driver, and the fixture
   wrapper links its binary too. Stage A0 is complete; A1 is next, after the
   fixture driver leaves the shipped binary.
+- [ ] Spike: recover the transverse field a point probe reads from its
+  neighbours' samples, measured before anything is built. The reading is the
+  quadratic through its element's own six samples, 0.4% to 1.8% of the
+  amplitude off by where the point falls in the element (Worth checking
+  sometime). The candidate is Zienkiewicz and Zhu's patch recovery: a
+  least-squares quadratic over the samples of the element and of those
+  sharing an edge with it, of the same material and never across a slit, up
+  to 24 samples, each inverted at its own site as now. Its weights are fixed
+  when the stencil is built, so the device would loop over 24 samples
+  instead of 6. The spike measures it on the CPU against exact fields over a
+  variety of unstructured meshes: graded, coarse and fine, beside walls,
+  slits and material interfaces, with points swept across their elements.
+  It goes ahead only if the worst reading falls clearly on all of them. The
+  point and curve probes share their reconstruction byte for byte, so the
+  curve probe would move with it or the shared block split (2026-10-30).
 - [x] A separated span the mesher samples as one segment, its two sides the
   same pair of trace vertices where transmitting neighbours merge the
   junctions, could not be cut: every face-law case of every crystal rod in
@@ -1625,6 +1646,17 @@ is next touched.
   wall reads the power leaving 1.5% high, which the wall's ledger books to
   1.8e-4. The fixture's CPU test holds it within 3% (found by PH-18 on
   2026-10-18).
+- The transverse field a point probe reads, the quadratic through its
+  element's six samples, is 0.4% to 1.8% of the amplitude off by where the
+  point falls in the element. It is worst near an edge, where the quadratic
+  is extrapolated: the samples sit at least 0.09 in from every edge in
+  barycentric terms. On the `observables` channel at edge 0.07, the upstream
+  point, 0.004 from an edge, reads 9.0e-3 off of 0.5, and that element's
+  centroid about 5e-3. On the mesh before the chain cut changed, both points
+  read within 1.9e-3, and the upstream point moved onto an edge 5.0e-3. The
+  density and the flow take it in, and the fixture's CPU test holds the
+  three at 1.2e-2, 6e-3 and 6e-3. Recovering the field from the neighbours'
+  samples is a spike under Maintenance (2026-10-30).
 - Late in an epoch the device's local time is one f32 near 256 s, 3e-5 s
   apart, and the drives' phases carry about 1e-4 rad from it. 254 s into an
   epoch, `far-field-late`'s state reads 1.25e-4 off the f64 reference, where a
@@ -1661,6 +1693,14 @@ is next touched.
   `canonical_gpu_temporal_timing` (517 and 1045 us/step) were measured on
   the legacy scene's mesh, 15264 DOFs; the topology mesh has 14984 and a
   332-node trace. Re-time them on a quiet host at 20,000 steps.
+- A span much shorter than the elements beside it at a baffle's free tip
+  meshes slivers, in a full build as in a repair: a slit is cut in after
+  refinement, so nothing grades the elements beside it. On a 0.18 mesh, a
+  welded baffle whose last span is 0.012 long meshes at 4.2° to 5.3°, and
+  one 0.006 long at 2.1° to 2.7° (the carve tests' `short_tip_geometry`).
+  Since the chain cut stopped leaving a short atom at a tip, only authored
+  geometry makes such a span (2026-10-30); grading it would take refinement
+  after the slit is cut in.
 
 ## Working practice
 

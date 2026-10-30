@@ -36,8 +36,8 @@ pub(super) const OBSERVED_DRIVE: TimeSignal = TimeSignal::Pulsed {
 const AMPLITUDE: f64 = 0.5;
 const FREQUENCY: f64 = 2.0;
 
-/// The fixture's run: 8 s at the step the app paces the channel at, 5.54e-3.
-pub(super) const OBSERVED_STEPS: u64 = 1440;
+/// The fixture's run: 8 s at the step the app paces the channel at, 6.69e-3.
+pub(super) const OBSERVED_STEPS: u64 = 1195;
 
 /// Where the readouts' spectrum and transfer read the wave: from its front
 /// passing the far point to the drive's falling edge.
@@ -382,13 +382,16 @@ fn grow(worst: &mut f64, value: f64) {
 /// What the device recorded, held to the twin at the steps it recorded. The
 /// record's step is its time over the step, since the recorder stamps the
 /// solver's clock. Each kind's records must be a stride apart from the run's
-/// start to its end, none missing; a value within `TOLERANCE` of its scale
-/// of the twin's, f32 against f64 (the M1 Max reads 2.2e-5 at worst, a
-/// point's); the stamp within `STAMP` of the twin's time, two of f32's
-/// spacings at the run's end (3.9e-7). Poynting's theorem on the loop, what
-/// left round it between two of its records against what the region inside
-/// lost, which a trapezoid over the records' stride holds to 5e-3 of the
-/// flow's scale, within 1e-4 of the twin's at the same records. Then the
+/// start to its end, none missing; a line's may instead be the latest
+/// `CURVE_TRACE_FRAMES`, all the app keeps, which at the channel's step and
+/// 60 Hz is a stride of 2 and the last 6.85 s of the 8 s run. A value within
+/// `TOLERANCE` of its scale of the twin's, f32 against f64 (the M1 Max reads
+/// 2.8e-5 at worst, a point's); the stamp within `STAMP` of the twin's time,
+/// two of f32's spacings at the run's end (3.0e-7). Poynting's theorem on the
+/// loop, what left round it between two of its records against what the
+/// region inside lost, which a trapezoid over the records' stride holds
+/// within 1e-2 of the flow's scale (7.5e-3), within 1e-4 of the twin's at the
+/// same records (7.9e-6). Then the
 /// readouts' estimators on the device's records: the upstream point's
 /// spectrum peaks at the drive's amplitude, and the transfer between the
 /// points, a pure delay, reads one. The rate, a backward difference, is
@@ -404,8 +407,9 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
         }
         Ok(step as usize)
     };
-    // Every recorded step from the first stride to the endpoint, none twice.
-    let covered = |name: &str, steps: &[usize]| -> Result<usize, String> {
+    // Every recorded step from the first stride to the endpoint, none twice,
+    // or the latest `kept` of them where the trace keeps no more.
+    let covered = |name: &str, steps: &[usize], kept: Option<usize>| -> Result<usize, String> {
         let stride = steps
             .windows(2)
             .map(|pair| pair[1] - pair[0])
@@ -414,7 +418,7 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
         if steps.len() < 2
             || stride == 0
             || steps.windows(2).any(|pair| pair[1] - pair[0] != stride)
-            || steps[0] > stride
+            || (steps[0] > stride && Some(steps.len()) != kept)
             || steps[steps.len() - 1] + stride <= endpoint as usize
         {
             return Err(format!(
@@ -445,7 +449,7 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
             .iter()
             .map(|record| step_of(record.time))
             .collect::<Result<Vec<_>, _>>()?;
-        let stride = covered(&format!("point {id:?}"), &steps)?;
+        let stride = covered(&format!("point {id:?}"), &steps, None)?;
         for (record, step) in trace.samples.iter().zip(&steps) {
             let expected = &twin.records[*step];
             let read = expected.points[index];
@@ -491,7 +495,11 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
             .iter()
             .map(|record| step_of(record.time))
             .collect::<Result<Vec<_>, _>>()?;
-        covered(&format!("line {id:?}"), &steps)?;
+        covered(
+            &format!("line {id:?}"),
+            &steps,
+            Some(super::super::CURVE_TRACE_FRAMES),
+        )?;
         for (record, step) in trace.records.iter().zip(&steps) {
             let expected = &twin.records[*step];
             grow(&mut worst_stamp, (record.time - expected.time).abs());
@@ -560,7 +568,7 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
             .iter()
             .map(|record| step_of(record.time))
             .collect::<Result<Vec<_>, _>>()?;
-        covered(&format!("area {id:?}"), &steps)?;
+        covered(&format!("area {id:?}"), &steps, None)?;
         for (record, step) in trace.records.iter().zip(&steps) {
             let expected = &twin.records[*step];
             grow(&mut worst_stamp, (record.time - expected.time).abs());
@@ -599,7 +607,8 @@ pub(super) fn judge(state: &Playground, twin: &Twin, endpoint: u64) -> Result<St
                 .map(|point| point.flux),
         )
     };
-    for pair in inside.windows(2) {
+    let kept_from = loop_flux.first().map_or(0, |(step, _)| *step);
+    for pair in inside.windows(2).filter(|pair| pair[0].0 >= kept_from) {
         let [(from, before), (to, after)] = [pair[0], pair[1]];
         let flux = |step| {
             loop_flux
@@ -749,24 +758,32 @@ mod tests {
 
     /// PH-18: the recorders' twins on the fixture's channel, at its mesh and
     /// step, against the plane wave `u = g(t − (x + 1))` over the 8 s run:
-    /// - the points' field within 2.5e-3 (1.2e-3, of an amplitude of 0.5),
+    /// - the points' field within 2.5e-3 (6.9e-4, of an amplitude of 0.5),
     ///   their rate against `u̇` half a step before the sample within 4e-3
-    ///   of `2πf` (2.1e-3), the transverse field `|c| = |u|` within 4e-3
-    ///   (1.9e-3), the density `u²` within 2.5e-3 (1.1e-3) and the flow
-    ///   `(u², 0)` within 4e-3 (2.1e-3);
+    ///   of `2πf` (2.3e-3), the transverse field `|c| = |u|` within 1.2e-2
+    ///   (9.0e-3), the density `u²` within 6e-3 (4.6e-3) and the flow
+    ///   `(u², 0)` within 6e-3 (4.5e-3);
     /// - the segment across, by the readout's trapezoid, `−2u²` under its
-    ///   left normal within 1.5e-3 (7.0e-4);
+    ///   left normal within 1.5e-3 (8.4e-4);
     /// - round the loop, Poynting's theorem against the area inside within
-    ///   4e-3 (1.8e-3);
-    /// - the energy the wall's ledger books within 5e-4 of `2∫g²` (1.8e-4);
+    ///   4e-3 (2.1e-3);
+    /// - the energy the wall's ledger books within 5e-4 of `2∫g²` (2.1e-4);
     /// - the segment down the wall carries 1.5% more than that, which is the
     ///   transverse field on the wall's elements: it reads 1.5% high at the
     ///   wall and 0.7% low half an element in, where the field reads exact,
     ///   falling four times as the edge halves. Held within 3%, and listed as
     ///   worth checking;
+    /// - the transverse field at a point is the quadratic through its
+    ///   element's six samples, and reads 0.4% to 1.8% of the amplitude off
+    ///   by where the point falls in the element: the upstream point, 0.004
+    ///   from an edge in barycentric terms, reads 9.0e-3, that element's
+    ///   centroid about 5e-3, and both points read within 1.9e-3 on the mesh
+    ///   the chain cut left before 2026-10-30. The density and the flow take
+    ///   it in, so the three are held wide of the rest; listed as worth
+    ///   checking;
     /// - the readout's spectrum of the upstream point peaks within 1e-2 of
-    ///   the drive's amplitude (4.3e-3), and the transfer to the downstream
-    ///   one, a pure delay, reads one within 2e-3 (5.4e-4).
+    ///   the drive's amplitude (5.7e-4), and the transfer to the downstream
+    ///   one, a pure delay, reads one within 2e-3 (4.6e-4).
     #[test]
     fn the_twins_meet_the_wave_on_the_observables_channel() {
         let document = observables_document();
@@ -844,7 +861,7 @@ mod tests {
                 height * u * u * span / f64::from(samples)
             })
             .sum::<f64>();
-        let bounds = [2.5e-3, 4.0e-3, 4.0e-3, 2.5e-3, 4.0e-3, 1.5e-3, 4.0e-3];
+        let bounds = [2.5e-3, 4.0e-3, 1.2e-2, 6.0e-3, 6.0e-3, 1.5e-3, 4.0e-3];
         for (slot, (read, bound)) in worst.iter().zip(bounds).enumerate() {
             assert!(*read <= bound, "reading {slot} at {read:.2e}: {worst:?}");
         }
