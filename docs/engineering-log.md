@@ -30919,3 +30919,49 @@ IV-02 of milestone C, identifiers (section 6j of
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-31 — Every linear scene adds and scales its responses, which completes stage C1
+
+IV-01 of milestone C, superposition (section 6j of
+`docs/spikes/funfern-testing-campaign-plan.md`), in
+`crates/funfern-app/tests/invariants.rs` beside IV-02 and IV-03.
+
+- **Which scenes.** A scene is linear when every material is: its field
+  laws linear, its loss rates constant, its restoring law none or
+  Klein-Gordon. Drives, gates and switches in time keep a medium linear.
+  79 of the 91 regression, frozen and gallery scenes are; the 12 left out
+  are the gallery's nonlinear section and their frozen copies. The test
+  requires at least 60, so a predicate that found none would not pass on
+  nothing.
+- **The runs.** Each linear scene runs 64 steps four times. The first is
+  struck by the pulse with its sources running, the second struck with
+  every source's signal at zero, the third has its sources alone, and the
+  fourth is struck with the pulse and every signal at -2.5 times. The
+  sources are the point source, the volume sources and every Neumann or
+  Dirichlet side and face, each signal scaled through its offset and
+  amplitude. The three documents must mesh alike. The first run must equal
+  the sum of the next two, and the fourth -2.5 times the first, in Q, b, r
+  and the probes, within 1e-12 of the larger term.
+- **What it read.** Every linear scene had sources running. The sums held
+  within 2.8e-15 and the scaling within 1.1e-14, through second-order walls,
+  thin gaps, losses, plasma, Klein-Gordon and modulated media.
+- **What it sees.** Superposition sees a defect in how the state evolves.
+  A defect in the sources alone is in both runs it compares and cancels;
+  that is the scaling's to see.
+- **Mutations tried.** Two defects were tried, and neither was seen by
+  IV-01 alone:
+  - The walls' memory rounded through f32 on the CPU: IV-01 read 1e-10 to
+    1e-8 in 43 scenes. IV-03, the slow near field's ledger, three of the
+    temporal path's exactness tests and the trapezoid wall's history test
+    caught it too.
+  - The Klein-Gordon force taken through the sine, as sine-Gordon's is:
+    IV-01 read up to 3.5e-8 in the ten Klein-Gordon scenes. IV-02 and IV-03
+    pass it, and twelve tests of the media caught it.
+
+  `klein-gordon-force-through-sine` is IV-01's mutation, the kind of defect
+  superposition is for.
+- **Stage C1 complete.** The plan's section 6j and plan.md say C2,
+  equivalent scenes at three levels, is next, planned before it starts.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

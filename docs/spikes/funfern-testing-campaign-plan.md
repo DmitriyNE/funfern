@@ -760,6 +760,22 @@ shows the solution does not see, and they run within 8.5e-16. Its mutation
 of the library, which every scene the other tests build allows, their
 libraries sorted by identifier.
 
+**IV-01 done on 2026-10-31**, in the same file, and with it stage C1. Of
+the 91 scenes, the 79 whose every material is linear (field laws linear,
+loss rates constant, restoring law none or Klein-Gordon) run four times:
+struck with their sources running, struck with every source's signal at
+zero, their sources alone, and struck with every signal at -2.5 times. The
+first is the sum of the next two within 2.8e-15 and the last -2.5 times
+the first within 1.1e-14, through second-order walls, thin gaps, losses,
+plasma, Klein-Gordon and modulated media; the 12 nonlinear scenes are left
+out. Superposition sees a defect in how the state evolves; one in the
+sources alone is in both runs it compares and cancels, which leaves it to
+the scaling. Of two defects tried, neither was seen by IV-01 alone:
+rounding the walls' memory through f32 on the CPU and the Klein-Gordon
+force taken through the sine each have other tests too. Its mutation `klein-gordon-force-through-sine`, which IV-02 and
+IV-03 pass. C2, equivalent scenes at three levels, is next, with a plan of
+its own.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

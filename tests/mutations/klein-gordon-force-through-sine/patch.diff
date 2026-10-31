@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/material_law.rs b/crates/funfern-core/src/material_law.rs
+index 3a7c370..eb32285 100644
+--- a/crates/funfern-core/src/material_law.rs
++++ b/crates/funfern-core/src/material_law.rs
+@@ -2090,7 +2090,7 @@ impl RestoringLawValues {
+     pub fn slope(self, r: f64) -> f64 {
+         match self {
+             Self::None => 0.0,
+-            Self::KleinGordon { omega0 } => omega0 * omega0 * r,
++            Self::KleinGordon { omega0 } => omega0 * omega0 * r.sin(),
+             Self::SineGordon { omega0 } => omega0 * omega0 * r.sin(),
+             Self::Phi4 { lambda, .. } => lambda * (r * r * r - r),
+         }

@@ -1,0 +1,4 @@
+about: the Klein-Gordon restoring force is taken through the sine, as sine-Gordon's is, off by r²/6 of itself at an integrated field r: a smooth nonlinearity a superposition of a scene's own responses sees and a renumbering or a renaming does not
+test: cargo test --release -p funfern-app --test invariants -- every_linear_scene_adds_and_scales_its_responses
+expect: Plasma skin depth: the pulse and the sources do not add
+needs: cpu

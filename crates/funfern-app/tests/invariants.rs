@@ -24,6 +24,18 @@
 //! differently with its curves listed in another order). Each must mesh
 //! alike, point for point, and run as the original does to roundoff, its
 //! probes read by their new identifiers.
+//!
+//! IV-01, superposition. A linear scene responds linearly to what drives
+//! it. Struck by the pulse with its own sources running, it reads the sum
+//! of the pulse with every source's signal at zero and of its sources
+//! alone; with the pulse and every signal times -2.5 it reads -2.5 times as
+//! much. A scene is linear when every material is: its field laws linear,
+//! its loss rates constant, its restoring law none or Klein-Gordon. Drives,
+//! gates and switches in time keep a medium linear, and walls with memory,
+//! thin gaps, losses and dispersion are linear too. The sources are the
+//! point source, the volume sources and every Neumann or Dirichlet side and
+//! face, each signal scaled through its offset and amplitude; a scene's
+//! three versions must mesh alike.
 
 use funfern_app::document::ProbeId;
 use funfern_app::topology_editor::{
@@ -37,8 +49,9 @@ use funfern_app::topology_runtime::{
 use funfern_core::{
     BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalPointStencil,
     CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState, CurveId, CurveSpanId,
-    FaceAnchor, MaterialId, MeshTriangle, MeshingOptions, Point2, RegionId, TopologyScene,
-    TopologyVertexId, TriMesh,
+    FaceAnchor, FaceBoundaryCondition, FieldLaw, MaterialId, MeshTriangle, MeshingOptions,
+    OuterBoundaryCondition, Point2, RateLaw, RegionId, RestoringLaw, SpanBehavior, TimeSignal,
+    TopologyScene, TopologyVertexId, TriMesh,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -249,8 +262,8 @@ enum Run {
 
 impl Run {
     /// At rest, then struck by a smooth pulse centred off the domain's
-    /// middle, where few scenes put anything.
-    fn struck(prepared: &PreparedTopology, time_step: f64) -> Result<Self, String> {
+    /// middle, where few scenes put anything, `strength` times its height.
+    fn struck(prepared: &PreparedTopology, time_step: f64, strength: f64) -> Result<Self, String> {
         let domain = prepared.bundle.authored.geometry.domain;
         let centre = Point2::new(
             domain.min_x + 0.37 * domain.width(),
@@ -261,7 +274,9 @@ impl Run {
             .canonical_operator
             .node_points()
             .iter()
-            .map(|point| 0.1 * (-(*point - centre).dot(*point - centre) / (width * width)).exp())
+            .map(|point| {
+                0.1 * strength * (-(*point - centre).dot(*point - centre) / (width * width)).exp()
+            })
             .collect::<Vec<_>>();
         let forcing = &prepared.canonical_forcing;
         match &prepared.canonical_temporal_operator {
@@ -344,7 +359,12 @@ impl Run {
 
 /// `prepared` struck and run `STEPS` steps at `time_step`.
 fn run(prepared: &PreparedTopology, time_step: f64) -> Result<Run, String> {
-    let mut run = Run::struck(prepared, time_step)?;
+    run_struck(prepared, time_step, 1.0)
+}
+
+/// `prepared` struck at `strength` and run `STEPS` steps at `time_step`.
+fn run_struck(prepared: &PreparedTopology, time_step: f64, strength: f64) -> Result<Run, String> {
+    let mut run = Run::struck(prepared, time_step, strength)?;
     for step in 0..STEPS {
         run.step(prepared)
             .map_err(|error| format!("step {step}: {error}"))?;
@@ -941,4 +961,229 @@ fn over_every_scene(what: &str, check: fn(&Scene) -> Result<(String, Apart), Str
 #[test]
 fn relabelled_identifiers_give_every_scene_the_same_solution() {
     over_every_scene("relabelled", relabelled);
+}
+
+/// The factor IV-01's second run takes the pulse and every signal by.
+const SCALE: f64 = -2.5;
+
+/// Whether every material of `scene` responds linearly to its field.
+fn linear(scene: &TopologyScene) -> bool {
+    scene.materials.iter().all(|material| {
+        [&material.mass_law, &material.stiffness_law]
+            .iter()
+            .all(|law| matches!(law.field, FieldLaw::Linear))
+            && [&material.electric_loss, &material.magnetic_loss]
+                .into_iter()
+                .flatten()
+                .all(|loss| matches!(loss.law.rate, RateLaw::Constant))
+            && matches!(
+                material.restoring,
+                RestoringLaw::None | RestoringLaw::KleinGordon { .. }
+            )
+    })
+}
+
+/// `signal` times `factor`, through its offset and amplitude.
+fn scaled_signal(signal: TimeSignal, factor: f64) -> TimeSignal {
+    match signal {
+        TimeSignal::Harmonic {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+        } => TimeSignal::Harmonic {
+            offset: factor * offset,
+            amplitude: factor * amplitude,
+            frequency_hz,
+            phase_radians,
+        },
+        TimeSignal::Pulsed {
+            offset,
+            amplitude,
+            frequency_hz,
+            phase_radians,
+            envelope,
+            start,
+            repeat,
+        } => TimeSignal::Pulsed {
+            offset: factor * offset,
+            amplitude: factor * amplitude,
+            frequency_hz,
+            phase_radians,
+            envelope,
+            start,
+            repeat,
+        },
+    }
+}
+
+/// `document` with every source's signal times `factor`: the point source,
+/// the volume sources and every driven side and face, in both scenes.
+fn sources_scaled(document: &TopologyDocument, factor: f64) -> TopologyDocument {
+    let face = |condition: &mut FaceBoundaryCondition| match condition {
+        FaceBoundaryCondition::Neumann { signal } | FaceBoundaryCondition::Dirichlet { signal } => {
+            *signal = scaled_signal(*signal, factor)
+        }
+        _ => {}
+    };
+    let mut document = document.clone();
+    let model = &mut document.model;
+    for scene in [&mut model.draft, &mut model.accepted] {
+        for source in &mut scene.volume_sources {
+            source.signal = scaled_signal(source.signal, factor);
+        }
+        for side in &mut scene.outer_boundaries.sides {
+            match side {
+                OuterBoundaryCondition::Neumann { signal }
+                | OuterBoundaryCondition::Dirichlet { signal } => {
+                    *signal = scaled_signal(*signal, factor)
+                }
+                _ => {}
+            }
+        }
+        for span in scene
+            .geometry
+            .curves
+            .iter_mut()
+            .flat_map(|curve| &mut curve.spans)
+        {
+            if let SpanBehavior::Separated { left, right, .. } = &mut span.behavior {
+                face(left);
+                face(right);
+            }
+        }
+    }
+    model.source.signal = scaled_signal(model.source.signal, factor);
+    document
+}
+
+/// `‖Σ cᵢ xᵢ‖ / maxᵢ ‖cᵢ xᵢ‖` for each quantity the runs carry: zero where
+/// the linear relation the terms state holds.
+fn residual(terms: &[(f64, &PreparedTopology, &Run)]) -> Result<Apart, String> {
+    fn combine<T>(terms: &[(f64, &[T])], square: impl Fn(T) -> f64) -> f64
+    where
+        T: Copy + std::ops::Add<Output = T> + std::ops::Mul<f64, Output = T>,
+    {
+        let largest = terms
+            .iter()
+            .map(|(factor, values)| values.iter().map(|value| square(*value * *factor)).sum())
+            .fold(0.0, f64::max);
+        let sum = (0..terms[0].1.len())
+            .map(|index| {
+                square(
+                    terms
+                        .iter()
+                        .map(|(factor, values)| values[index] * *factor)
+                        .reduce(|a, b| a + b)
+                        .unwrap(),
+                )
+            })
+            .sum::<f64>();
+        (sum / largest.max(f64::MIN_POSITIVE)).sqrt()
+    }
+    let scalar = |values: Vec<(f64, &[f64])>| combine(&values, |value| value * value);
+    let vector = |values: Vec<(f64, &[Point2])>| combine(&values, |value| value.dot(value));
+    let readings = terms
+        .iter()
+        .map(|(_, prepared, run)| readings(prepared, run))
+        .collect::<Result<Vec<_>, _>>()?;
+    let primaries = readings
+        .iter()
+        .map(|read| read.iter().map(|reading| reading.1).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let complementaries = readings
+        .iter()
+        .map(|read| read.iter().map(|reading| reading.2).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    let factors = || terms.iter().map(|(factor, ..)| *factor);
+    Ok(Apart {
+        primary: scalar(
+            factors()
+                .zip(terms.iter().map(|(.., run)| run.primary()))
+                .collect(),
+        ),
+        complementary: vector(
+            factors()
+                .zip(terms.iter().map(|(.., run)| run.complementary()))
+                .collect(),
+        ),
+        integrated: scalar(
+            factors()
+                .zip(terms.iter().map(|(.., run)| run.integrated()))
+                .collect(),
+        ),
+        probe_primary: scalar(factors().zip(primaries.iter().map(Vec::as_slice)).collect()),
+        probe_complementary: vector(
+            factors()
+                .zip(complementaries.iter().map(Vec::as_slice))
+                .collect(),
+        ),
+        ..Apart::default()
+    })
+}
+
+fn superposed(scene: &Scene) -> Result<(String, Apart), String> {
+    let started = Instant::now();
+    if !linear(&scene.document.model.accepted) {
+        return Ok((
+            format!("{}: not linear, left out", scene.name),
+            Apart::default(),
+        ));
+    }
+    let (_, _, whole) = prepare(&scene.document)?;
+    let (_, _, quiet) = prepare(&sources_scaled(&scene.document, 0.0))
+        .map_err(|error| format!("its sources at zero: {error}"))?;
+    let (_, _, negated) = prepare(&sources_scaled(&scene.document, SCALE))
+        .map_err(|error| format!("its sources scaled: {error}"))?;
+    let alike = |other: &PreparedTopology| {
+        other.mesh.vertices == whole.mesh.vertices
+            && other.mesh.triangles == whole.mesh.triangles
+            && other.mesh.boundary_edges == whole.mesh.boundary_edges
+    };
+    if !alike(&quiet) || !alike(&negated) {
+        return Err("its sources' strength changed its mesh".into());
+    }
+    let time_step = whole.recommended_time_step();
+    let both = run_struck(&whole, time_step, 1.0)?;
+    let pulse = run_struck(&quiet, time_step, 1.0)?;
+    let sources = run_struck(&whole, time_step, 0.0)?;
+    let scaled = run_struck(&negated, time_step, SCALE)?;
+    let sum = residual(&[
+        (1.0, &whole, &both),
+        (-1.0, &quiet, &pulse),
+        (-1.0, &whole, &sources),
+    ])?;
+    let scale = residual(&[(1.0, &negated, &scaled), (-SCALE, &whole, &both)])?;
+    if sum.worst().max(scale.worst()) > ROUNDOFF {
+        return Err(format!(
+            "the pulse and the sources do not add: {sum:?}; scaled: {scale:?}"
+        ));
+    }
+    let driven = sources.primary().iter().any(|value| *value != 0.0);
+    Ok((
+        format!(
+            "{}: {}, superposed {:.1e}, scaled {:.1e}, {:.2} s",
+            scene.name,
+            if driven { "driven" } else { "no sources" },
+            sum.worst(),
+            scale.worst(),
+            started.elapsed().as_secs_f64()
+        ),
+        Apart {
+            primary: sum.worst().max(scale.worst()),
+            ..Apart::default()
+        },
+    ))
+}
+
+#[test]
+fn every_linear_scene_adds_and_scales_its_responses() {
+    // 79 of the 91 on 2026-10-31: a test that found every scene nonlinear
+    // would pass on nothing.
+    let linear = scenes()
+        .iter()
+        .filter(|scene| linear(&scene.document.model.accepted))
+        .count();
+    assert!(linear >= 60, "only {linear} scenes are linear");
+    over_every_scene("superposed", superposed);
 }

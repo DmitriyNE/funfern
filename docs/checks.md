@@ -1360,9 +1360,13 @@ unshuffled mesh through that path must match a fresh preparation bit for
 bit. IV-02, identifiers: the same scenes with every curve, span, junction,
 material, region and probe renamed, the background region aside, and their
 lists reversed must mesh to the same triangles, perhaps numbered otherwise,
-and run as the originals within the same bound. Both run in the gate, about
-20 s each on ten threads; their mutations are
-`probe-point-read-in-mesh-order` and `materials-searched-as-sorted`.
+and run as the originals within the same bound. IV-01, superposition: every
+scene whose materials are all linear, run struck with its sources, struck
+with its signals at zero, with its sources alone and with the pulse and
+signals at -2.5 times, must add and scale within the same bound. All three
+run in the gate, 12 to 25 s each on ten threads; their mutations are
+`probe-point-read-in-mesh-order`, `materials-searched-as-sorted` and
+`klein-gordon-force-through-sine`.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
