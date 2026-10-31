@@ -15,16 +15,21 @@
 //! constitutive evaluation site the solver does not have, which a nonlinear
 //! law cannot serve without an extra uncached bracketed solve, and it is why
 //! the order here is worth the extra stencil data.
+//!
+//! A point probe's field combines more samples than its element's own: it is
+//! recovered from the samples around it (`canonical_recovery`), each still
+//! inverted at its own site.
 
 use crate::{
-    CanonicalWaveOperator, Point2, QuadraticAreaElement, QuadraticAreaStencil,
-    QuadraticPointStencil, SymmetricTensor2, WaveError, enriched_quadratic_basis,
+    CanonicalWaveOperator, ComplementaryRecovery, Point2, QuadraticAreaElement,
+    QuadraticAreaStencil, QuadraticPointStencil, RecoveredSample, SymmetricTensor2, WaveError,
+    enriched_quadratic_basis,
 };
 
 const LOCAL_NODES: usize = 7;
 const COMPLEMENTARY_SAMPLES: usize = 6;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalPointStencil {
     pub nodes: [u32; LOCAL_NODES],
     pub primary_weights: [f64; LOCAL_NODES],
@@ -38,6 +43,10 @@ pub struct CanonicalPointStencil {
     /// These are immutable for the life of a generation, so holding them here
     /// cannot go stale the way a copied law value would.
     pub sample_inverses: [SymmetricTensor2; COMPLEMENTARY_SAMPLES],
+    /// The samples the complementary field is read from, each with its
+    /// weight and inverse: those of the elements around a point probe, or the
+    /// element's own six for a line probe or the vector overlay.
+    pub recovery: Vec<RecoveredSample>,
     pub primary_reference: f64,
     /// Forward constitutive coefficient at the probe point. The complementary
     /// energy density is `w = 0.5 e . C e`, evaluated from the interpolated
@@ -56,9 +65,35 @@ pub struct CanonicalPointSample {
 }
 
 impl CanonicalPointStencil {
+    /// A point probe's stencil, its complementary field recovered from the
+    /// samples around it.
     pub fn from_quadratic(
         stencil: QuadraticPointStencil,
         operator: &CanonicalWaveOperator,
+    ) -> Result<Self, WaveError> {
+        Self::recovered_by(stencil, operator, Some(operator.recovery()))
+    }
+
+    /// The stencil of a consumer that reads its element's own six samples. A
+    /// line probe integrates its points, and the own fit's errors alternate
+    /// from element to element and cancel along the line, where a recovered
+    /// field's smaller, smooth error adds up: on a travelling packet 40
+    /// elements to the wavelength the recovered field read a segment's flux
+    /// ten times further off. The vector overlay's 16,384 arrows would need
+    /// some 40 MB of recovered weights.
+    pub fn from_quadratic_own(
+        stencil: QuadraticPointStencil,
+        operator: &CanonicalWaveOperator,
+    ) -> Result<Self, WaveError> {
+        Self::recovered_by(stencil, operator, None)
+    }
+
+    /// `recovery` is the base's own, or a temporal generation's, whose media
+    /// tell its laws apart.
+    pub(crate) fn recovered_by(
+        stencil: QuadraticPointStencil,
+        operator: &CanonicalWaveOperator,
+        recovery: Option<&ComplementaryRecovery>,
     ) -> Result<Self, WaveError> {
         let element = stencil.element as usize;
         if operator.element_nodes().get(element) != Some(&stencil.nodes) {
@@ -87,35 +122,45 @@ impl CanonicalPointStencil {
                 .ok_or(WaveError::Unsupported(
                     "a consumer asked for a region the generation does not hold",
                 ))?;
+        let complementary_samples =
+            std::array::from_fn(|local| (element * COMPLEMENTARY_SAMPLES + local) as u32);
+        let sample_inverses = std::array::from_fn(|local| samples[local].complementary_inverse);
+        let recovery = match recovery {
+            Some(recovery) => recovery.weights(operator, element, stencil.barycentric)?,
+            None => (0..COMPLEMENTARY_SAMPLES)
+                .map(|local| RecoveredSample {
+                    sample: complementary_samples[local],
+                    weight: complementary_weights[local],
+                    inverse: sample_inverses[local],
+                })
+                .collect(),
+        };
         Ok(Self {
             nodes: stencil.nodes,
             primary_weights: stencil.value_weights,
             primary_inverse_mass: stencil
                 .nodes
                 .map(|node| operator.primary_mass()[node as usize].recip()),
-            complementary_samples: std::array::from_fn(|local| {
-                (element * COMPLEMENTARY_SAMPLES + local) as u32
-            }),
+            complementary_samples,
             complementary_weights,
-            sample_inverses: std::array::from_fn(|local| samples[local].complementary_inverse),
+            sample_inverses,
+            recovery,
             primary_reference: stencil.mass_density,
             complementary_reference,
             orientation: operator.orientation(),
         })
     }
 
-    /// The physical complementary field at the probe point. Each of the
-    /// element's samples is inverted where the solver owns that inverse, and
-    /// the resulting fields are interpolated.
+    /// The physical complementary field at the probe point. Each sample is
+    /// inverted where the solver owns that inverse, and the resulting fields
+    /// are combined.
     pub fn complementary_field(&self, complementary_flux: &[Point2]) -> Result<Point2, WaveError> {
         let mut field = Point2::default();
-        for local in 0..COMPLEMENTARY_SAMPLES {
-            let Some(flux) = complementary_flux.get(self.complementary_samples[local] as usize)
-            else {
+        for entry in &self.recovery {
+            let Some(flux) = complementary_flux.get(entry.sample as usize) else {
                 return Err(WaveError::InvalidState);
             };
-            field = field
-                + self.sample_inverses[local].apply(*flux) * self.complementary_weights[local];
+            field = field + entry.inverse.apply(*flux) * entry.weight;
         }
         Ok(field)
     }
@@ -532,7 +577,7 @@ pub(crate) fn complementary_interpolation_weights(
     solve_six(matrix, monomials(target))
 }
 
-fn solve_six(
+pub(crate) fn solve_six(
     mut matrix: [[f64; COMPLEMENTARY_SAMPLES]; COMPLEMENTARY_SAMPLES],
     mut right: [f64; COMPLEMENTARY_SAMPLES],
 ) -> Result<[f64; COMPLEMENTARY_SAMPLES], WaveError> {
@@ -1034,9 +1079,10 @@ mod tests {
     /// PH-18: the consumers read a standing box mode in every skin, its
     /// slots giving `(ρ, A)` as each skin names them. At an edge of 0.125
     /// the field reads within 3e-4 (1.5e-4), the rate 2e-3 (1.0e-3), the
-    /// transverse field 3.2e-3 (1.6e-3), the density 1.7e-3 (8.3e-4) and the
-    /// flow 1.1e-3 (5.5e-4), each falling at least 2.5 times from an edge of
-    /// 0.25 (2.9 to 5.3). A disk's mean and RMS read within 1e-4 (4e-5, the
+    /// transverse field 9e-4 (4.5e-4), the density 7e-4 (3.3e-4) and the
+    /// flow 3e-4 (1.5e-4), each falling at least 2.5 times from an edge of
+    /// 0.25 (2.9 to 5.6). The element's own six samples read the last three
+    /// 1.6e-3, 8.3e-4 and 5.5e-4. A disk's mean and RMS read within 1e-4 (4e-5, the
     /// drawn circle's floor), its energy within 7e-3 (3.5e-3: the solver's
     /// lumped energy, a clipped element counted by its covered fraction),
     /// and the whole box's within 1e-3 (4e-4).
@@ -1046,7 +1092,7 @@ mod tests {
             let coarse = standing_mode_errors(physics, 0.25);
             let fine = standing_mode_errors(physics, 0.125);
             let bounds = [
-                3.0e-4, 2.0e-3, 3.2e-3, 1.7e-3, 1.1e-3, 1.0e-4, 1.0e-4, 7.0e-3, 1.0e-3,
+                3.0e-4, 2.0e-3, 9.0e-4, 7.0e-4, 3.0e-4, 1.0e-4, 1.0e-4, 7.0e-3, 1.0e-3,
             ];
             for (slot, (read, bound)) in fine.iter().zip(bounds).enumerate() {
                 assert!(
@@ -1121,7 +1167,21 @@ mod tests {
         };
         let count = 64;
         let segment = (0..count)
-            .map(|i| stencil(Point2::new(0.2, -0.5 + f64::from(i) / f64::from(count - 1))))
+            .map(|i| {
+                let p = Point2::new(0.2, -0.5 + f64::from(i) / f64::from(count - 1));
+                CanonicalPointStencil::from_quadratic_own(
+                    QuadraticPointStencil::build_topology(
+                        &prepared.mesh,
+                        &prepared.quadratic,
+                        &prepared.plan,
+                        prepared.model(),
+                        p,
+                    )
+                    .unwrap(),
+                    operator,
+                )
+                .unwrap()
+            })
             .collect::<Vec<_>>();
         let point = Point2::new(0.13, 0.21);
         let probe = stencil(point);
@@ -1173,16 +1233,18 @@ mod tests {
     /// PH-18: the consumers read a travelling packet in every skin, its flow
     /// along its travel and a segment's flux under the left-normal sign. At
     /// an edge of 0.05 the field reads within 4e-4 (1.8e-4), the transverse
-    /// field 4e-3 (1.9e-3), the density 2.2e-3 (1.1e-3), the flow 4e-3
-    /// (1.9e-3) and the segment's flux 1.1e-3 (5.5e-4), and the energy it
+    /// field 9e-4 (4.4e-4), the density 6e-4 (2.8e-4), the flow 7e-4
+    /// (3.3e-4) and the segment's flux 1.1e-3 (5.5e-4), and the energy it
     /// carries within 1.2e-3 of the packet's (5.1e-4), each falling at least
-    /// 2.5 times from an edge of 0.1 (3.3 to 6.8).
+    /// 2.5 times from an edge of 0.1 (2.7 to 3.7). The element's own six
+    /// samples read the point's transverse field, density and flow 1.9e-3,
+    /// 1.1e-3 and 1.9e-3; the segment, a line probe, reads through them.
     #[test]
     fn the_consumers_read_a_travelling_packet_in_every_skin() {
         for physics in skins() {
             let coarse = travelling_packet_errors(physics, 0.1);
             let fine = travelling_packet_errors(physics, 0.05);
-            let bounds = [4.0e-4, 4.0e-3, 2.2e-3, 4.0e-3, 1.1e-3, 1.2e-3];
+            let bounds = [4.0e-4, 9.0e-4, 6.0e-4, 7.0e-4, 1.1e-3, 1.2e-3];
             for (slot, (read, bound)) in fine.iter().zip(bounds).enumerate() {
                 assert!(
                     *read <= bound,

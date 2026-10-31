@@ -11,11 +11,12 @@ use crate::trace_eigen::{
     EIGEN_ITERATIONS_PER_EIGENVALUE, EIGEN_UNIT_WORK, EIGENSOLVE_DID_NOT_CONVERGE, portable_hypot,
 };
 use crate::{
-    CompiledVolumeSources, DirectionalWaveCoefficients, ElectromagneticPolarization, Material,
-    MaterialFrame, OuterBoundaryCondition, OuterSide, OwnedTopologyWaveModel, PhysicsModel, Point2,
-    PointSource, QuadraticWaveOperator, SymmetricTensor2, ThinGapSample, TimeSignal,
-    TopologyWaveModel, TriMesh, VolumeSource, WaveError, enriched_quadratic_basis_gradients,
-    source_reach::point_source_squared_distances, trace_eigen::BandedEigenJob,
+    CompiledVolumeSources, ComplementaryRecovery, DirectionalWaveCoefficients,
+    ElectromagneticPolarization, Material, MaterialFrame, OuterBoundaryCondition, OuterSide,
+    OwnedTopologyWaveModel, PhysicsModel, Point2, PointSource, QuadraticWaveOperator,
+    SymmetricTensor2, ThinGapSample, TimeSignal, TopologyWaveModel, TriMesh, VolumeSource,
+    WaveError, enriched_quadratic_basis_gradients, source_reach::point_source_squared_distances,
+    trace_eigen::BandedEigenJob,
 };
 
 const LOCAL_NODES: usize = 7;
@@ -1129,6 +1130,9 @@ pub struct CanonicalWaveOperator {
     component_count: usize,
     maximum_time_step: f64,
     grid_filter_reach: Vec<f64>,
+    /// Each element's medium and each vertex's elements, from which a point
+    /// consumer's complementary field is recovered.
+    recovery: Arc<ComplementaryRecovery>,
 }
 
 impl CanonicalWaveOperator {
@@ -1232,6 +1236,13 @@ impl CanonicalWaveOperator {
 
     pub fn constitutive_samples(&self) -> &[LinearConstitutiveSample] {
         &self.samples
+    }
+
+    /// The media and vertex stars this generation's point readings are
+    /// fitted over. A temporal generation holds its own, whose media tell
+    /// its laws apart.
+    pub fn recovery(&self) -> &ComplementaryRecovery {
+        &self.recovery
     }
 
     pub fn degrees_of_freedom(&self) -> usize {
@@ -4847,6 +4858,12 @@ impl CanonicalAssemblyJob {
             component_count,
             maximum_time_step: self.quadratic.maximum_time_step(),
             grid_filter_reach,
+            recovery: Arc::new(ComplementaryRecovery::new(
+                &self.mesh,
+                self.quadratic.element_nodes(),
+                self.quadratic.degrees_of_freedom(),
+                self.model.as_model(),
+            )?),
         };
         Ok(operator)
     }

@@ -3,8 +3,8 @@
 **Status: done, 31 October 2026: go for patch recovery with a second ring at
 material interfaces.** A spike in
 `crates/funfern-app/examples/point_recovery_spike.rs`, with no production
-change. The production change is planned separately (`docs/plan.md`,
-Maintenance).
+change. Production took it for the point probe alone the same day: a line
+probe reads integrals, which the recovery made worse ("Line probes").
 
 ## The question
 
@@ -263,3 +263,32 @@ in `funfern-core`, and read through it as the device does.
   methodology the GPU timings use.
 - Temporal and nonlinear media were outside this spike. They need their
   twins' readings, against a refined run, before and after.
+
+## Line probes
+
+Production first carried the recovery to the line probe as well, and
+measured what the spike had not: a line's integrals. The own fit's errors
+are large at a point but alternate from element to element, so they cancel
+along a line. The recovered field's are smaller and smooth, so they add up.
+On `canonical_consumer`'s travelling packet, against the peak flux:
+
+| | edge 0.1 | 0.05 | 0.025 |
+| --- | --- | --- | --- |
+| the point's transverse field, `own` / recovered | 7.2e-3 / 1.2e-3 | 1.9e-3 / 4.4e-4 | 5.0e-4 / 1.6e-4 |
+| a segment's flux across the channel | 2.0e-3 / 3.5e-4 | 5.5e-4 / 2.4e-4 | 6.4e-6 / 6.7e-5 |
+| the energy it carries over the run | 1.9e-3 / 2.3e-4 | 5.1e-4 / 2.5e-4 | 3.4e-6 / 6.2e-5 |
+
+With the exact `u` in place of the read one, the recovered segment's error
+falls only from 5.2e-4 to 3.4e-4 between the first two meshes: it is the
+transverse field's. On the `observables` channel at edge 0.07 the recovery
+read the segment across (8.4e-4 to 6.2e-4) and Poynting round the loop
+(2.1e-3 to 1.2e-3) better, and the energy down the wall worse: 2.0% high,
+where the own fit reads 1.5%. A fit at a wall reaches one way only, and
+along the wall its error does not cancel.
+
+So the line probe keeps its element's own six samples, and the point probe
+alone reads through the table (31 October 2026). Both shaders still carry
+both rules in their shared block, byte for byte, and the line recorder binds
+seven buffers where the point recorder binds eight. A recovery that kept
+each element's own mean, which might keep the cancellation and still fix
+the extrapolation, was not tried.

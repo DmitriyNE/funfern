@@ -30700,3 +30700,83 @@ release for all of them).
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-31 — A point probe reads its transverse field recovered from the samples around it
+
+Plan.md's production item after the spike of the same day
+([docs/spikes/funfern-point-recovery-spike.md](spikes/funfern-point-recovery-spike.md)):
+Zienkiewicz and Zhu's patch recovery with a second ring at material
+interfaces, for the point probe alone.
+
+- **The rule.** `canonical_recovery` holds the spike's `spr+iring`. An
+  element's medium is its material's coefficients and frame, the id, name
+  and colour left out. Each vertex fits a least-squares quadratic over the
+  samples of its elements of one medium, and over a second ring of them where
+  it ends an edge between two media. A point reads the quadratic through its
+  element's corner values of those fits and, at each edge's midpoint, the
+  mean of its two ends' fits. Both canonical operators carry the media and
+  the vertex stars. The temporal operator builds its own from the authored
+  model, so a driven region is a medium of its own even where its base
+  coefficients match its neighbour's. The weights are computed in f64 when a
+  stencil is built, and each sample is still `v(b)` at its own site under
+  its own law.
+- **The stencils.** `CanonicalPointStencil` and
+  `CanonicalTemporalPointStencil` carry a table of samples, weights and
+  inverses, and are no longer `Copy`. `from_quadratic` recovers;
+  `from_quadratic_own` keeps the element's own six, for a line probe and the
+  vector overlay.
+- **The device.** The point recorder binds the table as its eighth buffer,
+  32 bytes an entry. The shared reconstruction block gains `law_field`, the
+  per-sample law the six-sample path now goes through too, and
+  `recovered_complement`. The two shaders' blocks stay byte for byte the same,
+  and the line recorder binds seven buffers, its entry point reading the own
+  six.
+- **Line probes keep their own six.** Carried to the line probe as well, the
+  recovery read its integrals worse. The own fit's errors alternate from
+  element to element and cancel along a line, where the recovered field's
+  smaller error is smooth and adds up. On `canonical_consumer`'s travelling
+  packet, a segment's flux across the channel read 3.5e-4, 2.4e-4 and 6.7e-5
+  of the peak at edges 0.1, 0.05 and 0.025, against the own fit's 2.0e-3,
+  5.5e-4 and 6.4e-6. With the exact `u` in place of the read one, the
+  recovered error fell only from 5.2e-4 to 3.4e-4 over the first two, so it
+  is the transverse field's. On the `observables` channel the recovered line
+  read the energy down the wall 2.0% high, against 1.5%, while the segment
+  across and Poynting round the loop read better. The spike doc records it
+  under "Line probes", and plan.md's worth-checking entry now names the line
+  probe.
+- **The check that bites.**
+  `a_quadratic_on_each_side_is_read_exactly` reads a different quadratic
+  outside, in a drum of the same medium behind a reflecting rim, and in a
+  stiffer disc, at six places in every element, within 1e-10. With the
+  medium filter dropped, so that the fits cross the disc's edge, it reads
+  3.2e-1 off.
+- **Bounds narrowed.** The point readings the tests hold, to about twice
+  what the recovery reads. The standing mode at edge 0.125: the transverse
+  field, the density and the flow within 9e-4, 7e-4 and 3e-4 (4.5e-4, 3.3e-4,
+  1.5e-4; the own six read 1.6e-3, 8.3e-4, 5.5e-4). The packet at 0.05:
+  within 9e-4, 6e-4 and 7e-4 (4.4e-4, 2.8e-4, 3.3e-4; the own six 1.9e-3,
+  1.1e-3, 1.9e-3). The `observables` twin's points: within 4e-3, 2e-3 and
+  2e-3 (1.9e-3, 9.6e-4, 9.7e-4; the own six 9.0e-3, 4.6e-3, 4.5e-3, past
+  every new bound). The consumers' readings still fall at least 2.5 times
+  under refinement.
+- **Driven media.** `kerr-slab` and `travelling-modulation` on the CPU at
+  edges 0.08 and 0.04, the coarse step twice the fine, 82 points read over
+  4 s. The meshes' own solutions differ by more than the two rules: 3% to 9%
+  of the amplitude on the Kerr slab, up to 60% under the travelling
+  modulation, where the two rules at the finer mesh differ by 2.8e-2 and
+  7.0e-2 at worst. Against the finer run, the recovered coarse reading is
+  closer in the mean, by 10% and 30%, and at its worst point between 6%
+  closer and 3% further than the own fit's: 1.6% further on the Kerr slab.
+  The plan asked for no further anywhere; within the meshes' own difference
+  that was accepted.
+- **Not measured.** The cost with the largest line probe, since a line no
+  longer reads the table. The point recorder reads at most 16 points of
+  about 78 entries each.
+- **Device suite:** 113 of 113. `observables` reads its points 2.75e-5 off
+  their twin, lines 6.1e-6, their integrals 4.1e-6, areas 4.7e-7 and
+  Poynting round the loop 7.5e-3, as before. The temporal consumer's five
+  runs read their points' transverse fields within 4.8e-7 of their twins. The suite's logs at
+  the commit before were gone, so no run was diffed against them.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

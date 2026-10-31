@@ -328,7 +328,7 @@ fn main() -> AppExit {
     let line_expected = line
         .iter()
         .map(|(stencil, normal)| {
-            let consumer = CanonicalTemporalPointStencil::from_quadratic(*stencil, &operator)
+            let consumer = CanonicalTemporalPointStencil::from_quadratic_own(*stencil, &operator)
                 .expect("temporal line consumer");
             let sample = consumer
                 .sample(
@@ -354,7 +354,7 @@ fn main() -> AppExit {
     let arrows = line
         .iter()
         .map(|(stencil, _)| {
-            let consumer = CanonicalTemporalPointStencil::from_quadratic(*stencil, &operator)
+            let consumer = CanonicalTemporalPointStencil::from_quadratic_own(*stencil, &operator)
                 .expect("temporal arrow consumer");
             let sample = consumer
                 .sample(

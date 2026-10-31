@@ -1316,16 +1316,18 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   today's reading is up to 9.0e-3. The rule set before measuring asked for
   halving at walls and interfaces too. That was relaxed to "never worse",
   and the recovery taken.
-- [ ] Read a point's transverse field by patch recovery, with a second ring
+- [x] Read a point's transverse field by patch recovery, with a second ring
   at material interfaces (`docs/spikes/funfern-point-recovery-spike.md`,
-  "For production"). Each point's weights over its neighbours' samples,
-  about 78 and at most 114 in the spike's corpus, are fixed when its stencil
-  is built. The device reads them from a table beside the stencils, through
-  the point and curve probes' shared block. The vector overlay keeps its six
-  weights, and the CPU twins read the same table. Then narrow the
-  `observables` fixture's three bounds, and measure again the segment down
-  its wall, the probes' cost with the largest curve, and temporal and
-  nonlinear media against a refined run (2026-10-31).
+  "For production"). Done on 2026-10-31 for the point probe alone
+  (`canonical_recovery`): each point's weights over the samples around it
+  are fixed when its stencil is built, the device reads them from a table
+  at the point recorder's eighth binding, and the CPU twins read the same.
+  The `observables` fixture's points read their transverse field within
+  1.9e-3, where they read 9.0e-3, and its three bounds narrow to 4e-3, 2e-3
+  and 2e-3. A line probe keeps its element's own six samples: recovered, its
+  integrals got worse, a segment's flux on a well resolved packet ten times
+  and the energy down the fixture's wall 2.0% high against 1.5% (the spike
+  doc's "Line probes"). The vector overlay keeps them too.
 - [x] A separated span the mesher samples as one segment, its two sides the
   same pair of trace vertices where transmitting neighbours merge the
   junctions, could not be cut: every face-law case of every crystal rod in
@@ -1659,18 +1661,18 @@ is next touched.
   wall reads the power leaving 1.5% high, which the wall's ledger books to
   1.8e-4. The fixture's CPU test holds it within 3% (found by PH-18 on
   2026-10-18).
-- The transverse field a point probe reads, the quadratic through its
-  element's six samples, is 0.4% to 1.8% of the amplitude off by where the
-  point falls in the element. It is worst near an edge, where the quadratic
-  is extrapolated: the samples sit at least 0.09 in from every edge in
-  barycentric terms. On the `observables` channel at edge 0.07, the upstream
-  point, 0.004 from an edge, reads 9.0e-3 off of 0.5, and that element's
-  centroid about 5e-3. On the mesh before the chain cut changed, both points
-  read within 1.9e-3, and the upstream point moved onto an edge 5.0e-3. The
-  density and the flow take it in, and the fixture's CPU test holds the
-  three at 1.2e-2, 6e-3 and 6e-3. Recovering the field from the neighbours'
-  samples reads it within 2.6e-3 (`docs/spikes/funfern-point-recovery-spike.md`,
-  2026-10-31), and is open under Maintenance.
+- The transverse field a line probe reads at each of its points, the
+  quadratic through its element's six samples, is 0.4% to 1.8% of the
+  amplitude off by where the point falls in the element. It is worst near an
+  edge, where the quadratic is extrapolated: the samples sit at least 0.09 in
+  from every edge in barycentric terms. A point probe recovers its field from
+  the samples around it instead. A line integrates its points, and the own
+  fit's errors alternate and cancel along it, where the recovered field's
+  smaller, smooth error adds up: recovered, a segment's flux on a well
+  resolved packet read ten times further off, and the energy down the
+  `observables` channel's wall 2.0% high against 1.5%
+  (`docs/spikes/funfern-point-recovery-spike.md`, "Line probes",
+  2026-10-31). A recovery that keeps each element's own mean was not tried.
 - Late in an epoch the device's local time is one f32 near 256 s, 3e-5 s
   apart, and the drives' phases carry about 1e-4 rad from it. 254 s into an
   epoch, `far-field-late`'s state reads 1.25e-4 off the f64 reference, where a

@@ -761,8 +761,9 @@ small-angle limit, puts the 1 rad swing's period 6.2% off while the 1e-3 rad
 swing still passes.
 PH-18 holds what users read to analytic fields. Every probe number on screen
 comes from a GPU recorder whose CPU twin is the canonical consumer:
-`CanonicalPointStencil` for a point or each sample of a line, and
-`sample_canonical_area` for an area. First the consumers, in every skin, on
+`CanonicalPointStencil` for a point, its transverse field recovered from the
+samples around it, or for each sample of a line, read from its element's own
+six, and `sample_canonical_area` for an area. First the consumers, in every skin, on
 a medium of mass slot 2 and stiffness slot 0.8, so that each skin's units
 show: Mechanical's density and modulus, TM's `ε` and `1/μ`, and TE's `μ` and
 `1/ε`, as `(ρ, A)` in `ρü = ∇·(A∇u)`. A standing mode of the reflecting box,
@@ -771,12 +772,13 @@ at an edge of 0.125 and the production step to:
 - the field within 3e-4 (1.5e-4);
 - the rate, a backward difference, against `u̇` half a step before the
   sample, within 2e-3 (1.0e-3);
-- the transverse field `c = orientation·A·R∇φ sin ωt/ω` within 3.2e-3
-  (1.6e-3);
-- the energy density within 1.7e-3 (8.3e-4) and the flow
-  `orientation·u·Rc` within 1.1e-3 (5.5e-4).
+- the transverse field `c = orientation·A·R∇φ sin ωt/ω` within 9e-4
+  (4.5e-4);
+- the energy density within 7e-4 (3.3e-4) and the flow
+  `orientation·u·Rc` within 3e-4 (1.5e-4).
 
-Each falls at least 2.5 times from an edge of 0.25. A disk's mean and RMS
+Each falls at least 2.5 times from an edge of 0.25. The element's own six
+samples read the last three 1.6e-3, 8.3e-4 and 5.5e-4. A disk's mean and RMS
 read within 1e-4 (4e-5, the drawn circle's floor) of polar quadratures of
 the field, and its energy within 7e-3 (3.5e-3). That energy is the solver's
 lumped energy with a clipped element counted by its covered fraction, as the
@@ -786,12 +788,13 @@ A packet travelling down a channel, `u = −c₀P′(x − c₀t)` from an integ
 field `P`, a Gaussian times a sine
 (`the_consumers_read_a_travelling_packet_in_every_skin`), is held at an edge
 of 0.05 to:
-- the field within 4e-4 (1.8e-4) and the transverse field within 4e-3
-  (1.9e-3);
-- the density within 2.2e-3 (1.1e-3) and the flow `c₀w` along its travel
-  within 4e-3 (1.9e-3);
-- the readout's trapezoid over 64 points across the channel within 1.1e-3
-  (5.5e-4), negative under the segment's left normal against the travel;
+- the field within 4e-4 (1.8e-4) and the transverse field within 9e-4
+  (4.4e-4);
+- the density within 6e-4 (2.8e-4) and the flow `c₀w` along its travel
+  within 7e-4 (3.3e-4);
+- the readout's trapezoid over 64 points across the channel, a line read
+  through each element's own six samples, within 1.1e-3 (5.5e-4), negative
+  under the segment's left normal against the travel;
 - the energy that flux carries over the run within 1.2e-3 of the packet's
   own (5.1e-4).
 
@@ -840,8 +843,8 @@ The twins are held to the wave on the CPU at the same mesh and step
 (`the_twins_meet_the_wave_on_the_observables_channel`):
 - the points' field within 2.5e-3 of an amplitude of 0.5 (6.9e-4), the
   segment across within 1.5e-3 (8.4e-4), Poynting within 4e-3 (2.1e-3);
-- the points' transverse field within 1.2e-2 (9.0e-3), and the density and
-  the flow built on it within 6e-3 (4.6e-3 and 4.5e-3);
+- the points' transverse field within 4e-3 (1.9e-3), and the density and
+  the flow built on it within 2e-3 (9.6e-4 and 9.7e-4);
 - the wall's ledger booking `2∫g²` within 5e-4 (2.1e-4);
 - the spectrum and the transfer as on the device.
 
@@ -849,11 +852,12 @@ The segment down the wall carries 1.5% more than the ledger books. The
 transverse field on the wall's elements reads 1.5% high at the wall and 0.7%
 low half an element in, where the field reads exact, falling four times as
 the edge halves. It is held within 3% and listed as worth checking. A
-point's transverse field, the quadratic through its element's six samples,
-reads 0.4% to 1.8% of the amplitude off by where the point falls in the
-element: the upstream point, near an edge of its element, reads 9.0e-3, that
-element's centroid about 5e-3. It is listed as worth checking too, with a
-spike to recover it from the neighbours' samples. The
+point's transverse field is recovered from the samples around it
+(`docs/spikes/funfern-point-recovery-spike.md`). The quadratic through its
+element's own six samples read the upstream point, near an edge of its
+element, 9.0e-3 off. A line keeps its element's own six, whose errors
+alternate and cancel along it: recovered, the segment down the wall read
+2.0% high. The
 mutation `curve-probe-flux-reversed`, the line recorder's normal flux with
 its sign turned, reads the lines 2.1 off.
 

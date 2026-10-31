@@ -50,15 +50,21 @@ pub const MAX_VECTOR_OVERLAY_SAMPLES: usize = 16_384;
 /// the counts those layouts must respect.
 const CANONICAL_AREA_ELEMENT_STORAGE_BINDINGS: usize = 7;
 const CANONICAL_AREA_REDUCE_STORAGE_BINDINGS: usize = 5;
+/// The point recorder binds eight, its recovered samples the eighth: all a
+/// portable stage may. The line recorder's shader declares the same eight for
+/// the shared block, and binds seven: it reads its element's own samples.
+const CANONICAL_POINT_PROBE_STORAGE_BINDINGS: usize = 8;
 const WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT: usize = 8;
 const _: () = {
     assert!(CANONICAL_AREA_ELEMENT_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
     assert!(CANONICAL_AREA_REDUCE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
+    assert!(CANONICAL_POINT_PROBE_STORAGE_BINDINGS <= WEBGPU_PORTABLE_STORAGE_BUFFER_LIMIT);
 };
 
 #[derive(Clone)]
 pub(crate) struct ProbeBufferHandles {
     stencils: Handle<ShaderBuffer>,
+    recovery: Handle<ShaderBuffer>,
     control: Handle<ShaderBuffer>,
     output: Handle<ShaderBuffer>,
     ids: Arc<[u64]>,
@@ -214,8 +220,8 @@ impl CurveProbeBufferHandles {
 }
 
 impl ProbeBufferHandles {
-    fn all(&self) -> [&Handle<ShaderBuffer>; 3] {
-        [&self.stencils, &self.control, &self.output]
+    fn all(&self) -> [&Handle<ShaderBuffer>; 4] {
+        [&self.stencils, &self.recovery, &self.control, &self.output]
     }
 }
 
@@ -426,10 +432,11 @@ impl WaveGpuRequest {
             return Ok(());
         }
         let sample_stride = (1.0 / (sample_rate * time_step)).round().max(1.0) as u64;
+        let mut recovery = Vec::new();
         let stencils = probes
             .iter()
             .map(|(_, stencil)| match stencil {
-                Some(stencil) => source.build(*stencil, "point"),
+                Some(stencil) => source.build_recovered(*stencil, "point", &mut recovery),
                 None => Ok(GpuCanonicalPointStencil::default()),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -437,7 +444,7 @@ impl WaveGpuRequest {
             assets,
             commands,
             probes,
-            stencils,
+            (stencils, recovery),
             sample_stride,
             physics,
             history,
@@ -450,11 +457,12 @@ impl WaveGpuRequest {
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
         probes: &[(u64, Option<QuadraticPointStencil>)],
-        stencils: Vec<GpuCanonicalPointStencil>,
+        (stencils, recovery): (Vec<GpuCanonicalPointStencil>, Vec<GpuRecoveredSample>),
         sample_stride: u64,
         physics: PhysicsModel,
         history: RecorderHistory,
     ) -> Result<(), String> {
+        let recovery = bound_recovery(recovery);
         let ids = probes.iter().map(|(id, _)| *id).collect::<Arc<[u64]>>();
         let control = GpuProbeControl {
             values: Vec4::new(
@@ -472,9 +480,11 @@ impl WaveGpuRequest {
         let handles = if kept {
             let previous = self.probes.take().expect("a kept ring exists");
             assets.remove(previous.stencils.id());
+            assets.remove(previous.recovery.id());
             assets.remove(previous.control.id());
             ProbeBufferHandles {
                 stencils: assets.add(ShaderBuffer::from(stencils)),
+                recovery: assets.add(ShaderBuffer::from(recovery)),
                 control: assets.add(ShaderBuffer::from(control)),
                 sample_stride,
                 physics,
@@ -492,6 +502,7 @@ impl WaveGpuRequest {
             ];
             ProbeBufferHandles {
                 stencils: assets.add(ShaderBuffer::from(stencils)),
+                recovery: assets.add(ShaderBuffer::from(recovery)),
                 control: assets.add(ShaderBuffer::from(control)),
                 output: assets.add(ShaderBuffer::from(output)),
                 ids,
@@ -1540,6 +1551,29 @@ struct GpuCanonicalPointStencil {
     temporal_primary_a: UVec4,
     temporal_primary_b: UVec4,
     temporal_complementary: UVec4,
+    /// `x` the first of a point probe's recovered samples in its recorder's
+    /// table and `y` how many; none for a line probe or the vector overlay,
+    /// which read their element's own six above.
+    recovery: UVec4,
+}
+
+/// One sample a point's recovered field combines: `sample_word.x` its index
+/// and `.y` its law record in the temporal table, zero on a static
+/// generation; `inverse_weight.xyz` its constitutive inverse and `.w` its
+/// weight.
+#[derive(Clone, Copy, Default, ShaderType)]
+struct GpuRecoveredSample {
+    sample_word: UVec4,
+    inverse_weight: Vec4,
+}
+
+/// A recorder's table of recovered samples, never empty: a buffer of none
+/// cannot be bound.
+fn bound_recovery(mut recovery: Vec<GpuRecoveredSample>) -> Vec<GpuRecoveredSample> {
+    if recovery.is_empty() {
+        recovery.push(GpuRecoveredSample::default());
+    }
+    recovery
 }
 
 #[derive(Clone, Copy, Default, ShaderType)]
@@ -1609,27 +1643,81 @@ enum CanonicalStencilSource<'a> {
 }
 
 impl CanonicalStencilSource<'_> {
+    /// A stencil that reads its element's own six samples: a line probe's
+    /// or the vector overlay's.
     fn build(
         &self,
         stencil: QuadraticPointStencil,
         consumer: &str,
     ) -> Result<GpuCanonicalPointStencil, String> {
         match self {
-            Self::Fixed(operator) => CanonicalPointStencil::from_quadratic(stencil, operator)
-                .map(|stencil| gpu_canonical_point_stencil(Some(stencil)))
+            Self::Fixed(operator) => CanonicalPointStencil::from_quadratic_own(stencil, operator)
+                .map(|stencil| gpu_canonical_point_stencil(Some(&stencil)))
                 .map_err(|error| format!("Canonical {consumer} reconstruction failed: {error}")),
+            Self::Temporal { operator, index } => {
+                let stencil = CanonicalTemporalPointStencil::from_quadratic_own(stencil, operator)
+                    .map_err(|error| {
+                        format!("Temporal {consumer} reconstruction failed: {error}")
+                    })?;
+                gpu_temporal_canonical_point_stencil(&stencil, operator, index)
+            }
+        }
+    }
+
+    /// A point consumer's stencil, its field recovered from the samples
+    /// around it, which are appended to `table`.
+    fn build_recovered(
+        &self,
+        stencil: QuadraticPointStencil,
+        consumer: &str,
+        table: &mut Vec<GpuRecoveredSample>,
+    ) -> Result<GpuCanonicalPointStencil, String> {
+        let (mut result, recovery, index) = match self {
+            Self::Fixed(operator) => {
+                let stencil =
+                    CanonicalPointStencil::from_quadratic(stencil, operator).map_err(|error| {
+                        format!("Canonical {consumer} reconstruction failed: {error}")
+                    })?;
+                (
+                    gpu_canonical_point_stencil(Some(&stencil)),
+                    stencil.recovery,
+                    None,
+                )
+            }
             Self::Temporal { operator, index } => {
                 let stencil = CanonicalTemporalPointStencil::from_quadratic(stencil, operator)
                     .map_err(|error| {
                         format!("Temporal {consumer} reconstruction failed: {error}")
                     })?;
-                gpu_temporal_canonical_point_stencil(stencil, operator, index)
+                let result = gpu_temporal_canonical_point_stencil(&stencil, operator, index)?;
+                (result, stencil.fixed().recovery.clone(), Some(*index))
             }
+        };
+        let offset = u32::try_from(table.len())
+            .map_err(|_| format!("The {consumer} recovery table exceeds u32"))?;
+        for entry in &recovery {
+            let word = match index {
+                Some(index) => index.sample_word(entry.sample)?,
+                None => 0,
+            };
+            table.push(GpuRecoveredSample {
+                sample_word: UVec4::new(entry.sample, word, 0, 0),
+                inverse_weight: Vec4::new(
+                    entry.inverse.xx as f32,
+                    entry.inverse.xy as f32,
+                    entry.inverse.yy as f32,
+                    entry.weight as f32,
+                ),
+            });
         }
+        result.recovery = UVec4::new(offset, recovery.len() as u32, 0, 0);
+        Ok(result)
     }
 }
 
-fn gpu_canonical_point_stencil(stencil: Option<CanonicalPointStencil>) -> GpuCanonicalPointStencil {
+fn gpu_canonical_point_stencil(
+    stencil: Option<&CanonicalPointStencil>,
+) -> GpuCanonicalPointStencil {
     let Some(stencil) = stencil else {
         return GpuCanonicalPointStencil::default();
     };
@@ -1667,6 +1755,7 @@ fn gpu_canonical_point_stencil(stencil: Option<CanonicalPointStencil>) -> GpuCan
         temporal_primary_a: UVec4::ZERO,
         temporal_primary_b: UVec4::ZERO,
         temporal_complementary: UVec4::ZERO,
+        recovery: UVec4::ZERO,
     }
 }
 
@@ -1777,7 +1866,14 @@ impl TemporalTableIndex {
     fn complementary_word(&self, element: u32) -> Result<u32, String> {
         (element as usize)
             .checked_mul(COMPLEMENTARY_SAMPLES)
-            .and_then(|record| record.checked_mul(self.coefficient_words))
+            .ok_or_else(|| "A temporal complementary table address exceeds u32".to_string())
+            .and_then(|sample| self.sample_word(sample as u32))
+    }
+
+    /// The law record of one complementary sample.
+    fn sample_word(&self, sample: u32) -> Result<u32, String> {
+        (sample as usize)
+            .checked_mul(self.coefficient_words)
             .and_then(|offset| self.complementary_offset.checked_add(offset))
             .and_then(|word| u32::try_from(word).ok())
             .ok_or_else(|| "A temporal complementary table address exceeds u32".to_string())
@@ -1785,7 +1881,7 @@ impl TemporalTableIndex {
 }
 
 fn gpu_temporal_canonical_point_stencil(
-    stencil: CanonicalTemporalPointStencil,
+    stencil: &CanonicalTemporalPointStencil,
     operator: &CanonicalTemporalWaveOperator,
     index: &TemporalTableIndex,
 ) -> Result<GpuCanonicalPointStencil, String> {
@@ -2311,6 +2407,7 @@ fn init_pipeline(
                 storage_buffer_read_only::<GpuProbeControl>(false),
                 storage_buffer::<Vec<GpuCanonicalPointProbeSample>>(false),
                 storage_buffer_read_only::<Vec<GpuCanonicalTableWord>>(false),
+                storage_buffer_read_only::<Vec<GpuRecoveredSample>>(false),
             ),
         ),
     );
@@ -2843,8 +2940,9 @@ fn prepare_probe_bind_group(
     }) {
         return;
     }
-    let (Some(stencils), Some(control), Some(output)) = (
+    let (Some(stencils), Some(recovery), Some(control), Some(output)) = (
         gpu_buffers.get(&probes.stencils),
+        gpu_buffers.get(&probes.recovery),
         gpu_buffers.get(&probes.control),
         gpu_buffers.get(&probes.output),
     ) else {
@@ -2875,6 +2973,7 @@ fn prepare_probe_bind_group(
             control.buffer.as_entire_buffer_binding(),
             output.buffer.as_entire_buffer_binding(),
             tables.buffer.as_entire_buffer_binding(),
+            recovery.buffer.as_entire_buffer_binding(),
         )),
     );
     commands.insert_resource(ProbeBindGroup {
@@ -3016,6 +3115,10 @@ mod tests {
             count(include_str!("canonical_curve_probe.wgsl")),
             "the point-family shaders share one bind-group shape"
         );
+        assert_eq!(
+            count(include_str!("canonical_probe.wgsl")),
+            CANONICAL_POINT_PROBE_STORAGE_BINDINGS
+        );
     }
 
     #[test]
@@ -3035,9 +3138,17 @@ mod tests {
         assert!(point.contains("bitcast<u32>(control.clock_origin.y + control.clock_f32.y)"));
         assert!(!point.contains("indicator_potential"));
 
+        // The point probe reads its recovered field; the overlay and the line
+        // probe, their element's own six samples.
+        assert!(point.contains("let complement = recovered_complement(stencil, time);"));
+        assert!(point.contains(
+            "let complement = physical_complement(stencil, accepted_sample_flux(stencil), time);"
+        ));
+
         let curve = include_str!("canonical_curve_probe.wgsl");
         assert!(curve.contains("dot(flow, record.normal_stride_valid.xy)"));
         assert!(curve.contains("control.clock_u32.w % stride"));
+        assert!(!curve.contains("let complement = recovered_complement"));
 
         let area = include_str!("canonical_area_probe.wgsl");
         assert!(area.contains("fn sample_area_elements"));
@@ -3184,24 +3295,29 @@ mod tests {
         let curve = shared_reconstruction_block(include_str!("canonical_curve_probe.wgsl"));
         assert_eq!(point, curve);
         assert!(point.contains("fn physical_complement"));
-        assert!(point.contains("fn sample_temporal_factor"));
+        assert!(point.contains("fn recovered_complement"));
+        assert!(point.contains("fn law_field"));
         assert!(point.len() > 4_000, "the block lost its contents");
     }
 
     /// Every consumer recovers the physical complementary field at the
-    /// element's own samples and interpolates that, rather than inverting once
-    /// at an interpolated flux. The area shader cannot share the text above,
-    /// so its arithmetic is pinned here instead.
+    /// solver's own samples and combines that, rather than inverting once at
+    /// an interpolated flux: the element's own six, or for a point probe the
+    /// samples around it. The area shader cannot share the text above, so
+    /// its arithmetic is pinned here instead.
     #[test]
     fn consumers_invert_at_solver_samples_before_interpolating() {
         let point = include_str!("canonical_probe.wgsl");
         assert!(point.contains(
             "field += sample_field(stencil, local, flux[local], local_time) * weights[local];"
         ));
+        assert!(point.contains(
+            "let linear = apply_symmetric(inverse, flux) / record_factor(word, local_time);"
+        ));
+        assert!(point.contains("return law_field(stencil.sample_inverse[local].xyz,"));
         assert!(
-            point.contains("let linear = apply_symmetric(stencil.sample_inverse[local].xyz, flux)")
+            point.contains("field += law_field(sample.inverse_weight.xyz, sample.sample_word.y,")
         );
-        assert!(point.contains("/ sample_temporal_factor(stencil, local, local_time)"));
         assert!(
             point.contains("dot(field, apply_symmetric(stencil.reference_inverse.yzw, field))")
         );
@@ -3226,7 +3342,7 @@ mod tests {
             ("fn field_kind(word: u32)", "fn record_factor(word: u32"),
             (
                 "fn probe_primary_field(",
-                "// `v(b)` at one of the element's samples",
+                "// `v(b)` at a sample whose inverse is `inverse`",
             ),
         ] {
             let shared = piece(point, from, to);

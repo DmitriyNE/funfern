@@ -241,6 +241,9 @@ impl Twin {
         let canonical = |stencil| {
             CanonicalPointStencil::from_quadratic(stencil, &operator).map_err(|e| e.to_string())
         };
+        let own = |stencil| {
+            CanonicalPointStencil::from_quadratic_own(stencil, &operator).map_err(|e| e.to_string())
+        };
         let mut points = Vec::new();
         for id in POINTS {
             let TopologyProbeStencil::Point(stencil) = stencil(id)? else {
@@ -262,7 +265,7 @@ impl Twin {
                     let normal = Point2::new(-along.y, along.x) * (1.0 / along.norm());
                     let samples = stencils
                         .into_iter()
-                        .map(|stencil| canonical(stencil).map(|stencil| (stencil, normal)))
+                        .map(|stencil| own(stencil).map(|stencil| (stencil, normal)))
                         .collect::<Result<Vec<_>, _>>()?;
                     (samples, along.norm())
                 }
@@ -274,8 +277,7 @@ impl Twin {
                     let samples = stencils
                         .into_iter()
                         .map(|sample| {
-                            canonical(sample.stencil)
-                                .map(|stencil| (stencil, sample.outward_normal))
+                            own(sample.stencil).map(|stencil| (stencil, sample.outward_normal))
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     (samples, length)
@@ -760,9 +762,9 @@ mod tests {
     /// step, against the plane wave `u = g(t − (x + 1))` over the 8 s run:
     /// - the points' field within 2.5e-3 (6.9e-4, of an amplitude of 0.5),
     ///   their rate against `u̇` half a step before the sample within 4e-3
-    ///   of `2πf` (2.3e-3), the transverse field `|c| = |u|` within 1.2e-2
-    ///   (9.0e-3), the density `u²` within 6e-3 (4.6e-3) and the flow
-    ///   `(u², 0)` within 6e-3 (4.5e-3);
+    ///   of `2πf` (2.3e-3), the transverse field `|c| = |u|` within 4e-3
+    ///   (1.9e-3), the density `u²` within 2e-3 (9.6e-4) and the flow
+    ///   `(u², 0)` within 2e-3 (9.7e-4);
     /// - the segment across, by the readout's trapezoid, `−2u²` under its
     ///   left normal within 1.5e-3 (8.4e-4);
     /// - round the loop, Poynting's theorem against the area inside within
@@ -773,14 +775,10 @@ mod tests {
     ///   wall and 0.7% low half an element in, where the field reads exact,
     ///   falling four times as the edge halves. Held within 3%, and listed as
     ///   worth checking;
-    /// - the transverse field at a point is the quadratic through its
-    ///   element's six samples, and reads 0.4% to 1.8% of the amplitude off
-    ///   by where the point falls in the element: the upstream point, 0.004
-    ///   from an edge in barycentric terms, reads 9.0e-3, that element's
-    ///   centroid about 5e-3, and both points read within 1.9e-3 on the mesh
-    ///   the chain cut left before 2026-10-30. The density and the flow take
-    ///   it in, so the three are held wide of the rest; listed as worth
-    ///   checking;
+    /// - the transverse field at a point is recovered from the samples around
+    ///   it (`canonical_recovery`). The quadratic through its element's own
+    ///   six read the upstream point, 0.004 from an edge in barycentric
+    ///   terms, 9.0e-3 off, and its density and flow 4.6e-3 and 4.5e-3;
     /// - the readout's spectrum of the upstream point peaks within 1e-2 of
     ///   the drive's amplitude (5.7e-4), and the transfer to the downstream
     ///   one, a pure delay, reads one within 2e-3 (4.6e-4).
@@ -861,7 +859,7 @@ mod tests {
                 height * u * u * span / f64::from(samples)
             })
             .sum::<f64>();
-        let bounds = [2.5e-3, 4.0e-3, 1.2e-2, 6.0e-3, 6.0e-3, 1.5e-3, 4.0e-3];
+        let bounds = [2.5e-3, 4.0e-3, 4.0e-3, 2.0e-3, 2.0e-3, 1.5e-3, 4.0e-3];
         for (slot, (read, bound)) in worst.iter().zip(bounds).enumerate() {
             assert!(*read <= bound, "reading {slot} at {read:.2e}: {worst:?}");
         }

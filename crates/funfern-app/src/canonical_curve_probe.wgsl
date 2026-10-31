@@ -24,7 +24,13 @@ struct PointStencil {
     sample_inverse: array<vec4<f32>, 6>,
     temporal_primary_a: vec4<u32>, temporal_primary_b: vec4<u32>,
     temporal_complementary: vec4<u32>,
+    // The first of a point probe's recovered samples and how many; none for
+    // a line probe or the vector overlay, which read their element's own six.
+    recovery: vec4<u32>,
 }
+// One sample a recovered field combines: its index and law record, its
+// constitutive inverse and its weight.
+struct RecoveredSample { sample_word: vec4<u32>, inverse_weight: vec4<f32> }
 struct CurveStencil { point: PointStencil, normal_stride_valid: vec4<f32> }
 struct ProbeControl { values: vec4<f32> }
 struct ProbeSample { primary: vec4<f32>, secondary: vec4<f32> }
@@ -36,6 +42,7 @@ struct ProbeSample { primary: vec4<f32>, secondary: vec4<f32> }
 @group(0) @binding(4) var<storage, read> probe_control: ProbeControl;
 @group(0) @binding(5) var<storage, read_write> output: array<ProbeSample>;
 @group(0) @binding(6) var<storage, read> tables: array<TableWord>;
+@group(0) @binding(7) var<storage, read> recovered_samples: array<RecoveredSample>;
 
 // ---- shared canonical point reconstruction ----
 // Byte-identical in canonical_probe.wgsl and canonical_curve_probe.wgsl, and
@@ -324,17 +331,16 @@ fn probe_primary_field(node: u32, flux: f32, local_time: f32) -> f32 {
     }
     return select(-r, r, flux >= 0.0);
 }
-// `v(b)` at one of the element's samples: the radial solve on a nonlinear
-// record, `J b / factor` on a linear one.
-fn sample_field(stencil: PointStencil, local: u32, flux: vec2<f32>, local_time: f32) -> vec2<f32> {
-    let linear = apply_symmetric(stencil.sample_inverse[local].xyz, flux)
-        / sample_temporal_factor(stencil, local, local_time);
-    if !temporal_enabled() { return linear; }
-    let word = stencil.temporal_complementary.x + local * TEMPORAL_COEFFICIENT_WORDS;
+// `v(b)` at a sample whose inverse is `inverse` and whose law record starts
+// at `word`: the radial solve on a nonlinear record, `J b / factor` on a
+// linear one.
+fn law_field(inverse: vec3<f32>, word: u32, flux: vec2<f32>, local_time: f32) -> vec2<f32> {
+    if !temporal_enabled() { return apply_symmetric(inverse, flux); }
+    let linear = apply_symmetric(inverse, flux) / record_factor(word, local_time);
     if field_kind(word) == 0u { return linear; }
     let magnitude = length(flux);
     if magnitude == 0.0 { return vec2<f32>(0.0); }
-    let coefficient = record_factor(word, local_time) / stencil.sample_inverse[local].x;
+    let coefficient = record_factor(word, local_time) / inverse.x;
     let floor_value = coefficient * table_float(word + 3u, 3u);
     if !(floor_value > 0.0) { return linear; }
     var high = magnitude / floor_value;
@@ -352,6 +358,11 @@ fn sample_field(stencil: PointStencil, local: u32, flux: vec2<f32>, local_time: 
         r = select(0.5 * (low + high), newton, newton > low && newton < high);
     }
     return flux * (r / magnitude);
+}
+// `v(b)` at one of the element's own samples.
+fn sample_field(stencil: PointStencil, local: u32, flux: vec2<f32>, local_time: f32) -> vec2<f32> {
+    return law_field(stencil.sample_inverse[local].xyz,
+        stencil.temporal_complementary.x + local * TEMPORAL_COEFFICIENT_WORDS, flux, local_time);
 }
 // The assembled nodal map, summed over every contribution that owns this
 // node. This is the primary inverse the solver itself owns.
@@ -385,15 +396,6 @@ fn previous_sample_flux(stencil: PointStencil) -> array<vec2<f32>, 6> {
     return array<vec2<f32>, 6>(
         previous_b(start), previous_b(start + 1u), previous_b(start + 2u),
         previous_b(start + 3u), previous_b(start + 4u), previous_b(start + 5u));
-}
-// The law at one of the element's own samples, evaluated at that sample's own
-// material coordinates rather than at an interpolated phase.
-fn sample_temporal_factor(stencil: PointStencil, local: u32, local_time: f32) -> f32 {
-    if !temporal_enabled() { return 1.0; }
-    let word = stencil.temporal_complementary.x + local * TEMPORAL_COEFFICIENT_WORDS;
-    return temporal_factor(tables[word].data, tables[word + 1u].data,
-        table_float(word + 2u, 0u), table_float(word + 2u, 1u),
-        table_float(word + 2u, 2u), local_time);
 }
 // The same law at the probe point, for the pointwise densities only.
 fn probe_temporal_factor(stencil: PointStencil, primary: bool, local_time: f32) -> f32 {
@@ -431,6 +433,18 @@ fn physical_complement(
     var field = vec2<f32>(0.0);
     for (var local = 0u; local < COMPLEMENTARY_SAMPLES; local += 1u) {
         field += sample_field(stencil, local, flux[local], local_time) * weights[local];
+    }
+    return field;
+}
+// A point probe's field, recovered from the samples around it, each still
+// `v(b)` at its own site under its own law (`canonical_recovery`).
+fn recovered_complement(stencil: PointStencil, local_time: f32) -> vec2<f32> {
+    var field = vec2<f32>(0.0);
+    let end = stencil.recovery.x + stencil.recovery.y;
+    for (var entry = stencil.recovery.x; entry < end; entry += 1u) {
+        let sample = recovered_samples[entry];
+        field += law_field(sample.inverse_weight.xyz, sample.sample_word.y,
+            accepted_b(sample.sample_word.x), local_time) * sample.inverse_weight.w;
     }
     return field;
 }
@@ -522,6 +536,9 @@ fn sample_curve_probes(@builtin(global_invocation_id) invocation: vec3<u32>) {
     }
     let time = control.clock_f32.y;
     let primary = primary_field(record.point, time);
+    // A line's own six samples: their errors alternate from element to
+    // element and cancel along the line, where a recovered field's smaller,
+    // smooth error would add up (`canonical_recovery`).
     let complement = physical_complement(
         record.point, accepted_sample_flux(record.point), time);
     let energy = primary_energy(record.point, primary, time)

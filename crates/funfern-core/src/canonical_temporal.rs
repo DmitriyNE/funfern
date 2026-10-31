@@ -21,13 +21,14 @@ use crate::canonical_wave::{
 use crate::{
     CanonicalAreaContribution, CanonicalAreaSample, CanonicalForcing, CanonicalIndicatorSnapshot,
     CanonicalIndicatorSupplement, CanonicalPointSample, CanonicalPointStencil,
-    CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, ConstitutiveInverseError,
-    ConstitutiveSite, ConstitutiveTerm, DampingLaw, DampingLawValues, ElectromagneticPolarization,
-    FieldLawValues, LossChannel, Material, MaterialCoordinates, MaterialError, MaterialId,
-    MaterialSwitchRuntime, PhysicsModel, Point2, QuadraticAreaElement, QuadraticAreaStencil,
-    QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues, RegionId, RestoringLaw,
-    RestoringLawValues, SymmetricTensor2, TimeDriveRuntime, TimeDriveValues, TopologyWaveModel,
-    TriMesh, WaveError, canonical_area_contribution, complementary_interpolation_weights,
+    CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, ComplementaryRecovery,
+    ConstitutiveInverseError, ConstitutiveSite, ConstitutiveTerm, DampingLaw, DampingLawValues,
+    ElectromagneticPolarization, FieldLawValues, LossChannel, Material, MaterialCoordinates,
+    MaterialError, MaterialId, MaterialSwitchRuntime, PhysicsModel, Point2, QuadraticAreaElement,
+    QuadraticAreaStencil, QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues,
+    RegionId, RestoringLaw, RestoringLawValues, SymmetricTensor2, TimeDriveRuntime,
+    TimeDriveValues, TopologyWaveModel, TriMesh, WaveError, canonical_area_contribution,
+    complementary_interpolation_weights,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -788,23 +789,47 @@ impl CanonicalTemporalCoefficientSample {
 /// (including junction contributions), while the local energy and
 /// complementary observable use the owning element's law at the actual probe
 /// point rather than borrowing one quadrature sample.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalTemporalPointStencil {
     fixed: CanonicalPointStencil,
     primary: CanonicalTemporalCoefficientSample,
-    /// The law at each of the element's own samples, where the constitutive
-    /// inverse is applied before the physical field is interpolated.
-    sample_coefficients: [CanonicalTemporalCoefficientSample; 6],
+    /// The law at each sample the field is recovered from, in the fixed
+    /// stencil's order, where the constitutive inverse is applied before the
+    /// physical fields are combined.
+    sample_coefficients: Vec<CanonicalTemporalCoefficientSample>,
     /// The same law at the probe point, for the pointwise energy density.
     complementary: CanonicalTemporalCoefficientSample,
 }
 
 impl CanonicalTemporalPointStencil {
+    /// A point probe's stencil, its field recovered from the samples around
+    /// it over media that tell the laws apart.
     pub fn from_quadratic(
         stencil: QuadraticPointStencil,
         operator: &CanonicalTemporalWaveOperator,
     ) -> Result<Self, WaveError> {
-        let fixed = CanonicalPointStencil::from_quadratic(stencil, operator.base())?;
+        Self::recovered_by(stencil, operator, true)
+    }
+
+    /// A line probe's or the vector overlay's, from the element's own six
+    /// samples ([`CanonicalPointStencil::from_quadratic_own`]).
+    pub fn from_quadratic_own(
+        stencil: QuadraticPointStencil,
+        operator: &CanonicalTemporalWaveOperator,
+    ) -> Result<Self, WaveError> {
+        Self::recovered_by(stencil, operator, false)
+    }
+
+    fn recovered_by(
+        stencil: QuadraticPointStencil,
+        operator: &CanonicalTemporalWaveOperator,
+        recovered: bool,
+    ) -> Result<Self, WaveError> {
+        let fixed = CanonicalPointStencil::recovered_by(
+            stencil,
+            operator.base(),
+            recovered.then_some(&operator.recovery),
+        )?;
         let element = stencil.element as usize;
         let start = element
             .checked_mul(6)
@@ -842,8 +867,20 @@ impl CanonicalTemporalPointStencil {
             r: x.hypot(y),
             theta: y.atan2(x),
         };
-        let sample_coefficients: [CanonicalTemporalCoefficientSample; 6] =
-            std::array::from_fn(|local| samples[local].coefficient.into());
+        let sample_coefficients = fixed
+            .recovery
+            .iter()
+            .map(|entry| {
+                let sample = entry.sample as usize;
+                if sample < operator.complementary.len() {
+                    Ok(operator.complementary.at(sample).coefficient.into())
+                } else {
+                    Err(WaveError::InvalidMesh(
+                        "a recovered sample has no temporal complementary sample",
+                    ))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut complementary: CanonicalTemporalCoefficientSample = samples[0].coefficient.into();
         complementary.coordinates = coordinates;
         // The contributions are pushed seven to an element in element order,
@@ -892,8 +929,8 @@ impl CanonicalTemporalPointStencil {
         })
     }
 
-    pub fn fixed(&self) -> CanonicalPointStencil {
-        self.fixed
+    pub fn fixed(&self) -> &CanonicalPointStencil {
+        &self.fixed
     }
 
     pub fn element(&self) -> u32 {
@@ -908,14 +945,14 @@ impl CanonicalTemporalPointStencil {
         self.complementary
     }
 
-    pub fn sample_coefficients(&self) -> [CanonicalTemporalCoefficientSample; 6] {
-        self.sample_coefficients
+    pub fn sample_coefficients(&self) -> &[CanonicalTemporalCoefficientSample] {
+        &self.sample_coefficients
     }
 
     /// The physical complementary field at the probe point. Each sample is
-    /// divided by its own instantaneous factor before interpolation, so a
-    /// travelling modulation is resolved at the samples rather than smeared
-    /// through one factor at the probe.
+    /// divided by its own instantaneous factor before the fields are
+    /// combined, so a travelling modulation is resolved at the samples rather
+    /// than smeared through one factor at the probe.
     pub fn complementary_field(
         &self,
         complementary_flux: &[Point2],
@@ -932,15 +969,12 @@ impl CanonicalTemporalPointStencil {
             return Err(WaveError::Unsupported(CONSUMER_FIELD_LAWS));
         }
         let mut field = Point2::default();
-        for local in 0..self.fixed.complementary_samples.len() {
-            let sample = self.fixed.complementary_samples[local] as usize;
-            let Some(flux) = complementary_flux.get(sample) else {
+        for (entry, coefficient) in self.fixed.recovery.iter().zip(&self.sample_coefficients) {
+            let Some(flux) = complementary_flux.get(entry.sample as usize) else {
                 return Err(WaveError::InvalidState);
             };
-            let factor = self.sample_coefficients[local].factor_at(time, runtime)?;
-            field = field
-                + self.fixed.sample_inverses[local].apply(*flux) / factor
-                    * self.fixed.complementary_weights[local];
+            let factor = coefficient.factor_at(time, runtime)?;
+            field = field + entry.inverse.apply(*flux) / factor * entry.weight;
         }
         if field.finite() {
             Ok(field)
@@ -984,19 +1018,19 @@ impl CanonicalTemporalPointStencil {
         let complementary_factor = self.complementary.factor_at(time, runtime)?;
         let (complementary, energy_density) = if operator.has_field_laws {
             // Each sample is inverted at its own site, as the solver does,
-            // and only the physical fields are interpolated. The density is
-            // the stored energy of the interpolated fields under the laws at
-            // the probe, `c (ḡ(r) r² − G(r))` per row, whose linear form is
-            // the `c r²/2` below.
+            // and only the physical fields are combined. The density is the
+            // stored energy of the combined fields under the laws at the
+            // probe, `c (ḡ(r) r² − G(r))` per row, whose linear form is the
+            // `c r²/2` below.
             let mut field = Point2::default();
-            for local in 0..self.fixed.complementary_samples.len() {
-                let sample = self.fixed.complementary_samples[local] as usize;
+            for entry in &self.fixed.recovery {
+                let sample = entry.sample as usize;
                 let flux = complementary_flux
                     .get(sample)
                     .ok_or(WaveError::InvalidState)?;
                 field = field
                     + operator.complementary_sample_field(sample, *flux, time, runtime)?
-                        * self.fixed.complementary_weights[local];
+                        * entry.weight;
             }
             let store = |law: FieldLawValues, r: f64| law.multiplier(r) * r * r - law.coenergy(r);
             let reference = self.fixed.complementary_reference;
@@ -2287,6 +2321,9 @@ pub struct CanonicalTemporalWaveOperator {
     /// The grid filter's reach at each node over the whole trajectory; see
     /// [`trajectory_grid_filter_reach`].
     grid_filter_reach: Vec<f64>,
+    /// The base's recovery with the laws told apart: a driven region is
+    /// another medium than a neighbour of the same base coefficients.
+    recovery: ComplementaryRecovery,
 }
 
 /// How far a self-oscillating element's viscosity reaches: `τ·G = κ·γ₀`,
@@ -2554,6 +2591,12 @@ impl CanonicalTemporalWaveOperator {
             .filter(|(_, value)| **value > 0.0)
             .map(|(index, _)| index as u32)
             .collect();
+        let recovery = ComplementaryRecovery::new(
+            mesh,
+            base.element_nodes(),
+            base.degrees_of_freedom(),
+            authored,
+        )?;
         Ok(Self {
             base,
             primary,
@@ -2576,6 +2619,7 @@ impl CanonicalTemporalWaveOperator {
             short_wave_samples,
             active_nodes,
             grid_filter_reach,
+            recovery,
         })
     }
 
@@ -2823,6 +2867,12 @@ impl CanonicalTemporalWaveOperator {
 
     pub fn base(&self) -> &CanonicalWaveOperator {
         &self.base
+    }
+
+    /// The media and vertex stars point readings are fitted over, laws told
+    /// apart.
+    pub fn recovery(&self) -> &ComplementaryRecovery {
+        &self.recovery
     }
 
     pub fn initial_runtime(&self) -> CanonicalMaterialRuntimeState {
@@ -7459,18 +7509,15 @@ mod tests {
             .complementary_coefficient()
             .factor_at(time, &runtime)
             .unwrap();
-        // The rule, spelled out: invert at each of the element's own samples,
-        // divide by that sample's own factor, interpolate the physical field,
-        // and only then evaluate the density with the probe point's forward
-        // coefficient.
+        // The rule, spelled out: invert at each sample the field is
+        // recovered from, divide by that sample's own factor, combine the
+        // physical fields, and only then evaluate the density with the probe
+        // point's forward coefficient.
         let mut expected_complementary = Point2::default();
-        for local in 0..6 {
-            let factor = stencil.sample_coefficients()[local]
-                .factor_at(time, &runtime)
-                .unwrap();
-            expected_complementary = expected_complementary
-                + fixed.sample_inverses[local].apply(flux) / factor
-                    * fixed.complementary_weights[local];
+        for (entry, coefficient) in fixed.recovery.iter().zip(stencil.sample_coefficients()) {
+            let factor = coefficient.factor_at(time, &runtime).unwrap();
+            expected_complementary =
+                expected_complementary + entry.inverse.apply(flux) / factor * entry.weight;
         }
         let expected_energy = 0.5
             * (fixed.primary_reference * primary_factor * current_value.powi(2)
@@ -10066,12 +10113,10 @@ mod tests {
         let flux = Point2::new(0.27, -0.19);
         let complementary = vec![flux; operator.base().complementary_degrees_of_freedom()];
 
-        let factors = (0..6)
-            .map(|local| {
-                stencil.sample_coefficients()[local]
-                    .factor_at(time, &runtime)
-                    .unwrap()
-            })
+        let factors = stencil
+            .sample_coefficients()
+            .iter()
+            .map(|coefficient| coefficient.factor_at(time, &runtime).unwrap())
             .collect::<Vec<_>>();
         let spread = factors.iter().copied().fold(f64::MIN, f64::max)
             - factors.iter().copied().fold(f64::MAX, f64::min);
@@ -10080,12 +10125,9 @@ mod tests {
             "the fixture must actually vary across the element, got {spread}"
         );
 
-        let fixed = stencil.fixed();
         let mut expected = Point2::default();
-        for (local, factor) in factors.iter().enumerate() {
-            expected = expected
-                + fixed.sample_inverses[local].apply(flux) / *factor
-                    * fixed.complementary_weights[local];
+        for (entry, factor) in stencil.fixed().recovery.iter().zip(&factors) {
+            expected = expected + entry.inverse.apply(flux) / *factor * entry.weight;
         }
         let actual = stencil
             .complementary_field(&complementary, time, &runtime)
@@ -10098,7 +10140,7 @@ mod tests {
             .complementary_coefficient()
             .factor_at(time, &runtime)
             .unwrap();
-        let flux_first = fixed.sample_inverses[0].apply(flux) / probe_factor;
+        let flux_first = stencil.fixed().sample_inverses[0].apply(flux) / probe_factor;
         assert!((actual - flux_first).norm() > 1.0e-4);
     }
 
