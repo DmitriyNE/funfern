@@ -1,0 +1,4 @@
+about: a region's material is found by a binary search of the library, which every scene the other tests build allows, their libraries sorted by identifier, and a library in any other order refuses to assemble
+test: cargo test --release -p funfern-app --test invariants -- relabelled_identifiers_give_every_scene_the_same_solution
+expect: relabelled: Assembling wave operator
+needs: cpu

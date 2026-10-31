@@ -1301,7 +1301,8 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   4 to 6i of the plan). Milestone C's P1 invariants were planned on
   2026-10-31 (section 6j): IV-03, mesh renumbering, landed the same day in
   `crates/funfern-app/tests/invariants.rs`, with the point locator's fix it
-  found; IV-02, identifiers, is next.
+  found, and IV-02, identifiers, the same day; IV-01, superposition, is
+  next.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the

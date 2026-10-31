@@ -745,6 +745,21 @@ differently on the same mesh renumbered. The locator now takes the
 triangle whose centroid lies furthest along a fixed direction; its
 mutation `probe-point-read-in-mesh-order`.
 
+**IV-02 done on 2026-10-31**, in the same file. The same 91 scenes are
+renamed: every curve, span, junction, material, region and probe gets a new
+identifier, wide apart, and the materials, regions, face assignments,
+volume sources and probes are listed backwards. The new identifiers zigzag
+along each list as it then stands, so that no list is sorted by them. The
+background keeps its identifier, which validation requires. 84 mesh and
+run to the same bits. The other 7, the double slit, the Talbot carpet, the
+Fresnel zone plate and the regression scene of 12 October, whose curves
+meet the domain's sides or each other, mesh to the same triangles numbered
+otherwise: the curves' identifiers order the mesh's numbering, which IV-03
+shows the solution does not see, and they run within 8.5e-16. Its mutation
+`materials-searched-as-sorted` finds a region's material by a binary search
+of the library, which every scene the other tests build allows, their
+libraries sorted by identifier.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

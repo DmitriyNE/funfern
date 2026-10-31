@@ -30880,3 +30880,42 @@ with what each had and lacked. It begins with IV-03, mesh renumbering.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-31 — Every scene renamed throughout runs as it was
+
+IV-02 of milestone C, identifiers (section 6j of
+`docs/spikes/funfern-testing-campaign-plan.md`), in
+`crates/funfern-app/tests/invariants.rs` beside IV-03.
+
+- **The test.** The 91 regression, frozen and gallery scenes are renamed
+  throughout, in the draft and the accepted scene alike. Every curve, span,
+  junction, material, region and probe gets a new identifier, wide apart,
+  with face anchors, sources, probe targets, region names and readouts
+  following. The materials, regions, face assignments, volume
+  sources and probes are listed backwards. The new identifiers zigzag along
+  each list as it then stands, so that no list is sorted by them. The
+  background keeps `BACKGROUND_REGION`, which validation requires, and the
+  curves keep their order, which the mesher reads. Each renamed scene must
+  mesh to the same triangles, point for point, and run as the original
+  within IV-03's 1e-12, its probes found by their new identifiers. 12 s on
+  ten threads.
+- **What it read.** 84 scenes mesh and run to the same bits. The other 7,
+  the double slit, the Talbot carpet and the Fresnel zone plate in the
+  gallery and frozen, and the regression scene of 12 October, mesh to the
+  same triangles numbered otherwise: their curves meet the domain's sides
+  or each other, and the curves' identifiers order the chains the mesher
+  emits. IV-03 holds that the numbering cannot change a solution; they run
+  within 8.5e-16, six of them to zero.
+- **The first renaming missed a class.** New identifiers given in the
+  reverse of the old order, with the lists reversed too, left every list
+  sorted by its new identifiers again, and a shuffle gave every
+  two-material library the same order, which came out sorted. The zigzag
+  rules both out.
+- **Mutation.** `materials-searched-as-sorted` finds a region's material by
+  a binary search of the library. Every other test in the workspace passes
+  with it, 1432, since every scene they build lists its materials in the
+  order of their identifiers; IV-02 fails in each of the 58 scenes with more
+  than one material.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

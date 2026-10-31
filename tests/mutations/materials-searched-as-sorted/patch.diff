@@ -1,0 +1,16 @@
+diff --git a/crates/funfern-core/src/wave.rs b/crates/funfern-core/src/wave.rs
+index e7b3965..0d12973 100644
+--- a/crates/funfern-core/src/wave.rs
++++ b/crates/funfern-core/src/wave.rs
+@@ -50,8 +50,9 @@ pub(crate) fn evaluate_directional_material_library_at(
+         .find(|candidate| candidate.id == region)
+         .ok_or(MaterialError::InvalidValue)?;
+     let properties = materials
+-        .iter()
+-        .find(|material| material.id == region.material)
++        .binary_search_by_key(&region.material, |material| material.id)
++        .ok()
++        .map(|index| &materials[index])
+         .ok_or(MaterialError::InvalidValue)?
+         .evaluate_static(physics, region.frame, point)?;
+     let values = physics.directional_wave_coefficients(properties, region.frame);

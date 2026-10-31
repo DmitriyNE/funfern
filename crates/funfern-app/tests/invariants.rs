@@ -14,17 +14,33 @@
 //! the control to roundoff in its fields, its energy and what its point and
 //! segment probes read, and the control must match the fresh preparation
 //! bit for bit.
+//!
+//! IV-02, identifiers. The same scenes with every curve, span, junction,
+//! material, region and probe given another identifier, wide apart and in
+//! no order of its list, and the materials, regions, face assignments, volume
+//! sources and probes listed backwards, are the same scenes. The background
+//! keeps `BACKGROUND_REGION`, which validation requires, and the curves keep
+//! their order, which the mesher reads (section 6j measured a scene meshing
+//! differently with its curves listed in another order). Each must mesh
+//! alike, point for point, and run as the original does to roundoff, its
+//! probes read by their new identifiers.
 
-use funfern_app::topology_editor::{TopologyAcceptance, TopologyDocument, TopologyEditor};
+use funfern_app::document::ProbeId;
+use funfern_app::topology_editor::{
+    TopologyAcceptance, TopologyDocument, TopologyEditor, TopologyProbeTarget,
+};
 use funfern_app::topology_examples;
 use funfern_app::topology_persistence;
 use funfern_app::topology_runtime::{
     PreparedTopology, TopologyProbeCompilation, TopologyProbeStencil, TopologyRuntime,
 };
 use funfern_core::{
-    BoundaryEdge, CanonicalPointStencil, CanonicalTemporalWaveState, CanonicalWaveOperator,
-    CanonicalWaveState, MeshTriangle, MeshingOptions, Point2, TriMesh,
+    BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalPointStencil,
+    CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState, CurveId, CurveSpanId,
+    FaceAnchor, MaterialId, MeshTriangle, MeshingOptions, Point2, RegionId, TopologyScene,
+    TopologyVertexId, TriMesh,
 };
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -360,7 +376,7 @@ fn vector(a: Point2, b: Point2) -> (f64, f64) {
 
 /// What a probe reads: a point's field and complementary field, or a
 /// segment's summed over its points.
-fn readings(prepared: &PreparedTopology, run: &Run) -> Result<Vec<(f64, Point2)>, String> {
+fn readings(prepared: &PreparedTopology, run: &Run) -> Result<Vec<(ProbeId, f64, Point2)>, String> {
     let operator = &prepared.canonical_operator;
     let read = |stencil: &CanonicalPointStencil| {
         stencil
@@ -377,7 +393,8 @@ fn readings(prepared: &PreparedTopology, run: &Run) -> Result<Vec<(f64, Point2)>
             TopologyProbeStencil::Point(point) => {
                 let stencil = CanonicalPointStencil::from_quadratic(*point, operator)
                     .map_err(|error| error.to_string())?;
-                readings.push(read(&stencil)?);
+                let (primary, complementary) = read(&stencil)?;
+                readings.push((probe.id, primary, complementary));
             }
             TopologyProbeStencil::Segment(points) => {
                 let mut sum = (0.0, Point2::default());
@@ -387,7 +404,7 @@ fn readings(prepared: &PreparedTopology, run: &Run) -> Result<Vec<(f64, Point2)>
                     let (primary, complementary) = read(&stencil)?;
                     sum = (sum.0 + primary, sum.1 + complementary);
                 }
-                readings.push(sum);
+                readings.push((probe.id, sum.0, sum.1));
             }
             TopologyProbeStencil::Boundary(_) | TopologyProbeStencil::Area(_) => {}
         }
@@ -424,9 +441,13 @@ impl Apart {
     }
 }
 
-fn renumbered(scene: &Scene) -> Result<(String, Apart), String> {
-    let started = Instant::now();
-    let mut editor = TopologyEditor::from_document(scene.document.clone())
+/// `document` opened, validated to acceptance and prepared the way the app
+/// prepares it, at its own edge, and published: the editor, the runtime that
+/// holds it and the generation.
+fn prepare(
+    document: &TopologyDocument,
+) -> Result<(TopologyEditor, TopologyRuntime, Arc<PreparedTopology>), String> {
+    let mut editor = TopologyEditor::from_document(document.clone())
         .map_err(|error| format!("does not load: {error}"))?;
     settle(&mut editor);
     if let TopologyAcceptance::Invalid(issue) = &editor.acceptance {
@@ -448,7 +469,77 @@ fn renumbered(scene: &Scene) -> Result<(String, Apart), String> {
         options,
         true,
     )?;
-    let fresh = finish(&mut runtime)?;
+    let prepared = finish(&mut runtime)?;
+    Ok((editor, runtime, prepared))
+}
+
+/// How far `other`'s run stands from `control`'s, its primary nodes and
+/// complementary samples and probes found through the maps given, and how
+/// many probes were read.
+fn compare(
+    (control, control_run): (&PreparedTopology, &Run),
+    (other, other_run): (&PreparedTopology, &Run),
+    node: impl Fn(usize) -> usize,
+    sample: impl Fn(usize) -> usize,
+    probe: impl Fn(ProbeId) -> ProbeId,
+) -> Result<(Apart, usize), String> {
+    let expected = readings(control, control_run)?;
+    let read = readings(other, other_run)?;
+    if read.len() != expected.len() {
+        return Err(format!(
+            "{} probes read against {}",
+            read.len(),
+            expected.len()
+        ));
+    }
+    let matched = expected
+        .iter()
+        .map(|(id, ..)| {
+            read.iter()
+                .find(|(other, ..)| *other == probe(*id))
+                .map(|(_, primary, complementary)| (*primary, *complementary))
+                .ok_or_else(|| format!("no probe {:?} for {id:?}", probe(*id)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let apart = Apart {
+        time_step: (other.recommended_time_step() / control.recommended_time_step() - 1.0).abs(),
+        primary: apart(other_run.primary(), &node, control_run.primary(), scalar),
+        complementary: apart(
+            other_run.complementary(),
+            &sample,
+            control_run.complementary(),
+            vector,
+        ),
+        integrated: if control_run.integrated().is_empty() {
+            0.0
+        } else {
+            apart(
+                other_run.integrated(),
+                &node,
+                control_run.integrated(),
+                scalar,
+            )
+        },
+        energy: (other_run.energy(other)? / control_run.energy(control)? - 1.0).abs(),
+        probe_primary: apart(
+            &matched.iter().map(|reading| reading.0).collect::<Vec<_>>(),
+            |index| index,
+            &expected.iter().map(|reading| reading.1).collect::<Vec<_>>(),
+            scalar,
+        ),
+        probe_complementary: apart(
+            &matched.iter().map(|reading| reading.1).collect::<Vec<_>>(),
+            |index| index,
+            &expected.iter().map(|reading| reading.2).collect::<Vec<_>>(),
+            vector,
+        ),
+    };
+    Ok((apart, expected.len()))
+}
+
+fn renumbered(scene: &Scene) -> Result<(String, Apart), String> {
+    let started = Instant::now();
+    let (editor, mut runtime, fresh) = prepare(&scene.document)?;
     let mut same = (*fresh.mesh).clone();
     same.mesh_revision = runtime.reserve_mesh_revision();
     runtime.request_adapted(editor.revision, &editor.document, same)?;
@@ -470,63 +561,13 @@ fn renumbered(scene: &Scene) -> Result<(String, Apart), String> {
         &shuffled.canonical_operator,
         &elements,
     )?;
-    let (control_readings, shuffled_readings) = (
-        readings(&control, &control_run)?,
-        readings(&shuffled, &shuffled_run)?,
-    );
-    if control_readings.len() != shuffled_readings.len() {
-        return Err("the shuffled generation compiled other probes".into());
-    }
-    let apart = Apart {
-        time_step: (shuffled.recommended_time_step() / time_step - 1.0).abs(),
-        primary: apart(
-            shuffled_run.primary(),
-            |node| nodes[node],
-            control_run.primary(),
-            scalar,
-        ),
-        complementary: apart(
-            shuffled_run.complementary(),
-            |sample| samples[sample],
-            control_run.complementary(),
-            vector,
-        ),
-        integrated: if control_run.integrated().is_empty() {
-            0.0
-        } else {
-            apart(
-                shuffled_run.integrated(),
-                |node| nodes[node],
-                control_run.integrated(),
-                scalar,
-            )
-        },
-        energy: (shuffled_run.energy(&shuffled)? / control_run.energy(&control)? - 1.0).abs(),
-        probe_primary: apart(
-            &shuffled_readings
-                .iter()
-                .map(|reading| reading.0)
-                .collect::<Vec<_>>(),
-            |probe| probe,
-            &control_readings
-                .iter()
-                .map(|reading| reading.0)
-                .collect::<Vec<_>>(),
-            scalar,
-        ),
-        probe_complementary: apart(
-            &shuffled_readings
-                .iter()
-                .map(|reading| reading.1)
-                .collect::<Vec<_>>(),
-            |probe| probe,
-            &control_readings
-                .iter()
-                .map(|reading| reading.1)
-                .collect::<Vec<_>>(),
-            vector,
-        ),
-    };
+    let (apart, probes) = compare(
+        (&control, &control_run),
+        (&shuffled, &shuffled_run),
+        |node| nodes[node],
+        |sample| samples[sample],
+        |probe| probe,
+    )?;
     if apart.worst() > ROUNDOFF {
         return Err(format!(
             "the shuffled mesh's run stands {apart:?} from the control's"
@@ -537,7 +578,7 @@ fn renumbered(scene: &Scene) -> Result<(String, Apart), String> {
             "{}: {} vertices, {} probes read, time step {:.1e}, Q {:.1e}, b {:.1e}, r {:.1e}, energy {:.1e}, probes {:.1e} and {:.1e}, {:.2} s",
             scene.name,
             fresh.mesh.vertices.len(),
-            control_readings.len(),
+            probes,
             apart.time_step,
             apart.primary,
             apart.complementary,
@@ -553,6 +594,299 @@ fn renumbered(scene: &Scene) -> Result<(String, Apart), String> {
 
 #[test]
 fn a_shuffled_mesh_gives_every_scene_the_same_solution() {
+    over_every_scene("renumbered", renumbered);
+}
+
+/// New identifiers for `ids`, given in the order their list holds them,
+/// those in `kept` aside: wide apart, none of them small, and zigzagging
+/// along the list as it will stand, reversed where `reversed`, so that it
+/// is never sorted by them, nor sorted backwards from three on.
+fn renamed(ids: impl IntoIterator<Item = u64>, kept: &[u64], reversed: bool) -> BTreeMap<u64, u64> {
+    let mut order = Vec::new();
+    for id in ids {
+        if !kept.contains(&id) && !order.contains(&id) {
+            order.push(id);
+        }
+    }
+    if reversed {
+        order.reverse();
+    }
+    let count = order.len();
+    order
+        .into_iter()
+        .enumerate()
+        .map(|(position, id)| {
+            let rank = if position % 2 == 0 {
+                count - 1 - position / 2
+            } else {
+                position / 2
+            };
+            (id, 104_729 + 7_919 * rank as u64)
+        })
+        .collect()
+}
+
+/// The identifiers a document's scenes and probes carry, old to new.
+struct Renaming {
+    curves: BTreeMap<u64, u64>,
+    spans: BTreeMap<u64, u64>,
+    vertices: BTreeMap<u64, u64>,
+    materials: BTreeMap<u64, u64>,
+    regions: BTreeMap<u64, u64>,
+    probes: BTreeMap<u64, u64>,
+}
+
+impl Renaming {
+    /// The accepted scene's lists set the order, the draft's adding what
+    /// only it holds.
+    fn of(document: &TopologyDocument) -> Self {
+        let scenes = [&document.model.accepted, &document.model.draft];
+        let curves = || scenes.iter().flat_map(|scene| &scene.geometry.curves);
+        Self {
+            curves: renamed(curves().map(|curve| curve.id.0), &[], false),
+            spans: renamed(
+                curves().flat_map(|curve| curve.spans.iter().map(|span| span.id.0)),
+                &[],
+                false,
+            ),
+            vertices: renamed(
+                scenes
+                    .iter()
+                    .flat_map(|scene| &scene.geometry.vertices)
+                    .map(|vertex| vertex.id.0),
+                &[],
+                false,
+            ),
+            materials: renamed(
+                scenes
+                    .iter()
+                    .flat_map(|scene| &scene.materials)
+                    .map(|material| material.id.0),
+                &[],
+                true,
+            ),
+            regions: renamed(
+                scenes
+                    .iter()
+                    .flat_map(|scene| &scene.regions)
+                    .map(|region| region.id.0),
+                &[BACKGROUND_REGION.0],
+                true,
+            ),
+            probes: renamed(
+                document.model.probes.iter().map(|probe| probe.id.0),
+                &[],
+                true,
+            ),
+        }
+    }
+
+    fn region(&self, region: RegionId) -> RegionId {
+        RegionId(self.regions.get(&region.0).copied().unwrap_or(region.0))
+    }
+
+    fn probe(&self, probe: ProbeId) -> ProbeId {
+        ProbeId(self.probes[&probe.0])
+    }
+
+    fn scene(&self, scene: &mut TopologyScene) {
+        for curve in &mut scene.geometry.curves {
+            curve.id = CurveId(self.curves[&curve.id.0]);
+            for span in &mut curve.spans {
+                span.id = CurveSpanId(self.spans[&span.id.0]);
+            }
+            for vertex in curve
+                .nodes
+                .iter_mut()
+                .filter_map(|node| node.vertex.as_mut())
+            {
+                *vertex = TopologyVertexId(self.vertices[&vertex.0]);
+            }
+        }
+        for vertex in &mut scene.geometry.vertices {
+            vertex.id = TopologyVertexId(self.vertices[&vertex.id.0]);
+        }
+        for material in &mut scene.materials {
+            material.id = MaterialId(self.materials[&material.id.0]);
+        }
+        for region in &mut scene.regions {
+            region.id = self.region(region.id);
+            region.material = MaterialId(self.materials[&region.material.0]);
+        }
+        for assignment in &mut scene.face_assignments {
+            if let FaceAnchor::Curve { curve, span, .. } = &mut assignment.anchor {
+                *curve = CurveId(self.curves[&curve.0]);
+                *span = CurveSpanId(self.spans[&span.0]);
+            }
+            assignment.region = assignment.region.map(|region| self.region(region));
+        }
+        for source in &mut scene.volume_sources {
+            source.region = self.region(source.region);
+        }
+        scene.materials.reverse();
+        scene.regions.reverse();
+        scene.face_assignments.reverse();
+        scene.volume_sources.reverse();
+    }
+
+    fn document(&self, document: &TopologyDocument) -> TopologyDocument {
+        let mut document = document.clone();
+        let model = &mut document.model;
+        self.scene(&mut model.draft);
+        self.scene(&mut model.accepted);
+        for probe in &mut model.probes {
+            probe.id = self.probe(probe.id);
+            match &mut probe.target {
+                TopologyProbeTarget::Boundary(target) => {
+                    target.curve = CurveId(self.curves[&target.curve.0]);
+                    for span in &mut target.spans {
+                        *span = CurveSpanId(self.spans[&span.0]);
+                    }
+                }
+                TopologyProbeTarget::AreaRegion(region) => *region = self.region(*region),
+                TopologyProbeTarget::Point(_)
+                | TopologyProbeTarget::Segment { .. }
+                | TopologyProbeTarget::AreaDisk { .. } => {}
+            }
+        }
+        model.probes.reverse();
+        model.source.region = self.region(model.source.region);
+        model.region_names = std::mem::take(&mut model.region_names)
+            .into_iter()
+            .map(|(region, name)| (self.region(region), name))
+            .collect();
+        document.readouts.probes = std::mem::take(&mut document.readouts.probes)
+            .into_iter()
+            .map(|(probe, readout)| (self.probe(probe), readout))
+            .collect();
+        document
+    }
+}
+
+/// Where each of `original`'s triangles lies in `other`, when the two are
+/// the same mesh, perhaps numbered otherwise: the same triangles point for
+/// point, each of the region `renaming` makes of its own, and the same
+/// boundary edges, each labelled with the curve and span `renaming` makes
+/// of its own. `None` where they differ.
+fn same_mesh(original: &TriMesh, other: &TriMesh, renaming: &Renaming) -> Option<Vec<usize>> {
+    let point = |mesh: &TriMesh, vertex: usize| {
+        let point = mesh.vertices[vertex].point;
+        (point.x.to_bits(), point.y.to_bits())
+    };
+    let corners = |mesh: &TriMesh, vertices: &[usize]| {
+        let mut corners = vertices
+            .iter()
+            .map(|vertex| point(mesh, *vertex))
+            .collect::<Vec<_>>();
+        corners.sort_unstable();
+        corners
+    };
+    let triangles = other
+        .triangles
+        .iter()
+        .enumerate()
+        .map(|(index, triangle)| ((corners(other, &triangle.vertices), triangle.region), index))
+        .collect::<BTreeMap<_, _>>();
+    let elements = original
+        .triangles
+        .iter()
+        .map(|triangle| {
+            triangles
+                .get(&(
+                    corners(original, &triangle.vertices),
+                    renaming.region(triangle.region),
+                ))
+                .copied()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let label = |label: BoundaryLabel| match label {
+        BoundaryLabel::Curve {
+            curve,
+            span,
+            side,
+            separated,
+        } => BoundaryLabel::Curve {
+            curve: CurveId(renaming.curves[&curve.0]),
+            span: CurveSpanId(renaming.spans[&span.0]),
+            side,
+            separated,
+        },
+        outer => outer,
+    };
+    let edges = |mesh: &TriMesh, relabel: &dyn Fn(BoundaryLabel) -> BoundaryLabel| {
+        let mut edges = mesh
+            .boundary_edges
+            .iter()
+            .map(|edge| {
+                (
+                    edge.vertices.map(|vertex| point(mesh, vertex)),
+                    edge.parameters.map(f64::to_bits),
+                    format!("{:?}", relabel(edge.label)),
+                )
+            })
+            .collect::<Vec<_>>();
+        edges.sort_unstable();
+        edges
+    };
+    (original.vertices.len() == other.vertices.len()
+        && original.triangles.len() == other.triangles.len()
+        && edges(original, &label) == edges(other, &|label| label))
+    .then_some(elements)
+}
+
+fn relabelled(scene: &Scene) -> Result<(String, Apart), String> {
+    let started = Instant::now();
+    let renaming = Renaming::of(&scene.document);
+    let (_, _, original) = prepare(&scene.document)?;
+    let (_, _, other) = prepare(&renaming.document(&scene.document))
+        .map_err(|error| format!("relabelled: {error}"))?;
+    let elements = same_mesh(&original.mesh, &other.mesh, &renaming)
+        .ok_or("the relabelled scene meshes differently")?;
+    let renumbered = elements.iter().enumerate().any(|(from, to)| from != *to);
+    let (nodes, samples) = correspondence(
+        &original.canonical_operator,
+        &other.canonical_operator,
+        &elements,
+    )?;
+    let time_step = original.recommended_time_step();
+    let (original_run, other_run) = (run(&original, time_step)?, run(&other, time_step)?);
+    let (apart, probes) = compare(
+        (&original, &original_run),
+        (&other, &other_run),
+        |node| nodes[node],
+        |sample| samples[sample],
+        |probe| renaming.probe(probe),
+    )?;
+    if apart.worst() > ROUNDOFF {
+        return Err(format!(
+            "the relabelled scene's run stands {apart:?} from the original's"
+        ));
+    }
+    Ok((
+        format!(
+            "{}: {} vertices alike{}, {} probes read, {}, {:.2} s",
+            scene.name,
+            original.mesh.vertices.len(),
+            if renumbered {
+                ", numbered otherwise"
+            } else {
+                ""
+            },
+            probes,
+            if !renumbered && original_run.bits() == other_run.bits() {
+                "the same bits".to_owned()
+            } else {
+                format!("{:.1e} apart", apart.worst())
+            },
+            started.elapsed().as_secs_f64()
+        ),
+        apart,
+    ))
+}
+
+/// Runs `check` over every scene on all threads, prints each line, and
+/// fails with every scene that failed.
+fn over_every_scene(what: &str, check: fn(&Scene) -> Result<(String, Apart), String>) {
     let scenes = scenes();
     let workers = std::thread::available_parallelism()
         .map(|count| count.get())
@@ -569,7 +903,7 @@ fn a_shuffled_mesh_gives_every_scene_the_same_solution() {
                         .enumerate()
                         .skip(worker)
                         .step_by(workers)
-                        .map(|(index, scene)| (index, renumbered(scene)))
+                        .map(|(index, scene)| (index, check(scene)))
                         .collect::<Vec<_>>()
                 })
             })
@@ -597,9 +931,14 @@ fn a_shuffled_mesh_gives_every_scene_the_same_solution() {
         }
     }
     eprintln!(
-        "{} scenes renumbered on {workers} threads in {:.1} s, the worst {worst:.1e} apart",
+        "{} scenes {what} on {workers} threads in {:.1} s, the worst {worst:.1e} apart",
         outcomes.len() - failures.len(),
         started.elapsed().as_secs_f64()
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn relabelled_identifiers_give_every_scene_the_same_solution() {
+    over_every_scene("relabelled", relabelled);
 }

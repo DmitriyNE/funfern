@@ -1357,8 +1357,12 @@ mesh takes. Each is struck by one pulse and run 64 steps on the CPU, and the
 shuffled run must match the unshuffled one within 1e-12 in its fields,
 integrated field, energy, time step and point and segment probes. The
 unshuffled mesh through that path must match a fresh preparation bit for
-bit. It runs in the gate, about 20 s on ten threads; its mutation is
-`probe-point-read-in-mesh-order`.
+bit. IV-02, identifiers: the same scenes with every curve, span, junction,
+material, region and probe renamed, the background region aside, and their
+lists reversed must mesh to the same triangles, perhaps numbered otherwise,
+and run as the originals within the same bound. Both run in the gate, about
+20 s each on ten threads; their mutations are
+`probe-point-read-in-mesh-order` and `materials-searched-as-sorted`.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
