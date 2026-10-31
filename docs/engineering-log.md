@@ -30805,3 +30805,27 @@ The nightly's mutation job had failed every night since 26 October, 37 or
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-31 — The browser nightly runs the handoff-memory fixtures as a part of their own
+
+The slower hosting's state part, every fixture on SwiftShader with service
+workers refused, ran past its cell's 340 minutes on 26 and 27 October and
+was cancelled, and took 3 h 15 min on the 28th, all three on the same
+commit, bd009c0. On the slow nights the runner took every page about twice
+as long: the cavity 11.7 minutes against 6.6, `handoff-memory-running` 62
+against 30.
+
+- **The split.** Stage A1's `handoff-memory-rebuild`, `-remesh`, `-edit`,
+  `-timestep` and `-running` run as a part of their own, `memory`, in both
+  hostings, and the state part leaves them out. On the slow night of 27
+  October they took 3 h 45 min, and the rest of the state part about two
+  hours, each well inside 340 minutes at twice the time.
+- **The parts.** Read off the workflow against the device suite's fixture
+  list, every fixture runs in exactly one part, none named that the suite
+  does not run.
+- **Not changed.** PH-07's job failed on 30 October when GitHub's hosted
+  runner lost communication 77 minutes in, with no log kept; it passed on
+  every other night in 1¾ to 2¼ hours, and stays as it is.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

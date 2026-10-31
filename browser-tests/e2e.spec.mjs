@@ -21,9 +21,9 @@ const named = (process.env.FUNFERN_E2E_FIXTURES ?? "")
   .map((name) => name.trim())
   .filter(Boolean);
 // And the ones to leave out of all of them, comma-separated: the nightly runs
-// the recorders' fixtures and the late clocks', and the newest handoffs, as
-// parts of their own, since alongside the rest they would carry the slower
-// hosting past the runner's six hours.
+// the recorders' fixtures and the late clocks', the newest handoffs and the
+// handoff-memory fixtures as parts of their own, since alongside the rest
+// they would carry the slower hosting past its cells' 340 minutes.
 const excluded = (process.env.FUNFERN_E2E_EXCLUDE ?? "")
   .split(",")
   .map((name) => name.trim())

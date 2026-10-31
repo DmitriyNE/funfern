@@ -913,6 +913,11 @@ jobs:
     #   (VER-1 of the 2026-10-20 review);
     # - handoffs: the handoffs added on 2026-10-20 and after,
     #   `handoff-driven`, `handoff-driven-pins` and `handoff-memory-flux`;
+    # - memory: stage A1's `handoff-memory-rebuild`, `-remesh`, `-edit`,
+    #   `-timestep` and `-running`. The same commit's state part ran past 340
+    #   minutes on 2026-10-26 and 27 and took 3 h 15 min on the 28th: on a
+    #   slow runner every page takes twice its time, and these five took
+    #   3 h 45 min of it;
     # - state: the rest.
     # A cell that runs long fails at 340 minutes, before the runner's own
     # cancel, so it reports which page it stood at.
@@ -924,7 +929,7 @@ jobs:
       fail-fast: false
       matrix:
         hosting: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["isolated", "pages-blocked"]' || '["isolated"]') }}
-        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "recorders", "far-field", "handoffs"]' || '["state"]') }}
+        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "memory", "recorders", "far-field", "handoffs"]' || '["state"]') }}
     env:
       FULL: ${{ github.event_name == 'schedule' || inputs.browser == 'full' }}
     steps:
@@ -998,8 +1003,8 @@ jobs:
         # and the slowest page, cavity-batches' four runs, 745 s.
         env:
           FUNFERN_EXPECT_BUILD: ${{ github.sha }}
-          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'recorders' && 'observables,handoff-memory-running-late' || matrix.part == 'far-field' && 'far-field,far-field-late' || matrix.part == 'handoffs' && 'handoff-driven,handoff-driven-pins,handoff-memory-flux' || '' }}
-          FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables,far-field,far-field-late,handoff-memory-running-late,handoff-driven,handoff-driven-pins,handoff-memory-flux' || '' }}
+          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'memory' && 'handoff-memory-rebuild,handoff-memory-remesh,handoff-memory-edit,handoff-memory-timestep,handoff-memory-running' || matrix.part == 'recorders' && 'observables,handoff-memory-running-late' || matrix.part == 'far-field' && 'far-field,far-field-late' || matrix.part == 'handoffs' && 'handoff-driven,handoff-driven-pins,handoff-memory-flux' || '' }}
+          FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables,far-field,far-field-late,handoff-memory-running-late,handoff-driven,handoff-driven-pins,handoff-memory-flux,handoff-memory-rebuild,handoff-memory-remesh,handoff-memory-edit,handoff-memory-timestep,handoff-memory-running' || '' }}
           FUNFERN_E2E_DEADLINE: ${{ env.FULL != 'true' && '600' || '1500' }}
           FUNFERN_E2E_HOSTING: ${{ matrix.hosting }}
           FUNFERN_TEST_ISOLATED: ${{ matrix.hosting == 'isolated' && '1' || '0' }}

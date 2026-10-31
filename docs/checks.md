@@ -834,7 +834,8 @@ The same run with no probes then ends on the same bits. It takes 25 s on
 Metal, 290 s on lavapipe and 27 s in Chrome on Metal, which reads what the
 native app reads to every printed digit. In the nightly it runs in the
 browser's recorders part, apart from the state part, which in the slower
-hosting already takes up to 5 h 54 min of the runner's six hours. On
+hosting took up to 5 h 54 min of the runner's six hours, and past its 340
+minutes on a slow runner before the handoff-memory fixtures left it too. On
 SwiftShader a page takes 55 to 57 minutes served as Pages, and past 100
 isolated, beside the worker pool, where it ran out of time on 2026-10-19 and
 2026-10-20; it has 150.
