@@ -30655,3 +30655,48 @@ without it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-31 — A point's transverse field from its neighbours' samples (spike)
+
+Plan.md's spike on the transverse field a point probe reads, with no
+production change:
+[docs/spikes/funfern-point-recovery-spike.md](spikes/funfern-point-recovery-spike.md),
+harness `crates/funfern-app/examples/point_recovery_spike.rs` (`--only` one
+of `box`, `channel`, `packet`, `meshes`, `interface` and `gallery`; 325 s in
+release for all of them).
+
+- **The harness.** It meshes and assembles scenes as the runtime does, and
+  reproduces the `observables` fixture: 1935 vertices, 11305 degrees of
+  freedom, step 6.6931e-3, the upstream point 8.98e-3 off. It reads nine
+  rules at 16 positions in every element. The levels are exact samples, the
+  exact potential's interpolant, and the solver's own samples in runs whose
+  solution is known. The corpus is uniform boxes, the channel and four
+  meshes beside it, travelling packets, graded holes, a baffle, slivers down
+  to 3.6°, a slit with a different wave on each side, a disc of another
+  material, a packet through a material interface and all 45 gallery scenes.
+- **The samples carry the error.** With exact samples, today's quadratic
+  through the element's own six is the best rule. The solver's samples are
+  an order of magnitude further off than that: 4.3e-2 on the channel. Their
+  error alternates from element to element, so a fit over several cancels
+  much of it.
+- **The rule taken.** Zienkiewicz and Zhu's patch recovery has a fit per
+  vertex over its elements of one material. Where the vertex is on a
+  material interface, the fit takes a second ring. The worst error falls by
+  2.2 to 6 in the bulk, 1.6 to 4.7 at interfaces and 1.13 to 4 at walls,
+  and is never worse than today. The fixture's upstream point reads within
+  9.0e-4 to 2.6e-3 on the five channel meshes, against 4.9e-3 to 9.0e-3
+  today, and its mean bias falls from up to 4.9e-3 to 5.7e-4. A point reads
+  about 78 samples, at most 114, with weight sums at most 2.86. The rule set
+  before measuring asked for halving at walls and interfaces too, which no
+  rule meets: a fit at a wall still reaches only one way. That was relaxed
+  to "never worse".
+- **What lost.** The fixed 24-sample edge patch is up to 9% worse than today
+  at interfaces and 3% at the coarse channel's walls. A second ring at walls
+  hurts at the channel's seven elements to the wavelength. The error
+  estimator's averaging and one fit over the vertex patch read the upstream
+  point worse than today on the fixture's mesh, 1.5e-2 and 1.2e-2.
+- **Plan.md.** The spike is done; the production change is open under
+  Maintenance, and the worth-checking entry points at it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

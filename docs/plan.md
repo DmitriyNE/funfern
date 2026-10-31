@@ -1298,21 +1298,34 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   directory and checks the linked app for its driver, and the fixture
   wrapper links its binary too. Stage A0 is complete; A1 is next, after the
   fixture driver leaves the shipped binary.
-- [ ] Spike: recover the transverse field a point probe reads from its
+- [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the
   amplitude off by where the point falls in the element (Worth checking
-  sometime). The candidate is Zienkiewicz and Zhu's patch recovery: a
-  least-squares quadratic over the samples of the element and of those
-  sharing an edge with it, of the same material and never across a slit, up
-  to 24 samples, each inverted at its own site as now. Its weights are fixed
-  when the stencil is built, so the device would loop over 24 samples
-  instead of 6. The spike measures it on the CPU against exact fields over a
-  variety of unstructured meshes: graded, coarse and fine, beside walls,
-  slits and material interfaces, with points swept across their elements.
-  It goes ahead only if the worst reading falls clearly on all of them. The
-  point and curve probes share their reconstruction byte for byte, so the
-  curve probe would move with it or the shared block split (2026-10-30).
+  sometime). Done on 2026-10-31
+  (`docs/spikes/funfern-point-recovery-spike.md`). Nine rules were read
+  against exact fields: on uniform, graded and sliver meshes, beside walls,
+  slits and material interfaces, through runs of the `observables` channel
+  and of travelling packets, and on all 45 gallery scenes. The samples carry
+  the error, but it alternates from element to element, so a fit over
+  several cancels much of it. Zienkiewicz and Zhu's patch recovery, with a
+  second ring where a vertex's patch meets another material, is never worse
+  than today. It cuts the worst error by 2.2 to 6 in the bulk, 1.6 to 4.7 at
+  interfaces and 1.13 to 4 at walls, where a fit still reaches only one way.
+  It reads the fixture's upstream point within 2.6e-3 on five meshes, where
+  today's reading is up to 9.0e-3. The rule set before measuring asked for
+  halving at walls and interfaces too. That was relaxed to "never worse",
+  and the recovery taken.
+- [ ] Read a point's transverse field by patch recovery, with a second ring
+  at material interfaces (`docs/spikes/funfern-point-recovery-spike.md`,
+  "For production"). Each point's weights over its neighbours' samples,
+  about 78 and at most 114 in the spike's corpus, are fixed when its stencil
+  is built. The device reads them from a table beside the stencils, through
+  the point and curve probes' shared block. The vector overlay keeps its six
+  weights, and the CPU twins read the same table. Then narrow the
+  `observables` fixture's three bounds, and measure again the segment down
+  its wall, the probes' cost with the largest curve, and temporal and
+  nonlinear media against a refined run (2026-10-31).
 - [x] A separated span the mesher samples as one segment, its two sides the
   same pair of trace vertices where transmitting neighbours merge the
   junctions, could not be cut: every face-law case of every crystal rod in
@@ -1656,7 +1669,8 @@ is next touched.
   read within 1.9e-3, and the upstream point moved onto an edge 5.0e-3. The
   density and the flow take it in, and the fixture's CPU test holds the
   three at 1.2e-2, 6e-3 and 6e-3. Recovering the field from the neighbours'
-  samples is a spike under Maintenance (2026-10-30).
+  samples reads it within 2.6e-3 (`docs/spikes/funfern-point-recovery-spike.md`,
+  2026-10-31), and is open under Maintenance.
 - Late in an epoch the device's local time is one f32 near 256 s, 3e-5 s
   apart, and the drives' phases carry about 1e-4 rad from it. 254 s into an
   epoch, `far-field-late`'s state reads 1.25e-4 off the f64 reference, where a
