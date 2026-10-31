@@ -30780,3 +30780,28 @@ interfaces, for the point probe alone.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-31 — The far field's records are judged before their span, and the band-fill mutation runs its own unit test
+
+The nightly's mutation job had failed every night since 26 October, 37 or
+38 of 40 detected.
+
+- **The far field.** 534088f (25 October) held the records' first and last
+  times to the twin's first and last projections, ahead of what the records
+  read. Both far-field mutations move the head: `far-field-frame-at-step-end`
+  by half a step, 2.83e-3 s, and `far-field-stamps-summed-in-f32` by 1.7e-2 s
+  36 hours in. So both fixtures failed at the span, with a message neither
+  manifest named, and the amplitude check had no mutation that reached it.
+  The span is now held last. Under its patch, `far-field` reads an amplitude
+  3.209e-2 off, beyond 4e-5, and `far-field-late` its records skipping from
+  129854.992 s to 129855.015 s; both hold unpatched.
+- **The band fill.** `band-fill-owner-check` ran the core sweep over the
+  `Scene` path, which 43b49ba removed (26 October, pushed with the phase-out
+  on the 29th), and a test filter that matches nothing passes. It now runs
+  `zeros_between_pieces_leave_the_solve_unchanged`, written for the same
+  defect in 9d19e20, which under the patch fails with "did not converge",
+  the pattern the manifest already expects.
+- **Mutations:** `scripts/mutations.sh 'far-field|band-fill'` detects 3 of 3.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

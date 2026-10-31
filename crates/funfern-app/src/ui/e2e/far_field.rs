@@ -88,24 +88,6 @@ pub(super) fn judge(
     if records.len() < 60 {
         return Err(format!("the far field holds {} records", records.len()));
     }
-    // The records cover the run, from the first frame the delay window lets
-    // through to the last the twin projects: spacing and agreement alone let
-    // a recorder that dropped its head or its tail pass (VER-8 of the
-    // 2026-10-20 review).
-    let (first, last) = twin.span().ok_or("the twin projects no frame")?;
-    let (head, tail) = (records[0].time, records[records.len() - 1].time);
-    if !within((head - first).abs(), stamp_bound) {
-        return Err(format!(
-            "the far field's records start at {head} s, where the twin's first projection \
-             stands at {first} s"
-        ));
-    }
-    if !within((tail - last).abs(), stamp_bound) {
-        return Err(format!(
-            "the far field's records end at {tail} s, where the twin's last projection \
-             stands at {last} s"
-        ));
-    }
     let (mut worst, mut largest, mut stamp) = (0.0_f64, 0.0_f64, 0.0_f64);
     for record in records {
         let now = record.time + twin.margin();
@@ -155,6 +137,27 @@ pub(super) fn judge(
                 "{summary}: {what} reads {value:.3e}, beyond {bound:.0e}"
             ));
         }
+    }
+    // The records cover the run, from the first frame the delay window lets
+    // through to the last the twin projects: spacing and agreement alone let
+    // a recorder that dropped its head or its tail pass (VER-8 of the
+    // 2026-10-20 review). Held after what the records read, so a record that
+    // reads wrong fails as itself: a frame half a step off moves the head
+    // too, and failed here first from 2026-10-25, which hid the amplitude's
+    // own failure from its mutation.
+    let (first, last) = twin.span().ok_or("the twin projects no frame")?;
+    let (head, tail) = (records[0].time, records[records.len() - 1].time);
+    if !within((head - first).abs(), stamp_bound) {
+        return Err(format!(
+            "the far field's records start at {head} s, where the twin's first projection \
+             stands at {first} s"
+        ));
+    }
+    if !within((tail - last).abs(), stamp_bound) {
+        return Err(format!(
+            "the far field's records end at {tail} s, where the twin's last projection \
+             stands at {last} s"
+        ));
     }
     Ok(summary)
 }
