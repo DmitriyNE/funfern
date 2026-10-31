@@ -46,14 +46,14 @@ use funfern_app::topology_persistence;
 use funfern_app::topology_runtime::{
     PreparedTopology, TopologyProbeCompilation, TopologyProbeStencil, TopologyRuntime,
 };
-use funfern_core::MaterialFrame;
 use funfern_core::{
     BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalPointStencil,
     CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState, CurveId, CurveSpanId,
     CurveSpline, CurveTraceSide, DomainRect, FaceAnchor, FaceBoundaryCondition, FieldLaw,
-    MaterialId, MeshTriangle, MeshingOptions, OuterBoundaryCondition, OuterSide, Point2,
-    QuadraticPointStencil, RateLaw, RegionId, RestoringLaw, SpanBehavior, TimeSignal,
-    TopologyScene, TopologyVertexId, TopologyVertexLocation, TriMesh,
+    MaterialFrame, MaterialId, MeshTriangle, MeshingOptions, OuterBoundaryCondition, OuterSide,
+    PeriodicCubicSpline, Point2, QuadraticPointStencil, RateLaw, RegionId, RestoringLaw,
+    SpanBehavior, TimeSignal, TopologyCurve, TopologyScene, TopologyVertexId,
+    TopologyVertexLocation, TriMesh,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -1641,15 +1641,32 @@ fn run_for(
     Ok(run)
 }
 
+/// Per level, a case's field and complementary field read against its
+/// original, the original's own move from the level coarser in each, and
+/// the edge.
+type Levels = Vec<[f64; 5]>;
+
+/// One judged case: its label, its levels or why it did not run, and how
+/// long it took.
+type Judged = (String, Result<Levels, String>, f64);
+
 /// The levels IV-04 runs at, as multiples of a scene's own edge.
 const LEVELS: [f64; 3] = [2.0, 1.0, 0.5];
 
 /// One scene carried through `motion` at each of [`LEVELS`]: per level the
 /// field's and the complementary field's distance from the original carried
 /// through, and the original's own distance from the next finer level.
-fn moved_levels(scene: &Scene, motion: Motion) -> Result<Vec<[f64; 5]>, String> {
-    let document = &scene.document;
-    let other_document = motion.document(document)?;
+fn moved_levels(scene: &Scene, motion: Motion) -> Result<Levels, String> {
+    levels_against(&scene.document, &motion.document(&scene.document)?, motion)
+}
+
+/// `document` and `other_document`, the original carried through `motion`,
+/// at each of [`LEVELS`]: as [`moved_levels`] reads them.
+fn levels_against(
+    document: &TopologyDocument,
+    other_document: &TopologyDocument,
+    motion: Motion,
+) -> Result<Levels, String> {
     let edge = document.presentation.mesh_edge;
     let domain = document.model.accepted.geometry.domain;
     let pulse = Pulse::off_centre(domain, 1.0);
@@ -1663,8 +1680,8 @@ fn moved_levels(scene: &Scene, motion: Motion) -> Result<Vec<[f64; 5]>, String> 
     let mut previous: Option<(Arc<PreparedTopology>, Run)> = None;
     for factor in LEVELS {
         let (_, _, original) = prepare_at(document, edge * factor)?;
-        let (_, _, other) = prepare_at(&other_document, edge * factor)
-            .map_err(|error| format!("moved: {error}"))?;
+        let (_, _, other) =
+            prepare_at(other_document, edge * factor).map_err(|error| format!("moved: {error}"))?;
         if previous.is_none() {
             duration = 64.0 * original.recommended_time_step();
             points = common_points(domain, &original.mesh, edge * LEVELS[0]);
@@ -1860,7 +1877,7 @@ fn moved_cases() -> Vec<(Scene, Motion)> {
 /// mirror whose turn of the frames the scene's laws do not come through, a
 /// travelling modulation along a frame's own `x` reversed by it, takes the
 /// other turn.
-fn carry(scene: &Scene, motion: Motion) -> Result<(Motion, Vec<[f64; 5]>), String> {
+fn carry(scene: &Scene, motion: Motion) -> Result<(Motion, Levels), String> {
     match (moved_levels(scene, motion), motion) {
         (Err(error), Motion::Mirror { turn }) if error.starts_with(NOT_CARRIED) && turn != 0.0 => {
             let other = Motion::Mirror { turn: 0.0 };
@@ -1870,20 +1887,16 @@ fn carry(scene: &Scene, motion: Motion) -> Result<(Motion, Vec<[f64; 5]>), Strin
     }
 }
 
-#[test]
-fn a_moved_scene_reads_as_the_original_moved() {
-    let cases = moved_cases();
-    let started = Instant::now();
-    let outcomes = in_parallel(&cases, |(scene, motion)| {
-        let started = Instant::now();
-        (carry(scene, *motion), started.elapsed().as_secs_f64())
-    });
+/// Judges cases read at [`LEVELS`], each labelled, against [`MOVED`]:
+/// prints each, and fails with every case that stands a halving's move or
+/// more from its original, or failed to run.
+fn within_a_halving(what: &str, outcomes: Vec<Judged>) {
     let mut failures = Vec::new();
     let mut worst: f64 = 0.0;
-    for ((scene, motion), (outcome, seconds)) in cases.iter().zip(outcomes) {
-        let physics = scene.document.model.accepted.physics;
+    let count = outcomes.len();
+    for (label, outcome, seconds) in outcomes {
         match outcome {
-            Ok((taken, levels)) => {
+            Ok(levels) => {
                 let ratios = levels[1..]
                     .iter()
                     .map(|[field, complementary, own, own_complementary, _]| {
@@ -1893,8 +1906,7 @@ fn a_moved_scene_reads_as_the_original_moved() {
                 let largest = ratios.iter().copied().fold(0.0, f64::max);
                 worst = worst.max(largest);
                 let line = format!(
-                    "{} ({physics:?}) {taken:?}: {} ({seconds:.1} s)",
-                    scene.name,
+                    "{label}: {} ({seconds:.1} s)",
                     levels
                         .iter()
                         .map(|[field, complementary, own, own_complementary, edge]| format!(
@@ -1910,17 +1922,30 @@ fn a_moved_scene_reads_as_the_original_moved() {
                 }
             }
             Err(error) => {
-                eprintln!("FAILED {} {motion:?}: {error}", scene.name);
-                failures.push(format!("{} {motion:?}: {error}", scene.name));
+                eprintln!("FAILED {label}: {error}");
+                failures.push(format!("{label}: {error}"));
             }
         }
     }
-    eprintln!(
-        "{} cases carried in {:.1} s, the worst {worst:.2} of a halving's move",
-        cases.len(),
-        started.elapsed().as_secs_f64()
-    );
+    eprintln!("{count} cases {what}, the worst {worst:.2} of a halving's move");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_moved_scene_reads_as_the_original_moved() {
+    let cases = moved_cases();
+    let outcomes = in_parallel(&cases, |(scene, motion)| {
+        let started = Instant::now();
+        let outcome = carry(scene, *motion);
+        let physics = scene.document.model.accepted.physics;
+        let taken = outcome.as_ref().map_or(*motion, |(taken, _)| *taken);
+        (
+            format!("{} ({physics:?}) {taken:?}", scene.name),
+            outcome.map(|(_, levels)| levels),
+            started.elapsed().as_secs_f64(),
+        )
+    });
+    within_a_halving("carried", outcomes);
 }
 
 /// The study [`MOVED`] was set from: every linear gallery scene through
@@ -1977,4 +2002,248 @@ fn study_moved_scenes() {
     for line in lines {
         eprintln!("{line}");
     }
+}
+
+/// The motion that leaves every point where it is.
+const STILL: Motion = Motion::Shift(Point2 { x: 0.0, y: 0.0 });
+
+/// A scene's curves written another way, the geometry the same.
+#[derive(Clone, Copy, Debug)]
+enum Rewrite {
+    /// Every open curve traversed the other way, through the core's own
+    /// reversal, which swaps each separated span's laws; the face anchors
+    /// and boundary probes on it follow.
+    Reversed,
+    /// Every closed curve started at its next breakpoint.
+    Restarted,
+    /// The curves listed backwards, which the mesher reads in order.
+    Reordered,
+    /// A knot inserted in the middle of every curve's first span through the
+    /// editor, which inserts it without moving the curve.
+    Refined,
+}
+
+/// How [`Rewrite::document`] says a scene has nothing it rewrites.
+const NOTHING_TO_REWRITE: &str = "nothing to rewrite";
+
+/// `curve`, closed, started at its next breakpoint: the same points, its
+/// parameter shifted by the first interval. Of the alignments of controls to
+/// knots the one that traces the same curve is taken, and none is an error.
+fn restarted(curve: &TopologyCurve) -> Result<(TopologyCurve, f64), String> {
+    let CurveSpline::Closed(spline) = &curve.spline else {
+        return Err("not a closed curve".into());
+    };
+    let shift = spline.intervals()[0];
+    let mut intervals = spline.intervals().to_vec();
+    intervals.rotate_left(1);
+    let mut multiplicities = spline.multiplicities().to_vec();
+    multiplicities.rotate_left(1);
+    for offset in 0..spline.controls().len() {
+        let mut controls = spline.controls().to_vec();
+        controls.rotate_left(offset);
+        let Ok(candidate) = PeriodicCubicSpline::new_with_multiplicities(
+            controls,
+            intervals.clone(),
+            multiplicities.clone(),
+        ) else {
+            continue;
+        };
+        let alike = (0..32).all(|index| {
+            let parameter = spline.period() * index as f64 / 32.0;
+            (candidate.evaluate(parameter) - spline.evaluate(parameter + shift)).norm() <= 1.0e-12
+        });
+        if alike {
+            let mut restarted = curve.clone();
+            restarted.spline = CurveSpline::Closed(candidate);
+            restarted.spans.rotate_left(1);
+            restarted.nodes.rotate_left(1);
+            return Ok((restarted, shift));
+        }
+    }
+    Err(format!("no restart of curve {:?} traces it", curve.id))
+}
+
+/// How a rewritten curve's parameter maps: reversed, `p` to `period - p`
+/// and its faces' sides swapped; restarted, `p` to `p - shift` within the
+/// period.
+#[derive(Clone, Copy)]
+enum Reparameterized {
+    Reversed { period: f64 },
+    Restarted { period: f64, shift: f64 },
+}
+
+impl Reparameterized {
+    fn parameter(self, parameter: f64) -> f64 {
+        match self {
+            Reparameterized::Reversed { period } => period - parameter,
+            Reparameterized::Restarted { period, shift } => (parameter - shift).rem_euclid(period),
+        }
+    }
+
+    fn side(self, side: CurveTraceSide) -> CurveTraceSide {
+        match self {
+            Reparameterized::Reversed { .. } => side.opposite(),
+            Reparameterized::Restarted { .. } => side,
+        }
+    }
+}
+
+impl Rewrite {
+    fn document(self, document: &TopologyDocument) -> Result<TopologyDocument, String> {
+        if let Rewrite::Refined = self {
+            return refined(document);
+        }
+        let mut document = document.clone();
+        let model = &mut document.model;
+        let mut changes = BTreeMap::new();
+        let mut reordered = false;
+        for scene in [&mut model.draft, &mut model.accepted] {
+            if let Rewrite::Reordered = self {
+                reordered |= scene.geometry.curves.len() > 1;
+                scene.geometry.curves.reverse();
+                continue;
+            }
+            for curve in &mut scene.geometry.curves {
+                let change = match (self, &curve.spline) {
+                    (Rewrite::Reversed, CurveSpline::Open(spline)) => {
+                        let period = spline.period();
+                        *curve = curve.reversed().map_err(|issue| issue.to_string())?;
+                        Reparameterized::Reversed { period }
+                    }
+                    (Rewrite::Restarted, CurveSpline::Closed(spline)) => {
+                        let period = spline.period();
+                        let (restarted, shift) = restarted(curve)?;
+                        *curve = restarted;
+                        Reparameterized::Restarted { period, shift }
+                    }
+                    _ => continue,
+                };
+                changes.insert(curve.id, change);
+            }
+            for assignment in &mut scene.face_assignments {
+                if let FaceAnchor::Curve {
+                    curve,
+                    side,
+                    parameter,
+                    ..
+                } = &mut assignment.anchor
+                    && let Some(change) = changes.get(curve)
+                {
+                    *parameter = change.parameter(*parameter);
+                    *side = change.side(*side);
+                }
+            }
+            scene
+                .geometry
+                .synchronize_vertices()
+                .map_err(|issue| issue.to_string())?;
+        }
+        for probe in &mut model.probes {
+            if let TopologyProbeTarget::Boundary(target) = &mut probe.target
+                && let Some(change) = changes.get(&target.curve)
+            {
+                target.side = change.side(target.side);
+            }
+        }
+        if changes.is_empty() && !reordered {
+            return Err(NOTHING_TO_REWRITE.into());
+        }
+        Ok(document)
+    }
+}
+
+/// `document` with a knot in the middle of every curve's first span,
+/// inserted by the editor as a user inserts a control.
+fn refined(document: &TopologyDocument) -> Result<TopologyDocument, String> {
+    let mut editor = TopologyEditor::from_document(document.clone())?;
+    settle(&mut editor);
+    let middles = editor
+        .document
+        .model
+        .draft
+        .geometry
+        .curves
+        .iter()
+        .map(|curve| {
+            let [start, end] = curve.spline.span_bounds(0).expect("a first span");
+            (curve.id, 0.5 * (start + end))
+        })
+        .collect::<Vec<_>>();
+    if middles.is_empty() {
+        return Err(NOTHING_TO_REWRITE.into());
+    }
+    for (curve, parameter) in middles {
+        editor.insert_control(curve, parameter)?;
+    }
+    settle(&mut editor);
+    match &editor.acceptance {
+        TopologyAcceptance::Valid => Ok(editor.document.clone()),
+        other => Err(format!("refined, the scene is {other:?}")),
+    }
+}
+
+/// IV-09's cases: each scene and the rewrite it is read against. The gate's
+/// set reverses the one-sided double slit's baffle and the echo comb's
+/// curves, restarts the crystal's and the dielectric whispering gallery's,
+/// reorders the obstacle array's and refines the double slit, the crystal
+/// and Brewster's angle; `FUNFERN_INVARIANTS_ALL=1`, nightly, every rewrite of every linear
+/// gallery scene that has one.
+fn rewritten_cases() -> Vec<(Scene, Rewrite)> {
+    let rewrites = [
+        Rewrite::Reversed,
+        Rewrite::Restarted,
+        Rewrite::Reordered,
+        Rewrite::Refined,
+    ];
+    let copy = |scene: &Scene| Scene {
+        name: scene.name.clone(),
+        document: scene.document.clone(),
+    };
+    if std::env::var_os("FUNFERN_INVARIANTS_ALL").is_some() {
+        return topology_examples::catalog()
+            .iter()
+            .filter(|example| linear(&example.document.model.accepted))
+            .map(|example| gallery(example.name))
+            .chain([one_sided_double_slit()])
+            .flat_map(|scene| {
+                rewrites
+                    .into_iter()
+                    .filter(|rewrite| {
+                        !matches!(rewrite.document(&scene.document), Err(error) if error == NOTHING_TO_REWRITE)
+                    })
+                    .map(|rewrite| (copy(&scene), rewrite))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    }
+    let slit = one_sided_double_slit();
+    let crystal = gallery("Anisotropic crystal");
+    vec![
+        (copy(&slit), Rewrite::Reversed),
+        (slit, Rewrite::Refined),
+        (copy(&crystal), Rewrite::Restarted),
+        (crystal, Rewrite::Refined),
+        (gallery("Dielectric whispering gallery"), Rewrite::Restarted),
+        (gallery("Obstacle array"), Rewrite::Reordered),
+        (gallery("Echo comb"), Rewrite::Reversed),
+        (gallery("Brewster angle"), Rewrite::Refined),
+    ]
+}
+
+#[test]
+fn a_rewritten_scene_reads_as_the_original() {
+    let cases = rewritten_cases();
+    let outcomes = in_parallel(&cases, |(scene, rewrite)| {
+        let started = Instant::now();
+        let outcome = rewrite
+            .document(&scene.document)
+            .and_then(|other| levels_against(&scene.document, &other, STILL));
+        let physics = scene.document.model.accepted.physics;
+        (
+            format!("{} ({physics:?}) {rewrite:?}", scene.name),
+            outcome,
+            started.elapsed().as_secs_f64(),
+        )
+    });
+    within_a_halving("rewritten", outcomes);
 }

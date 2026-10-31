@@ -1375,7 +1375,11 @@ field; the moved scene's authored materials, frames and drives are checked
 against the original's first. The gate carries 15 cases in about 30 s; the
 nightly's `invariants` job carries every linear gallery scene with
 `FUNFERN_INVARIANTS_ALL=1`. Its mutation is
-`principal-axes-turned-backwards`.
+`principal-axes-turned-backwards`. IV-09, equivalent curves, reads scenes
+against themselves with their open curves reversed, their closed curves
+restarted, their curves reordered or a knot inserted, by the same rule; the
+gate carries 8 cases, the nightly every one, and its mutation is
+`span-laws-kept-on-reversal`.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

@@ -31028,3 +31028,48 @@ symmetry (section 6j of `docs/spikes/funfern-testing-campaign-plan.md`), in
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-31 — A scene with its curves written another way reads as before
+
+IV-09 of milestone C, equivalent curve representations (section 6j of
+`docs/spikes/funfern-testing-campaign-plan.md`), in
+`crates/funfern-app/tests/invariants.rs`, on IV-04's comparison with the
+scene left where it is.
+
+- **The rewrites.** Each keeps the geometry and changes the mesh:
+  - every open curve reversed through the core's `TopologyCurve::reversed`,
+    which swaps each separated span's laws, the face anchors on it taken
+    to `period - p` on the other side and its boundary probes' sides
+    swapped;
+  - every closed curve started at its next breakpoint, its controls,
+    intervals, multiplicities, spans and nodes turned round and its anchors'
+    parameters shifted. The alignment of controls to knots is the one that
+    traces the same 32 points within 1e-12, and none is an error; every
+    closed curve in the gallery had one;
+  - the curves listed backwards, which the mesher reads in order;
+  - a knot in the middle of every curve's first span, inserted through the
+    editor's `insert_control`, which inserts it without moving the curve.
+- **What it read.** Over every linear gallery scene and the one-sided
+  double slit, 110 rewrites (24 reversals, 21 restarts, 25 reorders, 40
+  refinements) read within 0.69 of a halving's move, in 153 s on ten
+  threads. The double slit reversed meshes alike at its coarsest level and
+  reads 1e-15 there.
+- **The gate's set**, 8 cases in 7 s:
+  - the one-sided double slit reversed and refined;
+  - the anisotropic crystal restarted and refined;
+  - the dielectric whispering gallery restarted;
+  - the obstacle array reordered;
+  - the echo comb reversed;
+  - Brewster's angle refined.
+
+  The nightly's `invariants` job runs every rewrite.
+- **Mutation.** `span-laws-kept-on-reversal` makes `SpanBehavior::mirrored`
+  the identity, so a reversed curve's faces swap laws. The one-sided double
+  slit reversed reads 8.7 times a halving's move. Of the workspace's other
+  tests only the reversal's own unit test fails. IV-04's mirror swaps the
+  laws itself and passes it.
+- **Shared.** IV-04's and IV-09's judging is one function; the levels and a
+  judged case are named types.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

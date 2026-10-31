@@ -816,6 +816,23 @@ complementary field carried as `R∇ψ` is, a reflection turning it `-M b`.
   level, 107 times a halving's move; the shift, quarter turn and mirror pass
   it.
 
+**IV-09 done on 2026-10-31**, in the same file, on IV-04's comparison with
+the scene left where it is. Four rewrites keep a scene's geometry:
+- every open curve reversed through the core's `TopologyCurve::reversed`,
+  its anchors and boundary probes following;
+- every closed curve started at its next breakpoint, its controls,
+  intervals, spans and nodes turned round, taken only where it traces the
+  same points;
+- the curves listed backwards;
+- a knot in the middle of every curve's first span, inserted through the
+  editor's `insert_control`.
+
+Each meshes otherwise. Over every linear gallery scene and the one-sided
+double slit, 110 rewrites read within 0.69 of a halving's move; the gate
+carries 8 in 7 s, the nightly every one. Its mutation
+`span-laws-kept-on-reversal` leaves a reversed curve's laws where they
+were: the one-sided double slit reversed reads 8.7 times a halving's move.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

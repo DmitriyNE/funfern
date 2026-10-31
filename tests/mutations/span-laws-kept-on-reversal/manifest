@@ -1,0 +1,4 @@
+about: a curve traversed the other way keeps each separated span's laws where they were, so its two faces swap laws; a scene with its curves reversed must read as before
+test: cargo test --release -p funfern-app --test invariants -- a_rewritten_scene_reads_as_the_original
+expect: Double slit, its baffle outgoing on one side \(Mechanical\) Reversed: .* of a halving's move
+needs: cpu

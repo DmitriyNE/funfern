@@ -1,0 +1,24 @@
+diff --git a/crates/funfern-core/src/topology.rs b/crates/funfern-core/src/topology.rs
+index 690b13c..916bd9e 100644
+--- a/crates/funfern-core/src/topology.rs
++++ b/crates/funfern-core/src/topology.rs
+@@ -119,18 +119,7 @@ impl SpanBehavior {
+     /// The same behaviour seen from the opposite curve direction: the two
+     /// separated laws swap sides so each face keeps the law it had.
+     pub fn mirrored(self) -> Self {
+-        match self {
+-            Self::Transmitting => Self::Transmitting,
+-            Self::Separated {
+-                left,
+-                right,
+-                coupling,
+-            } => Self::Separated {
+-                left: right,
+-                right: left,
+-                coupling,
+-            },
+-        }
++        self
+     }
+ }
+ 
