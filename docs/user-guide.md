@@ -277,9 +277,11 @@ running; this file covers using it.
   text still being typed into a field and a colour still being dragged in a
   picker.
   Coordinates are measured in world units in a rigid orthonormal frame: origin and
-  angle set placement, with no hidden coordinate scaling. A new subdomain's frame starts at the
-  centre of the face it owns, so a local profile is usable before touching the
-  gizmo. A region frame can stay
+  angle set placement, with no hidden coordinate scaling. A new subdomain of another
+  material gets a frame at the centre of the face it owns, so a local profile is
+  usable before touching the gizmo; a face drawn with the material of the region it
+  divides keeps that region's frame, so the medium goes on across the line unchanged.
+  A region frame can stay
   fixed in the world or follow whole-loop translation, rotation, and uniform scale;
   scaling moves the frame with the object but does not rescale the profile. Unused
   materials are isotropic by default. Directional materials add a constant or

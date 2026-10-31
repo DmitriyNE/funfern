@@ -1,0 +1,15 @@
+diff --git a/crates/funfern-app/src/topology_editor.rs b/crates/funfern-app/src/topology_editor.rs
+index 232f9d7..43232ef 100644
+--- a/crates/funfern-app/src/topology_editor.rs
++++ b/crates/funfern-app/src/topology_editor.rs
+@@ -3173,9 +3173,7 @@ impl TopologyEditor {
+                         // genuinely new subdomain starts centred on the face
+                         // it owns instead of at the world origin.
+                         frame: match separator_material {
+-                            Some(material) if material != source.material => {
+-                                face_frame(topology, Some(face))
+-                            }
++                            Some(_) => face_frame(topology, Some(face)),
+                             _ => source.frame,
+                         },
+                     });

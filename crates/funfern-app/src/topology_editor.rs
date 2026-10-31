@@ -1047,13 +1047,36 @@ impl TopologyEditor {
             })
             .copied()
             .ok_or("Closed curve does not create one new interior face")?;
+        // The face round the loop, on its other side, and that face's region.
+        let around = anchors
+            .iter()
+            .find(|other| **other != anchor)
+            .and_then(|other| other.resolve(&topology).ok())
+            .and_then(|face| {
+                candidate.face_assignments.iter().find(|assignment| {
+                    assignment
+                        .anchor
+                        .resolve(&topology)
+                        .is_ok_and(|resolved| resolved == face)
+                })
+            })
+            .and_then(|assignment| assignment.region)
+            .and_then(|region| candidate.region(region))
+            .copied();
         let region = match purpose {
             ClosedCurvePurpose::Subdomain { material } => {
                 let id = self.allocate_region()?;
                 candidate.regions.push(Region {
                     id,
                     material,
-                    frame: face_frame(&topology, anchor.resolve(&topology).ok()),
+                    // A loop of the material round it keeps that region's
+                    // frame, so a medium that turns or varies with its frame
+                    // goes on across the loop unchanged; one of another
+                    // material starts centred on its own face.
+                    frame: match around {
+                        Some(around) if around.material == material => around.frame,
+                        _ => face_frame(&topology, anchor.resolve(&topology).ok()),
+                    },
                 });
                 Some(id)
             }
@@ -3144,12 +3167,16 @@ impl TopologyEditor {
                         id,
                         material: separator_material.unwrap_or(source.material),
                         // A daughter that keeps the old material keeps the old
-                        // frame; a genuinely new subdomain starts centred on the
-                        // face it owns instead of at the world origin.
-                        frame: if separator_material.is_some() {
-                            face_frame(topology, Some(face))
-                        } else {
-                            source.frame
+                        // frame, a separator drawn with that material
+                        // included: a medium that turns or varies with its
+                        // frame would otherwise change across the line. A
+                        // genuinely new subdomain starts centred on the face
+                        // it owns instead of at the world origin.
+                        frame: match separator_material {
+                            Some(material) if material != source.material => {
+                                face_frame(topology, Some(face))
+                            }
+                            _ => source.frame,
                         },
                     });
                     Some(id)
@@ -9852,17 +9879,18 @@ mod tests {
     /// A subdomain's frame travels with it. Moving and turning the whole curve
     /// carries the origin through the same similarity and adds the turn to the
     /// angle; reshaping the curve leaves the frame where it was, and so does a
-    /// frame attached to the world.
+    /// frame attached to the world. A subdomain of a new material, whose frame
+    /// is its own.
     #[test]
     fn a_moved_subdomain_carries_its_frame() {
         let mut editor = TopologyEditor::default();
+        let material = editor.add_material().unwrap();
+        settle(&mut editor);
         let centre = Point2::new(-0.42, 0.31);
         let curve = editor
             .create_closed_curve(
                 PeriodicCubicSpline::rounded(centre, 0.18),
-                ClosedCurvePurpose::Subdomain {
-                    material: DEFAULT_MATERIAL,
-                },
+                ClosedCurvePurpose::Subdomain { material },
             )
             .unwrap();
         settle(&mut editor);
@@ -10033,18 +10061,19 @@ mod tests {
         assert_eq!(frame(&editor), world);
     }
 
-    /// A region-local profile is unusable if its frame starts at the world    /// A region-local profile is unusable if its frame starts at the world
-    /// origin while the region sits somewhere else.
+    /// A region-local profile is unusable if its frame starts at the world
+    /// origin while the region sits somewhere else: a subdomain of a new
+    /// material starts centred on its own face.
     #[test]
     fn a_new_subdomain_frame_starts_inside_its_own_face() {
         let mut editor = TopologyEditor::default();
+        let material = editor.add_material().unwrap();
+        settle(&mut editor);
         let centre = Point2::new(-0.42, 0.31);
         editor
             .create_closed_curve(
                 PeriodicCubicSpline::rounded(centre, 0.18),
-                ClosedCurvePurpose::Subdomain {
-                    material: DEFAULT_MATERIAL,
-                },
+                ClosedCurvePurpose::Subdomain { material },
             )
             .unwrap();
         settle(&mut editor);
@@ -10078,11 +10107,13 @@ mod tests {
         assert_eq!(background.frame.origin, Point2::default());
     }
 
-    /// A separator's new daughter should centre on the face it actually owns,
-    /// not on the whole parent.
+    /// A separator's new daughter of a new material should centre on the
+    /// face it actually owns, not on the whole parent.
     #[test]
     fn a_separator_daughter_frame_starts_inside_its_own_face() {
         let mut editor = TopologyEditor::default();
+        let material = editor.add_material().unwrap();
+        settle(&mut editor);
         let start = TopologyAttachment::Boundary(FaceAnchor::Outer {
             side: OuterSide::Bottom,
             fraction: 0.5,
@@ -10100,9 +10131,7 @@ mod tests {
                     Point2::new(0.0, domain.max_y),
                 ])
                 .unwrap(),
-                OpenCurvePurpose::SubdomainSeparator {
-                    material: DEFAULT_MATERIAL,
-                },
+                OpenCurvePurpose::SubdomainSeparator { material },
                 Some(start),
                 Some(end),
             )
@@ -10123,6 +10152,77 @@ mod tests {
             daughter.frame.origin
         );
         assert!(daughter.frame.origin.y.abs() < 0.05);
+    }
+
+    /// A face that keeps the material of the region it is cut from keeps
+    /// that region's frame, whether a loop or a separator cuts it, so a
+    /// medium that turns or varies with its frame goes on across the line
+    /// unchanged. Until 2026-11-01 both were centred on their faces and
+    /// turned by nothing, and IV-08 read an anisotropic medium in a frame
+    /// turned by 0.4 apart across either by 0.3.
+    #[test]
+    fn a_face_that_keeps_its_material_keeps_its_frame() {
+        let turned = MaterialFrame {
+            origin: Point2::new(0.11, -0.07),
+            angle_radians: 0.4,
+            attachment: MaterialFrameAttachment::World,
+        };
+        let mut document = TopologyDocument::default();
+        for scene in [&mut document.model.draft, &mut document.model.accepted] {
+            scene.regions[0].frame = turned;
+        }
+        let mut editor = TopologyEditor::from_document(document).unwrap();
+        settle(&mut editor);
+        let daughters = |editor: &TopologyEditor| {
+            editor
+                .document
+                .model
+                .draft
+                .regions
+                .iter()
+                .filter(|region| region.id != BACKGROUND_REGION)
+                .map(|region| region.frame)
+                .collect::<Vec<_>>()
+        };
+        editor
+            .create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(-0.42, 0.31), 0.18),
+                ClosedCurvePurpose::Subdomain {
+                    material: DEFAULT_MATERIAL,
+                },
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(daughters(&editor), vec![turned], "the loop's face");
+        let domain = editor.document.model.draft.geometry.domain;
+        editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.3, domain.min_y),
+                    Point2::new(0.3, domain.max_y),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: DEFAULT_MATERIAL,
+                },
+                Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                    side: OuterSide::Bottom,
+                    fraction: 0.65,
+                })),
+                Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                    side: OuterSide::Top,
+                    fraction: 0.35,
+                })),
+            )
+            .unwrap();
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert_eq!(
+            daughters(&editor),
+            vec![turned, turned],
+            "the loop's face and the separator's"
+        );
     }
 
     /// A new material that reused the background's own colour would be invisible

@@ -31073,3 +31073,56 @@ scene left where it is.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-01 — A face drawn with the material it divides keeps that region's frame
+
+IV-08's static half of milestone C (section 6j of
+`docs/spikes/funfern-testing-campaign-plan.md`), a separator within one
+medium, in `crates/funfern-app/tests/invariants.rs`. It closes stage C2,
+and it found an editor defect, fixed here.
+
+- **The test.** The editor's own commands draw into the default box, in
+  Mechanical, TM and TE, each of the box's own material:
+  - a loop, through `create_closed_curve` as a subdomain;
+  - a slanting wall-to-wall separator, through `create_open_curve` as a
+    subdomain separator attached to the bottom and top sides;
+  - a free-ended one.
+
+  The box is read against itself without them by IV-04's rule. The box has
+  no curve of its own, so the grid comes right up to the separator.
+- **What it found.** On a medium of unit coefficients all nine cases read
+  within 0.31 of a halving's move, and the three skins read alike, being
+  one scalar problem there. With the medium made anisotropic, axis ratio 2
+  in a frame turned by 0.4, the loop and the wall read 0.30 to 0.41 apart at
+  every level, 840 to 910 times a halving's move; the free separator, which
+  makes no face, read alike. The new region had the box's material and a
+  frame of its own: `face_frame` seeds every new subdomain's frame at its
+  face's centroid, turned by nothing. The draw-through path meant to keep
+  the old frame for a daughter that keeps the old material, but tested only
+  whether the separator named a material, and the loop path never compared.
+  A medium that turns or varies with its frame (anisotropy in a turned
+  frame, a formula in `x` or `y`, a travelling modulation's direction)
+  changed across a line drawn within it.
+- **The fix, agreed with the user.** A new face that keeps the material of
+  the region it divides keeps that region's frame, on both paths; a face of
+  another material keeps the centred seed. Inheriting does not depend on
+  whether the material is frame-dependent now, since the material is shared
+  by every region using it and may become so later. Three editor tests drew
+  with the background's own material to test the centred seed and the frame
+  that follows a moved subdomain; they now draw with a material of their
+  own. A new one, `a_face_that_keeps_its_material_keeps_its_frame`, draws a
+  loop and a separator of the material round them in a turned frame. The
+  user guide says which frame a new face gets.
+- **The check before the runs** now carries the stiffness tensor in world
+  axes, built in the test from the frame's turn and carried through IV-04's
+  motions, so a frame's turn cannot pass it. IV-04's 130 cases and IV-09's
+  110 still pass it every scene, 0.81 and 0.69 at worst. Its message names
+  the other scene, which here the editor made.
+- **The test's medium** is graded along its frame's axis too, density
+  `1.7 + 0.3 x`; the nine cases read within 0.41.
+- **Mutation.** `separator-face-recentred` gives the separator's face the
+  centred frame again. The check refuses the wall in every skin: its
+  material at the new face reads otherwise.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

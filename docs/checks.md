@@ -1379,7 +1379,11 @@ nightly's `invariants` job carries every linear gallery scene with
 against themselves with their open curves reversed, their closed curves
 restarted, their curves reordered or a knot inserted, by the same rule; the
 gate carries 8 cases, the nightly every one, and its mutation is
-`span-laws-kept-on-reversal`.
+`span-laws-kept-on-reversal`. IV-08's static half draws a loop, a
+wall-to-wall separator and a free one of the box's own material into the
+default box in each skin, the medium anisotropic in a turned frame and
+graded along it, and reads the box against itself without them by the same
+rule; 9 cases in the gate, and its mutation is `separator-face-recentred`.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

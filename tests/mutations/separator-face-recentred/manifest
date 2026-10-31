@@ -1,0 +1,4 @@
+about: a separator drawn with the material of the face it divides gives the new face a frame centred on it and turned by nothing, as until 2026-11-01, so a medium that turns or varies with its frame changes across the line
+test: cargo test --release -p funfern-app --test invariants -- a_separator_within_one_medium_reads_as_none
+expect: the box \(Mechanical\) with a Wall separator: the other scene's material
+needs: cpu

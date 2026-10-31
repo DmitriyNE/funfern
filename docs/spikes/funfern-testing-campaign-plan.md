@@ -833,6 +833,22 @@ carries 8 in 7 s, the nightly every one. Its mutation
 `span-laws-kept-on-reversal` leaves a reversed curve's laws where they
 were: the one-sided double slit reversed reads 8.7 times a halving's move.
 
+**IV-08's static half done on 2026-11-01**, in the same file, and with it
+stage C2. The editor draws into the default box, in each skin, a loop, a
+wall-to-wall separator and a free one, each of the box's own material, and
+the box is read against itself without them by the same rule. On a medium
+of unit coefficients every case read within 0.31 of a halving's move. On a
+medium anisotropic in a frame turned by 0.4, the loop and the wall read
+0.30 to 0.41 apart at every level, 840 to 910 times a halving's move: the
+editor gave a new face of the material it divides a frame of its own,
+centred on the face and turned by nothing, so the medium changed across
+the line. Such a face now keeps the frame of the region it divides, a face
+of another material keeps the centred seed, and the medium of the test,
+graded along its frame's axis too, reads within 0.41. The check before the
+runs now carries the stiffness tensor in world axes, so a frame's turn
+cannot pass it. Its mutation `separator-face-recentred`. Milestone C's
+stage C3, the remesh family, is next, planned before it starts.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

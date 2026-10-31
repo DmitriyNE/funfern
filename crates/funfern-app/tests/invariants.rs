@@ -39,7 +39,8 @@
 
 use funfern_app::document::ProbeId;
 use funfern_app::topology_editor::{
-    TopologyAcceptance, TopologyDocument, TopologyEditor, TopologyProbeTarget,
+    ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment, TopologyDocument,
+    TopologyEditor, TopologyProbeTarget,
 };
 use funfern_app::topology_examples;
 use funfern_app::topology_persistence;
@@ -49,11 +50,11 @@ use funfern_app::topology_runtime::{
 use funfern_core::{
     BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalPointStencil,
     CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState, CurveId, CurveSpanId,
-    CurveSpline, CurveTraceSide, DomainRect, FaceAnchor, FaceBoundaryCondition, FieldLaw,
-    MaterialFrame, MaterialId, MeshTriangle, MeshingOptions, OuterBoundaryCondition, OuterSide,
-    PeriodicCubicSpline, Point2, QuadraticPointStencil, RateLaw, RegionId, RestoringLaw,
-    SpanBehavior, TimeSignal, TopologyCurve, TopologyScene, TopologyVertexId,
-    TopologyVertexLocation, TriMesh,
+    CurveSpline, CurveTraceSide, DomainRect, ElectromagneticPolarization, FaceAnchor,
+    FaceBoundaryCondition, FieldLaw, MaterialFrame, MaterialId, MeshTriangle, MeshingOptions,
+    OpenCubicSpline, OuterBoundaryCondition, OuterSide, PeriodicCubicSpline, PhysicsModel, Point2,
+    QuadraticPointStencil, RateLaw, RegionId, RestoringLaw, SpanBehavior, SymmetricTensor2,
+    TimeSignal, TopologyCurve, TopologyScene, TopologyVertexId, TopologyVertexLocation, TriMesh,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -1290,6 +1291,28 @@ impl Motion {
         if self.reflects() { image * -1.0 } else { image }
     }
 
+    /// A tensor's image, `L A Lᵀ`.
+    fn tensor(self, tensor: SymmetricTensor2) -> SymmetricTensor2 {
+        let SymmetricTensor2 { xx, xy, yy } = tensor;
+        match self {
+            Motion::Shift(_) => tensor,
+            Motion::QuarterTurn => SymmetricTensor2 {
+                xx: yy,
+                xy: -xy,
+                yy: xx,
+            },
+            Motion::Mirror { .. } => SymmetricTensor2 { xx, xy: -xy, yy },
+            Motion::Turn { angle, .. } => {
+                let (sin, cos) = angle.sin_cos();
+                SymmetricTensor2 {
+                    xx: cos * cos * xx - 2.0 * cos * sin * xy + sin * sin * yy,
+                    xy: cos * sin * (xx - yy) + (cos * cos - sin * sin) * xy,
+                    yy: sin * sin * xx + 2.0 * sin * cos * xy + cos * cos * yy,
+                }
+            }
+        }
+    }
+
     fn domain(self, domain: DomainRect) -> DomainRect {
         if let Motion::Turn { .. } = self {
             return domain;
@@ -1475,8 +1498,13 @@ fn probe_at(prepared: &PreparedTopology, run: &Run, point: Point2) -> Option<(f6
 /// What `region`'s material is at `point` as authored, read in the region's
 /// frame as the solver reads it: its density, stiffness and axis ratio, its
 /// loss rates, its restoring law's scale, and each drive's multiplier at
-/// three instants.
-fn laws_at(scene: &TopologyScene, region: RegionId, point: Point2) -> Result<Vec<f64>, String> {
+/// three instants; and its stiffness as a tensor in world axes, the frame's
+/// turn on it, built here from the principal values.
+fn laws_at(
+    scene: &TopologyScene,
+    region: RegionId,
+    point: Point2,
+) -> Result<(Vec<f64>, SymmetricTensor2), String> {
     let region = scene.region(region).ok_or("no such region")?;
     let material = scene.material(region.material).ok_or("no such material")?;
     let coordinates = region.frame.coordinates(point);
@@ -1514,12 +1542,23 @@ fn laws_at(scene: &TopologyScene, region: RegionId, point: Point2) -> Result<Vec
             values.push(drive.multiplier(time, coordinates));
         }
     }
-    Ok(values)
+    // Stiffness times the ratio along the frame's first axis and over it
+    // along the second, `R diag Rᵀ`.
+    let (stiffness, ratio) = (values[1], values[2]);
+    let (x, y) = (stiffness * ratio, stiffness / ratio);
+    let (sin, cos) = region.frame.angle_radians.sin_cos();
+    let tensor = SymmetricTensor2 {
+        xx: x * cos * cos + y * sin * sin,
+        xy: (x - y) * sin * cos,
+        yy: x * sin * sin + y * cos * cos,
+    };
+    Ok((values, tensor))
 }
 
-/// How [`moved_apart`] says the moved scene is not the original carried
-/// through, which is the motion's fault, not the solver's.
-const NOT_CARRIED: &str = "the moved scene's material";
+/// How [`carried`] says the other scene is not the original carried
+/// through as authored: the motion's fault or the rewrite's, or the editor's
+/// where it made the other scene, never the solver's.
+const NOT_CARRIED: &str = "the other scene's material";
 
 /// How [`Motion::document`] refuses to turn a scene whose curves meet the
 /// domain's sides, which stay where they are.
@@ -1558,8 +1597,9 @@ fn common_points(domain: DomainRect, mesh: &TriMesh, margin: f64) -> Vec<Point2>
 
 /// Whether `other` is `original` carried through `motion` as authored: at
 /// every one of `points` both meshes take, the same material read in each
-/// region's frame. A scene that is not is the motion's fault, not the
-/// solver's, and fails apart.
+/// region's frame, its stiffness tensor carried through. A scene that is not
+/// is the motion's fault or the rewrite's, or the editor's where it made the
+/// other scene, never the solver's, and fails apart.
 fn carried(
     original: &PreparedTopology,
     other: &PreparedTopology,
@@ -1574,18 +1614,24 @@ fn carried(
         ) else {
             continue;
         };
-        let (laws_here, laws_there) = (
+        let ((laws_here, tensor_here), (laws_there, tensor_there)) = (
             laws_at(&original.bundle.authored, here.region, *point)?,
             laws_at(&other.bundle.authored, there.region, motion.point(*point))?,
         );
+        let tensor = motion.tensor(tensor_here);
         if laws_here.len() != laws_there.len()
             || laws_here
                 .iter()
                 .zip(&laws_there)
                 .any(|(a, b)| !close(*a, *b))
+            || !close(tensor.xx, tensor_there.xx)
+            || !close(tensor.xy, tensor_there.xy)
+            || !close(tensor.yy, tensor_there.yy)
         {
             return Err(format!(
-                "{NOT_CARRIED} at {point:?} is {laws_there:?}, not {laws_here:?}"
+                "{NOT_CARRIED} at {point:?} is {:?}, not {:?}",
+                (laws_there, tensor_there),
+                (laws_here, tensor)
             ));
         }
     }
@@ -2246,4 +2292,128 @@ fn a_rewritten_scene_reads_as_the_original() {
         )
     });
     within_a_halving("rewritten", outcomes);
+}
+
+/// What IV-08 draws into a box of one medium, that medium on both its sides.
+#[derive(Clone, Copy, Debug)]
+enum Separator {
+    /// A closed loop round part of it, made a subdomain of the same material.
+    Loop,
+    /// A slanting open curve from the bottom side to the top, dividing it in
+    /// two, the new face given the material it divides.
+    Wall,
+    /// An open curve with both ends free, dividing nothing.
+    Free,
+}
+
+/// The default box in `physics`, before and after `separator` is drawn into
+/// it through the editor, as a user draws one.
+fn separated(
+    physics: PhysicsModel,
+    separator: Separator,
+) -> Result<(TopologyDocument, TopologyDocument), String> {
+    // An anisotropic medium in a turned frame, its density graded along the
+    // frame's first axis, which a new face must carry over as it is.
+    let mut document = TopologyDocument::default();
+    for scene in [&mut document.model.draft, &mut document.model.accepted] {
+        for material in &mut scene.materials {
+            material.mass_density = funfern_core::ScalarField::formula("1.7 + 0.3 * x").unwrap();
+            material.axis_ratio = funfern_core::ScalarField::constant(2.0);
+        }
+        for region in &mut scene.regions {
+            region.frame.angle_radians = 0.4;
+        }
+    }
+    let mut editor = TopologyEditor::from_document(document)?;
+    settle(&mut editor);
+    editor.set_physics(physics)?;
+    settle(&mut editor);
+    if editor.acceptance != TopologyAcceptance::Valid {
+        return Err(format!("the box is {:?}", editor.acceptance));
+    }
+    let base = editor.document.clone();
+    let scene = &base.model.accepted;
+    let material = scene
+        .region(BACKGROUND_REGION)
+        .ok_or("the box has no background")?
+        .material;
+    let domain = scene.geometry.domain;
+    match separator {
+        Separator::Loop => {
+            editor.create_closed_curve(
+                PeriodicCubicSpline::rounded(Point2::new(0.21, 0.13), 0.33),
+                ClosedCurvePurpose::Subdomain { material },
+            )?;
+        }
+        Separator::Wall => {
+            let (bottom, top) = (0.137, 0.237);
+            let spline = OpenCubicSpline::polyline(vec![
+                Point2::new(bottom, domain.min_y),
+                Point2::new(top, domain.max_y),
+            ])
+            .map_err(|error| format!("{error:?}"))?;
+            let along = |side, fraction| {
+                Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                    side,
+                    fraction,
+                }))
+            };
+            editor.create_open_curve(
+                spline,
+                OpenCurvePurpose::SubdomainSeparator { material },
+                along(OuterSide::Bottom, (bottom - domain.min_x) / domain.width()),
+                // The top side runs right to left.
+                along(OuterSide::Top, (domain.max_x - top) / domain.width()),
+            )?;
+        }
+        Separator::Free => {
+            let spline = OpenCubicSpline::uniform(vec![
+                Point2::new(-0.5, -0.4),
+                Point2::new(-0.1, -0.3),
+                Point2::new(0.2, 0.2),
+                Point2::new(0.45, 0.5),
+            ])
+            .map_err(|error| format!("{error:?}"))?;
+            editor.create_open_curve(
+                spline,
+                OpenCurvePurpose::SubdomainSeparator { material },
+                None,
+                None,
+            )?;
+        }
+    }
+    settle(&mut editor);
+    match &editor.acceptance {
+        TopologyAcceptance::Valid => Ok((base, editor.document.clone())),
+        other => Err(format!("with its separator, the box is {other:?}")),
+    }
+}
+
+#[test]
+fn a_separator_within_one_medium_reads_as_none() {
+    let cases = [
+        PhysicsModel::Mechanical,
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        },
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        },
+    ]
+    .into_iter()
+    .flat_map(|physics| {
+        [Separator::Loop, Separator::Wall, Separator::Free].map(|separator| (physics, separator))
+    })
+    .collect::<Vec<_>>();
+    let outcomes = in_parallel(&cases, |(physics, separator)| {
+        let started = Instant::now();
+        let outcome = separated(*physics, *separator)
+            .and_then(|(base, with)| levels_against(&base, &with, STILL));
+        (
+            format!("the box ({physics:?}) with a {separator:?} separator"),
+            outcome,
+            started.elapsed().as_secs_f64(),
+        )
+    });
+    within_a_halving("separated", outcomes);
 }

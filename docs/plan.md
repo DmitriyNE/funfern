@@ -1303,8 +1303,11 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   `crates/funfern-app/tests/invariants.rs`, with the point locator's fix it
   found, and IV-02, identifiers, and IV-01, superposition, the same day,
   which completes stage C1. C2, equivalent scenes at three levels, began
-  with IV-04, symmetry, and IV-09, equivalent curves, on 2026-10-31;
-  IV-08's static half, a separator between one medium, is next.
+  with IV-04, symmetry, and IV-09, equivalent curves, on 2026-10-31, and
+  closed with IV-08's static half, a separator within one medium, on
+  2026-11-01, which found the editor giving such a separator's new face a
+  frame of its own (fixed). Stage C3, the remesh family, is next, planned
+  before it starts.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the
