@@ -30829,3 +30829,54 @@ against 30.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-31 — A shuffled mesh gives every scene the same solution, and the point locator no longer picks by the mesh's order
+
+Milestone C of the testing campaign, the 11 October plan's P1 invariants, is
+planned in section 6j of `docs/spikes/funfern-testing-campaign-plan.md`,
+with what each had and lacked. It begins with IV-03, mesh renumbering.
+
+- **The measurement behind the plan.** A scene with a hole, an inclusion
+  and a baffle meshed at edge 0.08 gives the same mesh with its curves'
+  identifiers relabelled, and a different one, vertices up to 0.043 apart,
+  with its curves listed in another order, its baffle reversed, a closed
+  curve started at another breakpoint, or mirrored. IV-04 and IV-09 are
+  therefore compared at the discretization level.
+- **The test.** `crates/funfern-app/tests/invariants.rs` prepares every
+  regression, frozen and gallery scene, 91, at its own edge. It shuffles
+  each mesh's vertices, triangles, each triangle's first vertex and its
+  boundary edges, and prepares the shuffled mesh through `request_adapted`,
+  the path an adaptation's mesh takes, beside the same mesh unshuffled.
+  Each run is struck by one smooth pulse and runs 64 steps on the CPU with
+  its own forcing. Mapped back element by element, the shuffled run matches
+  within 1e-12 in Q, b, r, energy, time step and the point and segment
+  probes, 8.9e-14 at worst, the bent fiber's segment probe. The unshuffled
+  mesh through the adaptation path matches a fresh preparation bit for bit
+  in every scene. 24 s on ten threads.
+- **What it found.** `QuadraticPointStencil` took a point from the first
+  triangle in the mesh's order whose barycentric coordinates all exceeded
+  -1e-10. A point on an edge or vertex several triangles share lies in each
+  of them, and the complementary field is each element's own. The
+  parametric fiber amplifier's segment probe runs along the fiber's axis
+  with 13 of its 64 points on shared edges. Its summed complementary field
+  read (0.0060, -0.0286) on one numbering and (0.0099, -0.0286) on the
+  other, 13% apart, its primary field 1.6e-16. Point and segment probes,
+  the far-field contour and the vector overlay all locate through it.
+- **The fix.** The triangle the point lies inside takes it, and there is
+  at most one; failing that, of those it lies on within the tolerance, the
+  one whose centroid lies furthest along (cos 1, sin 1). The scan still
+  stops at a triangle that holds the point inside. The fiber's probe now
+  reads 6.2e-15 apart. A core test reads a vertex four triangles share and
+  an edge two share from the same triangle in all 24 orders of the four,
+  each started at another vertex.
+- **Mutation.** `probe-point-read-in-mesh-order` puts back the first
+  triangle in the mesh's order. The invariants test fails on the fiber
+  amplifier and the core test on its first order; no other test saw it.
+- **Docs.** The campaign plan's section 6j; plan.md's campaign item, which
+  still said A1 was next; checks.md.
+- **Device suite:** the probe entries, the five temporal consumer examples
+  and the fixtures `observables`, `far-field` and `far-field-late`, 8 of 8
+  on the M1 Max.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

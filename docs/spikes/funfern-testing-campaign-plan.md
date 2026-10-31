@@ -441,7 +441,9 @@ with their reports in `docs/spikes/`.
 - **C, invariants and stress:** IV-01 to IV-13, AMR-01 to AMR-04, RT-01 to
   RT-08, the numerical edge cases, long runs and resource lifecycle. The
   metamorphic tests and the real-device fuzzing need none of the reference
-  machinery and can start whenever a stage leaves room.
+  machinery and can start whenever a stage leaves room. The P1 invariants,
+  IV-01 to IV-05 and IV-08 to IV-12, were planned on 2026-10-31
+  (section 6j).
 
 ## 6a. Stage B1: energy accounting and wall passivity
 
@@ -689,6 +691,59 @@ browser nightly's recorders part runs it. The mutation
 
   The mutations `clock-origin-summed-in-f32`,
   `handoff-candidate-packed-at-zero` and `far-field-stamps-summed-in-f32`.
+
+## 6j. Milestone C: the P1 invariants
+
+**Planned on 2026-10-31.** Ten invariants of the 11 October plan's section
+3, each a relation between two runs, so none needs a reference. What each
+had and lacked:
+
+| ID | Had | Lacked |
+|---|---|---|
+| IV-01 superposition | PH-01's four modes and a constant together, against the closed form | A, B and A+B, and αA with α < 0, over every linear channel |
+| IV-02 identifiers | nothing | relabelled curves, spans, regions, materials and sources, and reordered material and region lists |
+| IV-03 renumbering | renumbered traces in the transfer and plan tests | a shuffled mesh through assembly, compile and stepping |
+| IV-04 symmetry | nothing | translated, rotated and reflected scenes in each skin |
+| IV-05 observers | probes off, far field off and step batching, each the same bits | the overlays, auto exposure, readouts, recording, pause, resize |
+| IV-08 separator | nothing | a transmitting separator between one medium, static and edited mid-run |
+| IV-09 curves | reversal at the geometry level | reversed, restarted, reordered and split curves solved |
+| IV-10 neutral remesh | totals to roundoff in the transfer maps; the device held to the f64 twin | totals counted from geometry per component, through the app, on both |
+| IV-11 repeated remesh | twelve static round trips against fixed bounds | a running field remeshed K times, its error's growth in K |
+| IV-12 baffle sides | each side its own values in the transfer tests | a jump across a free-ended baffle through refining, coarsening and a move |
+
+One measurement settles which of them can hold to roundoff. A scene with a
+hole, an inclusion and a baffle meshed at edge 0.08 gives the same mesh
+with its curves' identifiers relabelled, and a different one, vertices up
+to 0.043 apart, with its curves listed in another order, its baffle
+reversed, a closed curve started at another breakpoint, or mirrored. The
+same document always meshes alike, so this is no defect; it puts IV-04 and
+IV-09 at the discretization level.
+
+Four stages, a commit per invariant:
+
+- **C1, exact identities on the CPU:** IV-03, IV-02, IV-01, each to
+  roundoff.
+- **C2, equivalent scenes at three levels:** IV-04, IV-09 and IV-08's
+  static half, both fields read at common points, the difference required
+  to fall with the mesh at the scheme's rate from an f64 study's numbers.
+- **C3, the remesh family on the CPU and the device:** IV-10, IV-11,
+  IV-12 and IV-08 edited mid-run.
+- **C4, the device:** an `observers` fixture for IV-05, and IV-01 within
+  f32.
+
+**IV-03 done on 2026-10-31** (`crates/funfern-app/tests/invariants.rs`).
+Every regression, frozen and gallery scene, 91 in all, is prepared at its
+own edge, its mesh shuffled and prepared again through the path an
+adaptation's mesh takes. Each run is struck by one pulse and runs 64 steps on
+the CPU. The shuffled run matches the unshuffled one within 1e-12 in its
+fields, energy, time step and probes, 8.9e-14 at worst. The unshuffled mesh
+through that path matches a fresh preparation bit for bit. It found the
+point locator taking a point on a shared edge from the first triangle in
+the mesh's order: a segment probe along the parametric fiber amplifier's
+axis, 13 of its 64 points on edges, read its complementary field 13%
+differently on the same mesh renumbered. The locator now takes the
+triangle whose centroid lies furthest along a fixed direction; its
+mutation `probe-point-read-in-mesh-order`.
 
 ## 7. Infrastructure
 

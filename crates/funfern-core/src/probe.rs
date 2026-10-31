@@ -8,6 +8,13 @@ use crate::{
 };
 
 const BOUNDARY_TOLERANCE: f64 = 1.0e-9;
+/// Which of the triangles a point on a shared edge or vertex lies in reads
+/// it: the one whose centroid lies furthest this way, `(cos 1, sin 1)`, off
+/// the axes and the diagonals a mesh's edges tend to follow.
+const SHARED_POINT_DIRECTION: Point2 = Point2 {
+    x: 0.540_302_305_868_139_8,
+    y: 0.841_470_984_807_896_5,
+};
 const MIN_DISK_POLYGON_SIDES: usize = 24;
 const MAX_DISK_POLYGON_SIDES: usize = 128;
 const DISK_APPROXIMATION_TOLERANCE: f64 = 2.0e-4;
@@ -447,7 +454,18 @@ impl QuadraticPointStencil {
             }
         }
 
+        // The triangle the point lies inside, of which there is at most one;
+        // failing that, of the triangles it lies on within the tolerance,
+        // the one whose centroid lies furthest along
+        // `SHARED_POINT_DIRECTION`, so that the mesh's order never picks.
+        // The complementary field is each element's own and differs between
+        // neighbours. Until 2026-10-31 the first triangle in the mesh's
+        // order took the point, and a segment probe along the parametric
+        // fiber amplifier's axis, 13 of its 64 points on shared edges, read
+        // its summed complementary field 13% differently on the same mesh
+        // renumbered.
         let mut located = None;
+        let mut furthest = f64::NEG_INFINITY;
         for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
             let [a, b, c] = triangle.vertices;
             let (Some(a), Some(b), Some(c)) = (
@@ -472,8 +490,19 @@ impl QuadraticPointStencil {
                     Point2::new(c.point.y - a.point.y, a.point.x - c.point.x) / twice_area,
                     Point2::new(a.point.y - b.point.y, b.point.x - a.point.x) / twice_area,
                 ];
-                located = Some((triangle_index, triangle.region, barycentric, gradients));
-                break;
+                let inside = barycentric.iter().all(|weight| *weight > 1.0e-10);
+                let reach = if inside {
+                    f64::INFINITY
+                } else {
+                    ((a.point + b.point + c.point) / 3.0 - point).dot(SHARED_POINT_DIRECTION)
+                };
+                if reach > furthest {
+                    furthest = reach;
+                    located = Some((triangle_index, triangle.region, barycentric, gradients));
+                }
+                if inside {
+                    break;
+                }
             }
         }
         let Some((triangle_index, region, barycentric, gradients)) = located else {
@@ -1521,6 +1550,86 @@ mod tests {
         assert!((sample.velocity - 4.0).abs() < 1.0e-12);
         assert!((sample.gradient - Point2::new(2.0, -1.0)).norm() < 1.0e-12);
         assert!((sample.energy_density - (0.5 * 2.0 * 16.0 + 0.5 * 3.0 * 5.0)).abs() < 1.0e-11);
+    }
+
+    /// A point on an edge or a vertex several triangles share is read from
+    /// the same one whatever order the mesh lists them in and whichever
+    /// vertex each starts at: the one whose centroid lies furthest along
+    /// `SHARED_POINT_DIRECTION`.
+    #[test]
+    fn a_point_several_triangles_share_reads_the_same_one_in_any_order() {
+        let (_, scene, _) = fixture();
+        let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.5, 0.5]];
+        // Below, right of, above and left of the centre.
+        let triangles = [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]];
+        let centroid = |triangle: [usize; 3]| {
+            triangle.iter().fold(Point2::default(), |sum, corner| {
+                sum + Point2::new(corners[*corner][0], corners[*corner][1])
+            }) / 3.0
+        };
+        // The centre, which all four share, reads the one above it; a point
+        // on the edge between the lower and the left one reads the left.
+        let cases = [
+            (Point2::new(0.5, 0.5), centroid(triangles[2])),
+            (Point2::new(0.25, 0.25), centroid(triangles[3])),
+        ];
+        let mut orders = Vec::new();
+        for first in 0..4 {
+            for second in (0..4).filter(|index| *index != first) {
+                for third in (0..4).filter(|index| ![first, second].contains(index)) {
+                    let fourth = 6 - first - second - third;
+                    orders.push([first, second, third, fourth]);
+                }
+            }
+        }
+        for (index, order) in orders.iter().enumerate() {
+            let listed = order.map(|triangle| {
+                let turn = (index + triangle) % 3;
+                std::array::from_fn(|corner| triangles[triangle][(corner + turn) % 3])
+            });
+            let mesh = TriMesh {
+                geometry_revision: 3,
+                mesh_revision: 7,
+                vertices: corners
+                    .iter()
+                    .map(|point| MeshVertex {
+                        point: Point2::new(point[0], point[1]),
+                        boundary: None,
+                        trace: None,
+                    })
+                    .collect(),
+                triangles: listed
+                    .iter()
+                    .map(|vertices| MeshTriangle {
+                        vertices: *vertices,
+                        region: BACKGROUND_REGION,
+                    })
+                    .collect(),
+                boundary_edges: vec![],
+                requested_sizes: vec![],
+                quality: MeshQuality {
+                    minimum_angle_degrees: 45.0,
+                    maximum_edge_length: 1.0,
+                },
+            };
+            let mesh = Meshed::by_hand(mesh, box_plan(crate::DomainRect::new(0.0, 1.0, 0.0, 1.0)));
+            let operator = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+            for (point, expected) in cases {
+                let stencil = QuadraticPointStencil::build_topology(
+                    &mesh,
+                    &operator,
+                    &mesh.plan,
+                    TopologyWaveModel::from_topology_scene(&scene),
+                    point,
+                )
+                .unwrap();
+                let read = centroid(listed[stencil.element as usize]);
+                assert!(
+                    (read - expected).norm() < 1.0e-12,
+                    "{point:?} in the order {order:?} read the triangle at {read:?}"
+                );
+            }
+        }
     }
 
     #[test]

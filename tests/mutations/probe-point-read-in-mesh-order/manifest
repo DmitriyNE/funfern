@@ -1,0 +1,4 @@
+about: the point locator reads a point on an edge or vertex several triangles share from the first of them in the mesh's order, as it did until 2026-10-31, so the same mesh renumbered moves a segment probe's complementary field
+test: cargo test --release -p funfern-app --test invariants -- a_shuffled_mesh_gives_every_scene_the_same_solution
+expect: Parametric fiber amplifier: the shuffled mesh's run stands
+needs: cpu

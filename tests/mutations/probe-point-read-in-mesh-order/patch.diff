@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/probe.rs b/crates/funfern-core/src/probe.rs
+index eb7fa20..450c4e3 100644
+--- a/crates/funfern-core/src/probe.rs
++++ b/crates/funfern-core/src/probe.rs
+@@ -496,7 +496,7 @@ impl QuadraticPointStencil {
+                 } else {
+                     ((a.point + b.point + c.point) / 3.0 - point).dot(SHARED_POINT_DIRECTION)
+                 };
+-                if reach > furthest {
++                if located.is_none() {
+                     furthest = reach;
+                     located = Some((triangle_index, triangle.region, barycentric, gradients));
+                 }

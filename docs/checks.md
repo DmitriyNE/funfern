@@ -1348,6 +1348,18 @@ fixed generation's device plan is packed both ways, through the production
 packer and the one the packer's own tests use, and the two must agree. It
 runs in the gate, about a second on ten threads.
 
+`cargo test --release -p funfern-app --test invariants -- --nocapture`
+holds milestone C's invariants (section 6j of the campaign plan). IV-03,
+renumbering: every regression, frozen and gallery scene is prepared at its
+own edge, its mesh shuffled (vertices, triangles, each triangle's first
+vertex, boundary edges) and prepared again through the path an adaptation's
+mesh takes. Each is struck by one pulse and run 64 steps on the CPU, and the
+shuffled run must match the unshuffled one within 1e-12 in its fields,
+integrated field, energy, time step and point and segment probes. The
+unshuffled mesh through that path must match a fresh preparation bit for
+bit. It runs in the gate, about 20 s on ten threads; its mutation is
+`probe-point-read-in-mesh-order`.
+
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
 catch it and the pattern its failure must match; the script applies each,
