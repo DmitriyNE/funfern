@@ -30965,3 +30965,66 @@ IV-01 of milestone C, superposition (section 6j of
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-10-31 — A moved scene reads as the original moved
+
+Stage C2 of milestone C, planned with the user, compares scenes that are
+the same physics on different meshes at three levels. It begins with IV-04,
+symmetry (section 6j of `docs/spikes/funfern-testing-campaign-plan.md`), in
+`crates/funfern-app/tests/invariants.rs`.
+
+- **The motions.** The test carries a scene's domain, curves, junctions,
+  sides and their fractions, face anchors, frames, source and probes through
+  a shift, a quarter turn, a mirror, or a turn by 37° of the contents alone.
+  A reflection swaps each separated span's laws and each anchor's side, the
+  test's own doing and not the core's `SpanBehavior::mirrored`. The
+  complementary field is carried as `R∇ψ` is, a reflection turning it to
+  `-M b`.
+- **The check before any run.** The moved scene's materials as authored,
+  read in each region's frame, must equal the original's at the carried
+  point. That covers density, stiffness, axis ratio, loss rates, the
+  restoring law and every drive at three instants, over a grid 1e-3 clear of
+  every curve. A scene that fails is the motion's fault, not the solver's.
+- **The comparison.** Both runs are read through the production point probe
+  at a 24 by 24 grid kept a coarse edge from every curve, at the scene's own
+  edge, twice it and half it, to the same physical time.
+- **The study.** All 39 linear gallery scenes went through every motion at
+  three levels in 5.5 minutes on ten threads.
+  - The moved run's distance does not fall at a rate. A shifted scene may
+    mesh almost alike at one level and not the next, and the drums' runs do
+    not converge between levels at all.
+  - What held everywhere: the moved run stands closer to the original than
+    one halving of the mesh moves the original, 0.56 of that at worst for
+    shifts, quarter turns and mirrors.
+- **Two faults of the motion, found by the study.**
+  - A mirror must reverse a frame's own `x` or its `y`. The travelling
+    modulation runs along a frame's `x`, so reversing it reversed the
+    modulation, and four scenes read 0.11 to 1.14 apart at every level. The
+    check compared static coefficients only; it now reads the drives,
+    refuses that mirror, and the test takes the other.
+  - The fiber amplifier's band is narrower than the comparison's margin, so
+    the check reads its own denser grid.
+- **The turn.** A frame's tensor turned the wrong way is invisible to a
+  quarter turn and to a mirror: its axes repeat every 180°, and a reflection
+  maps the backward turn onto the forward one. Only a generic angle sees it.
+  The turn leaves the outer walls in place, so it applies to the ten gallery
+  scenes whose curves clear the sides and whose runs end before their waves
+  reach them, 0.81 at worst. Elsewhere it read up to 18 times a halving's
+  move, the walls' doing.
+- **The bound.** At both finer levels, the field and the complementary
+  field must stand within one halving's move of the original.
+  - The gate carries 15 cases in 29 s on ten threads, 0.64 at worst. They
+    cover each skin: the anisotropic crystal through all four motions, the
+    double slit with its baffle outgoing on one side, Brewster's angle, the
+    acoustic whispering gallery, the travelling modulation, the phased
+    array, the echo comb and the skin depth.
+  - A nightly job, `invariants`, carries every linear gallery scene with
+    `FUNFERN_INVARIANTS_ALL=1`: 130 cases in 188 s here, 0.81 at worst.
+- **Mutation.** `principal-axes-turned-backwards` turns a frame's tensor by
+  the opposite angle. The turn reads the crystal 0.34 apart at every level,
+  107 times a halving's move, while the shift, quarter turn and mirror pass
+  it. Of the workspace's other tests only the tensor's own unit test fails;
+  no physics test does.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

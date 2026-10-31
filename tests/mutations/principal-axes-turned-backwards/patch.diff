@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/material.rs b/crates/funfern-core/src/material.rs
+index 23b54af..617cc1a 100644
+--- a/crates/funfern-core/src/material.rs
++++ b/crates/funfern-core/src/material.rs
+@@ -299,7 +299,7 @@ impl SymmetricTensor2 {
+         let (sin, cos) = angle_radians.sin_cos();
+         Self {
+             xx: x * cos * cos + y * sin * sin,
+-            xy: (x - y) * sin * cos,
++            xy: (y - x) * sin * cos,
+             yy: x * sin * sin + y * cos * cos,
+         }
+     }

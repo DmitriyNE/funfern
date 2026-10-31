@@ -170,6 +170,53 @@ jobs:
           FUNFERN_WALL_SWEEP_EDGE: 0.25
         run: cargo test --release -p funfern-app --test wall_sweep --locked -- --nocapture
 
+  # Nightly: IV-04 carries every linear gallery scene through a shift, a
+  # quarter turn and a mirror, and the scenes whose contents may turn through
+  # a turn by 37°, at three levels; the gate carries a set of them
+  # (crates/funfern-app/tests/invariants.rs).
+  invariants:
+    name: Invariants, every scene
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal \
+            --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Carry every linear scene through each motion
+        env:
+          FUNFERN_INVARIANTS_ALL: 1
+        run: cargo test --release -p funfern-app --test invariants --locked -- a_moved_scene_reads_as_the_original_moved --nocapture
+
   # Nightly: PH-04, the first- and second-order walls' reflection against
   # their law at 0°, 45° and 75° on three meshes, held to steady state; about
   # 57 minutes on an M1 Max, 75° on the finest mesh alone 27, so longer here

@@ -1366,7 +1366,16 @@ with its signals at zero, with its sources alone and with the pulse and
 signals at -2.5 times, must add and scale within the same bound. All three
 run in the gate, 12 to 25 s each on ten threads; their mutations are
 `probe-point-read-in-mesh-order`, `materials-searched-as-sorted` and
-`klein-gordon-force-through-sine`.
+`klein-gordon-force-through-sine`. IV-04, symmetry: a set of gallery
+scenes shifted, quarter turned, mirrored and, where the contents clear the
+sides, turned by 37°, run at their own edge, twice it and half it, must read
+at a grid of common points closer to the original carried through than one
+halving of the mesh moves the original, in the field and the complementary
+field; the moved scene's authored materials, frames and drives are checked
+against the original's first. The gate carries 15 cases in about 30 s; the
+nightly's `invariants` job carries every linear gallery scene with
+`FUNFERN_INVARIANTS_ALL=1`. Its mutation is
+`principal-axes-turned-backwards`.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

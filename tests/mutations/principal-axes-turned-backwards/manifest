@@ -1,0 +1,4 @@
+about: a frame's tensor is turned by the opposite angle, invisible to a quarter turn and a mirror since a tensor's axes repeat every 180° and a reflection maps the backward turn onto the forward one; a turn by a generic angle sees it
+test: cargo test --release -p funfern-app --test invariants -- a_moved_scene_reads_as_the_original_moved
+expect: Anisotropic crystal \(Mechanical\) Turn .* of a halving's move
+needs: cpu

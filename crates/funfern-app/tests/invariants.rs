@@ -46,12 +46,14 @@ use funfern_app::topology_persistence;
 use funfern_app::topology_runtime::{
     PreparedTopology, TopologyProbeCompilation, TopologyProbeStencil, TopologyRuntime,
 };
+use funfern_core::MaterialFrame;
 use funfern_core::{
     BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalPointStencil,
     CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState, CurveId, CurveSpanId,
-    FaceAnchor, FaceBoundaryCondition, FieldLaw, MaterialId, MeshTriangle, MeshingOptions,
-    OuterBoundaryCondition, Point2, RateLaw, RegionId, RestoringLaw, SpanBehavior, TimeSignal,
-    TopologyScene, TopologyVertexId, TriMesh,
+    CurveSpline, CurveTraceSide, DomainRect, FaceAnchor, FaceBoundaryCondition, FieldLaw,
+    MaterialId, MeshTriangle, MeshingOptions, OuterBoundaryCondition, OuterSide, Point2,
+    QuadraticPointStencil, RateLaw, RegionId, RestoringLaw, SpanBehavior, TimeSignal,
+    TopologyScene, TopologyVertexId, TopologyVertexLocation, TriMesh,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -260,23 +262,54 @@ enum Run {
     Temporal(CanonicalTemporalWaveState),
 }
 
+/// A smooth pulse of the primary field: a Gaussian `height` high and
+/// `width` wide about `centre`.
+#[derive(Clone, Copy, Debug)]
+struct Pulse {
+    centre: Point2,
+    width: f64,
+    height: f64,
+}
+
+impl Pulse {
+    /// Centred off the domain's middle, where few scenes put anything,
+    /// `strength` times its usual height.
+    fn off_centre(domain: DomainRect, strength: f64) -> Self {
+        Self {
+            centre: Point2::new(
+                domain.min_x + 0.37 * domain.width(),
+                domain.min_y + 0.41 * domain.height(),
+            ),
+            width: 0.15 * domain.width().min(domain.height()),
+            height: 0.1 * strength,
+        }
+    }
+
+    fn at(self, point: Point2) -> f64 {
+        let offset = point - self.centre;
+        self.height * (-offset.dot(offset) / (self.width * self.width)).exp()
+    }
+}
+
 impl Run {
-    /// At rest, then struck by a smooth pulse centred off the domain's
-    /// middle, where few scenes put anything, `strength` times its height.
+    /// At rest, then struck by the pulse off the domain's middle,
+    /// `strength` times its usual height.
     fn struck(prepared: &PreparedTopology, time_step: f64, strength: f64) -> Result<Self, String> {
         let domain = prepared.bundle.authored.geometry.domain;
-        let centre = Point2::new(
-            domain.min_x + 0.37 * domain.width(),
-            domain.min_y + 0.41 * domain.height(),
-        );
-        let width = 0.15 * domain.width().min(domain.height());
+        Self::struck_by(prepared, time_step, Pulse::off_centre(domain, strength))
+    }
+
+    /// At rest, then struck by `pulse`.
+    fn struck_by(
+        prepared: &PreparedTopology,
+        time_step: f64,
+        pulse: Pulse,
+    ) -> Result<Self, String> {
         let increment = prepared
             .canonical_operator
             .node_points()
             .iter()
-            .map(|point| {
-                0.1 * strength * (-(*point - centre).dot(*point - centre) / (width * width)).exp()
-            })
+            .map(|point| pulse.at(*point))
             .collect::<Vec<_>>();
         let forcing = &prepared.canonical_forcing;
         match &prepared.canonical_temporal_operator {
@@ -467,6 +500,14 @@ impl Apart {
 fn prepare(
     document: &TopologyDocument,
 ) -> Result<(TopologyEditor, TopologyRuntime, Arc<PreparedTopology>), String> {
+    prepare_at(document, document.presentation.mesh_edge)
+}
+
+/// [`prepare`] at the mesh edge `edge`.
+fn prepare_at(
+    document: &TopologyDocument,
+    edge: f64,
+) -> Result<(TopologyEditor, TopologyRuntime, Arc<PreparedTopology>), String> {
     let mut editor = TopologyEditor::from_document(document.clone())
         .map_err(|error| format!("does not load: {error}"))?;
     settle(&mut editor);
@@ -474,7 +515,6 @@ fn prepare(
         return Err(format!("refused at acceptance: {issue}"));
     }
     let domain = editor.document.model.accepted.geometry.domain;
-    let edge = editor.document.presentation.mesh_edge;
     let options = MeshingOptions {
         target_edge_length: edge,
         curve_tolerance: (edge * 0.02).min(5.0e-4),
@@ -904,26 +944,23 @@ fn relabelled(scene: &Scene) -> Result<(String, Apart), String> {
     ))
 }
 
-/// Runs `check` over every scene on all threads, prints each line, and
-/// fails with every scene that failed.
-fn over_every_scene(what: &str, check: fn(&Scene) -> Result<(String, Apart), String>) {
-    let scenes = scenes();
+/// `work` done on every item on all threads, the results in the items' order.
+fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let workers = std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(4)
-        .min(scenes.len());
-    let started = Instant::now();
-    let outcomes = std::thread::scope(|scope| {
+        .min(items.len().max(1));
+    let work = &work;
+    std::thread::scope(|scope| {
         let handles = (0..workers)
             .map(|worker| {
-                let scenes = &scenes;
                 scope.spawn(move || {
-                    scenes
+                    items
                         .iter()
                         .enumerate()
                         .skip(worker)
                         .step_by(workers)
-                        .map(|(index, scene)| (index, check(scene)))
+                        .map(|(index, item)| (index, work(item)))
                         .collect::<Vec<_>>()
                 })
             })
@@ -933,8 +970,19 @@ fn over_every_scene(what: &str, check: fn(&Scene) -> Result<(String, Apart), Str
             .flat_map(|handle| handle.join().expect("a worker"))
             .collect::<Vec<_>>();
         outcomes.sort_by_key(|(index, _)| *index);
-        outcomes
-    });
+        outcomes.into_iter().map(|(_, outcome)| outcome).collect()
+    })
+}
+
+/// Runs `check` over every scene on all threads, prints each line, and
+/// fails with every scene that failed.
+fn over_every_scene(what: &str, check: fn(&Scene) -> Result<(String, Apart), String>) {
+    let scenes = scenes();
+    let started = Instant::now();
+    let outcomes = in_parallel(&scenes, check)
+        .into_iter()
+        .enumerate()
+        .collect::<Vec<_>>();
     let mut failures = Vec::new();
     let mut worst: f64 = 0.0;
     for (index, outcome) in &outcomes {
@@ -951,7 +999,7 @@ fn over_every_scene(what: &str, check: fn(&Scene) -> Result<(String, Apart), Str
         }
     }
     eprintln!(
-        "{} scenes {what} on {workers} threads in {:.1} s, the worst {worst:.1e} apart",
+        "{} scenes {what} in {:.1} s, the worst {worst:.1e} apart",
         outcomes.len() - failures.len(),
         started.elapsed().as_secs_f64()
     );
@@ -1186,4 +1234,747 @@ fn every_linear_scene_adds_and_scales_its_responses() {
         .count();
     assert!(linear >= 60, "only {linear} scenes are linear");
     over_every_scene("superposed", superposed);
+}
+
+/// A rigid motion of the plane.
+#[derive(Clone, Copy, Debug)]
+enum Motion {
+    /// Every point moved by the vector.
+    Shift(Point2),
+    /// A quarter turn counterclockwise about the origin.
+    QuarterTurn,
+    /// The mirror image across the vertical axis, `x → -x`. A frame's axes
+    /// cannot be mirrored, so its angle goes to `turn - angle`: a turn of 0
+    /// reverses the frame's own `x`, of π its own `y`, and a formula even in
+    /// that coordinate comes through.
+    Mirror { turn: f64 },
+    /// The domain's contents turned by `angle` about `centre`, the domain
+    /// itself and its sides left where they are: a turn the outer walls do
+    /// not share, so a run must end before its waves reach them, and no
+    /// curve may meet a side.
+    Turn { centre: Point2, angle: f64 },
+}
+
+impl Motion {
+    fn linear(self, vector: Point2) -> Point2 {
+        match self {
+            Motion::Shift(_) => vector,
+            Motion::QuarterTurn => Point2::new(-vector.y, vector.x),
+            Motion::Mirror { .. } => Point2::new(-vector.x, vector.y),
+            Motion::Turn { angle, .. } => {
+                let (sin, cos) = angle.sin_cos();
+                Point2::new(
+                    cos * vector.x - sin * vector.y,
+                    sin * vector.x + cos * vector.y,
+                )
+            }
+        }
+    }
+
+    fn point(self, point: Point2) -> Point2 {
+        match self {
+            Motion::Shift(shift) => point + shift,
+            Motion::Turn { centre, .. } => centre + self.linear(point - centre),
+            _ => self.linear(point),
+        }
+    }
+
+    fn reflects(self) -> bool {
+        matches!(self, Motion::Mirror { .. })
+    }
+
+    /// The complementary field's image. The field is a gradient turned a
+    /// quarter, `R∇ψ`, and a reflection turns it the other way: `-M b`.
+    fn complementary(self, vector: Point2) -> Point2 {
+        let image = self.linear(vector);
+        if self.reflects() { image * -1.0 } else { image }
+    }
+
+    fn domain(self, domain: DomainRect) -> DomainRect {
+        if let Motion::Turn { .. } = self {
+            return domain;
+        }
+        let [a, b] = [
+            Point2::new(domain.min_x, domain.min_y),
+            Point2::new(domain.max_x, domain.max_y),
+        ]
+        .map(|corner| self.point(corner));
+        DomainRect {
+            min_x: a.x.min(b.x),
+            max_x: a.x.max(b.x),
+            min_y: a.y.min(b.y),
+            max_y: a.y.max(b.y),
+        }
+    }
+
+    /// An outer side's image, and a fraction along it, which runs
+    /// counterclockwise round the domain.
+    fn side(self, side: OuterSide, fraction: f64) -> (OuterSide, f64) {
+        match self {
+            Motion::Shift(_) | Motion::Turn { .. } => (side, fraction),
+            Motion::QuarterTurn => (
+                match side {
+                    OuterSide::Bottom => OuterSide::Right,
+                    OuterSide::Right => OuterSide::Top,
+                    OuterSide::Top => OuterSide::Left,
+                    OuterSide::Left => OuterSide::Bottom,
+                },
+                fraction,
+            ),
+            Motion::Mirror { .. } => (
+                match side {
+                    OuterSide::Left => OuterSide::Right,
+                    OuterSide::Right => OuterSide::Left,
+                    other => other,
+                },
+                1.0 - fraction,
+            ),
+        }
+    }
+
+    fn frame(self, frame: MaterialFrame) -> MaterialFrame {
+        MaterialFrame {
+            origin: self.point(frame.origin),
+            angle_radians: match self {
+                Motion::Shift(_) => frame.angle_radians,
+                Motion::QuarterTurn => frame.angle_radians + std::f64::consts::FRAC_PI_2,
+                Motion::Mirror { turn } => turn - frame.angle_radians,
+                Motion::Turn { angle, .. } => frame.angle_radians + angle,
+            },
+            ..frame
+        }
+    }
+
+    /// The side of a curve a face lies on: a reflection reverses every
+    /// curve, so its left becomes its right.
+    fn trace_side(self, side: CurveTraceSide) -> CurveTraceSide {
+        if self.reflects() {
+            side.opposite()
+        } else {
+            side
+        }
+    }
+
+    /// `document` carried through the motion: its domain, curves, junctions,
+    /// outer sides, face anchors, frames, source and probes. A reflection
+    /// swaps every separated span's two laws, its left now its right.
+    fn document(self, document: &TopologyDocument) -> Result<TopologyDocument, String> {
+        let mut document = document.clone();
+        let model = &mut document.model;
+        for scene in [&mut model.draft, &mut model.accepted] {
+            let geometry = &mut scene.geometry;
+            geometry.domain = self.domain(geometry.domain);
+            for curve in &mut geometry.curves {
+                let controls = match &curve.spline {
+                    CurveSpline::Closed(spline) => spline.controls().to_vec(),
+                    CurveSpline::Open(spline) => spline.controls().to_vec(),
+                };
+                for (index, control) in controls.into_iter().enumerate() {
+                    let point = self.point(control);
+                    match &mut curve.spline {
+                        CurveSpline::Closed(spline) => spline.set_control(index, point),
+                        CurveSpline::Open(spline) => spline.set_control(index, point),
+                    }
+                    .map_err(|error| format!("{error:?}"))?;
+                }
+                if self.reflects() {
+                    for span in &mut curve.spans {
+                        if let SpanBehavior::Separated {
+                            left,
+                            right,
+                            coupling,
+                        } = span.behavior
+                        {
+                            span.behavior = SpanBehavior::Separated {
+                                left: right,
+                                right: left,
+                                coupling,
+                            };
+                        }
+                    }
+                }
+            }
+            for vertex in &mut geometry.vertices {
+                vertex.location = match vertex.location {
+                    TopologyVertexLocation::Free(point) => {
+                        TopologyVertexLocation::Free(self.point(point))
+                    }
+                    TopologyVertexLocation::Interior(point) => {
+                        TopologyVertexLocation::Interior(self.point(point))
+                    }
+                    TopologyVertexLocation::Outer { .. } if matches!(self, Motion::Turn { .. }) => {
+                        return Err(NOT_TURNABLE.into());
+                    }
+                    TopologyVertexLocation::Outer { side, fraction } => {
+                        let (side, fraction) = self.side(side, fraction);
+                        TopologyVertexLocation::Outer { side, fraction }
+                    }
+                };
+            }
+            geometry
+                .synchronize_vertices()
+                .map_err(|issue| issue.to_string())?;
+            let sides = scene.outer_boundaries.sides;
+            for side in OuterSide::ALL {
+                scene.outer_boundaries.sides[self.side(side, 0.5).0.index()] = sides[side.index()];
+            }
+            for region in &mut scene.regions {
+                region.frame = self.frame(region.frame);
+            }
+            for assignment in &mut scene.face_assignments {
+                match &mut assignment.anchor {
+                    FaceAnchor::Outer { side, fraction } => {
+                        (*side, *fraction) = self.side(*side, *fraction);
+                    }
+                    FaceAnchor::Curve { side, .. } => *side = self.trace_side(*side),
+                }
+            }
+        }
+        model.source.position = self.point(model.source.position);
+        for probe in &mut model.probes {
+            match &mut probe.target {
+                TopologyProbeTarget::Point(point) => *point = self.point(*point),
+                TopologyProbeTarget::Segment { start, end, .. } => {
+                    (*start, *end) = (self.point(*start), self.point(*end));
+                }
+                TopologyProbeTarget::AreaDisk { center, .. } => *center = self.point(*center),
+                TopologyProbeTarget::Boundary(target) => target.side = self.trace_side(target.side),
+                TopologyProbeTarget::AreaRegion(_) => {}
+            }
+        }
+        Ok(document)
+    }
+}
+
+/// The stencil of a point probe at `point`, `None` where no element takes
+/// it.
+fn stencil_at(prepared: &PreparedTopology, point: Point2) -> Option<QuadraticPointStencil> {
+    QuadraticPointStencil::build_topology(
+        &prepared.mesh,
+        &prepared.operator,
+        &prepared.bundle.plan,
+        prepared.fixed_model(),
+        point,
+    )
+    .ok()
+}
+
+/// What a point probe reads at `point`: the field and the complementary
+/// field. `None` where no element takes the point.
+fn probe_at(prepared: &PreparedTopology, run: &Run, point: Point2) -> Option<(f64, Point2)> {
+    let reading = CanonicalPointStencil::from_quadratic(
+        stencil_at(prepared, point)?,
+        &prepared.canonical_operator,
+    )
+    .ok()?
+    .sample(run.primary(), run.primary(), run.complementary())
+    .ok()?;
+    Some((reading.primary, reading.complementary))
+}
+
+/// What `region`'s material is at `point` as authored, read in the region's
+/// frame as the solver reads it: its density, stiffness and axis ratio, its
+/// loss rates, its restoring law's scale, and each drive's multiplier at
+/// three instants.
+fn laws_at(scene: &TopologyScene, region: RegionId, point: Point2) -> Result<Vec<f64>, String> {
+    let region = scene.region(region).ok_or("no such region")?;
+    let material = scene.material(region.material).ok_or("no such material")?;
+    let coordinates = region.frame.coordinates(point);
+    let parameters = &material.parameters;
+    let field = |field: &funfern_core::ScalarField| {
+        field
+            .evaluate(coordinates, parameters)
+            .map_err(|error| format!("{error:?}"))
+    };
+    let mut values = vec![
+        field(&material.mass_density)?,
+        field(&material.stiffness)?,
+        field(&material.axis_ratio)?,
+    ];
+    let mut drives = vec![&material.mass_law.drive, &material.stiffness_law.drive];
+    for loss in [&material.electric_loss, &material.magnetic_loss]
+        .into_iter()
+        .flatten()
+    {
+        values.push(field(&loss.base_rate)?);
+        drives.push(&loss.law.drive);
+    }
+    values.push(match &material.restoring {
+        RestoringLaw::None => 0.0,
+        RestoringLaw::KleinGordon { omega0 } | RestoringLaw::SineGordon { omega0 } => {
+            field(omega0)?
+        }
+        RestoringLaw::Phi4 { lambda, .. } => field(lambda)?,
+    });
+    for drive in drives {
+        let drive = drive
+            .evaluate(parameters)
+            .map_err(|error| format!("{error:?}"))?;
+        for time in [0.0, 0.37, 1.1] {
+            values.push(drive.multiplier(time, coordinates));
+        }
+    }
+    Ok(values)
+}
+
+/// How [`moved_apart`] says the moved scene is not the original carried
+/// through, which is the motion's fault, not the solver's.
+const NOT_CARRIED: &str = "the moved scene's material";
+
+/// How [`Motion::document`] refuses to turn a scene whose curves meet the
+/// domain's sides, which stay where they are.
+const NOT_TURNABLE: &str = "a curve meets a side the turn leaves";
+
+/// A grid of points over `domain`, those within `margin` of a curve of
+/// `mesh` left out: the two meshes approximate a curve each its own way, and
+/// a point beside one may lie on its two sides in the two.
+fn common_points(domain: DomainRect, mesh: &TriMesh, margin: f64) -> Vec<Point2> {
+    let segments = mesh
+        .boundary_edges
+        .iter()
+        .filter(|edge| matches!(edge.label, BoundaryLabel::Curve { .. }))
+        .map(|edge| edge.vertices.map(|vertex| mesh.vertices[vertex].point))
+        .collect::<Vec<_>>();
+    let distance = |point: Point2, [a, b]: [Point2; 2]| {
+        let along = b - a;
+        let t = ((point - a).dot(along) / along.dot(along)).clamp(0.0, 1.0);
+        (a + along * t - point).norm()
+    };
+    let count = 24;
+    (0..count * count)
+        .map(|index| {
+            Point2::new(
+                domain.min_x + domain.width() * ((index % count) as f64 + 0.5) / count as f64,
+                domain.min_y + domain.height() * ((index / count) as f64 + 0.5) / count as f64,
+            )
+        })
+        .filter(|point| {
+            segments
+                .iter()
+                .all(|segment| distance(*point, *segment) > margin)
+        })
+        .collect()
+}
+
+/// Whether `other` is `original` carried through `motion` as authored: at
+/// every one of `points` both meshes take, the same material read in each
+/// region's frame. A scene that is not is the motion's fault, not the
+/// solver's, and fails apart.
+fn carried(
+    original: &PreparedTopology,
+    other: &PreparedTopology,
+    motion: Motion,
+    points: &[Point2],
+) -> Result<(), String> {
+    let close = |a: f64, b: f64| (a - b).abs() <= 1.0e-12 * a.abs().max(b.abs()).max(1.0);
+    for point in points {
+        let (Some(here), Some(there)) = (
+            stencil_at(original, *point),
+            stencil_at(other, motion.point(*point)),
+        ) else {
+            continue;
+        };
+        let (laws_here, laws_there) = (
+            laws_at(&original.bundle.authored, here.region, *point)?,
+            laws_at(&other.bundle.authored, there.region, motion.point(*point))?,
+        );
+        if laws_here.len() != laws_there.len()
+            || laws_here
+                .iter()
+                .zip(&laws_there)
+                .any(|(a, b)| !close(*a, *b))
+        {
+            return Err(format!(
+                "{NOT_CARRIED} at {point:?} is {laws_there:?}, not {laws_here:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// How far `other` reads from `original` carried through `motion`, at the
+/// points both take, relative to the original: the field, the complementary
+/// field, and how many points.
+fn moved_apart(
+    (original, original_run): (&PreparedTopology, &Run),
+    (other, other_run): (&PreparedTopology, &Run),
+    motion: Motion,
+    points: &[Point2],
+) -> (f64, f64, usize) {
+    let (mut field, mut field_norm, mut complementary, mut complementary_norm, mut used) =
+        (0.0, 0.0, 0.0, 0.0, 0);
+    for point in points {
+        let (Some(here), Some(there)) = (
+            probe_at(original, original_run, *point),
+            probe_at(other, other_run, motion.point(*point)),
+        ) else {
+            continue;
+        };
+        field += (there.0 - here.0).powi(2);
+        field_norm += here.0 * here.0;
+        let expected = motion.complementary(here.1);
+        complementary += (there.1 - expected).dot(there.1 - expected);
+        complementary_norm += expected.dot(expected);
+        used += 1;
+    }
+    (
+        (field / field_norm.max(f64::MIN_POSITIVE)).sqrt(),
+        (complementary / complementary_norm.max(f64::MIN_POSITIVE)).sqrt(),
+        used,
+    )
+}
+
+/// `prepared` struck by `pulse` and run to `duration` in whole steps no
+/// longer than `time_step`.
+fn run_for(
+    prepared: &PreparedTopology,
+    time_step: f64,
+    duration: f64,
+    pulse: Pulse,
+) -> Result<Run, String> {
+    let steps = (duration / time_step).ceil();
+    let mut run = Run::struck_by(prepared, duration / steps, pulse)?;
+    for step in 0..steps as u64 {
+        run.step(prepared)
+            .map_err(|error| format!("step {step}: {error}"))?;
+    }
+    Ok(run)
+}
+
+/// The levels IV-04 runs at, as multiples of a scene's own edge.
+const LEVELS: [f64; 3] = [2.0, 1.0, 0.5];
+
+/// One scene carried through `motion` at each of [`LEVELS`]: per level the
+/// field's and the complementary field's distance from the original carried
+/// through, and the original's own distance from the next finer level.
+fn moved_levels(scene: &Scene, motion: Motion) -> Result<Vec<[f64; 5]>, String> {
+    let document = &scene.document;
+    let other_document = motion.document(document)?;
+    let edge = document.presentation.mesh_edge;
+    let domain = document.model.accepted.geometry.domain;
+    let pulse = Pulse::off_centre(domain, 1.0);
+    let moved_pulse = Pulse {
+        centre: motion.point(pulse.centre),
+        ..pulse
+    };
+    let mut duration = 0.0;
+    let (mut points, mut law_points) = (Vec::new(), Vec::new());
+    let mut levels = Vec::new();
+    let mut previous: Option<(Arc<PreparedTopology>, Run)> = None;
+    for factor in LEVELS {
+        let (_, _, original) = prepare_at(document, edge * factor)?;
+        let (_, _, other) = prepare_at(&other_document, edge * factor)
+            .map_err(|error| format!("moved: {error}"))?;
+        if previous.is_none() {
+            duration = 64.0 * original.recommended_time_step();
+            points = common_points(domain, &original.mesh, edge * LEVELS[0]);
+            // Past where two meshes' curves can part: the tolerance a curve
+            // is meshed to is at most 5e-4.
+            law_points = common_points(domain, &original.mesh, 1.0e-3);
+        }
+        carried(&original, &other, motion, &law_points)?;
+        let time_step = original
+            .recommended_time_step()
+            .min(other.recommended_time_step());
+        let original_run = run_for(&original, time_step, duration, pulse)?;
+        let other_run = run_for(&other, time_step, duration, moved_pulse)?;
+        let (field, complementary, _) = moved_apart(
+            (&original, &original_run),
+            (&other, &other_run),
+            motion,
+            &points,
+        );
+        let own = match &previous {
+            Some((coarser, coarser_run)) => moved_apart(
+                (coarser, coarser_run),
+                (&original, &original_run),
+                Motion::Shift(Point2::default()),
+                &points,
+            ),
+            None => (f64::NAN, f64::NAN, 0),
+        };
+        levels.push([field, complementary, own.0, own.1, edge * factor]);
+        previous = Some((original, original_run));
+    }
+    Ok(levels)
+}
+
+/// How close a moved scene must read to the original carried through, at
+/// each of the two finer [`LEVELS`], in its field and its complementary
+/// field: within the original's own distance from the level coarser, what
+/// one halving of the mesh moves it. A motion the solver does not carry
+/// through reads apart by its own error, which no refinement takes away. On
+/// 2026-10-31 the study below read 0.56 at worst over the gallery's 39
+/// linear scenes shifted, quarter turned and mirrored, and 0.81 for the
+/// scenes the turn by 37° applies to; a mirror whose frames reversed the
+/// travelling modulations read 3 to 85.
+const MOVED: f64 = 1.0;
+
+/// The turn by 37° about the domain's centre, which no frame is tested at.
+fn turned(scene: &Scene) -> Motion {
+    let domain = scene.document.model.accepted.geometry.domain;
+    Motion::Turn {
+        centre: Point2::new(
+            0.5 * (domain.min_x + domain.max_x),
+            0.5 * (domain.min_y + domain.max_y),
+        ),
+        angle: 37.0_f64.to_radians(),
+    }
+}
+
+const SHIFT: Motion = Motion::Shift(Point2 {
+    x: 0.3137,
+    y: -0.2219,
+});
+
+const MIRROR: Motion = Motion::Mirror {
+    turn: std::f64::consts::PI,
+};
+
+/// The gallery scenes whose contents a turn may carry: every curve clear of
+/// the sides, and a run that ends before its waves reach them.
+const TURNABLE: [&str; 10] = [
+    "Anisotropic crystal",
+    "Acoustic whispering gallery",
+    "Dielectric whispering gallery",
+    "Plasma whispering gallery",
+    "Luneburg lens",
+    "Maxwell's fisheye",
+    "Drum modes",
+    "Struck drum",
+    "Pumped drum",
+    "Ellipse flash",
+];
+
+fn gallery(name: &str) -> Scene {
+    let example = topology_examples::catalog()
+        .iter()
+        .find(|example| example.name == name)
+        .unwrap_or_else(|| panic!("no gallery scene {name}"));
+    Scene {
+        name: example.name.to_owned(),
+        document: example.document.clone(),
+    }
+}
+
+/// The double slit with its baffle outgoing on its right and reflecting on
+/// its left, so that a mirror must swap the two to read alike.
+fn one_sided_double_slit() -> Scene {
+    let mut editor = TopologyEditor::from_document(gallery("Double slit").document).unwrap();
+    settle(&mut editor);
+    let spans = editor
+        .document
+        .model
+        .draft
+        .geometry
+        .curves
+        .iter()
+        .flat_map(|curve| &curve.spans)
+        .filter(|span| matches!(span.behavior, SpanBehavior::Separated { .. }))
+        .map(|span| span.id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(!spans.is_empty(), "the double slit has a baffle");
+    editor
+        .set_span_face_condition(
+            &spans,
+            CurveTraceSide::Right,
+            FaceBoundaryCondition::SecondOrderOutgoing,
+        )
+        .unwrap();
+    settle(&mut editor);
+    assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+    Scene {
+        name: "Double slit, its baffle outgoing on one side".into(),
+        document: editor.document.clone(),
+    }
+}
+
+/// IV-04's cases: each scene and the motions it is carried through. The
+/// gate's set covers frames, a one-sided baffle, interfaces and curved walls
+/// in each skin, a travelling modulation, volume sources, a driven side and
+/// a lossy medium; `FUNFERN_INVARIANTS_ALL=1`, nightly, carries every linear
+/// gallery scene.
+fn moved_cases() -> Vec<(Scene, Motion)> {
+    if std::env::var_os("FUNFERN_INVARIANTS_ALL").is_some() {
+        return topology_examples::catalog()
+            .iter()
+            .filter(|example| linear(&example.document.model.accepted))
+            .flat_map(|example| {
+                let scene = gallery(example.name);
+                let mut motions = vec![SHIFT, Motion::QuarterTurn, MIRROR];
+                if TURNABLE.contains(&example.name) {
+                    motions.push(turned(&scene));
+                }
+                motions.into_iter().map(move |motion| {
+                    (
+                        Scene {
+                            name: scene.name.clone(),
+                            document: scene.document.clone(),
+                        },
+                        motion,
+                    )
+                })
+            })
+            .chain(
+                [SHIFT, Motion::QuarterTurn, MIRROR]
+                    .map(|motion| (one_sided_double_slit(), motion)),
+            )
+            .collect();
+    }
+    let crystal = gallery("Anisotropic crystal");
+    let gallery_ring = gallery("Acoustic whispering gallery");
+    let mut cases = vec![
+        (gallery("Anisotropic crystal"), turned(&crystal)),
+        (
+            gallery("Acoustic whispering gallery"),
+            turned(&gallery_ring),
+        ),
+    ];
+    for (scene, motions) in [
+        (crystal, vec![SHIFT, Motion::QuarterTurn, MIRROR]),
+        (
+            one_sided_double_slit(),
+            vec![SHIFT, Motion::QuarterTurn, MIRROR],
+        ),
+        (gallery("Brewster angle"), vec![Motion::QuarterTurn, MIRROR]),
+        (gallery_ring, vec![MIRROR]),
+        (gallery("Travelling modulation"), vec![MIRROR]),
+        (gallery("Phased array"), vec![Motion::QuarterTurn]),
+        (gallery("Echo comb"), vec![MIRROR]),
+        (gallery("Skin depth"), vec![SHIFT]),
+    ] {
+        for motion in motions {
+            cases.push((
+                Scene {
+                    name: scene.name.clone(),
+                    document: scene.document.clone(),
+                },
+                motion,
+            ));
+        }
+    }
+    cases
+}
+
+/// `scene` carried through `motion` at [`LEVELS`], and the motion it took: a
+/// mirror whose turn of the frames the scene's laws do not come through, a
+/// travelling modulation along a frame's own `x` reversed by it, takes the
+/// other turn.
+fn carry(scene: &Scene, motion: Motion) -> Result<(Motion, Vec<[f64; 5]>), String> {
+    match (moved_levels(scene, motion), motion) {
+        (Err(error), Motion::Mirror { turn }) if error.starts_with(NOT_CARRIED) && turn != 0.0 => {
+            let other = Motion::Mirror { turn: 0.0 };
+            moved_levels(scene, other).map(|levels| (other, levels))
+        }
+        (result, _) => result.map(|levels| (motion, levels)),
+    }
+}
+
+#[test]
+fn a_moved_scene_reads_as_the_original_moved() {
+    let cases = moved_cases();
+    let started = Instant::now();
+    let outcomes = in_parallel(&cases, |(scene, motion)| {
+        let started = Instant::now();
+        (carry(scene, *motion), started.elapsed().as_secs_f64())
+    });
+    let mut failures = Vec::new();
+    let mut worst: f64 = 0.0;
+    for ((scene, motion), (outcome, seconds)) in cases.iter().zip(outcomes) {
+        let physics = scene.document.model.accepted.physics;
+        match outcome {
+            Ok((taken, levels)) => {
+                let ratios = levels[1..]
+                    .iter()
+                    .map(|[field, complementary, own, own_complementary, _]| {
+                        (field / own).max(complementary / own_complementary)
+                    })
+                    .collect::<Vec<_>>();
+                let largest = ratios.iter().copied().fold(0.0, f64::max);
+                worst = worst.max(largest);
+                let line = format!(
+                    "{} ({physics:?}) {taken:?}: {} ({seconds:.1} s)",
+                    scene.name,
+                    levels
+                        .iter()
+                        .map(|[field, complementary, own, own_complementary, edge]| format!(
+                            "edge {edge:.3} u {field:.1e} of {own:.1e}, b {complementary:.1e} of {own_complementary:.1e}"
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
+                eprintln!("{line}");
+                // `f64::max` drops a NaN, so each ratio is judged itself.
+                if ratios.iter().any(|ratio| ratio.is_nan() || *ratio > MOVED) {
+                    failures.push(format!("{line}: {largest:.2} of a halving's move"));
+                }
+            }
+            Err(error) => {
+                eprintln!("FAILED {} {motion:?}: {error}", scene.name);
+                failures.push(format!("{} {motion:?}: {error}", scene.name));
+            }
+        }
+    }
+    eprintln!(
+        "{} cases carried in {:.1} s, the worst {worst:.2} of a halving's move",
+        cases.len(),
+        started.elapsed().as_secs_f64()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The study [`MOVED`] was set from: every linear gallery scene through
+/// every motion, both mirrors' turns among them, with the ratios printed.
+#[test]
+#[ignore]
+fn study_moved_scenes() {
+    let jobs = topology_examples::catalog()
+        .iter()
+        .filter(|example| linear(&example.document.model.accepted))
+        .flat_map(|example| {
+            let scene = gallery(example.name);
+            let turn = turned(&scene);
+            [
+                SHIFT,
+                Motion::QuarterTurn,
+                Motion::Mirror { turn: 0.0 },
+                MIRROR,
+                turn,
+            ]
+            .map(|motion| {
+                (
+                    Scene {
+                        name: scene.name.clone(),
+                        document: scene.document.clone(),
+                    },
+                    motion,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let lines = in_parallel(&jobs, |(scene, motion)| {
+        let started = Instant::now();
+        let line = match moved_levels(scene, *motion) {
+            Ok(levels) => levels
+                .iter()
+                .map(|[field, complementary, own, own_b, edge]| {
+                    format!(
+                        "edge {edge:.3}: u {field:.2e}/{own:.2e} = {:.2} b {complementary:.2e}/{own_b:.2e} = {:.2}",
+                        field / own,
+                        complementary / own_b
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+            Err(error) => format!("FAILED {error}"),
+        };
+        format!(
+            "{} {motion:?}: {line} ({:.1} s)",
+            scene.name,
+            started.elapsed().as_secs_f64()
+        )
+    });
+    for line in lines {
+        eprintln!("{line}");
+    }
 }

@@ -772,9 +772,49 @@ out. Superposition sees a defect in how the state evolves; one in the
 sources alone is in both runs it compares and cancels, which leaves it to
 the scaling. Of two defects tried, neither was seen by IV-01 alone:
 rounding the walls' memory through f32 on the CPU and the Klein-Gordon
-force taken through the sine each have other tests too. Its mutation `klein-gordon-force-through-sine`, which IV-02 and
-IV-03 pass. C2, equivalent scenes at three levels, is next, with a plan of
-its own.
+force taken through the sine each have other tests too. Its mutation
+`klein-gordon-force-through-sine`, which IV-02 and IV-03 pass.
+
+**C2 planned on 2026-10-31**, on the user's go: IV-04, IV-09 and IV-08's
+static half, each scene and its equivalent read at a grid of common points
+through the production point probe, at three levels, a commit per invariant.
+
+**IV-04 done on 2026-10-31**, in the same file. A motion carries a scene's
+domain, curves, junctions, sides, face anchors, frames, source and probes,
+and a reflection swaps each separated span's laws, the test's own doing.
+Before any run, the moved scene's materials as authored, read in each
+region's frame (density, stiffness, axis ratio, loss rates, restoring law
+and every drive at three instants), must equal the original's at the
+carried point; a scene that is not is the motion's fault. Both runs are
+read at a 24 by 24 grid kept a coarse edge from every curve, the
+complementary field carried as `R∇ψ` is, a reflection turning it `-M b`.
+- **The study first.** Every linear gallery scene through a shift, a quarter
+  turn, two mirrors and a turn by 37° at three levels. The moved run's
+  distance from the original does not fall at a rate: a shifted scene may
+  mesh almost alike at one level and not the next, and the drums' runs do
+  not converge between levels at all. What held everywhere is that the
+  moved run stands closer to the original than one halving of the mesh
+  moves it, 0.56 of that at worst for the shifts, turns and mirrors.
+- **The motion's own faults.** A mirror reverses a frame's own `x` or its
+  `y`; the travelling modulation runs along a frame's `x`, so the first
+  reversed it and four scenes read 0.11 to 1.14 apart at every level. The
+  check, once it read the drives, refuses that mirror, and the test takes
+  the other. The turn by 37° leaves the outer walls where they are, so it
+  applies only where every curve is clear of the sides and the run ends
+  before its waves reach them; ten scenes, 0.81 at worst.
+- **Why the turn.** A frame turned the wrong way is invisible to a quarter
+  turn and to a mirror: a tensor's axes repeat every 180°, and a reflection
+  maps the backward turn onto the forward one. Only a generic angle sees it.
+- **The gate's set**, 15 cases in 29 s on ten threads: the anisotropic
+  crystal through all four motions, the double slit with its baffle
+  outgoing on one side through three, Brewster's angle, the acoustic
+  whispering gallery, the travelling modulation's mirror, the phased array,
+  the echo comb and the skin depth, in each skin; 0.64 at worst. The
+  nightly's `invariants` job carries every linear gallery scene.
+- **Mutation** `principal-axes-turned-backwards`: a frame's tensor turned
+  by the opposite angle. The turn reads the crystal 0.34 apart at every
+  level, 107 times a halving's move; the shift, quarter turn and mirror pass
+  it.
 
 ## 7. Infrastructure
 
