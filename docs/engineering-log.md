@@ -31376,3 +31376,35 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-01 — The device suite samples a run's stacks before stopping it
+
+- **What prompted it.** `canonical_gpu_cavity_modes --physics te` hung in
+  all three device suite runs between 18:27 and 19:35 local, each time just
+  after opening its window, until the time limit, with nothing in its log to
+  say where it waited.
+  - **No commit.** A bisect from the last passing suite run (1fe73da, 31
+    October) ran it at 1fe73da, 76190f4, 64881e2, f0e419e and 823eba7
+    (the tree it hung on): all passed, in 65 to 101 s. Of the commits after
+    76190f4, the two not run, 73cdeae and a1e3c31, change only tests, CI
+    and docs.
+  - **Not the suite.** It passed again inside the suite on 823eba7 later
+    that evening, in 38 s.
+  - **Not the window or the display.** Hidden as soon as its window opened,
+    it went on and finished in 58 s. The power log shows the display on
+    without a break from 14:30, through the hangs.
+  - **Nothing else hung.** In the second suite it was the only one of 34
+    runs to stop.
+- **The change.** `scripts/device-suite.sh` now runs each binary in the
+  background and watches it, where perl's alarm stopped it before. A run
+  still going at the limit has its threads' stacks sampled for 5 s into
+  `<log>.stacks.txt` beside its log, and is then sent SIGALRM, so its status
+  is 142 as before. Its log ends naming the stacks file.
+- **Checked.** With an 8 s limit the TE run was stopped at 14 s, status
+  142, its stacks for 26 threads beside its log and its log naming them.
+  `canonical_gpu_timing --failure` and the `cavity` fixture pass as before.
+- **Worth checking sometime.** The hang joins `docs/plan.md`'s list, to be
+  read from the stacks when it recurs.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

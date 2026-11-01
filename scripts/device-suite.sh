@@ -23,7 +23,10 @@
 # Before the fixtures the linked app is asked for a fixture that does not
 # exist, and must refuse it as the driver does, so an app without the driver
 # fails the suite rather than opening. Logs go to target/device-suite/<time>/.
-# A run past DEVICE_SUITE_TIMEOUT seconds (default 900) is stopped and fails.
+# A run past DEVICE_SUITE_TIMEOUT seconds (default 900) is stopped and fails,
+# its threads' stacks first sampled into <log>.stacks.txt beside its log: on
+# 1 November `canonical_gpu_cavity_modes --physics te` hung three times in an
+# hour, on no commit's account, and left nothing to say where it waited.
 # Exits 1 if any run failed.
 set -u
 cd "$(dirname "$0")/.."
@@ -217,14 +220,22 @@ for run in "${selected[@]}"; do
   mkdir -p "$home/Library/Application Support/funfern"
   printf '[%d/%d] %s\n' "$index" "${#selected[@]}" "$run"
   started=$SECONDS
-  # Perl's alarm outlives the exec and ends the run with SIGALRM at the limit,
-  # where macOS has no `timeout`.
+  # Watched rather than left to an alarm, where macOS has no `timeout`, so
+  # that a run at the limit can be sampled before SIGALRM ends it.
   env HOME="$home" ${assignments[@]+"${assignments[@]}"} \
-    perl -e 'alarm shift @ARGV; exec @ARGV or die "$!\n"' "$limit" \
-    "$binary" ${flags[@]+"${flags[@]}"} >"$log" 2>&1
+    "$binary" ${flags[@]+"${flags[@]}"} >"$log" 2>&1 &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null && ((SECONDS - started < limit)); do
+    sleep 0.2
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    sample "$pid" 5 -file "${log%.log}.stacks.txt" >/dev/null 2>&1
+    kill -ALRM "$pid" 2>/dev/null
+  fi
+  wait "$pid"
   status=$?
   if [[ $status -eq 142 ]]; then
-    echo "stopped after ${limit} s" >>"$log"
+    echo "stopped after ${limit} s; stacks in ${log%.log}.stacks.txt" >>"$log"
   fi
   elapsed=$((SECONDS - started))
   if [[ $status -eq 0 ]]; then

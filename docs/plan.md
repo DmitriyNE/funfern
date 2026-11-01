@@ -1636,6 +1636,13 @@ is next touched.
   in a run started beside a plain rebuild of the app, after it had opened its window and found the device; it passed in
   2 s when rerun alone and in every suite of the day. One occurrence; worth a
   look if it recurs.
+- `canonical_gpu_cavity_modes --physics te` hung to the suite's limit in all
+  three device suite runs between 18:27 and 19:35 local on 2026-11-01, just
+  after opening its window, and in no run since. It passed at every commit
+  back to the last suite it passed in, in the suite on the same tree that
+  evening, and with its window hidden; the display was on throughout. The
+  suite now samples a run's stacks before stopping it at the limit, into
+  `<log>.stacks.txt`: read them when it recurs.
 - The `canonical_gpu_temporal_amr` example's transfer-alone diagnostic reads
   its complementary error as 0 on some runs and 4.8e-8 on others of the same
   build, with every other readout identical (2026-10-12, three device-suite
