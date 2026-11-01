@@ -889,8 +889,23 @@ is prepared again 0.7 and 1.4 times finer and coarser, or rebuilt.
 - **Mutation** `component-share-over-source-support` puts back the shares
   over the old component's own support.
 
-The device half, the same totals read off the device's state after its
-remesh, follows.
+**IV-10's device half done on 2026-11-01**, the `neutral-remesh` fixture
+in `crates/funfern-app/src/ui/e2e.rs`. The cavity at edge 0.04 is parted the
+same way and each part struck by a pulse of its own, a pulse staying within
+the walls it is placed between. At step 128 the mesh's edge is set to 0.028,
+as its slider does, and the device's own state is read just before the
+remesh and at the handoff. Each part's total, counted over the nodes of the
+elements whose centres lie in it, must come through within 1e-6 of its
+magnitude.
+- **Numbers.** The M1 Max reads 5.5e-8.
+- **What only the totals see.** With either of IV-10's defects put back,
+  the device reads 1.1e-4 (the shares) and 1.1e-3 (the wall's sides), while
+  its handed state stays within 5e-6 of the reference, which carries the
+  field the same way.
+- **Mutation** `device-correction-of-the-first-component` gives every node
+  the first component's correction in the device's correction pass: 8.0e-4.
+  Of the device suite's 30 remesh and handoff entries, only this fixture
+  fails under it.
 
 ## 7. Infrastructure
 

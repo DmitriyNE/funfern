@@ -29,7 +29,9 @@ use crate::canonical_gpu::{
     CANONICAL_FAILURE_INVERSE_DOMAIN, CanonicalGpuHandoffOutcome, CanonicalGpuRuntimeTransfer,
     canonical_failure_description,
 };
-use crate::topology_editor::{ClosedCurvePurpose, TopologyDocument, TopologyEditor};
+use crate::topology_editor::{
+    ClosedCurvePurpose, OpenCurvePurpose, TopologyAttachment, TopologyDocument, TopologyEditor,
+};
 use crate::topology_runtime::PreparedCanonicalTransfer;
 use bevy::render::{
     Render, RenderApp, RenderSystems,
@@ -39,8 +41,8 @@ use bevy::render::{
 use bevy_egui::EguiPrimaryContextPass;
 use check::{within, worse};
 use funfern_core::{
-    CanonicalHandoffMaps, CanonicalTemporalWaveState, CanonicalWaveState, OuterBoundaryCondition,
-    OuterBoundaryConditions,
+    CanonicalHandoffMaps, CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState,
+    FaceAnchor, OpenCubicSpline, OuterBoundaryCondition, OuterBoundaryConditions, SpanBehavior,
 };
 use std::collections::{BTreeSet, VecDeque};
 
@@ -98,6 +100,7 @@ pub(crate) fn add(app: &mut App) {
         "handoff-driven" => (Fixture::HandoffDriven, vec![None]),
         "handoff-driven-pins" => (Fixture::HandoffDrivenPins, vec![None]),
         "remesh" => (Fixture::Remesh, vec![None]),
+        "neutral-remesh" => (Fixture::NeutralRemesh, vec![None]),
         "handoff-memory-rebuild" => (Fixture::HandoffMemory(MemoryHandoff::Rebuild), vec![None]),
         "handoff-memory-remesh" => (Fixture::HandoffMemory(MemoryHandoff::Remesh), vec![None]),
         "handoff-memory-edit" => (Fixture::HandoffMemory(MemoryHandoff::Edit), vec![None]),
@@ -194,6 +197,17 @@ enum Fixture {
     /// the field is interpolated onto another mesh of the same geometry, its
     /// component totals kept.
     Remesh,
+    /// IV-10 of the testing campaign on the device: the cavity parted by a
+    /// reflecting baffle from wall to wall and an island inside a reflecting
+    /// loop, three components, each struck by a pulse, remeshed from edge
+    /// 0.04 to 0.028 at step 128 of 256. The device's own state is read just
+    /// before the remesh and at the handoff, and each part's total, counted
+    /// over the nodes of the elements whose centres lie in it, which the
+    /// driver tells from where the baffle and the loop are, must come through
+    /// to the device's precision: the conservation of the device's own carry,
+    /// which an agreement with the reference would not show where both carried
+    /// alike.
+    NeutralRemesh,
     /// The cavity with its bottom side a second-order outgoing wall and its
     /// top side driven, the pulse run into the wall until its pole states
     /// hold memory, then handed off at step 192 of 384 the way named: the
@@ -289,6 +303,8 @@ const DISC_MESH: &str = "b7183a42450e64cb/70e06866ae57b36a";
 const FINER_CAVITY_MESH: &str = "2a08c7884de88562/d105b9149fd88df1";
 const CHANNEL_MESH: &str = "87169bdb09e61b78/b63cee07f5ecf758";
 const HOLE_MESH: &str = "f84998df08704d66/34b4ee47d28f53ae";
+const PARTED_MESH: &str = "6f134ce035236366/db143b236f3be3fb";
+const FINER_PARTED_MESH: &str = "345ff654d5d190eb/7b78d839d7290095";
 
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
 /// time, a number that divides nothing, half the most a frame may ask for
@@ -331,7 +347,7 @@ impl Fixture {
             Fixture::Handoff | Fixture::HandoffDriven | Fixture::HandoffDrivenPins => {
                 (&[(128, Action::Edit)], 256)
             }
-            Fixture::Remesh => (&[(128, Action::Remesh)], 256),
+            Fixture::Remesh | Fixture::NeutralRemesh => (&[(128, Action::Remesh)], 256),
             // The pulse's front reaches the wall near step 150: the handoff
             // comes once the wall holds memory, and the run goes on for as
             // long again, so that what the wall gives back is in the field.
@@ -369,7 +385,37 @@ impl Fixture {
     /// the new generation steps, where no wall's memory calls for it: a
     /// driven generation's pins, which its first step sets again.
     fn reads_the_handoff(self) -> bool {
-        matches!(self, Fixture::HandoffDrivenPins)
+        matches!(self, Fixture::HandoffDrivenPins | Fixture::NeutralRemesh)
+    }
+
+    /// Whether each part's total is read off the device's own state before
+    /// the remesh and at the handoff.
+    fn counts_the_parts(self) -> bool {
+        matches!(self, Fixture::NeutralRemesh)
+    }
+
+    /// Where the fixture's pulses strike, in `domain`: one off the middle, or
+    /// one in each part of the parted cavity, which a pulse does not leave.
+    fn pulses_at(self, domain: DomainRect) -> Vec<Point2> {
+        match self {
+            Fixture::NeutralRemesh => vec![
+                Point2::new(0.0, -0.6),
+                Point2::new(0.7, 0.0),
+                PARTED_ISLAND.0,
+            ],
+            _ => vec![Point2::new(
+                domain.min_x + 0.37 * domain.width(),
+                domain.min_y + 0.58 * (domain.max_y - domain.min_y),
+            )],
+        }
+    }
+
+    /// The edge a remesh sets, and the mesh it must build.
+    fn finer(self) -> (f64, &'static str) {
+        match self {
+            Fixture::NeutralRemesh => (0.028, FINER_PARTED_MESH),
+            _ => (0.06, FINER_CAVITY_MESH),
+        }
     }
 
     /// Whether a pulse at step 0 sets the field going. A field-dependent medium
@@ -409,6 +455,7 @@ impl Fixture {
             Fixture::Switch | Fixture::HandoffDriven => DISC_MESH,
             Fixture::Observables => CHANNEL_MESH,
             Fixture::FarField | Fixture::FarFieldLate => HOLE_MESH,
+            Fixture::NeutralRemesh => PARTED_MESH,
             _ => CAVITY_MESH,
         }
     }
@@ -422,6 +469,7 @@ impl Fixture {
             | Fixture::Remesh
             | Fixture::DeviceLoss => (cavity_document(), None),
             Fixture::Rejection => (rejection_document(), None),
+            Fixture::NeutralRemesh => (parted_document(), None),
             Fixture::HandoffDriven => (pump_document(), None),
             Fixture::HandoffDrivenPins => (pumped_driven_document(), None),
             Fixture::Observables => (observables::observables_document(), None),
@@ -502,6 +550,13 @@ enum Phase {
         asked: Instant,
         document: Box<TopologyDocument>,
     },
+    /// The run holds at the `next` action's step, and a full snapshot of the
+    /// device's state is asked for, to count the parts before the action.
+    Departing {
+        reference: Reference,
+        next: usize,
+        seen: u64,
+    },
     /// The handoff's generation holds at the step it took the field, and a
     /// full snapshot of it is asked for, to read the carry on its own before
     /// the run goes on.
@@ -544,6 +599,7 @@ impl Phase {
             Phase::Run { .. } => "running to the next stop",
             Phase::Act { .. } => "waiting for the device to take the action",
             Phase::Losing { .. } => "waiting for the app to stop after the device was lost",
+            Phase::Departing { .. } => "waiting for the snapshot before the action",
             Phase::Carried { .. } => "waiting for the handoff's snapshot",
             Phase::Snapshot { .. } => "waiting for the endpoint's snapshot",
             Phase::Observe { .. } => "waiting for the probes' last records",
@@ -620,6 +676,9 @@ struct Reference {
     /// What the wall's memory went through at the last handoff, where the
     /// generation has a wall.
     carry: Option<MemoryCarry>,
+    /// Each part's total of the device's `Q` and of its magnitude just before
+    /// the action, where the fixture counts the parts.
+    departed: Option<([f64; 3], [f64; 3])>,
     /// The recorders' twins, read after every step, where the run's probes
     /// are to be judged.
     twin: Option<observables::Twin>,
@@ -1003,6 +1062,146 @@ fn pumped_driven_document() -> TopologyDocument {
     document
 }
 
+/// The parted cavity's baffle, from its bottom side to its top, and its
+/// island's centre and radius.
+const PARTED_BAFFLE: [Point2; 2] = [Point2 { x: 0.24, y: -1.0 }, Point2 { x: 0.4, y: 1.0 }];
+const PARTED_ISLAND: (Point2, f64) = (Point2 { x: -0.4, y: 0.1 }, 0.44);
+
+/// How far the device's handoff may move a part's total, relative to the
+/// part's magnitude: f32's own reach. On 2026-11-01 the M1 Max read 5.5e-8;
+/// with each component's share its area's ratio, as until that day, 1.1e-4,
+/// with a wall's nodes taken from its other side 1.1e-3, and with every node
+/// given the first component's correction 8.0e-4, where the reference, which
+/// carries the field the device's way, read the first two within 5e-6.
+const PARTS_TOLERANCE: f64 = 1.0e-6;
+
+/// The cavity at edge 0.04 parted by a reflecting baffle along
+/// [`PARTED_BAFFLE`] and an island of its own medium inside a reflecting loop
+/// round [`PARTED_ISLAND`], drawn through the editor: three components, as
+/// IV-10's box in `tests/invariants.rs`.
+fn parted_document() -> TopologyDocument {
+    let mut document = cavity_document();
+    document.presentation.mesh_edge = 0.04;
+    let mut editor = TopologyEditor::from_document(document).expect("the cavity opens");
+    let settle = |editor: &mut TopologyEditor| {
+        while editor.acceptance == crate::topology_editor::TopologyAcceptance::Pending {
+            editor.validate_frame(64);
+        }
+    };
+    settle(&mut editor);
+    let domain = editor.document.model.draft.geometry.domain;
+    let [bottom, top] = PARTED_BAFFLE;
+    let anchor = |side, fraction| {
+        Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+            side,
+            fraction,
+        }))
+    };
+    editor
+        .create_open_curve(
+            OpenCubicSpline::polyline(PARTED_BAFFLE.to_vec()).expect("the baffle's line"),
+            OpenCurvePurpose::BoundaryBaffle,
+            anchor(
+                OuterSide::Bottom,
+                (bottom.x - domain.min_x) / domain.width(),
+            ),
+            // The top side runs right to left.
+            anchor(OuterSide::Top, (domain.max_x - top.x) / domain.width()),
+        )
+        .expect("the baffle");
+    settle(&mut editor);
+    let (centre, radius) = PARTED_ISLAND;
+    let island = editor
+        .create_closed_curve(
+            PeriodicCubicSpline::rounded(centre, radius),
+            ClosedCurvePurpose::Subdomain {
+                material: DEFAULT_MATERIAL,
+            },
+        )
+        .expect("the island");
+    settle(&mut editor);
+    let spans = editor
+        .document
+        .model
+        .draft
+        .geometry
+        .curves
+        .iter()
+        .find(|curve| curve.id == island)
+        .expect("the island's loop")
+        .spans
+        .iter()
+        .map(|span| span.id)
+        .collect();
+    editor
+        .set_span_behavior(&spans, SpanBehavior::REFLECTING)
+        .expect("the island's wall");
+    let mut document = editor.document;
+    document.model.accepted = document.model.draft.clone();
+    document
+}
+
+/// Each of the parted cavity's parts' totals of `primary` and of its
+/// magnitude: 0 left of [`PARTED_BAFFLE`], 1 right of it, 2 inside the
+/// island's loop. A node takes the part the centres of its elements lie in,
+/// which tells the two copies of a wall's node apart.
+fn part_totals(
+    operator: &CanonicalWaveOperator,
+    primary: &[f32],
+) -> Result<([f64; 3], [f64; 3]), String> {
+    if primary.len() != operator.degrees_of_freedom() {
+        return Err(format!(
+            "the snapshot holds {} values where the generation has {}",
+            primary.len(),
+            operator.degrees_of_freedom()
+        ));
+    }
+    let (centre, radius) = PARTED_ISLAND;
+    let spline = PeriodicCubicSpline::rounded(centre, radius);
+    let island = (0..4096)
+        .map(|index| spline.evaluate(spline.period() * index as f64 / 4096.0))
+        .collect::<Vec<_>>();
+    let [from, to] = PARTED_BAFFLE;
+    let part = |point: Point2| {
+        let mut inside = false;
+        for (index, a) in island.iter().enumerate() {
+            let b = island[(index + 1) % island.len()];
+            if (a.y > point.y) != (b.y > point.y)
+                && point.x < a.x + (point.y - a.y) * (b.x - a.x) / (b.y - a.y)
+            {
+                inside = !inside;
+            }
+        }
+        if inside {
+            2
+        } else if (to - from).cross(point - from) > 0.0 {
+            0
+        } else {
+            1
+        }
+    };
+    let mut owner = vec![usize::MAX; operator.degrees_of_freedom()];
+    for nodes in operator.element_nodes() {
+        let centre = nodes.iter().fold(Point2::default(), |sum, node| {
+            sum + operator.node_points()[*node as usize]
+        }) / nodes.len() as f64;
+        let part = part(centre);
+        for node in nodes {
+            let slot = &mut owner[*node as usize];
+            if *slot != usize::MAX && *slot != part {
+                return Err(format!("node {node} lies in parts {} and {part}", *slot));
+            }
+            *slot = part;
+        }
+    }
+    let (mut totals, mut sizes) = ([0.0; 3], [0.0; 3]);
+    for (part, value) in owner.iter().zip(primary) {
+        totals[*part] += f64::from(*value);
+        sizes[*part] += f64::from(*value).abs();
+    }
+    Ok((totals, sizes))
+}
+
 /// Advances the fixture a phase; answers a run's verdict once it has one.
 fn advance(
     driver: &mut Driver,
@@ -1149,6 +1348,7 @@ fn advance(
                         control: None,
                         steps: 0,
                         carry: None,
+                        departed: None,
                         twin,
                         far,
                     },
@@ -1157,25 +1357,33 @@ fn advance(
                 return None;
             }
             let domain = state.editor.document.model.accepted.geometry.domain;
-            let point = Point2::new(
-                domain.min_x + 0.37 * domain.width(),
-                domain.min_y + 0.58 * (domain.max_y - domain.min_y),
-            );
-            state.place_pulse(point);
-            let Some(&(position, region)) = state.coordinator.pending_pulses.back() else {
-                return Some(Err(format!("the pulse was not queued: {}", state.message)));
-            };
-            let reference = pulse_increment(
-                &active,
-                position,
-                region,
-                f64::from(state.pulse_amplitude),
-                f64::from(state.pulse_width),
-            )
-            .and_then(|increment| {
-                let start = fresh_clock(time_step)?.time();
-                let mut reference = State::zero(&active, time_step)?.starting_at(start)?;
-                reference.pulse(&active, &increment)?;
+            let points = driver.fixture.pulses_at(domain);
+            let queued_before = state.coordinator.pending_pulses.len();
+            for point in &points {
+                state.place_pulse(*point);
+            }
+            if state.coordinator.pending_pulses.len() != queued_before + points.len() {
+                return Some(Err(format!("a pulse was not queued: {}", state.message)));
+            }
+            let queued = state
+                .coordinator
+                .pending_pulses
+                .iter()
+                .skip(queued_before)
+                .copied()
+                .collect::<Vec<_>>();
+            let reference = fresh_clock(time_step).and_then(|clock| {
+                let mut reference = State::zero(&active, time_step)?.starting_at(clock.time())?;
+                for (position, region) in &queued {
+                    let increment = pulse_increment(
+                        &active,
+                        *position,
+                        *region,
+                        f64::from(state.pulse_amplitude),
+                        f64::from(state.pulse_width),
+                    )?;
+                    reference.pulse(&active, &increment)?;
+                }
                 Ok(reference)
             });
             let reference = match reference {
@@ -1185,11 +1393,14 @@ fn advance(
             driver.base = request.stats().completed_steps();
             driver.start_time = reference.time();
             report(&format!(
-                "e2e {:?}: {} DOFs, step {time_step:.4e}, pulse at ({:.3}, {:.3}), mesh {}",
+                "e2e {:?}: {} DOFs, step {time_step:.4e}, pulse at {}, mesh {}",
                 driver.fixture,
                 active.canonical_operator.degrees_of_freedom(),
-                position.x,
-                position.y,
+                queued
+                    .iter()
+                    .map(|(position, _)| format!("({:.3}, {:.3})", position.x, position.y))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
                 mesh_hashes(&active.mesh)
             ));
             driver.phase = Phase::Pulse {
@@ -1199,6 +1410,7 @@ fn advance(
                     control: None,
                     steps: 0,
                     carry: None,
+                    departed: None,
                     twin: None,
                     far: None,
                 },
@@ -1219,6 +1431,7 @@ fn advance(
             }
             if request.stats().processed_event() == processed
                 || !state.coordinator.pending_pulses.is_empty()
+                || request.live_event_pending()
             {
                 driver.phase = Phase::Pulse {
                     reference,
@@ -1296,6 +1509,16 @@ fn advance(
                 driver.phase = Phase::Snapshot { reference, seen };
                 return None;
             };
+            if driver.fixture.counts_the_parts() && reference.departed.is_none() {
+                let seen = display.full_readbacks;
+                request.request_full_state_readback();
+                driver.phase = Phase::Departing {
+                    reference,
+                    next,
+                    seen,
+                };
+                return None;
+            }
             let processed = request.stats().processed_event();
             let generation = request.generation();
             match action {
@@ -1319,7 +1542,9 @@ fn advance(
                         return Some(Err(format!("the edit did not apply: {error}")));
                     }
                 }
-                Action::Remesh => state.editor.document.presentation.mesh_edge = 0.06,
+                Action::Remesh => {
+                    state.editor.document.presentation.mesh_edge = driver.fixture.finer().0;
+                }
                 Action::Rebuild => state.coordinator.remesh_requested = true,
                 Action::Timestep => state.editor.document.presentation.simulation_speed = 0.5,
                 Action::Drive => {
@@ -1533,7 +1758,7 @@ fn advance(
                     // A remesh goes to the finer mesh recorded; a rebuild of
                     // the same scene builds the same mesh to the bit.
                     let recorded = match action {
-                        Action::Remesh => Some(FINER_CAVITY_MESH),
+                        Action::Remesh => Some(driver.fixture.finer().1),
                         Action::Rebuild => Some(driver.fixture.mesh()),
                         _ => None,
                     };
@@ -1616,6 +1841,34 @@ fn advance(
             };
             None
         }
+        Phase::Departing {
+            mut reference,
+            next,
+            seen,
+        } => {
+            let (step, _) = actions[next];
+            let arrived = display.full_readbacks > seen
+                && display.generation == request.generation()
+                && display
+                    .full_snapshot_completed_steps()
+                    .saturating_sub(driver.base)
+                    == step;
+            if !arrived {
+                request.request_full_state_readback();
+                driver.phase = Phase::Departing {
+                    reference,
+                    next,
+                    seen,
+                };
+                return None;
+            }
+            match part_totals(&reference.active.canonical_operator, &display.primary_flux) {
+                Ok(totals) => reference.departed = Some(totals),
+                Err(failure) => return Some(Err(failure)),
+            }
+            driver.phase = Phase::Run { reference, next };
+            None
+        }
         Phase::Carried {
             mut reference,
             next,
@@ -1681,6 +1934,33 @@ fn advance(
                     next: next + 1,
                 };
                 return None;
+            }
+            if driver.fixture.counts_the_parts() {
+                let Some((departed, sizes)) = reference.departed else {
+                    return Some(Err("the parts were not counted before the remesh".into()));
+                };
+                let arrived = match part_totals(
+                    &reference.active.canonical_operator,
+                    &display.primary_flux,
+                ) {
+                    Ok((arrived, _)) => arrived,
+                    Err(failure) => return Some(Err(failure)),
+                };
+                let moved = (0..3)
+                    .map(|part| (arrived[part] - departed[part]).abs() / sizes[part])
+                    .fold(0.0, worse);
+                let summary = format!(
+                    "the parts' totals {:.4e}, {:.4e} and {:.4e} came through within {moved:.1e} \
+                     of their magnitudes",
+                    departed[0], departed[1], departed[2]
+                );
+                report(&format!("e2e {:?}: {summary}", driver.fixture));
+                if !within(moved, PARTS_TOLERANCE) {
+                    return Some(Err(format!(
+                        "{summary}: the device's carry moved a part's total beyond \
+                         {PARTS_TOLERANCE:.0e}"
+                    )));
+                }
             }
             let tolerance = driver.fixture.tolerance();
             // Q off the prescribed nodes, and on them where the reference

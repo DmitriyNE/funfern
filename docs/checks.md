@@ -82,7 +82,14 @@ at the authored mass, `1.2e-1` off (GPU-3 of the 2026-10-20 review).
 `remesh` sets the target edge finer at step 128,
 nothing else changed: the field is interpolated from 11,121 nodes onto 15,349 of
 the same geometry. Q reads `7.7e-7`, and a reference that drops the component
-totals the runtime keeps reads 2.5e-5 and fails. The six `handoff-memory`
+totals the runtime keeps reads 2.5e-5 and fails. `neutral-remesh`, IV-10 on
+the device, parts the cavity at edge 0.04 by a reflecting baffle from wall to
+wall and an island inside a reflecting loop, strikes each of the three parts
+with a pulse, and remeshes it to 0.028 at step 128, 34,014 nodes onto 70,218.
+Each part's total, counted on the device's own state just before the remesh
+and at the handoff over the nodes of the elements whose centres lie in it,
+must come through within 1e-6 of its magnitude: it reads 5.5e-8, and the
+handed state reads Q `3.9e-7` against the reference. The six `handoff-memory`
 fixtures, `-rebuild`, `-remesh`, `-edit`, `-timestep`, `-flux` and `-running`, give
 the cavity a second-order outgoing wall on its bottom side and a 0.8 Hz drive
 on its top, run the pulse into the wall, and at step 192, once the wall holds
@@ -1392,7 +1399,9 @@ parts' totals of the primary field, counted from where the nodes lie, must
 come through within 1e-12 of its magnitude; a rebuild must give the field
 back within 1e-12, and a remesh's must read at the common points within one
 halving's move of the original. 6 cases in the gate in about 4 s, 18 in the
-nightly; its mutation is `component-share-over-source-support`.
+nightly; its mutation is `component-share-over-source-support`. Its device
+half is the `neutral-remesh` fixture, whose mutation is
+`device-correction-of-the-first-component`.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

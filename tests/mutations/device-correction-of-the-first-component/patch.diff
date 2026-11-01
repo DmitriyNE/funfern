@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-app/src/canonical_transfer.wgsl b/crates/funfern-app/src/canonical_transfer.wgsl
+index cbb07cb..4e91a86 100644
+--- a/crates/funfern-app/src/canonical_transfer.wgsl
++++ b/crates/funfern-app/src/canonical_transfer.wgsl
+@@ -423,7 +423,7 @@ fn correct_primary(@builtin(global_invocation_id) id: vec3<u32>) {
+     let metadata = transfer[base + 2u].data.w;
+     if (metadata & 256u) != 0u || new_nodes[node].boundary.z != 0u { return; }
+     let component = metadata >> 9u;
+-    let correction = scratch[component_scratch(component)].values;
++    let correction = scratch[component_scratch(0u)].values;
+     if correction.z == 0.0 { return; }
+     let support = transfer_float(base + 3u, 3u);
+     let next = candidate_q(node) + correction.x * support / correction.z;

@@ -31210,3 +31210,55 @@ the handoff of a running field, both fixed here.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-01 — IV-10 on the device: each part's total through the device's own remesh
+
+IV-10's device half, the `neutral-remesh` fixture
+(`crates/funfern-app/src/ui/e2e.rs`). The CPU half (f0e419e) holds the
+carry the core's handoff does, which the device's transfer table is built
+from. This one holds what the device itself does with it.
+
+- **The fixture.**
+  - **Scene.** The cavity at edge 0.04, parted through the editor by a
+    reflecting baffle from the bottom side to the top and an island of its
+    own medium inside a reflecting loop: three components, 34,014 nodes.
+  - **Pulses.** A pulse stays within the walls it is placed between, so the
+    fixture strikes each part with one of its own. The pulse phase now
+    waits until no live event is pending, so a second pulse is in before the
+    run starts.
+  - **Remesh.** At step 128 the mesh's edge is set to 0.028, as the slider
+    does, onto 70,218 nodes. Both meshes are recorded by hash, as the
+    cavity's are.
+  - **Readbacks.** A new phase reads the device's own state at step 128,
+    before the action. The handed state is read at the handoff's own step,
+    as for the driven pins.
+- **The check.** Each part's total of the device's `Q` is counted over the
+  nodes of the elements whose centres lie in it. The driver tells the parts
+  from where the baffle and the loop are, not from the solver's labels. The
+  totals must come through within 1e-6 of each part's magnitude, checked
+  before the handed state is held to the reference. The fixture then runs to
+  256 steps and is held to the reference as the others are.
+- **Numbers on the M1 Max.** The totals come through within 5.5e-8. The
+  handed state reads Q 3.9e-7 and b 6.5e-7 against the reference, and the
+  endpoint Q 6.3e-7 and b 1.0e-6.
+- **What only the totals see.** Each of IV-10's defects was put back and
+  the fixture run:
+  - with the shares over the old component's own support, the totals read
+    1.1e-4;
+  - with the wall's nodes searched for among every triangle, 1.1e-3.
+
+  Both times the handed state stood within 5e-6 of the reference, which
+  carries the field the device's way.
+- **Mutation.** `device-correction-of-the-first-component` gives every node
+  the first component's correction in `correct_primary`. The totals read
+  8.0e-4, and the reference comparison would read Q 3.7e-4. Of the device
+  suite's 30 remesh and handoff entries, only this fixture fails under it.
+- **CI.** The fixture joins the device suite, and with it lavapipe and the
+  browser, which list the suite's fixtures. In the browser it runs in the
+  handoffs part, since the state part stands near the runner's limit and
+  this fixture's meshes are three and six times the cavity's.
+- **Device suite.** All 20 e2e fixtures pass with the pulse phase's new wait
+  (`target/device-suite/20261101-151704`).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

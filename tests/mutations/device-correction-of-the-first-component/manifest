@@ -1,0 +1,4 @@
+about: the device's correction pass gives every node the first component's correction, so on a scene of several components each part takes another's share and its total moves
+test: scripts/e2e-fixture.sh neutral-remesh
+expect: NeutralRemesh failed: the parts' totals [^:]+ within [0-9.]+e-[0-9]+ of their magnitudes: the device's carry moved a part's total
+needs: device

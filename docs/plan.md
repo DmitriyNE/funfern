@@ -1309,7 +1309,9 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   frame of its own (fixed). Stage C3, the remesh family, began on
   2026-11-01 with IV-10, a neutral remesh, whose CPU half found a remesh
   feeding a curved wall's nodes from its other side and shrinking a
-  component's total with its area (both fixed); its device half is next.
+  component's total with its area (both fixed), and its device half, the
+  `neutral-remesh` fixture, the same day. IV-11, repeated remeshing, is
+  next.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the
