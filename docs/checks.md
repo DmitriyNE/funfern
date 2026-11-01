@@ -1413,7 +1413,17 @@ never rise. The gate runs one and eight round trips and twelve still ones
 at the default edge in about 3 s, the nightly up to sixteen at the default
 edge and half it. Its mutation is `complementary-evaluated-not-projected`,
 which the core's `a_rough_field_carried_back_and_forth_never_gains_energy`
-catches too.
+catches too. IV-12, baffle sides: the default box with a free-ended
+reflecting baffle, an arc across its middle, is struck below it and run
+until the pulse has come back off it, then remeshed at 0.7 and 1.4 times its
+edge or its baffle moved up or down by half an edge to two edges, and
+carried over. Read at 33 points along the baffle, 0.3 of an edge to each
+side, the jump must come through a remesh within 1e-2 and stand at the moved
+baffle within 0.3 of each side's own values, and no more than 0.1 of it may
+be left where the baffle was, in the field and the complementary field. 5
+cases in the gate in about a second, 16 in the nightly. Its mutation is
+`old-ground-sided-by-the-new-wall`, which the core's
+`a_moved_wall_keeps_each_side_its_own_value` catches too.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

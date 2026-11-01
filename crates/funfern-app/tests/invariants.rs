@@ -49,6 +49,7 @@ use funfern_app::topology_runtime::{
     PreparedCanonicalTransfer, PreparedTopology, TopologyProbeCompilation, TopologyProbeStencil,
     TopologyRuntime,
 };
+use funfern_app::topology_viewport::TopologyTransformUpdate;
 use funfern_core::{
     BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalHandoffMaps, CanonicalPointStencil,
     CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState, CurveId, CurveSpanId,
@@ -3063,6 +3064,333 @@ fn a_repeated_remesh_keeps_the_field_and_its_energy() {
                     rise <= ROUNDOFF,
                 ),
                 _ => unreachable!("a leg reads as it ran"),
+            };
+            eprintln!("{line}");
+            if !held {
+                failures.push(line);
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// IV-12's box: the default box with a free-ended reflecting baffle, an arc
+/// bulging up across its middle; and the baffle's curve.
+fn baffled(physics: PhysicsModel) -> Result<(TopologyDocument, CurveId), String> {
+    let mut editor = TopologyEditor::from_document(TopologyDocument::default())?;
+    settle(&mut editor);
+    editor.set_physics(physics)?;
+    settle(&mut editor);
+    let domain = editor.document.model.accepted.geometry.domain;
+    let at = |x: f64, y: f64| {
+        Point2::new(
+            domain.min_x + x * domain.width(),
+            domain.min_y + y * domain.height(),
+        )
+    };
+    let spline = OpenCubicSpline::new(
+        vec![
+            at(0.3, 0.45),
+            at(0.4, 0.62),
+            at(0.5, 0.64),
+            at(0.6, 0.62),
+            at(0.7, 0.45),
+        ],
+        vec![1.0, 1.0],
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let curve = editor.create_boundary_baffle(spline)?;
+    settle(&mut editor);
+    if baffle_curve(&editor.document, curve)?
+        .spans
+        .iter()
+        .any(|span| span.behavior != SpanBehavior::REFLECTING)
+    {
+        return Err("the baffle does not reflect".into());
+    }
+    match &editor.acceptance {
+        TopologyAcceptance::Valid => Ok((editor.document.clone(), curve)),
+        other => Err(format!("the baffled box is {other:?}")),
+    }
+}
+
+fn baffle_curve(document: &TopologyDocument, curve: CurveId) -> Result<&TopologyCurve, String> {
+    document
+        .model
+        .draft
+        .geometry
+        .curves
+        .iter()
+        .find(|other| other.id == curve)
+        .ok_or_else(|| "the baffle is not in the document".to_owned())
+}
+
+/// 33 points along the baffle's middle, from a fifth of the way along it to
+/// four fifths, away from its tips, each with the normal to its convex side,
+/// the curve's left.
+fn along_baffle(
+    document: &TopologyDocument,
+    curve: CurveId,
+) -> Result<Vec<(Point2, Point2)>, String> {
+    let CurveSpline::Open(spline) = &baffle_curve(document, curve)?.spline else {
+        return Err("the baffle is not open".into());
+    };
+    let end = spline
+        .span_bounds(spline.controls().len() - 4)
+        .ok_or("the baffle has no last span")?[1];
+    Ok((0..33)
+        .map(|index| {
+            let t = end * (0.2 + 0.6 * index as f64 / 32.0);
+            let tangent = spline.derivative(t, 1);
+            let normal = Point2::new(-tangent.y, tangent.x) / tangent.norm();
+            (spline.evaluate(t), normal)
+        })
+        .collect())
+}
+
+/// The field's and the complementary field's jump from the second point of
+/// each pair to the first.
+fn jumps(
+    prepared: &PreparedTopology,
+    run: &Run,
+    pairs: impl Iterator<Item = (Point2, Point2)>,
+) -> Result<Vec<(f64, Point2)>, String> {
+    pairs
+        .map(|(above, below)| {
+            let (Some(above), Some(below)) = (
+                probe_at(prepared, run, above),
+                probe_at(prepared, run, below),
+            ) else {
+                return Err(format!("{above:?} or {below:?} reads outside the mesh"));
+            };
+            Ok((above.0 - below.0, above.1 - below.1))
+        })
+        .collect()
+}
+
+/// The RMS of `jumps`' differences from `meant`'s over the RMS of `against`,
+/// in the field and in the complementary field.
+fn jumps_apart(
+    jumps: &[(f64, Point2)],
+    meant: Option<&[(f64, Point2)]>,
+    against: &[(f64, Point2)],
+) -> [f64; 2] {
+    let zero = vec![(0.0, Point2::new(0.0, 0.0)); jumps.len()];
+    let meant = meant.unwrap_or(&zero);
+    let sum = |pairs: &mut dyn Iterator<Item = ((f64, Point2), (f64, Point2))>| {
+        pairs.fold([0.0, 0.0], |[q, b], (one, other)| {
+            [
+                q + (one.0 - other.0).powi(2),
+                b + (one.1 - other.1).dot(one.1 - other.1),
+            ]
+        })
+    };
+    let apart = sum(&mut jumps.iter().copied().zip(meant.iter().copied()));
+    let size = sum(&mut against.iter().copied().zip(zero.iter().copied()));
+    [0, 1].map(|index| (apart[index] / size[index]).sqrt())
+}
+
+/// How far from a curve IV-12 reads each side, in edges.
+const BESIDE: f64 = 0.3;
+
+/// What IV-12 does to its box once run: remeshes it at a multiple of its
+/// edge, or moves its baffle up by a number of edges, down where negative,
+/// as dragging its control points does.
+#[derive(Clone, Copy, Debug)]
+enum Change {
+    Remesh(f64),
+    Move(f64),
+}
+
+/// One IV-12 case: the baffled box at `edge`, struck below the baffle and
+/// run until the pulse has come back off it, then `change`d and carried
+/// over through the runtime. The jump at the baffle afterwards against each
+/// side's own values, relative to them, and for a move the jump left where
+/// the baffle was, relative to the jump before; each in the field and the
+/// complementary field.
+fn baffle_sides(
+    (document, curve): (&TopologyDocument, CurveId),
+    edge: f64,
+    change: Change,
+) -> Result<([f64; 2], Option<[f64; 2]>), String> {
+    let domain = document.model.accepted.geometry.domain;
+    let pulse = Pulse {
+        centre: Point2::new(
+            domain.min_x + 0.5 * domain.width(),
+            domain.min_y + 0.38 * domain.height(),
+        ),
+        width: 0.15 * domain.width().min(domain.height()),
+        height: 0.1,
+    };
+    let (mut editor, mut runtime, source) = prepare_at(document, edge)?;
+    let run = run_for(
+        &source,
+        source.recommended_time_step(),
+        0.45 * domain.height(),
+        pulse,
+    )?;
+    let points = along_baffle(&editor.document, curve)?;
+    let (edge_after, shift) = match change {
+        Change::Remesh(factor) => (edge * factor, 0.0),
+        Change::Move(edges) => (edge, edges * edge),
+    };
+    if shift != 0.0 {
+        let CurveSpline::Open(spline) = &baffle_curve(&editor.document, curve)?.spline else {
+            return Err("the baffle is not open".into());
+        };
+        let updates = spline
+            .controls()
+            .iter()
+            .enumerate()
+            .map(|(control, point)| TopologyTransformUpdate::Control {
+                curve,
+                control,
+                point: *point + Point2::new(0.0, shift),
+            })
+            .collect::<Vec<_>>();
+        editor.apply_transform_updates(&updates)?;
+        settle(&mut editor);
+        if !matches!(editor.acceptance, TopologyAcceptance::Valid) {
+            return Err(format!("the moved baffle is {:?}", editor.acceptance));
+        }
+    }
+    let (target, maps) = remeshed(&editor, &mut runtime, Some(edge_after))?;
+    let carried = handed(
+        (&source, &run),
+        &target,
+        &maps,
+        target.recommended_time_step(),
+    )?;
+    let (apart, up) = (BESIDE * edge, Point2::new(0.0, shift));
+    let before = jumps(
+        &source,
+        &run,
+        points
+            .iter()
+            .map(|(at, normal)| (*at + *normal * apart, *at - *normal * apart)),
+    )?;
+    let after = jumps(
+        &target,
+        &carried,
+        points
+            .iter()
+            .map(|(at, normal)| (*at + up + *normal * apart, *at + up - *normal * apart)),
+    )?;
+    // Each side's own values: on the side the baffle moved away from, the
+    // old field where it stands; on the side that gained ground, the old
+    // field beside the old baffle.
+    let meant = jumps(
+        &source,
+        &run,
+        points.iter().map(|(at, normal)| {
+            let [above, below] = if shift >= 0.0 {
+                [up, Point2::default()]
+            } else {
+                [Point2::default(), up]
+            };
+            (*at + above + *normal * apart, *at + below - *normal * apart)
+        }),
+    )?;
+    let kept = jumps_apart(&after, Some(&meant), &meant);
+    if shift == 0.0 {
+        return Ok((kept, None));
+    }
+    // Read within the ground the baffle swept.
+    let near = apart.min(BESIDE * shift.abs());
+    let behind = jumps(
+        &target,
+        &carried,
+        points
+            .iter()
+            .map(|(at, normal)| (*at + *normal * near, *at - *normal * near)),
+    )?;
+    Ok((kept, Some(jumps_apart(&behind, None, &before))))
+}
+
+/// How far the jump across IV-12's baffle may come through a remesh from
+/// the one before, relatively. On 2026-11-02 the remeshes read 1.5e-3 in Q
+/// and 4.0e-3 in b at worst, coarsened at the default edge.
+const REMESHED_SIDES: f64 = 1.0e-2;
+
+/// How far the jump at IV-12's moved baffle may stand from each side's own
+/// values, relatively. A side that gains ground takes it from its nearest
+/// old element, a constant, so the jump reads within the field's change
+/// over an element of the old one, and halves with the edge. On 2026-11-02
+/// the moves read 0.093 in Q and 0.25 in b at worst, two edges up at the
+/// default edge. Carried by position, as before then, they read 0.95 to
+/// 1.11 in Q: the moved baffle held no jump.
+const MOVED_SIDES: f64 = 0.3;
+
+/// How much of the jump before a move may be left where IV-12's baffle was,
+/// relatively. On 2026-11-02 at most 0.022 in Q and 0.073 in b; carried by
+/// position, 0.79 to 1.07 in Q and 0.48 to 0.84 in b.
+const LEFT_BEHIND: f64 = 0.1;
+
+/// IV-12, each side of a baffle its own values. The default box with a
+/// free-ended reflecting baffle, an arc across its middle, is struck below
+/// it and run until the pulse has come back off it, the field jumping across
+/// the baffle. It is remeshed at 0.7 and 1.4 times its edge, or its baffle
+/// moved up or down by parts of an element and by elements, as dragging its
+/// control points does, and carried over through the runtime. Read at 33
+/// points along the baffle's middle, 0.3 of an edge to each side, the jump
+/// must come through a remesh within 1e-2, and stand at the moved baffle
+/// within 0.3 of each side's own values: the old field where it stands on
+/// the side the baffle moved away from, and the old field beside the old
+/// baffle on the side that gained ground. Where the baffle was, no more
+/// than 0.1 of the jump may be left. Each in the field and the
+/// complementary field.
+#[test]
+fn a_baffle_keeps_its_sides_through_a_remesh_and_a_move() {
+    let all = std::env::var_os("FUNFERN_INVARIANTS_ALL").is_some();
+    let factors: &[f64] = if all { &[1.0, 0.5] } else { &[1.0] };
+    let changes = if all {
+        vec![
+            Change::Remesh(0.7),
+            Change::Remesh(1.4),
+            Change::Move(0.5),
+            Change::Move(-0.5),
+            Change::Move(1.0),
+            Change::Move(-1.0),
+            Change::Move(2.0),
+            Change::Move(-2.0),
+        ]
+    } else {
+        vec![
+            Change::Remesh(0.7),
+            Change::Remesh(1.4),
+            Change::Move(0.5),
+            Change::Move(-1.0),
+            Change::Move(2.0),
+        ]
+    };
+    let (document, curve) = baffled(PhysicsModel::Mechanical).unwrap();
+    let mut failures = Vec::new();
+    for factor in factors {
+        let edge = document.presentation.mesh_edge * factor;
+        let outcomes = in_parallel(&changes, |change| {
+            let started = Instant::now();
+            let outcome = baffle_sides((&document, curve), edge, *change);
+            (outcome, started.elapsed().as_secs_f64())
+        });
+        for (change, (outcome, seconds)) in changes.iter().zip(outcomes) {
+            let label = format!("edge {edge:.3}, {change:?}");
+            let (line, held) = match outcome {
+                Err(error) => (format!("{label}: {error}"), false),
+                Ok(([q, b], None)) => (
+                    format!(
+                        "{label}: the jump came through within {q:.1e} in Q and {b:.1e} in b ({seconds:.1} s)"
+                    ),
+                    q <= REMESHED_SIDES && b <= REMESHED_SIDES,
+                ),
+                Ok(([q, b], Some([q_left, b_left]))) => (
+                    format!(
+                        "{label}: the jump stands within {q:.3} of each side's own in Q and {b:.3} in b, {q_left:.3} and {b_left:.3} of it left behind ({seconds:.1} s)"
+                    ),
+                    q <= MOVED_SIDES
+                        && b <= MOVED_SIDES
+                        && q_left <= LEFT_BEHIND
+                        && b_left <= LEFT_BEHIND,
+                ),
             };
             eprintln!("{line}");
             if !held {

@@ -31408,3 +31408,89 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-02 — IV-12: a moved wall takes its sides with it
+
+- **What prompted it.** IV-12 of the testing campaign, each side of a baffle
+  its own values. Its f64 study drew into the default box a free-ended
+  reflecting baffle, an arc across its middle, struck the box below it and
+  ran it until the pulse had come back off it. Remeshed at 0.7 and 1.4 times
+  its edge, the jump across the baffle came through within 5e-4. Moved up or
+  down by half an edge to two edges, as dragging its control points does,
+  the baffle held none of the jump, and 0.77 to 1.07 of it stood where the
+  baffle had been, free in the medium, to radiate as a spurious pair of
+  waves.
+- **Cause.** The transfer placed every new node and complementary sample by
+  position. One in the strip the wall swept over took the old element under
+  it, across the old wall, and so the other side's value. The moved wall's
+  own nodes, past IV-10's quarter of a height beside their side, searched
+  every triangle and did the same. The projection's side flood started from
+  the old element under each new element's centre, on the other side too.
+- **Fix.** `SweptGround` in `crates/funfern-core/src/transfer.rs` traces
+  each separated curve on both meshes, each wall segment once and turned so
+  the curve's left side lies on its left, on a grid. A point's side of a
+  curve is that of the curve's nearest point, the two segments' normals
+  together at a corner, and none where that point is a tip: beyond a free
+  end both sides meet, and the old rule holds there. A point on a wall goes
+  by its labels, the new mesh's node and the old node an exact copy takes.
+  - **Swept ground.** A new node whose old element, or old node, lay on
+    another side of a moved curve than the node lies on now takes no sample
+    and is listed by `QuadraticTransferMap::swept_nodes`. A complementary
+    sample the same, and a new element whose centre's old element lay
+    across takes its samples one by one rather than the projection.
+  - **Its own side.** Both extensions take such a value from the nearest
+    old element on its own side: a donor must lie on the target element's
+    side of every moved curve as well as in its sight. Swept ground extends
+    whatever its distance, so a wall dragged across many elements in one
+    handoff leaves the field one dragged in many short ones does; with the
+    two rings new support keeps, a move of two edges left a band of zeros
+    beside the wall. Constant, the extension is first order: the jump stands
+    within the field's change over an element.
+  - **Only moved curves.** Only an edit builds the traces, and only curves
+    whose traces differ between the meshes are judged. A remesh of the same
+    geometry builds the same maps as before. Two core tests found the need:
+    a mesh whose two sides are one triangle twice, carried onto its own clone
+    under a new revision, and a hole made a face, whose outer wall nodes,
+    copied exactly, were judged by their own points on the wall.
+  - **Cost.** A moved baffle's preparation at edge 0.02, 136 thousand nodes,
+    takes 2.9 s with the check and without.
+- **Tests.**
+  - `a_baffle_keeps_its_sides_through_a_remesh_and_a_move` in
+    `crates/funfern-app/tests/invariants.rs`, IV-12. The study's box, its
+    pulse 2.5 times wider so that the field is resolved, is remeshed or its
+    baffle moved and carried over through the runtime. Read at 33 points
+    along the baffle's middle, 0.3 of an edge to each side, the jump must
+    come through a remesh within 1e-2, and stand at the moved baffle within
+    0.3 of each side's own values: the old field where it stands on the side
+    the baffle moved away from, the old field beside the old baffle on the
+    side that gained ground. No more than 0.1 of the jump may be left where
+    the baffle was. Each in Q and `b`. The gate runs remeshes and moves of
+    half an edge, an edge down and two edges up at the default edge in about
+    a second; the nightly every move to two edges each way, at the default
+    edge and half it.
+  - `a_moved_wall_keeps_each_side_its_own_value` in the core: a reflecting
+    loop moved by part of an element and by two elements. No node may take
+    the other side's value, and the nodes left without a sample must be the
+    swept ones.
+- **Numbers.** The worst of the nightly's 16 cases, the moves relative to
+  each side's own and the jump left behind relative to the jump before:
+
+  | Case | Q | `b` | Left behind, Q / `b` | By position, Q / left |
+  |---|---|---|---|---|
+  | Remesh 0.7, 1.4 | 1.5e-3 | 4.0e-3 | – | the same |
+  | Move ±0.5 edge | 0.039 | 0.107 | 0.021 / 0.033 | 0.95–1.00 / 0.79–0.86 |
+  | Move ±1 edge | 0.065 | 0.152 | 0.022 / 0.068 | 1.01–1.07 / 1.04–1.06 |
+  | Move ±2 edges | 0.093 | 0.247 | 0.016 / 0.073 | 1.00–1.11 / 1.04–1.07 |
+
+  At half the edge each move's error about halves.
+- **Mutation** `old-ground-sided-by-the-new-wall` reads the side of a moved
+  curve the old ground lay on off the new trace, so that nothing counts as
+  swept. The half-edge move reads 0.999 of each side's own, as by position;
+  the core test finds 50 of 11,125 nodes taking the other side's value.
+- **Device.** The device's transfer tables are built from these maps, so it
+  needs no change. The device suite is not run: none of its entries moves a
+  wall, and a remesh of the same geometry builds the same maps. IV-12's
+  device half, a suite entry moving the baffle mid-run, is next.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

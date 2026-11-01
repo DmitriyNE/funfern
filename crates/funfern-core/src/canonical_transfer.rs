@@ -9,6 +9,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::transfer::SweptGround;
 use crate::{
     CanonicalOutgoingBoundary, CanonicalOutgoingPhysicalMemory, CanonicalTemporalWaveOperator,
     CanonicalThinGapMemory, CanonicalWaveOperator, Point2, PredicateSign, QuadraticTransferMap,
@@ -132,7 +133,8 @@ impl CanonicalPrimaryTransferMap {
     }
 
     /// Adds the agreed bounded constant-preserving initialization for target
-    /// support outside the old domain but connected within two element rings.
+    /// support outside the old domain but connected within two element rings,
+    /// and for ground a moved wall swept over, from its own side.
     /// The already prepared quadratic map supplies all side restrictions.
     /// [`CanonicalPrimaryTransferJob`] runs the same steps across frames.
     pub fn prepare_with_meshes(
@@ -179,8 +181,9 @@ impl CanonicalPrimaryTransferMap {
     }
 
     /// The source element whose nodes seed an uncovered target node: new
-    /// support within two element rings of the old domain. `None` for a node
-    /// the source covers, for one beyond that reach, and on an identity map.
+    /// support within two element rings of the old domain, or ground a moved
+    /// wall swept over, wherever it lies. `None` for a node the source
+    /// covers, for new support beyond that reach, and on an identity map.
     pub fn extension(&self, target_node: usize) -> Option<[u32; 7]> {
         self.extensions.get(target_node).copied().flatten()
     }
@@ -398,12 +401,14 @@ impl CanonicalPrimaryTransferPhase {
 struct CanonicalPrimaryTransferWork {
     phase: CanonicalPrimaryTransferPhase,
     map: Option<CanonicalPrimaryTransferMap>,
-    /// Uncovered target nodes within reach, each with its nearest element,
-    /// in node order.
-    pending: Vec<(u32, u32)>,
+    /// Uncovered target nodes within reach and swept ones wherever they
+    /// lie, each with its nearest element and whether a moved wall swept
+    /// over it, in node order.
+    pending: Vec<(u32, u32, bool)>,
     walls: Vec<[usize; 2]>,
     donors: Option<RegionCentroidIndex>,
     sight: Option<WallGrid>,
+    swept_ground: Option<SweptGround>,
 }
 
 impl CanonicalPrimaryTransferWork {
@@ -415,6 +420,7 @@ impl CanonicalPrimaryTransferWork {
             walls: Vec::new(),
             donors: None,
             sight: None,
+            swept_ground: None,
         }
     }
 
@@ -468,11 +474,26 @@ impl CanonicalPrimaryTransferWork {
                         }
                     }
                 }
+                // Swept ground extends whatever its distance: a wall dragged
+                // across many elements in one handoff leaves the same field
+                // as one dragged in many short ones.
+                let swept = interpolation.swept_nodes();
+                for (element, nodes) in target.element_nodes().iter().enumerate() {
+                    for node in nodes {
+                        let node = *node as usize;
+                        if nearest[node].is_none() && swept.binary_search(&(node as u32)).is_ok() {
+                            nearest[node] = Some((usize::MAX, element));
+                        }
+                    }
+                }
                 self.pending = nearest
                     .iter()
                     .enumerate()
                     .filter_map(|(node, nearest)| {
-                        nearest.map(|(_, element)| (node as u32, element as u32))
+                        nearest.map(|(_, element)| {
+                            let node = node as u32;
+                            (node, element as u32, swept.binary_search(&node).is_ok())
+                        })
                     })
                     .collect();
                 if self.pending.is_empty() {
@@ -484,19 +505,22 @@ impl CanonicalPrimaryTransferWork {
             CanonicalPrimaryTransferPhase::Index => {
                 self.donors = Some(RegionCentroidIndex::new(source_mesh)?);
                 self.sight = Some(WallGrid::new(target_mesh, &self.walls));
+                self.swept_ground = SweptGround::new(source_mesh, target_mesh);
                 self.phase = CanonicalPrimaryTransferPhase::Extend(0);
             }
             CanonicalPrimaryTransferPhase::Extend(index) => {
-                let Some(&(node, element)) = self.pending.get(index) else {
+                let Some(&(node, element, swept)) = self.pending.get(index) else {
                     self.phase = CanonicalPrimaryTransferPhase::Done;
                     return Ok(self.map.take());
                 };
                 let donor = nearest_donor_in_sight(
                     self.donors.as_ref().unwrap(),
                     self.sight.as_ref().unwrap(),
+                    self.swept_ground.as_ref(),
                     target_mesh,
                     element as usize,
                     target.node_points()[node as usize],
+                    if swept { f64::INFINITY } else { DONOR_REACH },
                 );
                 self.map.as_mut().unwrap().extensions[node as usize] =
                     donor.map(|element| source.element_nodes()[element]);
@@ -843,16 +867,20 @@ impl WallGrid {
 }
 
 /// The donor of a value extended at `point` for target `element`: the
-/// nearest source centroid of the element's region within [`DONOR_REACH`]
-/// that the element's centroid sees without crossing a wall of the new mesh.
+/// nearest source centroid of the element's region within `reach` of the
+/// element's longest edges, [`DONOR_REACH`] but on swept ground, that the
+/// element's centroid sees without crossing a wall of the new mesh and that
+/// lay on the element's side of every curve an edit moved.
 /// The centroid rather than `point` looks, because a node on a curve sits on
 /// a wall and a curved element's point can lie past its straight edge.
 fn nearest_donor_in_sight(
     donors: &RegionCentroidIndex,
     sight: &WallGrid,
+    swept_ground: Option<&SweptGround>,
     mesh: &TriMesh,
     element: usize,
     point: Point2,
+    reach: f64,
 ) -> Option<usize> {
     let triangle = &mesh.triangles[element];
     let corners = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
@@ -860,9 +888,12 @@ fn nearest_donor_in_sight(
     let edge = (0..3)
         .map(|corner| (corners[(corner + 1) % 3] - corners[corner]).norm())
         .fold(0.0, f64::max);
-    let limit = (DONOR_REACH * edge).powi(2);
+    let limit = (reach * edge).powi(2);
     donors.nearest(triangle.region, point, limit, |centroid| {
         !sight.blocks(eye, centroid)
+            && !swept_ground.is_some_and(|ground| {
+                ground.across((centroid, &BTreeSet::new()), (eye, &BTreeSet::new()))
+            })
     })
 }
 
@@ -878,6 +909,9 @@ enum VectorTarget {
         source_element: u32,
     },
     Exposed,
+    /// On ground a moved wall swept over: extended however far its own side
+    /// lies.
+    Swept,
 }
 
 /// What one new element's samples take from one old element's: row `i`
@@ -900,7 +934,9 @@ pub struct CanonicalVectorTransferBlock {
 /// samples' Lebesgue constant, 3.55, at an element's corners: remeshed back
 /// and forth, that part grew threefold a round trip once it took over. An
 /// element the old mesh leaves mostly uncovered, as an edit can, still takes
-/// each sample from the old element under it, or extends one.
+/// each sample from the old element under it, or extends one. Ground a
+/// moved wall swept over takes nothing from the side it lay on before: its
+/// elements and samples extend from their own side, however far.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalVectorTransferMap {
     source_samples: usize,
@@ -1101,6 +1137,7 @@ struct CanonicalVectorTransferWork {
     exposed: usize,
     distance: Vec<usize>,
     walls: Vec<[usize; 2]>,
+    swept_ground: Option<SweptGround>,
 }
 
 impl CanonicalVectorTransferWork {
@@ -1119,6 +1156,7 @@ impl CanonicalVectorTransferWork {
             exposed: 0,
             distance: Vec::new(),
             walls: Vec::new(),
+            swept_ground: None,
         }
     }
 
@@ -1163,6 +1201,7 @@ impl CanonicalVectorTransferWork {
                     self.targets = Vec::with_capacity(target.complementary_degrees_of_freedom());
                     self.ranges = vec![[0, 0]; target_mesh.triangles.len()];
                     self.bins = Some(CanonicalSourceBins::new(source_mesh)?);
+                    self.swept_ground = SweptGround::new(source_mesh, target_mesh);
                     self.phase = CanonicalVectorTransferPhase::Bins(0);
                 }
             }
@@ -1204,6 +1243,7 @@ impl CanonicalVectorTransferWork {
                     let element = target_index / QUADRATURE_SAMPLES;
                     let projected = projected_blocks(
                         self.bins.as_ref().unwrap(),
+                        self.swept_ground.as_ref(),
                         (source_mesh, source),
                         (target_mesh, target),
                         element,
@@ -1224,11 +1264,34 @@ impl CanonicalVectorTransferWork {
                         return Ok(None);
                     }
                 }
+                let element = sample.element as usize;
                 let donor = self
                     .bins
                     .as_ref()
                     .and_then(|bins| bins.locate(source_mesh, sample.point, target_region));
-                if let Some((source_element, source_barycentric)) = donor {
+                let swept = donor.is_some_and(|(source_element, _)| {
+                    self.swept_ground.as_ref().is_some_and(|ground| {
+                        ground.across(
+                            (
+                                triangle_centroid(
+                                    source_mesh,
+                                    source_mesh.triangles[source_element].vertices,
+                                ),
+                                &BTreeSet::new(),
+                            ),
+                            (
+                                triangle_centroid(
+                                    target_mesh,
+                                    target_mesh.triangles[element].vertices,
+                                ),
+                                &BTreeSet::new(),
+                            ),
+                        )
+                    })
+                });
+                if swept {
+                    self.targets.push(VectorTarget::Swept);
+                } else if let Some((source_element, source_barycentric)) = donor {
                     self.targets.push(VectorTarget::Reconstruct {
                         source_element: source_element as u32,
                         weights: quadratic_sample_weights(
@@ -1245,7 +1308,7 @@ impl CanonicalVectorTransferWork {
             CanonicalVectorTransferPhase::PrepareExtension => {
                 self.distance = vec![usize::MAX; target_mesh.triangles.len()];
                 for (sample_index, target_sample) in self.targets.iter().enumerate() {
-                    if !matches!(target_sample, VectorTarget::Exposed) {
+                    if !matches!(target_sample, VectorTarget::Exposed | VectorTarget::Swept) {
                         self.distance[sample_index / QUADRATURE_SAMPLES] = 0;
                     }
                 }
@@ -1254,8 +1317,9 @@ impl CanonicalVectorTransferWork {
             }
             CanonicalVectorTransferPhase::IndexDonors => {
                 let reachable = self.targets.iter().enumerate().any(|(index, entry)| {
-                    matches!(entry, VectorTarget::Exposed)
-                        && self.distance[index / QUADRATURE_SAMPLES] <= 2
+                    matches!(entry, VectorTarget::Swept)
+                        || matches!(entry, VectorTarget::Exposed)
+                            && self.distance[index / QUADRATURE_SAMPLES] <= 2
                 });
                 if reachable {
                     self.donors = Some(RegionCentroidIndex::new(source_mesh)?);
@@ -1269,21 +1333,26 @@ impl CanonicalVectorTransferWork {
                     return Ok(None);
                 }
                 let entry = &mut self.targets[target_index];
-                if matches!(entry, VectorTarget::Exposed)
-                    && self.distance[target_index / QUADRATURE_SAMPLES] <= 2
+                let swept = matches!(entry, VectorTarget::Swept);
+                if swept
+                    || matches!(entry, VectorTarget::Exposed)
+                        && self.distance[target_index / QUADRATURE_SAMPLES] <= 2
                 {
                     let sample = &target.constitutive_samples()[target_index];
                     let donor = nearest_donor_in_sight(
                         self.donors.as_ref().unwrap(),
                         self.sight.as_ref().unwrap(),
+                        self.swept_ground.as_ref(),
                         target_mesh,
                         sample.element as usize,
                         sample.point,
+                        if swept { f64::INFINITY } else { DONOR_REACH },
                     )
                     .map(|element| element as u32);
-                    if let Some(source_element) = donor {
-                        *entry = VectorTarget::ExtendConstant { source_element };
-                    }
+                    *entry = match donor {
+                        Some(source_element) => VectorTarget::ExtendConstant { source_element },
+                        None => VectorTarget::Exposed,
+                    };
                 }
                 self.phase = CanonicalVectorTransferPhase::Extend(target_index + 1);
             }
@@ -1316,7 +1385,7 @@ impl CanonicalVectorTransferWork {
                                 self.extended += 1;
                                 (source_element, [1.0 / QUADRATURE_SAMPLES as f64; 6])
                             }
-                            VectorTarget::Exposed => {
+                            VectorTarget::Exposed | VectorTarget::Swept => {
                                 self.exposed += 1;
                                 continue;
                             }
@@ -2467,6 +2536,7 @@ const PROJECTED_COVER: f64 = 0.75;
 /// centre lies outside the old mesh or the old mesh covers too little of it.
 fn projected_blocks(
     bins: &CanonicalSourceBins,
+    swept_ground: Option<&SweptGround>,
     (source_mesh, source): (&TriMesh, &CanonicalWaveOperator),
     (target_mesh, target): (&TriMesh, &CanonicalWaveOperator),
     element: usize,
@@ -2481,6 +2551,17 @@ fn projected_blocks(
     let Some((home, _)) = bins.locate(source_mesh, centre, region) else {
         return Ok(None);
     };
+    if swept_ground.is_some_and(|ground| {
+        ground.across(
+            (
+                triangle_centroid(source_mesh, source_mesh.triangles[home].vertices),
+                &BTreeSet::new(),
+            ),
+            (centre, &BTreeSet::new()),
+        )
+    }) {
+        return Ok(None);
+    }
     let lo = Point2::new(
         corners[0].x.min(corners[1].x).min(corners[2].x),
         corners[0].y.min(corners[1].y).min(corners[2].y),

@@ -946,6 +946,45 @@ of its edge and back K times on the way, through the runtime.
   back: eight round trips read 2.23 and 6.82, and the still leg's energy
   multiplies by up to 6.8 in a round trip.
 
+**IV-12 done on 2026-11-02**, its CPU half,
+`a_baffle_keeps_its_sides_through_a_remesh_and_a_move` in the same file. The
+default box takes a free-ended reflecting baffle, an arc across its middle,
+and is struck below it and run until the pulse has come back off it, the
+field jumping across the baffle. It is remeshed at 0.7 and 1.4 times its
+edge, or its baffle moved up or down by half an edge to two edges through
+its control points, and carried over through the runtime.
+- **Checks.** Read at 33 points along the baffle's middle, 0.3 of an edge to
+  each side, the jump must come through a remesh within 1e-2. At a moved
+  baffle it must stand within 0.3 of each side's own values: the old field
+  where it stands on the side the baffle moved away from, and the old field
+  beside the old baffle on the side that gained ground. No more than 0.1 of
+  the jump may be left where the baffle was. Each in the field and the
+  complementary field.
+- **What it found: a moved wall left its jump behind.** Moved by half an
+  edge, the baffle held almost none of the jump, and 0.79 to 0.86 of it
+  stood where the baffle had been; moved by one or two edges, all of it.
+  The transfer placed each new node and sample by position, so ground the
+  wall swept over took its values from across the old wall, and so did the
+  moved wall's own nodes past IV-10's quarter of a height.
+- **Fix.** Ground a moved separated curve swept over takes nothing from the
+  side it lay on before. Its nodes, samples and projected elements extend
+  from their own side's nearest old element, however far, and the donor
+  must lie on that side too. A point's side is that of the curve's nearest
+  point on each mesh's trace, none at a tip, so beyond a free end the old
+  rule holds; a point on a wall goes by its labels. Only the curves an edit
+  moved are judged, at no measurable cost: a moved baffle's preparation at
+  136 thousand nodes takes 2.9 s either way. The device's tables are built
+  from these maps.
+- **Numbers.** Over the nightly's 16 cases, down to half the edge, the
+  remeshes read 1.5e-3 in Q and 4.0e-3 in `b` at worst. The moves read
+  0.093 and 0.25 of each side's own, halving with the edge, with 0.022 and
+  0.073 left behind; carried by position, 0.95 to 1.11 in Q, with 0.79 to
+  1.07 left behind.
+- **Mutation** `old-ground-sided-by-the-new-wall` reads the old ground's side
+  off the new trace, so that nothing is swept: the moves read as by
+  position. The core's `a_moved_wall_keeps_each_side_its_own_value`, a loop
+  moved by part of an element and by two, catches it too.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

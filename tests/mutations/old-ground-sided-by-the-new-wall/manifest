@@ -1,0 +1,4 @@
+about: a remesh after an edit reads the side of a moved curve the old ground lay on off the new mesh's trace, so that no ground counts as swept and a moved baffle's jump stays where the baffle was, as until 2026-11-02
+test: cargo test --release -p funfern-app --test invariants -- a_baffle_keeps_its_sides_through_a_remesh_and_a_move
+expect: Move\(0\.5\): the jump stands within (0\.[4-9]|[1-9])[0-9.]* of each side's own
+needs: cpu

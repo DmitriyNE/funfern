@@ -7,7 +7,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum BoundaryTraceKey {
+pub(crate) enum BoundaryTraceKey {
     Curve {
         curve: CurveId,
         side: CurveTraceSide,
@@ -276,6 +276,7 @@ pub struct QuadraticTransferMap {
     target_mesh_revision: u64,
     source_dofs: usize,
     samples: Vec<Option<QuadraticTransferSample>>,
+    swept: Vec<u32>,
 }
 
 impl QuadraticTransferMap {
@@ -311,11 +312,14 @@ impl QuadraticTransferMap {
             target_mesh_revision: mesh.mesh_revision,
             source_dofs: source_operator.degrees_of_freedom(),
             samples,
+            swept: Vec::new(),
         })
     }
 
     /// Locates every target quadratic node in the source parent triangulation and
-    /// evaluates the source element's enriched quadratic basis at that point.
+    /// evaluates the source element's enriched quadratic basis at that point,
+    /// but for a node on ground a moved wall swept over, which takes none
+    /// ([`Self::swept_nodes`]).
     pub fn build(
         source_mesh: &TriMesh,
         source_operator: &QuadraticWaveOperator,
@@ -338,6 +342,13 @@ impl QuadraticTransferMap {
 
     pub fn samples(&self) -> &[Option<QuadraticTransferSample>] {
         &self.samples
+    }
+
+    /// The target nodes, in order, on ground a moved wall swept over: the
+    /// old mesh holds their position on the wall's other side, so they take
+    /// no sample and extend from their own side however far it lies.
+    pub fn swept_nodes(&self) -> &[u32] {
+        &self.swept
     }
 
     pub fn matches(
@@ -441,7 +452,10 @@ struct QuadraticTransferWork {
     source_by_point: BTreeMap<[u64; 2], Vec<u32>>,
     /// The separated sides each source node lies on.
     source_sides: Vec<BTreeSet<BoundaryTraceKey>>,
+    /// The curves an edit moved, where it changed the geometry.
+    swept_ground: Option<SweptGround>,
     samples: Vec<Option<QuadraticTransferSample>>,
+    swept: Vec<u32>,
 }
 
 /// Whether a target node on one side of a separated curve would take a donor
@@ -469,7 +483,9 @@ fn behind_the_wall(
 /// barycentric weights: a quarter of its height past an edge. A chord's
 /// sagitta is an eighth of its length over the curve's radius in units of
 /// a height, 0.14 for a chord as long as the radius; a node further off is
-/// not beside its side but somewhere else, as on a curve an edit moved.
+/// not beside its side but somewhere else, as on a curve an edit moved,
+/// where the element holding it answers if it lay on the node's side
+/// ([`SweptGround`]).
 const BESIDE_ITS_SIDE: f64 = 0.25;
 
 fn point_key(point: Point2) -> [u64; 2] {
@@ -501,7 +517,9 @@ impl QuadraticTransferWork {
             source_traces: SourceTraceTriangles::default(),
             source_by_point: BTreeMap::new(),
             source_sides: Vec::new(),
+            swept_ground: None,
             samples: Vec::new(),
+            swept: Vec::new(),
         }
     }
 
@@ -563,6 +581,7 @@ impl QuadraticTransferWork {
                             .push(index as u32);
                     }
                 }
+                self.swept_ground = SweptGround::new(source_mesh, target_mesh);
                 self.bins = Some(SourceBins::new(source_mesh)?);
                 self.samples = Vec::with_capacity(target_operator.degrees_of_freedom());
                 self.phase = TransferPhase::Bins(0);
@@ -586,6 +605,7 @@ impl QuadraticTransferWork {
                         target_mesh_revision: target_mesh.mesh_revision,
                         source_dofs: source_operator.degrees_of_freedom(),
                         samples: std::mem::take(&mut self.samples),
+                        swept: std::mem::take(&mut self.swept),
                     }));
                 }
                 let target = &self.target_traces[index];
@@ -599,7 +619,7 @@ impl QuadraticTransferWork {
                             self.source_sides[*node as usize].contains(key)
                         }) =>
                     {
-                        Some(exact_sample(*node))
+                        Some((exact_sample(*node), points[index], *node))
                     }
                     _ => None,
                 };
@@ -621,12 +641,36 @@ impl QuadraticTransferWork {
                             self.region_groups.as_ref(),
                             &preferred,
                         )
-                        .map(|(triangle, weights)| QuadraticTransferSample {
-                            nodes: source_operator.element_nodes()[triangle as usize],
-                            weights: enriched_quadratic_basis(weights),
+                        .map(|(triangle, weights)| {
+                            let corners = source_mesh.triangles[triangle as usize]
+                                .vertices
+                                .map(|vertex| source_mesh.vertices[vertex].point);
+                            (
+                                QuadraticTransferSample {
+                                    nodes: source_operator.element_nodes()[triangle as usize],
+                                    weights: enriched_quadratic_basis(weights),
+                                },
+                                (corners[0] + corners[1] + corners[2]) / 3.0,
+                                // The centre lies on no wall.
+                                u32::MAX,
+                            )
                         })
                 });
-                self.samples.push(sample);
+                // Ground a moved wall swept over takes nothing from the side
+                // it lay on before and is extended from its own. An exact
+                // copy's old node speaks for its side by its walls.
+                let none = BTreeSet::new();
+                let swept = sample.as_ref().is_some_and(|(_, from, node)| {
+                    self.swept_ground.as_ref().is_some_and(|ground| {
+                        let walls = self.source_sides.get(*node as usize).unwrap_or(&none);
+                        ground.across((*from, walls), (points[index], &target.boundaries))
+                    })
+                });
+                if swept {
+                    self.swept.push(index as u32);
+                }
+                self.samples
+                    .push(sample.filter(|_| !swept).map(|(sample, _, _)| sample));
                 self.phase = TransferPhase::Locate(index + 1);
             }
             TransferPhase::Done => {}
@@ -773,6 +817,287 @@ pub(crate) fn has_unified_topology(mesh: &TriMesh) -> bool {
             .boundary_edges
             .iter()
             .any(|edge| matches!(edge.label, BoundaryLabel::Curve { .. }))
+}
+
+/// The separated curves an edit moved, each as the old mesh and the new one
+/// trace it, for telling the side of a curve ground lay on before from the
+/// side it lies on now. A side is that of the curve's nearest point, or none
+/// where that point is a tip, as beyond a free end, where both sides meet. A
+/// wall an edit moves sweeps over ground, and the value carried there by
+/// position belongs to the side the ground lay on before: the moved wall's
+/// own side took the other side's values, and the jump the wall held stayed
+/// where the wall had been, free in the medium (IV-12 of the testing
+/// campaign).
+pub(crate) struct SweptGround {
+    /// Each moved curve's trace on the old mesh and on the new.
+    curves: Vec<(CurveId, SideTrace, SideTrace)>,
+}
+
+/// One curve's walls on one mesh, each segment once, turned so the curve's
+/// left side lies on its left, on a uniform grid for the nearest segment.
+struct SideTrace {
+    segments: Vec<[Point2; 2]>,
+    /// The segment ending where each begins and the one beginning where it
+    /// ends; `None` at a tip.
+    neighbours: Vec<[Option<u32>; 2]>,
+    minimum: Point2,
+    maximum: Point2,
+    cell: Point2,
+    dimension: usize,
+    cells: Vec<Vec<u32>>,
+}
+
+impl SweptGround {
+    /// The curves both meshes wall whose traces differ, or `None` where no
+    /// such curve moved, as in a remesh of the same geometry. Within an
+    /// edit, a curve meshed again with other chords counts as moved, its
+    /// sides told apart all the same.
+    pub(crate) fn new(source: &TriMesh, target: &TriMesh) -> Option<Self> {
+        if source.geometry_revision == target.geometry_revision {
+            return None;
+        }
+        let mut before = side_traces(source);
+        let curves = side_traces(target)
+            .into_iter()
+            .filter_map(|(curve, after)| {
+                let before = before.remove(&curve)?;
+                (before.segments != after.segments).then_some((curve, before, after))
+            })
+            .collect::<Vec<_>>();
+        (!curves.is_empty()).then_some(Self { curves })
+    }
+
+    /// Whether ground at `from` on the old mesh lay on another side of a
+    /// moved curve than `to` lies on the new one, where neither is beyond a
+    /// tip. Each point comes with the sides of the walls it lies on, which
+    /// speak for it there. A pair whose box misses both traces' bounds is on
+    /// one side: far from a curve, its sides differ only past a half turn,
+    /// and ground the curve never swept keeps its place.
+    pub(crate) fn across(
+        &self,
+        (from, from_walls): (Point2, &BTreeSet<BoundaryTraceKey>),
+        (to, to_walls): (Point2, &BTreeSet<BoundaryTraceKey>),
+    ) -> bool {
+        let low = Point2::new(from.x.min(to.x), from.y.min(to.y));
+        let high = Point2::new(from.x.max(to.x), from.y.max(to.y));
+        self.curves.iter().any(|(curve, before, after)| {
+            if !before.meets(low, high) && !after.meets(low, high) {
+                return false;
+            }
+            let then = wall_side(from_walls, *curve).unwrap_or_else(|| before.side(from));
+            let now = wall_side(to_walls, *curve).unwrap_or_else(|| after.side(to));
+            matches!((then, now), (Some(then), Some(now)) if then != now)
+        })
+    }
+}
+
+/// The side of `curve` a point on the walls `walls` lies on, if it lies on
+/// the curve's: none at a tip, where both sides meet.
+fn wall_side(walls: &BTreeSet<BoundaryTraceKey>, curve: CurveId) -> Option<Option<CurveTraceSide>> {
+    let mut sides = walls.iter().filter_map(|key| {
+        let BoundaryTraceKey::Curve { curve: wall, side } = key;
+        (*wall == curve).then_some(*side)
+    });
+    match (sides.next(), sides.next()) {
+        (None, _) => None,
+        (Some(side), None) => Some(Some(side)),
+        (Some(_), Some(_)) => Some(None),
+    }
+}
+
+/// Each separated curve's trace on `mesh`.
+fn side_traces(mesh: &TriMesh) -> BTreeMap<CurveId, SideTrace> {
+    let mut walls = BTreeMap::<(usize, usize), (CurveId, CurveTraceSide, [usize; 2])>::new();
+    for edge in &mesh.boundary_edges {
+        if let BoundaryLabel::Curve {
+            curve,
+            side,
+            separated: true,
+            ..
+        } = edge.label
+        {
+            walls.insert(
+                transfer_edge_key(edge.vertices),
+                (curve, side, edge.vertices),
+            );
+        }
+    }
+    let mut segments = BTreeMap::<CurveId, BTreeMap<[[u64; 2]; 2], [Point2; 2]>>::new();
+    for triangle in &mesh.triangles {
+        let [a, b, c] = triangle.vertices;
+        for (edge, opposite) in [([a, b], c), ([b, c], a), ([c, a], b)] {
+            let Some((curve, side, vertices)) = walls.get(&transfer_edge_key(edge)) else {
+                continue;
+            };
+            let [start, end] = vertices.map(|vertex| mesh.vertices[vertex].point);
+            let owner_left = crate::orient2d(start, end, mesh.vertices[opposite].point)
+                == crate::PredicateSign::Positive;
+            let [start, end] = if owner_left == (*side == CurveTraceSide::Left) {
+                [start, end]
+            } else {
+                [end, start]
+            };
+            segments
+                .entry(*curve)
+                .or_default()
+                .insert([point_key(start), point_key(end)], [start, end]);
+        }
+    }
+    segments
+        .into_iter()
+        .map(|(curve, segments)| (curve, SideTrace::new(segments.into_values().collect())))
+        .collect()
+}
+
+impl SideTrace {
+    fn new(segments: Vec<[Point2; 2]>) -> Self {
+        let mut starts = BTreeMap::<[u64; 2], u32>::new();
+        let mut ends = BTreeMap::<[u64; 2], u32>::new();
+        for (index, [start, end]) in segments.iter().enumerate() {
+            starts.entry(point_key(*start)).or_insert(index as u32);
+            ends.entry(point_key(*end)).or_insert(index as u32);
+        }
+        let neighbours = segments
+            .iter()
+            .map(|[start, end]| {
+                [
+                    ends.get(&point_key(*start)).copied(),
+                    starts.get(&point_key(*end)).copied(),
+                ]
+            })
+            .collect();
+        let mut minimum = Point2::new(f64::INFINITY, f64::INFINITY);
+        let mut maximum = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for point in segments.iter().flatten() {
+            minimum.x = minimum.x.min(point.x);
+            minimum.y = minimum.y.min(point.y);
+            maximum.x = maximum.x.max(point.x);
+            maximum.y = maximum.y.max(point.y);
+        }
+        let dimension = (segments.len() as f64).sqrt().ceil().clamp(1.0, 512.0) as usize;
+        let width = |extent: f64| {
+            if extent > 0.0 {
+                extent / dimension as f64
+            } else {
+                1.0
+            }
+        };
+        let mut trace = Self {
+            segments,
+            neighbours,
+            minimum,
+            maximum,
+            cell: Point2::new(width(maximum.x - minimum.x), width(maximum.y - minimum.y)),
+            dimension,
+            cells: vec![Vec::new(); dimension * dimension],
+        };
+        for index in 0..trace.segments.len() {
+            let [start, end] = trace.segments[index];
+            let [x0, y0] = trace.bin(Point2::new(start.x.min(end.x), start.y.min(end.y)));
+            let [x1, y1] = trace.bin(Point2::new(start.x.max(end.x), start.y.max(end.y)));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    trace.cells[y * dimension + x].push(index as u32);
+                }
+            }
+        }
+        trace
+    }
+
+    fn meets(&self, low: Point2, high: Point2) -> bool {
+        high.x >= self.minimum.x
+            && low.x <= self.maximum.x
+            && high.y >= self.minimum.y
+            && low.y <= self.maximum.y
+    }
+
+    fn bin(&self, point: Point2) -> [usize; 2] {
+        bin_index(point, self.minimum, self.cell, self.dimension)
+    }
+
+    /// The segment nearest `point`, the lowest-numbered of equals, from
+    /// square rings of cells searched outward until nothing outside them can
+    /// be nearer.
+    fn nearest(&self, point: Point2) -> Option<usize> {
+        let [cx, cy] = self.bin(point);
+        let last = self.dimension - 1;
+        let slack = 1.0e-9 * (self.cell.x + self.cell.y);
+        let mut best = None::<(f64, u32)>;
+        for ring in 0..=last {
+            let (x0, x1) = (cx.saturating_sub(ring), (cx + ring).min(last));
+            let (y0, y1) = (cy.saturating_sub(ring), (cy + ring).min(last));
+            for y in y0..=y1 {
+                let edge_row = y.abs_diff(cy) == ring;
+                for x in x0..=x1 {
+                    if !edge_row && x.abs_diff(cx) != ring {
+                        continue;
+                    }
+                    for &index in &self.cells[y * self.dimension + x] {
+                        let [start, end] = self.segments[index as usize];
+                        let along = end - start;
+                        let t = ((point - start).dot(along) / along.dot(along)).clamp(0.0, 1.0);
+                        let offset = start + along * t - point;
+                        let distance = offset.dot(offset);
+                        if best.is_none_or(|(nearest, holder)| {
+                            distance < nearest || (distance == nearest && index < holder)
+                        }) {
+                            best = Some((distance, index));
+                        }
+                    }
+                }
+            }
+            let mut outside = f64::INFINITY;
+            if x0 > 0 {
+                outside = outside.min(point.x - (self.minimum.x + x0 as f64 * self.cell.x));
+            }
+            if x1 < last {
+                outside = outside.min(self.minimum.x + (x1 + 1) as f64 * self.cell.x - point.x);
+            }
+            if y0 > 0 {
+                outside = outside.min(point.y - (self.minimum.y + y0 as f64 * self.cell.y));
+            }
+            if y1 < last {
+                outside = outside.min(self.minimum.y + (y1 + 1) as f64 * self.cell.y - point.y);
+            }
+            if outside == f64::INFINITY {
+                break;
+            }
+            let reach = outside - slack;
+            if reach > 0.0 && best.is_some_and(|(nearest, _)| nearest < reach * reach) {
+                break;
+            }
+        }
+        best.map(|(_, index)| index as usize)
+    }
+
+    /// The side of the curve `point` lies on: of the nearest segment, or at
+    /// a corner nearest, of the two segments' normals together; none at a
+    /// tip or on the curve.
+    fn side(&self, point: Point2) -> Option<CurveTraceSide> {
+        let index = self.nearest(point)?;
+        let [start, end] = self.segments[index];
+        let along = end - start;
+        let t = (point - start).dot(along) / along.dot(along);
+        let normal = |along: Point2| Point2::new(-along.y, along.x) / along.norm();
+        let turn = if t <= 0.0 || t >= 1.0 {
+            let (corner, other) = if t <= 0.0 {
+                (start, self.neighbours[index][0]?)
+            } else {
+                (end, self.neighbours[index][1]?)
+            };
+            let [other_start, other_end] = self.segments[other as usize];
+            (point - corner).dot(normal(along) + normal(other_end - other_start))
+        } else {
+            along.cross(point - start)
+        };
+        if turn > 0.0 {
+            Some(CurveTraceSide::Left)
+        } else if turn < 0.0 {
+            Some(CurveTraceSide::Right)
+        } else {
+            None
+        }
+    }
 }
 
 fn transfer_edge_key(vertices: [usize; 2]) -> (usize, usize) {
@@ -1905,6 +2230,60 @@ mod tests {
             assert_eq!(
                 wrong, 0,
                 "edge {from} to {to}: {wrong} of {nodes} nodes took the other side's value"
+            );
+        }
+    }
+
+    /// IV-12 of the testing campaign: ground a moved wall swept over takes
+    /// nothing from the side it lay on before. Located by position alone,
+    /// the nodes inside a loop moved by part of an element took the field
+    /// outside it, and the jump the wall held stayed where the wall had been.
+    #[test]
+    fn a_moved_wall_keeps_each_side_its_own_value() {
+        let at = |center: Point2, revision: u64| {
+            walled_mesh(
+                vec![reflecting_loop(1, 10, center, 0.5)],
+                MeshingOptions {
+                    target_edge_length: 0.07,
+                    curve_tolerance: 2.0e-3,
+                    ..MeshingOptions::default()
+                },
+                revision,
+            )
+        };
+        let center = Point2::new(0.2, -0.1);
+        let (source, source_operator) = at(center, 1);
+        let inside = one_inside(&source, &source_operator, center);
+        for shift in [0.02, 0.05, 0.15] {
+            let moved = center + Point2::new(shift, 0.0);
+            let (target, target_operator) = at(moved, 2);
+            let map =
+                QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
+                    .unwrap();
+            let transferred = map.interpolate(&inside, -1.0).unwrap();
+            let expected = one_inside(&target, &target_operator, moved);
+            let unsampled = (0..expected.len())
+                .filter(|node| map.samples()[*node].is_none())
+                .map(|node| node as u32)
+                .collect::<Vec<_>>();
+            let wrong = transferred
+                .iter()
+                .zip(&expected)
+                .filter(|(actual, expected)| {
+                    **actual != -1.0 && (*actual - *expected).abs() > 1.0e-9
+                })
+                .count();
+            assert_eq!(
+                wrong,
+                0,
+                "moved {shift}: {wrong} of {} nodes took the other side's value",
+                expected.len()
+            );
+            assert!(!unsampled.is_empty(), "moved {shift}: nothing was swept");
+            assert_eq!(
+                map.swept_nodes(),
+                unsampled,
+                "moved {shift}: the nodes left without a sample are not the swept ones"
             );
         }
     }

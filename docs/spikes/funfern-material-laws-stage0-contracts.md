@@ -172,7 +172,10 @@ of `b` that changes from sample to sample until repeated remeshes grew it
 without bound. An
 unchanged element/sample is an exact copy. A connected new cell takes a bounded
 constant-preserving extension from donors no farther than two element rings; a
-new island is zero. There is no global harmonic relaxation.
+new island is zero. Since 2026-11-02 (IV-12) ground a moved wall swept over
+takes nothing from the side it lay on before: its `Q` and `b` extend from its
+own side's nearest old element however far, so the wall's jump moves with it.
+There is no global harmonic relaxation.
 
 On the irregular production fixtures, predeclared limits are:
 
