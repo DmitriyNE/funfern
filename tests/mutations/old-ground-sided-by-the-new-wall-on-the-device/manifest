@@ -1,0 +1,4 @@
+about: the defect of old-ground-sided-by-the-new-wall read on the device: a moved baffle's jump stays where the baffle was in the device's own state, while the device stands with the reference, which carries the field the same way
+test: scripts/e2e-fixture.sh baffle-move
+expect: the device's carry did not move the jump with the baffle
+needs: device

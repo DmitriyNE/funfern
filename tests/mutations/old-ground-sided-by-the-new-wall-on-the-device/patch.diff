@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/transfer.rs b/crates/funfern-core/src/transfer.rs
+--- a/crates/funfern-core/src/transfer.rs
++++ b/crates/funfern-core/src/transfer.rs
+@@ -884,7 +884,7 @@ impl SweptGround {
+             if !before.meets(low, high) && !after.meets(low, high) {
+                 return false;
+             }
+-            let then = wall_side(from_walls, *curve).unwrap_or_else(|| before.side(from));
++            let then = wall_side(from_walls, *curve).unwrap_or_else(|| after.side(from));
+             let now = wall_side(to_walls, *curve).unwrap_or_else(|| after.side(to));
+             matches!((then, now), (Some(then), Some(now)) if then != now)
+         })

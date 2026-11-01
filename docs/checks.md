@@ -89,7 +89,16 @@ with a pulse, and remeshes it to 0.028 at step 128, 34,014 nodes onto 70,218.
 Each part's total, counted on the device's own state just before the remesh
 and at the handoff over the nodes of the elements whose centres lie in it,
 must come through within 1e-6 of its magnitude: it reads 5.5e-8, and the
-handed state reads Q `3.9e-7` against the reference. The six `handoff-memory`
+handed state reads Q `3.9e-7` against the reference. `baffle-move`, IV-12 on
+the device, draws IV-12's free-ended reflecting arc into the cavity at edge
+0.04, strikes it below the baffle with a pulse as wide as IV-12's, and at
+step 384, once the pulse has come back off the baffle, drags the baffle up
+an edge as the Move tool does. Read on the device's own state just before
+the move and at the handoff, 0.3 of an edge to each side of 33 points along
+the baffle, the jump at the moved baffle must stand within 0.3 of each
+side's own values and no more than 0.1 of it may be left where the baffle
+was: it reads 0.024 in Q and 0.172 in b, 0.010 and 0.091 left behind, and
+the handed state reads Q `6.7e-7` against the reference. The six `handoff-memory`
 fixtures, `-rebuild`, `-remesh`, `-edit`, `-timestep`, `-flux` and `-running`, give
 the cavity a second-order outgoing wall on its bottom side and a 0.8 Hz drive
 on its top, run the pulse into the wall, and at step 192, once the wall holds
@@ -1423,7 +1432,9 @@ baffle within 0.3 of each side's own values, and no more than 0.1 of it may
 be left where the baffle was, in the field and the complementary field. 5
 cases in the gate in about a second, 16 in the nightly. Its mutation is
 `old-ground-sided-by-the-new-wall`, which the core's
-`a_moved_wall_keeps_each_side_its_own_value` catches too.
+`a_moved_wall_keeps_each_side_its_own_value` catches too. Its device half is
+the `baffle-move` fixture, whose mutation
+`old-ground-sided-by-the-new-wall-on-the-device` puts the same defect back.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

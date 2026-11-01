@@ -101,6 +101,7 @@ pub(crate) fn add(app: &mut App) {
         "handoff-driven-pins" => (Fixture::HandoffDrivenPins, vec![None]),
         "remesh" => (Fixture::Remesh, vec![None]),
         "neutral-remesh" => (Fixture::NeutralRemesh, vec![None]),
+        "baffle-move" => (Fixture::BaffleMove, vec![None]),
         "handoff-memory-rebuild" => (Fixture::HandoffMemory(MemoryHandoff::Rebuild), vec![None]),
         "handoff-memory-remesh" => (Fixture::HandoffMemory(MemoryHandoff::Remesh), vec![None]),
         "handoff-memory-edit" => (Fixture::HandoffMemory(MemoryHandoff::Edit), vec![None]),
@@ -208,6 +209,16 @@ enum Fixture {
     /// which an agreement with the reference would not show where both carried
     /// alike.
     NeutralRemesh,
+    /// IV-12 of the testing campaign on the device: the cavity at edge 0.04
+    /// with a free-ended reflecting baffle, an arc across its middle, struck
+    /// below it and run until the pulse has come back off it, then the baffle
+    /// dragged up an edge at step [`BAFFLE_MOVE_STEP`]. The device's own state
+    /// is read just before the move and at the handoff: at the moved baffle
+    /// the jump must stand within [`MOVED_SIDES`] of each side's own values,
+    /// and no more than [`LEFT_BEHIND`] of it may be left where the baffle
+    /// was, which an agreement with the reference would not show where both
+    /// carried alike.
+    BaffleMove,
     /// The cavity with its bottom side a second-order outgoing wall and its
     /// top side driven, the pulse run into the wall until its pole states
     /// hold memory, then handed off at step 192 of 384 the way named: the
@@ -305,6 +316,7 @@ const CHANNEL_MESH: &str = "87169bdb09e61b78/b63cee07f5ecf758";
 const HOLE_MESH: &str = "f84998df08704d66/34b4ee47d28f53ae";
 const PARTED_MESH: &str = "6f134ce035236366/db143b236f3be3fb";
 const FINER_PARTED_MESH: &str = "345ff654d5d190eb/7b78d839d7290095";
+const BAFFLED_MESH: &str = "cb876407d8c1eb75/63a98d72da510426";
 
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
 /// time, a number that divides nothing, half the most a frame may ask for
@@ -336,6 +348,9 @@ enum Action {
     /// The view's grid toggled, a change for the autosave to carry, and the
     /// device destroyed.
     LoseDevice,
+    /// The cavity's baffle selected and dragged up [`BAFFLE_SHIFT`] edges, as
+    /// the Move tool does.
+    Move,
 }
 
 impl Fixture {
@@ -348,6 +363,7 @@ impl Fixture {
                 (&[(128, Action::Edit)], 256)
             }
             Fixture::Remesh | Fixture::NeutralRemesh => (&[(128, Action::Remesh)], 256),
+            Fixture::BaffleMove => (&[(BAFFLE_MOVE_STEP, Action::Move)], BAFFLE_MOVE_STEP + 128),
             // The pulse's front reaches the wall near step 150: the handoff
             // comes once the wall holds memory, and the run goes on for as
             // long again, so that what the wall gives back is in the field.
@@ -385,13 +401,33 @@ impl Fixture {
     /// the new generation steps, where no wall's memory calls for it: a
     /// driven generation's pins, which its first step sets again.
     fn reads_the_handoff(self) -> bool {
-        matches!(self, Fixture::HandoffDrivenPins | Fixture::NeutralRemesh)
+        matches!(
+            self,
+            Fixture::HandoffDrivenPins | Fixture::NeutralRemesh | Fixture::BaffleMove
+        )
     }
 
     /// Whether each part's total is read off the device's own state before
     /// the remesh and at the handoff.
     fn counts_the_parts(self) -> bool {
         matches!(self, Fixture::NeutralRemesh)
+    }
+
+    /// Whether the jump across the baffle is read off the device's own state
+    /// before the move and at the handoff.
+    fn reads_the_sides(self) -> bool {
+        matches!(self, Fixture::BaffleMove)
+    }
+
+    /// The width the fixture sets its pulse to, as the pulse's slider does,
+    /// where it does not take the app's.
+    fn pulse_width(self) -> Option<f32> {
+        match self {
+            // As wide as IV-12's in `tests/invariants.rs`, so that the field
+            // beside the baffle is resolved.
+            Fixture::BaffleMove => Some(0.2),
+            _ => None,
+        }
     }
 
     /// Where the fixture's pulses strike, in `domain`: one off the middle, or
@@ -403,6 +439,10 @@ impl Fixture {
                 Point2::new(0.7, 0.0),
                 PARTED_ISLAND.0,
             ],
+            Fixture::BaffleMove => vec![Point2::new(
+                domain.min_x + 0.5 * domain.width(),
+                domain.min_y + 0.38 * domain.height(),
+            )],
             _ => vec![Point2::new(
                 domain.min_x + 0.37 * domain.width(),
                 domain.min_y + 0.58 * (domain.max_y - domain.min_y),
@@ -456,6 +496,7 @@ impl Fixture {
             Fixture::Observables => CHANNEL_MESH,
             Fixture::FarField | Fixture::FarFieldLate => HOLE_MESH,
             Fixture::NeutralRemesh => PARTED_MESH,
+            Fixture::BaffleMove => BAFFLED_MESH,
             _ => CAVITY_MESH,
         }
     }
@@ -470,6 +511,7 @@ impl Fixture {
             | Fixture::DeviceLoss => (cavity_document(), None),
             Fixture::Rejection => (rejection_document(), None),
             Fixture::NeutralRemesh => (parted_document(), None),
+            Fixture::BaffleMove => (baffled_document(), None),
             Fixture::HandoffDriven => (pump_document(), None),
             Fixture::HandoffDrivenPins => (pumped_driven_document(), None),
             Fixture::Observables => (observables::observables_document(), None),
@@ -679,6 +721,9 @@ struct Reference {
     /// Each part's total of the device's `Q` and of its magnitude just before
     /// the action, where the fixture counts the parts.
     departed: Option<([f64; 3], [f64; 3])>,
+    /// The baffle's jump on the device's state just before the move, where
+    /// the fixture reads the sides.
+    sides: Option<SidesBefore>,
     /// The recorders' twins, read after every step, where the run's probes
     /// are to be judged.
     twin: Option<observables::Twin>,
@@ -1141,6 +1186,270 @@ fn parted_document() -> TopologyDocument {
     document
 }
 
+/// [`Fixture::BaffleMove`]'s baffle, as fractions of the domain: IV-12's
+/// arc in `tests/invariants.rs`, bulging up across the middle, its ends
+/// free.
+const BAFFLE_ARC: [[f64; 2]; 5] = [
+    [0.3, 0.45],
+    [0.4, 0.62],
+    [0.5, 0.64],
+    [0.6, 0.62],
+    [0.7, 0.45],
+];
+
+/// The baffled cavity's edge, and how far its baffle is dragged up, in
+/// edges.
+const BAFFLED_EDGE: f64 = 0.04;
+const BAFFLE_SHIFT: f64 = 1.0;
+
+/// The step the baffle is dragged at: the pulse below it has come back off
+/// it, the field jumping across it.
+const BAFFLE_MOVE_STEP: u64 = 384;
+
+/// How far from the baffle each side is read, in edges.
+const BESIDE: f64 = 0.3;
+
+/// How far the jump at the moved baffle may stand from each side's own
+/// values on the device, relatively: IV-12's bound in `tests/invariants.rs`.
+const MOVED_SIDES: f64 = 0.3;
+
+/// How much of the jump may be left where the baffle was on the device,
+/// relatively: IV-12's bound in `tests/invariants.rs`.
+const LEFT_BEHIND: f64 = 0.1;
+
+/// The cavity at [`BAFFLED_EDGE`] with a free-ended reflecting baffle along
+/// [`BAFFLE_ARC`], drawn through the editor, as IV-12's box.
+fn baffled_document() -> TopologyDocument {
+    let mut document = cavity_document();
+    document.presentation.mesh_edge = BAFFLED_EDGE;
+    let mut editor = TopologyEditor::from_document(document).expect("the cavity opens");
+    let settle = |editor: &mut TopologyEditor| {
+        while editor.acceptance == crate::topology_editor::TopologyAcceptance::Pending {
+            editor.validate_frame(64);
+        }
+    };
+    settle(&mut editor);
+    let domain = editor.document.model.draft.geometry.domain;
+    let controls = BAFFLE_ARC
+        .iter()
+        .map(|[x, y]| {
+            Point2::new(
+                domain.min_x + x * domain.width(),
+                domain.min_y + y * domain.height(),
+            )
+        })
+        .collect();
+    editor
+        .create_boundary_baffle(
+            OpenCubicSpline::new(controls, vec![1.0, 1.0]).expect("the baffle's arc"),
+        )
+        .expect("the baffle");
+    settle(&mut editor);
+    let mut document = editor.document;
+    document.model.accepted = document.model.draft.clone();
+    document
+}
+
+/// The baffle's curve: the document's only open one.
+fn the_baffle(document: &TopologyDocument) -> Result<&funfern_core::TopologyCurve, String> {
+    let mut open = document
+        .model
+        .draft
+        .geometry
+        .curves
+        .iter()
+        .filter(|curve| matches!(curve.spline, funfern_core::CurveSpline::Open(_)));
+    match (open.next(), open.next()) {
+        (Some(curve), None) => Ok(curve),
+        _ => Err("the document has no one baffle".into()),
+    }
+}
+
+/// [`Action::Move`]: the baffle's spans selected and dragged up
+/// [`BAFFLE_SHIFT`] edges in one transaction, as the Move tool does.
+fn move_the_baffle(editor: &mut TopologyEditor) -> Result<(), String> {
+    let geometry = editor.document.model.draft.geometry.clone();
+    let selected = the_baffle(&editor.document)?
+        .spans
+        .iter()
+        .map(|span| crate::topology_viewport::TopologySpanTarget::Curve(span.id))
+        .collect();
+    let updates = crate::topology_viewport::plan_rigid_transform(
+        &geometry,
+        &selected,
+        crate::topology_viewport::RigidTransform {
+            pivot: Point2::default(),
+            translation: Point2::new(0.0, BAFFLE_SHIFT * BAFFLED_EDGE),
+            rotation_radians: 0.0,
+            scale: 1.0,
+        },
+    )
+    .map_err(|issue| issue.to_string())?;
+    editor.apply_transform_updates(&updates)
+}
+
+/// 33 points along the baffle's middle, from a fifth of the way along it to
+/// four fifths, each with the normal to its convex side, the curve's left.
+fn along_the_baffle(document: &TopologyDocument) -> Result<Vec<(Point2, Point2)>, String> {
+    let funfern_core::CurveSpline::Open(spline) = &the_baffle(document)?.spline else {
+        return Err("the baffle is not open".into());
+    };
+    let end = spline
+        .span_bounds(spline.controls().len() - 4)
+        .ok_or("the baffle has no last span")?[1];
+    Ok((0..33)
+        .map(|index| {
+            let t = end * (0.2 + 0.6 * index as f64 / 32.0);
+            let tangent = spline.derivative(t, 1);
+            let normal = Point2::new(-tangent.y, tangent.x) / tangent.norm();
+            (spline.evaluate(t), normal)
+        })
+        .collect())
+}
+
+/// The device's `Q` and `b` jumps from the second point of each pair to the
+/// first, read on `prepared` from the display's full snapshot.
+fn device_jumps(
+    prepared: &PreparedTopology,
+    display: &CanonicalGpuDisplay,
+    pairs: impl Iterator<Item = (Point2, Point2)>,
+) -> Result<Vec<(f64, Point2)>, String> {
+    let operator = &prepared.canonical_operator;
+    if display.primary_flux.len() != operator.degrees_of_freedom()
+        || display.complementary_flux.len() != operator.complementary_degrees_of_freedom()
+    {
+        return Err("the snapshot does not match the generation".into());
+    }
+    let primary = display
+        .primary_flux
+        .iter()
+        .map(|value| f64::from(*value))
+        .collect::<Vec<_>>();
+    let complementary = display
+        .complementary_flux
+        .iter()
+        .map(|[x, y]| Point2::new(f64::from(*x), f64::from(*y)))
+        .collect::<Vec<_>>();
+    let read = |point: Point2| {
+        let stencil = funfern_core::QuadraticPointStencil::build_topology(
+            &prepared.mesh,
+            &prepared.operator,
+            &prepared.bundle.plan,
+            prepared.fixed_model(),
+            point,
+        )
+        .map_err(|error| format!("no stencil at {point:?}: {error:?}"))?;
+        funfern_core::CanonicalPointStencil::from_quadratic(stencil, operator)
+            .and_then(|stencil| stencil.sample(&primary, &primary, &complementary))
+            .map_err(|error| format!("no reading at {point:?}: {error}"))
+    };
+    pairs
+        .map(|(above, below)| {
+            let (above, below) = (read(above)?, read(below)?);
+            Ok((
+                above.primary - below.primary,
+                above.complementary - below.complementary,
+            ))
+        })
+        .collect()
+}
+
+/// The RMS of `jumps`' differences from `meant`'s over the RMS of `against`,
+/// in `Q` and in `b`; from none where `meant` is `None`.
+fn jumps_apart(
+    jumps: &[(f64, Point2)],
+    meant: Option<&[(f64, Point2)]>,
+    against: &[(f64, Point2)],
+) -> [f64; 2] {
+    let sum = |pairs: &mut dyn Iterator<Item = ((f64, Point2), (f64, Point2))>| {
+        pairs.fold([0.0, 0.0], |[q, b], (one, other)| {
+            [
+                q + (one.0 - other.0).powi(2),
+                b + (one.1 - other.1).dot(one.1 - other.1),
+            ]
+        })
+    };
+    let zero = vec![(0.0, Point2::default()); jumps.len().max(against.len())];
+    let meant = meant.unwrap_or(&zero);
+    let apart = sum(&mut jumps.iter().copied().zip(meant.iter().copied()));
+    let size = sum(&mut against.iter().copied().zip(zero.iter().copied()));
+    [0, 1].map(|index| (apart[index] / size[index]).sqrt())
+}
+
+/// What [`Fixture::BaffleMove`] reads off the device's state just before the
+/// move: the baffle's points and normals, the jump at each, and the jump
+/// each side's own values make at the moved baffle: the old field where it
+/// stands above, the side the baffle moves away from, and beside the old
+/// baffle below, the side that gains ground.
+struct SidesBefore {
+    points: Vec<(Point2, Point2)>,
+    before: Vec<(f64, Point2)>,
+    meant: Vec<(f64, Point2)>,
+}
+
+impl SidesBefore {
+    fn read(
+        active: &PreparedTopology,
+        document: &TopologyDocument,
+        display: &CanonicalGpuDisplay,
+    ) -> Result<Self, String> {
+        let points = along_the_baffle(document)?;
+        let apart = BESIDE * BAFFLED_EDGE;
+        let up = Point2::new(0.0, BAFFLE_SHIFT * BAFFLED_EDGE);
+        let before = device_jumps(
+            active,
+            display,
+            points
+                .iter()
+                .map(|(at, normal)| (*at + *normal * apart, *at - *normal * apart)),
+        )?;
+        let meant = device_jumps(
+            active,
+            display,
+            points
+                .iter()
+                .map(|(at, normal)| (*at + up + *normal * apart, *at - *normal * apart)),
+        )?;
+        Ok(Self {
+            points,
+            before,
+            meant,
+        })
+    }
+
+    /// At the handoff, on the new generation: the jump at the moved baffle
+    /// against each side's own values, and the jump left where the baffle
+    /// was against the jump before; each in `Q` and in `b`.
+    fn after(
+        &self,
+        target: &PreparedTopology,
+        display: &CanonicalGpuDisplay,
+    ) -> Result<([f64; 2], [f64; 2]), String> {
+        let apart = BESIDE * BAFFLED_EDGE;
+        let up = Point2::new(0.0, BAFFLE_SHIFT * BAFFLED_EDGE);
+        let after = device_jumps(
+            target,
+            display,
+            self.points
+                .iter()
+                .map(|(at, normal)| (*at + up + *normal * apart, *at + up - *normal * apart)),
+        )?;
+        // Read within the ground the baffle swept.
+        let near = apart.min(BESIDE * up.y);
+        let behind = device_jumps(
+            target,
+            display,
+            self.points
+                .iter()
+                .map(|(at, normal)| (*at + *normal * near, *at - *normal * near)),
+        )?;
+        Ok((
+            jumps_apart(&after, Some(&self.meant), &self.meant),
+            jumps_apart(&behind, None, &self.before),
+        ))
+    }
+}
+
 /// Each of the parted cavity's parts' totals of `primary` and of its
 /// magnitude: 0 left of [`PARTED_BAFFLE`], 1 right of it, 2 inside the
 /// island's loop. A node takes the part the centres of its elements lie in,
@@ -1349,6 +1658,7 @@ fn advance(
                         steps: 0,
                         carry: None,
                         departed: None,
+                        sides: None,
                         twin,
                         far,
                     },
@@ -1357,6 +1667,9 @@ fn advance(
                 return None;
             }
             let domain = state.editor.document.model.accepted.geometry.domain;
+            if let Some(width) = driver.fixture.pulse_width() {
+                state.pulse_width = width;
+            }
             let points = driver.fixture.pulses_at(domain);
             let queued_before = state.coordinator.pending_pulses.len();
             for point in &points {
@@ -1411,6 +1724,7 @@ fn advance(
                     steps: 0,
                     carry: None,
                     departed: None,
+                    sides: None,
                     twin: None,
                     far: None,
                 },
@@ -1509,7 +1823,9 @@ fn advance(
                 driver.phase = Phase::Snapshot { reference, seen };
                 return None;
             };
-            if driver.fixture.counts_the_parts() && reference.departed.is_none() {
+            if (driver.fixture.counts_the_parts() && reference.departed.is_none())
+                || (driver.fixture.reads_the_sides() && reference.sides.is_none())
+            {
                 let seen = display.full_readbacks;
                 request.request_full_state_readback();
                 driver.phase = Phase::Departing {
@@ -1546,6 +1862,11 @@ fn advance(
                     state.editor.document.presentation.mesh_edge = driver.fixture.finer().0;
                 }
                 Action::Rebuild => state.coordinator.remesh_requested = true,
+                Action::Move => {
+                    if let Err(error) = move_the_baffle(&mut state.editor) {
+                        return Some(Err(format!("the baffle did not move: {error}")));
+                    }
+                }
                 Action::Timestep => state.editor.document.presentation.simulation_speed = 0.5,
                 Action::Drive => {
                     let driven = state.editor.set_outer_condition(
@@ -1628,7 +1949,8 @@ fn advance(
                 | Action::Rebuild
                 | Action::Timestep
                 | Action::Drive
-                | Action::Flux => published.is_none(),
+                | Action::Flux
+                | Action::Move => published.is_none(),
                 // The loss takes its own phase and never waits here.
                 Action::LoseDevice => {
                     return Some(Err("the device's loss is not an action to wait for".into()));
@@ -1749,7 +2071,8 @@ fn advance(
                 | Action::Rebuild
                 | Action::Timestep
                 | Action::Drive
-                | Action::Flux => {
+                | Action::Flux
+                | Action::Move => {
                     let target = published.expect("an edit waits for its generation");
                     let (from, to) = (
                         reference.active.canonical_operator.degrees_of_freedom(),
@@ -1767,7 +2090,11 @@ fn advance(
                     {
                         return Some(Err(failure));
                     }
-                    if matches!(action, Action::Remesh) == (from == to) {
+                    // A move meshes the ground it changes again, its nodes
+                    // as many or not.
+                    if !matches!(action, Action::Move)
+                        && matches!(action, Action::Remesh) == (from == to)
+                    {
                         return Some(Err(format!(
                             "the {action:?} went from {from} nodes to {to}"
                         )));
@@ -1862,9 +2189,17 @@ fn advance(
                 };
                 return None;
             }
-            match part_totals(&reference.active.canonical_operator, &display.primary_flux) {
-                Ok(totals) => reference.departed = Some(totals),
-                Err(failure) => return Some(Err(failure)),
+            if driver.fixture.counts_the_parts() {
+                match part_totals(&reference.active.canonical_operator, &display.primary_flux) {
+                    Ok(totals) => reference.departed = Some(totals),
+                    Err(failure) => return Some(Err(failure)),
+                }
+            }
+            if driver.fixture.reads_the_sides() {
+                match SidesBefore::read(&reference.active, &state.editor.document, display) {
+                    Ok(sides) => reference.sides = Some(sides),
+                    Err(failure) => return Some(Err(failure)),
+                }
             }
             driver.phase = Phase::Run { reference, next };
             None
@@ -2020,6 +2355,32 @@ fn advance(
             }
             if let (Some(carry), Some(wall)) = (&mut reference.carry, &wall) {
                 carry.at_handoff = [q, b, wall.z, wall.memory];
+            }
+            // Read once the device stands with the reference: both carry the
+            // field the same way, so only the device's own state shows where
+            // the jump went.
+            if driver.fixture.reads_the_sides() {
+                let Some(sides) = &reference.sides else {
+                    return Some(Err("the baffle was not read before the move".into()));
+                };
+                let ([q, b], [q_left, b_left]) = match sides.after(&reference.active, display) {
+                    Ok(read) => read,
+                    Err(failure) => return Some(Err(failure)),
+                };
+                let summary = format!(
+                    "the jump stands within {q:.3} of each side's own in Q and {b:.3} in b, \
+                     {q_left:.3} and {b_left:.3} of it left behind"
+                );
+                report(&format!("e2e {:?}: {summary}", driver.fixture));
+                if !within(q, MOVED_SIDES)
+                    || !within(b, MOVED_SIDES)
+                    || !within(q_left, LEFT_BEHIND)
+                    || !within(b_left, LEFT_BEHIND)
+                {
+                    return Some(Err(format!(
+                        "{summary}: the device's carry did not move the jump with the baffle"
+                    )));
+                }
             }
             state.e2e_steps.limit = Some(driver.base + stop(next + 1));
             driver.phase = Phase::Run {

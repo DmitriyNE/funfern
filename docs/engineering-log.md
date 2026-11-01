@@ -31494,3 +31494,45 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-02 — IV-12 on the device: a moved baffle's jump in its own state
+
+- **What it is.** IV-12's device half, the `baffle-move` fixture in
+  `crates/funfern-app/src/ui/e2e.rs`. IV-12's free-ended reflecting arc is
+  drawn into the cavity at edge 0.04, 33,938 nodes, and struck below it by
+  one pulse, its width set to 0.2 as the pulse's slider sets it, as wide as
+  IV-12's. At step 384 of 512, a second in, once the pulse has come back off
+  the baffle, the baffle's spans are selected and dragged up an edge in one
+  transaction, as the Move tool does.
+- **Checks.** The device's own state is read just before the move and at
+  the handoff, 0.3 of an edge to each side of 33 points along the baffle.
+  The jump at the moved baffle must stand within 0.3 of each side's own
+  values, read on the state before the move above the moved baffle and below
+  the old one, and no more than 0.1 of the jump may be left where the baffle
+  was: IV-12's bounds. The handed state and the endpoint are held to the
+  reference within 5e-6, as every handoff fixture's are.
+- **Numbers.** On the M1 Max:
+
+  | Reading | Q | `b` |
+  |---|---|---|
+  | Jump against each side's own | 0.024 | 0.172 |
+  | Jump left where the baffle was | 0.010 | 0.091 |
+  | Handed state against the reference | 6.7e-7 | 1.2e-6 |
+  | Endpoint against the reference | 8.3e-7 | 1.3e-6 |
+
+- **What only the device's own state sees.** The device has no code of its
+  own for swept ground: its transfer tables are built from the maps 5523dad
+  changed. With that commit's defect put back, the device stands within
+  6.8e-7 and 1.2e-6 of the reference, which carries the field the same way,
+  while its own state reads 1.006 and 0.940 of each side's own, with 1.057
+  and 0.783 left behind.
+- **Mutation** `old-ground-sided-by-the-new-wall-on-the-device` is that
+  defect, run against the fixture.
+- **Suite and CI.** The device suite runs it after `neutral-remesh`: 115 of
+  115 pass (`target/device-suite/20261102-015646`), every remesh, handoff
+  and AMR entry on 5523dad's maps included. CI's lavapipe job takes it from
+  the suite's run lines, and the nightly browser parts put it in `handoffs`
+  beside `neutral-remesh`, whose size it shares.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

@@ -985,6 +985,25 @@ its control points, and carried over through the runtime.
   position. The core's `a_moved_wall_keeps_each_side_its_own_value`, a loop
   moved by part of an element and by two, catches it too.
 
+**IV-12's device half done on 2026-11-02**, the `baffle-move` fixture in
+`crates/funfern-app/src/ui/e2e.rs`. IV-12's arc is drawn into the cavity at
+edge 0.04 and struck below it by a pulse as wide as IV-12's. At step 384,
+once the pulse has come back off the baffle, the baffle is dragged up an
+edge as the Move tool does. Read on the device's own state just before the
+move and at the handoff, the jump at the moved baffle must stand within 0.3
+of each side's own values, and no more than 0.1 of it may be left where the
+baffle was: IV-12's bounds.
+- **Numbers.** The M1 Max reads 0.024 in Q and 0.172 in `b`, with 0.010 and
+  0.091 left behind; the handed state stands within 6.7e-7 and 1.2e-6 of
+  the reference.
+- **What only the device's own state sees.** The device has no code of its
+  own for swept ground: its tables are built from the maps. With IV-12's
+  defect put back, the device stands within 6.8e-7 and 1.2e-6 of the
+  reference, which carries the field the same way, while its own state reads
+  1.006 and 0.940 of each side's own, with 1.057 and 0.783 left behind.
+- **Mutation** `old-ground-sided-by-the-new-wall-on-the-device` is that
+  defect, run against the fixture.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

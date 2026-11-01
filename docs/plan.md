@@ -1316,8 +1316,9 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   remeshed back and forth grew without bound (fixed by an L2 projection).
   IV-12, baffle sides, followed on 2026-11-02: it found a baffle an edit
   moved leaving its jump in the medium where it had stood, and holding none
-  itself (fixed: ground the wall swept over extends from its own side). Its
-  device half is next.
+  itself (fixed: ground the wall swept over extends from its own side), and
+  its device half, the `baffle-move` fixture, the same day. IV-08 edited
+  mid-run is next.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the
