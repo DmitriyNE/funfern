@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-app/src/canonical_gpu.rs b/crates/funfern-app/src/canonical_gpu.rs
+index b49b686..8cb4996 100644
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -580,7 +580,7 @@ impl CanonicalGpuRuntimeTransfer {
+                     .map(|(component, support)| {
+                         (
+                             component as u32,
+-                            (support / drawn[component]).clamp(0.0, 1.0),
++                            (support / source_support[component]).clamp(0.0, 1.0),
+                         )
+                     })
+                     .collect(),

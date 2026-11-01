@@ -849,6 +849,49 @@ runs now carries the stiffness tensor in world axes, so a frame's turn
 cannot pass it. Its mutation `separator-face-recentred`. Milestone C's
 stage C3, the remesh family, is next, planned before it starts.
 
+**C3 planned on 2026-11-01**, on the user's go: IV-10, IV-11, IV-12 and
+IV-08 edited mid-run, each through the app's own remesh. The runtime is asked
+for the same document again, at another edge or rebuilt, its maps taken
+before the generation is published, and the running field crosses as the app
+carries it: the runtime transfer's totals, then the core's handoff, which the
+device's transfer table is built from. A commit each, each with an f64 study
+first and a mutation; the device halves are suite entries.
+
+**IV-10 done on 2026-11-01**, in the same file, its CPU half. The editor
+draws into the default box a reflecting baffle from wall to wall and, beside
+it, an island inside a reflecting loop: three components. Struck by a pulse
+all three take some of, the box runs to one time at its edge and half it, and
+is prepared again 0.7 and 1.4 times finer and coarser, or rebuilt.
+- **Totals from geometry.** Each part's total of the primary field is counted
+  over the nodes of the elements whose centres lie in it, the parts told
+  from the baffle's ends and the loop's trace, not from the solver's labels.
+  Each must come through to 1e-12.
+- **The field.** A rebuild must give it back to 1e-12, and a remesh's, read
+  at common points, must stand within one halving's move of the original.
+- **What it found.** Two defects, both fixed in its commit:
+  - **A wall's nodes taken from its other side.** At edges of 0.04 and finer,
+    a remesh fed up to 424 of the island's wall nodes from the field outside
+    it, and the island's total moved by up to 5e-3. Each edge traces the
+    curve with its own chords, so a new node on a convex wall lies outside
+    the old mesh's elements on its side and inside the other side's, which
+    the locator's search of every triangle then took. It now takes its own
+    side's nearest element when it lies within a quarter of its height past
+    it.
+  - **A component's total shrunk by its area.** Each component's share of
+    its old total was its new area over its old, capped at 1, and
+    straight elements give a curved component a slightly different area on
+    each mesh: a component a remesh made smaller lost up to 7.3e-4 of its
+    total. Each old total now goes out whole among the components that draw
+    on it.
+- **Numbers.** The gate's 6 cases hold the totals to 1.2e-14 and read 0.44 of
+  a halving's move at worst; the nightly's 18, down to edge 0.02, to 3.9e-14
+  and 0.44.
+- **Mutation** `component-share-over-source-support` puts back the shares
+  over the old component's own support.
+
+The device half, the same totals read off the device's state after its
+remesh, follows.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

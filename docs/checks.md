@@ -1384,6 +1384,15 @@ wall-to-wall separator and a free one of the box's own material into the
 default box in each skin, the medium anisotropic in a turned frame and
 graded along it, and reads the box against itself without them by the same
 rule; 9 cases in the gate, and its mutation is `separator-face-recentred`.
+IV-10, a neutral remesh: the default box with a reflecting baffle from wall
+to wall and an island inside a reflecting loop runs to one time at its edge
+and half it, is prepared again at 0.7 and 1.4 times the edge or rebuilt, and
+its running field is carried over as the app carries it. Each of the three
+parts' totals of the primary field, counted from where the nodes lie, must
+come through within 1e-12 of its magnitude; a rebuild must give the field
+back within 1e-12, and a remesh's must read at the common points within one
+halving's move of the original. 6 cases in the gate in about 4 s, 18 in the
+nightly; its mutation is `component-share-over-source-support`.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

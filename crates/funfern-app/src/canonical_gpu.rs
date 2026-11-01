@@ -515,8 +515,10 @@ impl CanonicalGpuRuntimeTransfer {
     }
 
     /// Builds stable runtime ownership from the already prepared support map.
-    /// Component shares are geometric retained-support fractions, so a split
-    /// or merge does not depend on the instantaneous field being transferred.
+    /// Each source component's total goes out whole among the target
+    /// components that draw on it, by the support each draws: geometric
+    /// shares, so a split or merge does not depend on the instantaneous field
+    /// being transferred.
     pub fn from_primary_transfer(
         source: &CanonicalWaveOperator,
         target: &CanonicalWaveOperator,
@@ -551,16 +553,35 @@ impl CanonicalGpuRuntimeTransfer {
                     row.coefficients[slot] * primary.source_support()[source_node];
             }
         }
+        let drawn_from = |component: usize, support: f64| {
+            let total = source_support[component];
+            support > 1.0e-14 * total.max(1.0) && total > 0.0
+        };
+        // A share was once the support drawn over the source component's
+        // own, a ratio of two meshes' areas of one component where the
+        // elements' straight sides trace a curved wall each mesh its own way:
+        // a component a remesh left smaller lost that fraction of its total
+        // (IV-10 of the testing campaign).
+        let mut drawn = vec![0.0; source.component_count()];
+        for by_source in &retained {
+            for (component, support) in by_source.iter().enumerate() {
+                if drawn_from(component, *support) {
+                    drawn[component] += support;
+                }
+            }
+        }
         let components = retained
             .into_iter()
             .map(|by_source| CanonicalComponentTransfer {
                 sources: by_source
                     .into_iter()
                     .enumerate()
-                    .filter_map(|(component, support)| {
-                        let total = source_support[component];
-                        (support > 1.0e-14 * total.max(1.0) && total > 0.0)
-                            .then_some((component as u32, (support / total).clamp(0.0, 1.0)))
+                    .filter(|(component, support)| drawn_from(*component, *support))
+                    .map(|(component, support)| {
+                        (
+                            component as u32,
+                            (support / drawn[component]).clamp(0.0, 1.0),
+                        )
                     })
                     .collect(),
             })

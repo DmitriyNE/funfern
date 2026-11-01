@@ -464,6 +464,14 @@ fn behind_the_wall(
     })
 }
 
+/// How far beyond its own side's nearest element a node on a separated
+/// curve may lie and still take that element's field, in the element's
+/// barycentric weights: a quarter of its height past an edge. A chord's
+/// sagitta is an eighth of its length over the curve's radius in units of
+/// a height, 0.14 for a chord as long as the radius; a node further off is
+/// not beside its side but somewhere else, as on a curve an edit moved.
+const BESIDE_ITS_SIDE: f64 = 0.25;
+
 fn point_key(point: Point2) -> [u64; 2] {
     [point.x.to_bits(), point.y.to_bits()]
 }
@@ -948,8 +956,9 @@ impl SourceBins {
     }
 
     /// The source triangle containing `point` and its barycentric weights.
-    /// Each preferred set is tried in turn before every triangle is, and a
-    /// region group restricts the candidates when the caller supplies one.
+    /// Each preferred set is tried in turn, then the triangle of the broadest
+    /// the point lies beside, and only then every triangle; a region group
+    /// restricts the candidates when the caller supplies one.
     fn locate(
         &self,
         source: &TriMesh,
@@ -965,26 +974,69 @@ impl SourceBins {
         {
             return None;
         }
+        let admitted = |triangle_index: u32| {
+            target_group.is_none_or(|target_group| {
+                let region = source.triangles[triangle_index as usize].region;
+                region_groups
+                    .and_then(|groups| groups.get(&region))
+                    .copied()
+                    .unwrap_or(region)
+                    == target_group
+            })
+        };
+        let corners = |triangle_index: u32| {
+            source.triangles[triangle_index as usize]
+                .vertices
+                .map(|i| source.vertices[i].point)
+        };
         let [x, y] = bin_index(point, self.minimum, self.cell, self.dimension);
-        for tier in preferred.iter().map(Some).chain([None]) {
-            for &triangle_index in &self.bins[y * self.dimension + x] {
-                if tier.is_some_and(|triangles| !triangles.contains(&triangle_index)) {
+        let bin = &self.bins[y * self.dimension + x];
+        for tier in preferred {
+            for &triangle_index in bin {
+                if !tier.contains(&triangle_index) || !admitted(triangle_index) {
                     continue;
                 }
-                let triangle = source.triangles[triangle_index as usize];
-                if let Some(target_group) = target_group {
-                    let source_group = region_groups
-                        .and_then(|groups| groups.get(&triangle.region))
-                        .copied()
-                        .unwrap_or(triangle.region);
-                    if source_group != target_group {
-                        continue;
-                    }
-                }
-                let points = triangle.vertices.map(|i| source.vertices[i].point);
-                if let Some(weights) = barycentric(point, points) {
+                if let Some(weights) = barycentric(point, corners(triangle_index)) {
                     return Some((triangle_index, weights));
                 }
+            }
+        }
+        // A node on a separated curve that no element of its own side holds
+        // lies beside that side: each mesh traces the curve with its own
+        // chords, and a node on the curve stands up to a chord's sagitta
+        // outside the other mesh's elements on its side, inside those of the
+        // other side. It takes its own side's field from the element it lies
+        // least outside of, the element's quadratic carried that far beyond
+        // it; searched for among every triangle, it took the field across the
+        // wall (IV-10 of the testing campaign).
+        if let Some(side) = preferred.last() {
+            let beside = side
+                .iter()
+                .filter(|triangle_index| admitted(**triangle_index))
+                .filter_map(|&triangle_index| {
+                    let weights = barycentric_weights(point, corners(triangle_index))?;
+                    let outside = weights.into_iter().fold(f64::INFINITY, f64::min);
+                    Some((triangle_index, weights, outside))
+                })
+                .fold(
+                    None,
+                    |best: Option<(u32, [f64; 3], f64)>, candidate| match best {
+                        Some(best) if best.2 >= candidate.2 => Some(best),
+                        _ => Some(candidate),
+                    },
+                );
+            if let Some((triangle_index, weights, outside)) = beside
+                && outside >= -BESIDE_ITS_SIDE
+            {
+                return Some((triangle_index, weights));
+            }
+        }
+        for &triangle_index in bin {
+            if !admitted(triangle_index) {
+                continue;
+            }
+            if let Some(weights) = barycentric(point, corners(triangle_index)) {
+                return Some((triangle_index, weights));
             }
         }
         None
@@ -1009,7 +1061,8 @@ fn region_groups(mesh: &TriMesh) -> BTreeMap<crate::RegionId, crate::RegionId> {
         .collect()
 }
 
-fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
+/// `point`'s barycentric weights in `triangle`, wherever it lies.
+fn barycentric_weights(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
     let [a, b, c] = triangle;
     let denominator = (b - a).cross(c - a);
     if !denominator.is_finite() || denominator <= 0.0 {
@@ -1017,7 +1070,13 @@ fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
     }
     let w1 = (point - a).cross(c - a) / denominator;
     let w2 = (b - a).cross(point - a) / denominator;
-    let weights = [1.0 - w1 - w2, w1, w2];
+    Some([1.0 - w1 - w2, w1, w2])
+}
+
+fn barycentric(point: Point2, triangle: [Point2; 3]) -> Option<[f64; 3]> {
+    let weights = barycentric_weights(point, triangle)?;
+    let [a, b, c] = triangle;
+    let denominator = (b - a).cross(c - a);
     // The weights round with the coordinates' magnitude, and more the smaller
     // the element is: a weight is a distance over the element's height. An
     // absolute tolerance refused points on a small element's own edge
@@ -1679,111 +1738,175 @@ mod tests {
     /// unrestricted search, skipping the curve-side set, and one of the wall's
     /// two coincident copies took the other side's value. Here the field is
     /// one inside the wall and zero outside, which every node has to keep.
-    #[test]
-    fn a_renumbered_wall_trace_keeps_each_side_its_own_value() {
-        let reflecting_loop = |id: u64, span_base: u64, center: Point2, radius: f64| {
-            let spline = PeriodicCubicSpline::rounded(center, radius);
-            let spans = (0..spline.intervals().len())
-                .map(|index| CurveSpan {
-                    id: CurveSpanId(span_base + index as u64),
-                    behavior: SpanBehavior::REFLECTING,
-                })
-                .collect();
-            TopologyCurve::new(CurveId(id), CurveSpline::Closed(spline), spans).unwrap()
+    fn reflecting_loop(id: u64, span_base: u64, center: Point2, radius: f64) -> TopologyCurve {
+        let spline = PeriodicCubicSpline::rounded(center, radius);
+        let spans = (0..spline.intervals().len())
+            .map(|index| CurveSpan {
+                id: CurveSpanId(span_base + index as u64),
+                behavior: SpanBehavior::REFLECTING,
+            })
+            .collect();
+        TopologyCurve::new(CurveId(id), CurveSpline::Closed(spline), spans).unwrap()
+    }
+
+    /// `curves` in the default domain, each face its own region of the
+    /// default medium, meshed with `options` from atoms merged to them, as
+    /// the app's runtime meshes a scene.
+    fn walled_mesh(
+        curves: Vec<TopologyCurve>,
+        options: MeshingOptions,
+        revision: u64,
+    ) -> (TriMesh, QuadraticWaveOperator) {
+        let geometry = TopologyGeometry {
+            curves,
+            ..TopologyGeometry::default()
         };
-        let wall_center = Point2::new(0.4, 0.0);
-        let mesh_with_hole = |hole_radius: f64, revision: u64| {
-            let geometry = TopologyGeometry {
-                curves: vec![
-                    reflecting_loop(1, 10, Point2::new(-0.5, 0.0), hole_radius),
-                    reflecting_loop(2, 30, wall_center, 0.35),
-                ],
-                ..TopologyGeometry::default()
-            };
-            let topology = compile_topology(&geometry, revision).unwrap();
-            let assignments = topology
-                .faces
-                .iter()
-                .enumerate()
-                .map(|(index, face)| FaceRegionAssignment {
-                    face: face.id,
-                    region: Some(RegionId(index as u64 + 1)),
-                })
-                .collect::<Vec<_>>();
-            let plan = TopologyMeshPlan::new(&topology, &assignments).unwrap();
-            let mesh = mesh_topology_plan(
-                &plan,
-                revision,
-                MeshingOptions {
-                    target_edge_length: 0.08,
-                    ..MeshingOptions::default()
-                },
-            )
+        let topology = compile_topology(&geometry, revision).unwrap();
+        let assignments = topology
+            .faces
+            .iter()
+            .enumerate()
+            .map(|(index, face)| FaceRegionAssignment {
+                face: face.id,
+                region: Some(RegionId(index as u64 + 1)),
+            })
+            .collect::<Vec<_>>();
+        let plan = TopologyMeshPlan::new(&topology, &assignments)
+            .unwrap()
+            .coarsened(&topology, AtomCoarsening::from_meshing(options))
             .unwrap();
-            let regions = (1..=topology.faces.len() as u64)
-                .map(|id| Region {
-                    id: RegionId(id),
-                    material: MaterialId(1),
-                    frame: crate::MaterialFrame::world(),
-                })
-                .collect::<Vec<_>>();
-            let operator = QuadraticWaveOperator::assemble_topology(
-                &mesh,
-                &plan,
-                TopologyWaveModel {
-                    physics: crate::PhysicsModel::Mechanical,
-                    materials: &[Material::default_medium()],
-                    regions: &regions,
-                    outer_boundaries: &OuterBoundaryConditions::default(),
-                },
-            )
-            .unwrap();
-            (mesh, operator)
-        };
-        // One inside the wall, zero everywhere else, node by node from the
-        // element each copy belongs to.
-        let field = |mesh: &TriMesh, operator: &QuadraticWaveOperator| {
-            let inside = mesh
-                .triangles
-                .iter()
-                .find(|triangle| {
-                    barycentric(
-                        wall_center,
-                        triangle.vertices.map(|index| mesh.vertices[index].point),
-                    )
-                    .is_some()
-                })
-                .expect("a triangle holds the wall's centre")
-                .region;
-            let mut values = vec![0.0; operator.degrees_of_freedom()];
-            for (triangle, nodes) in mesh.triangles.iter().zip(operator.element_nodes()) {
-                if triangle.region == inside {
-                    for node in nodes {
-                        values[*node as usize] = 1.0;
-                    }
+        let mesh = mesh_topology_plan(&plan, revision, options).unwrap();
+        let regions = (1..=topology.faces.len() as u64)
+            .map(|id| Region {
+                id: RegionId(id),
+                material: MaterialId(1),
+                frame: crate::MaterialFrame::world(),
+            })
+            .collect::<Vec<_>>();
+        let operator = QuadraticWaveOperator::assemble_topology(
+            &mesh,
+            &plan,
+            TopologyWaveModel {
+                physics: crate::PhysicsModel::Mechanical,
+                materials: &[Material::default_medium()],
+                regions: &regions,
+                outer_boundaries: &OuterBoundaryConditions::default(),
+            },
+        )
+        .unwrap();
+        (mesh, operator)
+    }
+
+    /// One in the region holding `inside`, zero everywhere else, node by node
+    /// from the element each copy belongs to.
+    fn one_inside(mesh: &TriMesh, operator: &QuadraticWaveOperator, inside: Point2) -> Vec<f64> {
+        let region = mesh
+            .triangles
+            .iter()
+            .find(|triangle| {
+                barycentric(
+                    inside,
+                    triangle.vertices.map(|index| mesh.vertices[index].point),
+                )
+                .is_some()
+            })
+            .expect("a triangle holds the point")
+            .region;
+        let mut values = vec![0.0; operator.degrees_of_freedom()];
+        for (triangle, nodes) in mesh.triangles.iter().zip(operator.element_nodes()) {
+            if triangle.region == region {
+                for node in nodes {
+                    values[*node as usize] = 1.0;
                 }
             }
-            values
-        };
-        let (source, source_operator) = mesh_with_hole(0.12, 1);
-        let (target, target_operator) = mesh_with_hole(0.3, 2);
-        let map = QuadraticTransferMap::build(&source, &source_operator, &target, &target_operator)
-            .unwrap();
+        }
+        values
+    }
+
+    /// How many of `target`'s nodes the map from `source` gives a value
+    /// other than [`one_inside`]'s own, and how many nodes there are.
+    fn taken_across(
+        (source, source_operator): (&TriMesh, &QuadraticWaveOperator),
+        (target, target_operator): (&TriMesh, &QuadraticWaveOperator),
+        inside: Point2,
+    ) -> (usize, usize) {
+        let map =
+            QuadraticTransferMap::build(source, source_operator, target, target_operator).unwrap();
         let transferred = map
-            .interpolate(&field(&source, &source_operator), 0.0)
+            .interpolate(&one_inside(source, source_operator, inside), 0.0)
             .unwrap();
-        let expected = field(&target, &target_operator);
+        let expected = one_inside(target, target_operator, inside);
         let wrong = transferred
             .iter()
             .zip(&expected)
             .filter(|(actual, expected)| (*actual - *expected).abs() > 1.0e-9)
             .count();
-        assert_eq!(
-            wrong,
-            0,
-            "{wrong} of {} nodes took the other side's value",
-            expected.len()
+        (wrong, expected.len())
+    }
+
+    #[test]
+    fn a_renumbered_wall_trace_keeps_each_side_its_own_value() {
+        let wall_center = Point2::new(0.4, 0.0);
+        let mesh_with_hole = |hole_radius: f64, revision: u64| {
+            walled_mesh(
+                vec![
+                    reflecting_loop(1, 10, Point2::new(-0.5, 0.0), hole_radius),
+                    reflecting_loop(2, 30, wall_center, 0.35),
+                ],
+                MeshingOptions {
+                    target_edge_length: 0.08,
+                    ..MeshingOptions::default()
+                },
+                revision,
+            )
+        };
+        let (source, source_operator) = mesh_with_hole(0.12, 1);
+        let (target, target_operator) = mesh_with_hole(0.3, 2);
+        let (wrong, nodes) = taken_across(
+            (&source, &source_operator),
+            (&target, &target_operator),
+            wall_center,
         );
+        assert_eq!(
+            wrong, 0,
+            "{wrong} of {nodes} nodes took the other side's value"
+        );
+    }
+
+    /// IV-10 of the testing campaign: a curve is meshed as chords, each mesh
+    /// its own, so a finer mesh's node on a convex wall lies up to a chord's
+    /// sagitta outside the coarser mesh's elements on its side, and inside
+    /// the other side's. Searched for among every triangle, an island's wall
+    /// nodes took the field outside it when the mesh was made finer.
+    #[test]
+    fn a_wall_remeshed_finer_keeps_each_side_its_own_value() {
+        let center = Point2::new(0.2, -0.1);
+        // A tolerance loose enough that the edge, not the tolerance, sets
+        // where each mesh samples the curve.
+        let at = |edge: f64, revision: u64| {
+            walled_mesh(
+                vec![reflecting_loop(1, 10, center, 0.5)],
+                MeshingOptions {
+                    target_edge_length: edge,
+                    curve_tolerance: 2.0e-3,
+                    ..MeshingOptions::default()
+                },
+                revision,
+            )
+        };
+        for (from, to) in [(0.07, 0.05), (0.05, 0.07)] {
+            let (source, source_operator) = at(from, 1);
+            let (target, target_operator) = at(to, 2);
+            let (wrong, nodes) = taken_across(
+                (&source, &source_operator),
+                (&target, &target_operator),
+                center,
+            );
+            assert_eq!(
+                wrong, 0,
+                "edge {from} to {to}: {wrong} of {nodes} nodes took the other side's value"
+            );
+        }
     }
 
     /// MESH-13 of the 2026-10-20 review: a face that becomes active behind a

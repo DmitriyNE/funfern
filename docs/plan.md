@@ -1306,8 +1306,10 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   with IV-04, symmetry, and IV-09, equivalent curves, on 2026-10-31, and
   closed with IV-08's static half, a separator within one medium, on
   2026-11-01, which found the editor giving such a separator's new face a
-  frame of its own (fixed). Stage C3, the remesh family, is next, planned
-  before it starts.
+  frame of its own (fixed). Stage C3, the remesh family, began on
+  2026-11-01 with IV-10, a neutral remesh, whose CPU half found a remesh
+  feeding a curved wall's nodes from its other side and shrinking a
+  component's total with its area (both fixed); its device half is next.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the

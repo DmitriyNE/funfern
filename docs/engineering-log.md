@@ -31126,3 +31126,87 @@ and it found an editor defect, fixed here.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-01 — A remesh carries each wall's sides and each component's whole total
+
+Milestone C's stage C3, the remesh family, begins with IV-10, a neutral
+remesh (`crates/funfern-app/tests/invariants.rs`,
+`a_neutral_remesh_keeps_every_components_total`). It found two defects in
+the handoff of a running field, both fixed here.
+
+- **The test.**
+  - **Scene.** The editor draws into the default box a reflecting baffle
+    from the bottom side to the top and, beside it, an island inside a
+    reflecting loop: three components.
+  - **Run.** The box is struck by a pulse all three take some of and run to
+    one time at the default edge and at half it. The runtime then prepares
+    the box again at 0.7 and 1.4 times the edge, or rebuilds it at its own,
+    as the mesh slider and Remesh do.
+  - **Carry.** The maps the runtime prepared are taken before the
+    generation is published. The field crosses as the app carries it: the
+    runtime transfer's totals, then the core's handoff, which the device's
+    transfer table is built from.
+  - **Totals.** Each part's total of the primary field is counted over the
+    nodes of the elements whose centres lie in it. The test tells the parts
+    from the baffle's ends and the loop's trace, not from the solver's
+    labels. Every total must come through within 1e-12 of the part's
+    magnitude.
+  - **Field.** A rebuild, the identity, must give the field back within
+    1e-12. A remesh's field, read at a grid of common points, must stand
+    within one halving's move of the original, IV-04's rule.
+- **First defect: a wall's nodes taken from its other side.**
+  - **Symptom.** At edges of 0.04 and finer, a remesh fed 126 to 424 of the
+    island's wall nodes from the field outside the loop. The island's total
+    moved 1.9e-3 to 5e-3 and the energy 0.7e-3 to 2.1e-3, where a remesh
+    without it moves totals by 1e-14.
+  - **Cause.** The runtime meshes a curve from atoms merged to the meshing
+    options, so each edge traces the curve with its own chords. A new node
+    on a convex wall lies up to a chord's sagitta outside the old mesh's
+    elements on its side, and inside the other side's.
+    `SourceBins::locate` tried the node's own side's triangles first, but
+    when none held it, it searched every triangle and the other side's
+    answered.
+  - **Fix.** A node on a curve side the old mesh also has now takes the
+    triangle of that side it lies least outside of, and that element's
+    quadratic carried out to it. This holds if it lies within a quarter of
+    the element's height past it (`BESIDE_ITS_SIDE`; a chord's sagitta is
+    at most 0.14 of a height for a chord as long as the curve's radius, and
+    the worst seen was 0.065). A node further off, as on a curve an edit
+    moved, searches every triangle as before; IV-12 is to judge that case.
+  - **Complementary field.** Its samples lie inside elements, clear of the
+    strip, and none crossed.
+  - **Core test.** `a_wall_remeshed_finer_keeps_each_side_its_own_value`
+    meshes a reflecting loop at 0.07 and 0.05 and back. Its plan is merged
+    to the meshing options as the runtime merges it; without that both
+    meshes share one set of chords and nothing crosses. It shares its loop,
+    mesh and field with `a_renumbered_wall_trace_keeps_each_side_its_own_value`.
+    Before the fix, 126 of 21,695 nodes took the other side's value.
+- **Second defect: a component's total shrunk by its area.**
+  - **Cause.** `CanonicalGpuRuntimeTransfer::from_primary_transfer` gave
+    each new component the support it draws from an old one over that old
+    component's own support, capped at 1. On one geometry that is the ratio
+    of the two meshes' areas of the component, which straight elements make
+    differ on a curved wall.
+  - **Symptom.** A component the remesh left smaller lost that fraction of
+    its total: the part round the island 0.7e-4 to 2.8e-4 on refining, the
+    island 7.3e-4 going from 0.03 to 0.042.
+  - **Fix.** Each old component's total now goes out whole among the new
+    components that draw on it, by the support each draws: on a remesh of
+    one geometry every share is 1, a split divides by area as before, and an
+    edit to the geometry still turns the correction off. The device's
+    transfer table takes the same shares.
+- **Numbers.** The gate's 6 cases read within 1.2e-14 in their totals and
+  0.44 of a halving's move, in 4 s. The nightly's `invariants` job runs 18:
+  five edge changes and a rebuild from 0.08, 0.04 and 0.02, within 3.9e-14
+  and 0.44. With either fix taken out alone the gate fails: 2.7e-3 in the
+  island without the first, 2.8e-4 in the part round it without the second.
+- **Mutation.** `component-share-over-source-support` puts back the shares
+  over the old component's own support. No other test catches it: under it
+  the workspace's tests, IV-10 aside, all pass.
+- **Device.** The device suite's 29 remesh and handoff entries pass
+  (`target/device-suite/20261101-143355`). The device half of IV-10, the
+  same totals read off the device's state after its remesh, follows as its
+  own commit.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

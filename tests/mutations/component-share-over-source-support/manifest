@@ -1,0 +1,4 @@
+about: a remesh gives each new component the support it draws from an old one over that old component's own support, as until 2026-11-01, so a component the remesh leaves smaller, as straight elements leave a curved one, loses that fraction of its total
+test: cargo test --release -p funfern-app --test invariants -- a_neutral_remesh_keeps_every_components_total
+expect: edge 0\.040 remeshed to 0\.028: totals [0-9.]+e-4
+needs: cpu

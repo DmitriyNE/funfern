@@ -37,6 +37,7 @@
 //! face, each signal scaled through its offset and amplitude; a scene's
 //! three versions must mesh alike.
 
+use funfern_app::canonical_gpu::CanonicalGpuRuntimeTransfer;
 use funfern_app::document::ProbeId;
 use funfern_app::topology_editor::{
     ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment, TopologyDocument,
@@ -45,10 +46,11 @@ use funfern_app::topology_editor::{
 use funfern_app::topology_examples;
 use funfern_app::topology_persistence;
 use funfern_app::topology_runtime::{
-    PreparedTopology, TopologyProbeCompilation, TopologyProbeStencil, TopologyRuntime,
+    PreparedCanonicalTransfer, PreparedTopology, TopologyProbeCompilation, TopologyProbeStencil,
+    TopologyRuntime,
 };
 use funfern_core::{
-    BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalPointStencil,
+    BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalHandoffMaps, CanonicalPointStencil,
     CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState, CurveId, CurveSpanId,
     CurveSpline, CurveTraceSide, DomainRect, ElectromagneticPolarization, FaceAnchor,
     FaceBoundaryCondition, FieldLaw, MaterialFrame, MaterialId, MeshTriangle, MeshingOptions,
@@ -56,7 +58,7 @@ use funfern_core::{
     QuadraticPointStencil, RateLaw, RegionId, RestoringLaw, SpanBehavior, SymmetricTensor2,
     TimeSignal, TopologyCurve, TopologyScene, TopologyVertexId, TopologyVertexLocation, TriMesh,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -504,6 +506,17 @@ fn prepare(
     prepare_at(document, document.presentation.mesh_edge)
 }
 
+/// The meshing options the tests prepare `domain` with at the mesh edge
+/// `edge`.
+fn meshing(domain: DomainRect, edge: f64) -> MeshingOptions {
+    MeshingOptions {
+        target_edge_length: edge,
+        curve_tolerance: (edge * 0.02).min(5.0e-4),
+        ..MeshingOptions::default()
+    }
+    .sized_for_area(domain.width() * domain.height())
+}
+
 /// [`prepare`] at the mesh edge `edge`.
 fn prepare_at(
     document: &TopologyDocument,
@@ -516,12 +529,7 @@ fn prepare_at(
         return Err(format!("refused at acceptance: {issue}"));
     }
     let domain = editor.document.model.accepted.geometry.domain;
-    let options = MeshingOptions {
-        target_edge_length: edge,
-        curve_tolerance: (edge * 0.02).min(5.0e-4),
-        ..MeshingOptions::default()
-    }
-    .sized_for_area(domain.width() * domain.height());
+    let options = meshing(domain, edge);
     let mut runtime = TopologyRuntime::default();
     runtime.request(
         editor.revision,
@@ -2416,4 +2424,392 @@ fn a_separator_within_one_medium_reads_as_none() {
         )
     });
     within_a_halving("separated", outcomes);
+}
+
+/// IV-10's box: a reflecting baffle from its bottom side to its top, and
+/// on one side of it an island of the same medium inside a reflecting loop,
+/// three components the solver must keep apart. What the test knows of
+/// them is where they are: the baffle's two ends and the loop's trace.
+struct Parts {
+    baffle: [Point2; 2],
+    island: Vec<Point2>,
+}
+
+impl Parts {
+    /// Which part `point` lies in: 0 left of the baffle, 1 right of it, 2
+    /// the island.
+    fn part(&self, point: Point2) -> usize {
+        let mut inside = false;
+        for (index, a) in self.island.iter().enumerate() {
+            let b = self.island[(index + 1) % self.island.len()];
+            if (a.y > point.y) != (b.y > point.y)
+                && point.x < a.x + (point.y - a.y) * (b.x - a.x) / (b.y - a.y)
+            {
+                inside = !inside;
+            }
+        }
+        if inside {
+            2
+        } else if (self.baffle[1] - self.baffle[0]).cross(point - self.baffle[0]) > 0.0 {
+            0
+        } else {
+            1
+        }
+    }
+
+    /// Each part's total of `primary` and of its magnitude, a node taken in
+    /// the part its elements lie in, which a node on the baffle or the loop
+    /// tells by the element it belongs to.
+    fn totals(
+        &self,
+        operator: &CanonicalWaveOperator,
+        primary: &[f64],
+    ) -> Result<([f64; 3], [f64; 3]), String> {
+        let mut owner = vec![usize::MAX; operator.degrees_of_freedom()];
+        for nodes in operator.element_nodes() {
+            let centre = nodes.iter().fold(Point2::default(), |sum, node| {
+                sum + operator.node_points()[*node as usize]
+            }) / nodes.len() as f64;
+            let part = self.part(centre);
+            for node in nodes {
+                let slot = &mut owner[*node as usize];
+                if *slot != usize::MAX && *slot != part {
+                    return Err(format!(
+                        "node {node} at {:?} lies in parts {} and {part}",
+                        operator.node_points()[*node as usize],
+                        *slot
+                    ));
+                }
+                *slot = part;
+            }
+        }
+        let (mut totals, mut sizes) = ([0.0; 3], [0.0; 3]);
+        for (part, value) in owner.iter().zip(primary) {
+            totals[*part] += value;
+            sizes[*part] += value.abs();
+        }
+        Ok((totals, sizes))
+    }
+}
+
+/// The default box in `physics` with IV-10's baffle and island drawn in
+/// through the editor, and where they are.
+fn parted(physics: PhysicsModel) -> Result<(TopologyDocument, Parts), String> {
+    let mut editor = TopologyEditor::from_document(TopologyDocument::default())?;
+    settle(&mut editor);
+    editor.set_physics(physics)?;
+    settle(&mut editor);
+    let scene = &editor.document.model.accepted;
+    let material = scene
+        .region(BACKGROUND_REGION)
+        .ok_or("the box has no background")?
+        .material;
+    let domain = scene.geometry.domain;
+    let (bottom, top) = (
+        domain.min_x + 0.62 * domain.width(),
+        domain.min_x + 0.7 * domain.width(),
+    );
+    let baffle = [
+        Point2::new(bottom, domain.min_y),
+        Point2::new(top, domain.max_y),
+    ];
+    let spline =
+        OpenCubicSpline::polyline(baffle.to_vec()).map_err(|error| format!("{error:?}"))?;
+    let along = |side, fraction| {
+        Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+            side,
+            fraction,
+        }))
+    };
+    editor.create_open_curve(
+        spline,
+        OpenCurvePurpose::BoundaryBaffle,
+        along(OuterSide::Bottom, (bottom - domain.min_x) / domain.width()),
+        // The top side runs right to left.
+        along(OuterSide::Top, (domain.max_x - top) / domain.width()),
+    )?;
+    settle(&mut editor);
+    let loop_spline = PeriodicCubicSpline::rounded(
+        Point2::new(
+            domain.min_x + 0.3 * domain.width(),
+            domain.min_y + 0.55 * domain.height(),
+        ),
+        0.22 * domain.width().min(domain.height()),
+    );
+    let island = (0..4096)
+        .map(|index| loop_spline.evaluate(loop_spline.period() * index as f64 / 4096.0))
+        .collect();
+    let curve =
+        editor.create_closed_curve(loop_spline, ClosedCurvePurpose::Subdomain { material })?;
+    settle(&mut editor);
+    let spans = editor
+        .document
+        .model
+        .draft
+        .geometry
+        .curves
+        .iter()
+        .find(|other| other.id == curve)
+        .ok_or("the loop is not in the document")?
+        .spans
+        .iter()
+        .map(|span| span.id)
+        .collect::<BTreeSet<_>>();
+    editor.set_span_behavior(&spans, SpanBehavior::REFLECTING)?;
+    settle(&mut editor);
+    match &editor.acceptance {
+        TopologyAcceptance::Valid => Ok((editor.document.clone(), Parts { baffle, island })),
+        other => Err(format!("the parted box is {other:?}")),
+    }
+}
+
+/// `runtime`'s scene prepared again at the mesh edge `edge`, or rebuilt at
+/// its own where `edge` is `None`, as a remesh asks for it, and the maps the
+/// runtime prepared to carry the running field over, taken before the
+/// generation is published.
+fn remeshed(
+    editor: &TopologyEditor,
+    runtime: &mut TopologyRuntime,
+    edge: Option<f64>,
+) -> Result<(Arc<PreparedTopology>, Arc<PreparedCanonicalTransfer>), String> {
+    let edge = match edge {
+        Some(edge) => edge,
+        None => {
+            runtime.request_full_rebuild();
+            runtime
+                .active()
+                .ok_or("nothing is running to rebuild")?
+                .meshing
+                .target_edge_length
+        }
+    };
+    let options = meshing(editor.document.model.accepted.geometry.domain, edge);
+    runtime.request(
+        editor.revision,
+        &editor.document,
+        editor.compiled_accepted.clone(),
+        options,
+        false,
+    )?;
+    for _ in 0..200_000_000 {
+        if let Some(outcome) = runtime.advance(64) {
+            let token = outcome.map_err(|error| error.to_string())?;
+            let maps = runtime
+                .ready()
+                .and_then(|ready| ready.canonical_transfer.clone())
+                .ok_or("the remesh prepared no maps")?;
+            return Ok((runtime.commit_ready(token)?, maps));
+        }
+    }
+    Err("preparation did not finish".into())
+}
+
+/// `run` on `source` carried onto `target` through `maps` as the app carries
+/// the running field: each component's total kept where the runtime's
+/// transfer keeps it, the core's handoff doing what the device's transfer
+/// table does, stepped on at `time_step`.
+fn handed(
+    (source, run): (&PreparedTopology, &Run),
+    target: &PreparedTopology,
+    maps: &PreparedCanonicalTransfer,
+    time_step: f64,
+) -> Result<Run, String> {
+    let runtime = CanonicalGpuRuntimeTransfer::from_primary_transfer(
+        &source.canonical_operator,
+        &target.canonical_operator,
+        &source.canonical_forcing,
+        &target.canonical_forcing,
+        &maps.primary,
+        [0; 4],
+    )
+    .map_err(|error| format!("{error:?}"))?;
+    let runtime = if target.mesh.geometry_revision == source.mesh.geometry_revision {
+        runtime
+    } else {
+        runtime.without_total_correction()
+    };
+    let desired = runtime.desired_totals(&source.canonical_operator, run.primary());
+    let maps = CanonicalHandoffMaps {
+        primary: &maps.primary,
+        complementary: &maps.complementary,
+        thin_gap: &maps.thin_gap,
+        outgoing: &maps.outgoing,
+    };
+    let forcing = &target.canonical_forcing;
+    match (
+        run,
+        &source.canonical_temporal_operator,
+        &target.canonical_temporal_operator,
+    ) {
+        (Run::Fixed(state), None, None) => state
+            .handed_over(
+                &source.canonical_operator,
+                &target.canonical_operator,
+                forcing,
+                maps,
+                &desired,
+                time_step,
+            )
+            .map(|(state, _)| Run::Fixed(state)),
+        (Run::Temporal(state), Some(from), Some(to)) => state
+            .handed_over(from, to, forcing, maps, &desired, time_step)
+            .map(|handed| Run::Temporal(handed.state)),
+        _ => return Err("the run and the generations disagree on a drive".into()),
+    }
+    .map_err(|error| error.to_string())
+}
+
+/// The pulse IV-10 strikes its box with: wide enough that every part takes
+/// some of it.
+fn parted_pulse(domain: DomainRect) -> Pulse {
+    Pulse {
+        centre: Point2::new(
+            domain.min_x + 0.45 * domain.width(),
+            domain.min_y + 0.45 * domain.height(),
+        ),
+        width: 0.3 * domain.width().min(domain.height()),
+        height: 0.1,
+    }
+}
+
+/// How far the field a remesh carries may read from the original at the
+/// common points, as a fraction of the original's own move from the level
+/// coarser: within what one halving of the mesh moves it, as IV-04 holds a
+/// moved scene. On 2026-11-01 the nightly's 18 remeshes read 0.44 of that
+/// at worst, the complementary field carried onto a mesh 1.4 times coarser.
+const CARRIED: f64 = 1.0;
+
+/// One IV-10 case: the parted box at `edge`, run to `duration`, remeshed to
+/// `change` times its edge or rebuilt at it, and carried over: the most any
+/// part's total moved relative to its magnitude, and the field's and the
+/// complementary field's distance from the original at `points`.
+fn neutral_remesh(
+    (document, parts): (&TopologyDocument, &Parts),
+    edge: f64,
+    change: Option<f64>,
+    duration: f64,
+    points: &[Point2],
+) -> Result<[f64; 3], String> {
+    let pulse = parted_pulse(document.model.accepted.geometry.domain);
+    let (editor, mut runtime, source) = prepare_at(document, edge)?;
+    let run = run_for(&source, source.recommended_time_step(), duration, pulse)?;
+    let (before, sizes) = parts.totals(&source.canonical_operator, run.primary())?;
+    let (target, maps) = remeshed(&editor, &mut runtime, change.map(|change| edge * change))?;
+    let carried = handed(
+        (&source, &run),
+        &target,
+        &maps,
+        target.recommended_time_step(),
+    )?;
+    let (after, _) = parts.totals(&target.canonical_operator, carried.primary())?;
+    let drift = (0..3)
+        .map(|part| (after[part] - before[part]).abs() / sizes[part])
+        .fold(0.0, f64::max);
+    let (field, complementary, _) =
+        moved_apart((&source, &run), (&target, &carried), STILL, points);
+    Ok([drift, field, complementary])
+}
+
+/// IV-10, a neutral remesh. The editor draws into the default box a
+/// reflecting baffle from its bottom side to its top and, on one side of
+/// it, an island inside a reflecting loop: three components, each holding
+/// its own total of the primary field while the outer walls let waves out
+/// of the other two. Struck by a pulse all three take some of, the box runs
+/// to a fixed time at each level, and the runtime prepares it again at
+/// another edge, or rebuilds it at its own, as the mesh's slider and Remesh
+/// do; the maps it prepared carry the running field over as the app carries
+/// it. Each part's total, counted over the nodes of the elements whose
+/// centres lie in it, which the test tells from the baffle's ends and the
+/// loop's trace and not from the solver's labels, must come through to
+/// roundoff. A rebuild is the identity and must give the field back to
+/// roundoff; a remesh's field, read at common points, must stand within the
+/// original's own move from the level coarser.
+#[test]
+fn a_neutral_remesh_keeps_every_components_total() {
+    let all = std::env::var_os("FUNFERN_INVARIANTS_ALL").is_some();
+    let factors: &[f64] = if all { &[2.0, 1.0, 0.5, 0.25] } else { &LEVELS };
+    let changes: &[Option<f64>] = if all {
+        &[Some(0.6), Some(0.7), Some(0.8), Some(1.25), Some(1.4), None]
+    } else {
+        &[Some(0.7), Some(1.4), None]
+    };
+    let (document, parts) = parted(PhysicsModel::Mechanical).unwrap();
+    let domain = document.model.accepted.geometry.domain;
+    let edges = factors
+        .iter()
+        .map(|factor| document.presentation.mesh_edge * factor)
+        .collect::<Vec<_>>();
+    let (_, _, coarsest) = prepare_at(&document, edges[0]).unwrap();
+    let duration = 64.0 * coarsest.recommended_time_step();
+    let points = common_points(domain, &coarsest.mesh, edges[0]);
+    let pulse = parted_pulse(domain);
+    // Each level's own move from the level coarser.
+    let originals = in_parallel(&edges, |edge| {
+        prepare_at(&document, *edge).and_then(|(_, _, prepared)| {
+            let run = run_for(&prepared, prepared.recommended_time_step(), duration, pulse)?;
+            Ok((prepared, run))
+        })
+    });
+    let originals = originals
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let cases = (1..edges.len())
+        .flat_map(|level| changes.iter().map(move |change| (level, *change)))
+        .collect::<Vec<_>>();
+    let outcomes = in_parallel(&cases, |(level, change)| {
+        let started = Instant::now();
+        let outcome = neutral_remesh(
+            (&document, &parts),
+            edges[*level],
+            *change,
+            duration,
+            &points,
+        );
+        (outcome, started.elapsed().as_secs_f64())
+    });
+    let mut failures = Vec::new();
+    let mut worst: f64 = 0.0;
+    for ((level, change), (outcome, seconds)) in cases.iter().zip(outcomes) {
+        let label = format!(
+            "edge {:.3} {}",
+            edges[*level],
+            match change {
+                Some(change) => format!("remeshed to {:.3}", edges[*level] * change),
+                None => "rebuilt".to_owned(),
+            }
+        );
+        let [drift, field, complementary] = match outcome {
+            Ok(read) => read,
+            Err(error) => {
+                eprintln!("FAILED {label}: {error}");
+                failures.push(format!("{label}: {error}"));
+                continue;
+            }
+        };
+        let (coarser, coarser_run) = &originals[level - 1];
+        let (source, source_run) = &originals[*level];
+        let (own, own_complementary, _) =
+            moved_apart((coarser, coarser_run), (source, source_run), STILL, &points);
+        let line = format!(
+            "{label}: totals {drift:.1e}, u {field:.1e} of {own:.1e}, b {complementary:.1e} of {own_complementary:.1e} ({seconds:.1} s)"
+        );
+        eprintln!("{line}");
+        // `f64::max` drops a NaN, so each quantity is judged itself.
+        let held = if change.is_some() {
+            let ratios = [field / own, complementary / own_complementary];
+            worst = ratios.into_iter().fold(worst, f64::max);
+            ratios.iter().all(|ratio| *ratio <= CARRIED)
+        } else {
+            field <= ROUNDOFF && complementary <= ROUNDOFF
+        };
+        if !(drift <= ROUNDOFF && held) {
+            failures.push(line);
+        }
+    }
+    eprintln!(
+        "{} cases, the worst {worst:.2} of a halving's move",
+        cases.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
