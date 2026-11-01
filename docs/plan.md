@@ -1310,8 +1310,11 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   2026-11-01 with IV-10, a neutral remesh, whose CPU half found a remesh
   feeding a curved wall's nodes from its other side and shrinking a
   component's total with its area (both fixed), and its device half, the
-  `neutral-remesh` fixture, the same day. IV-11, repeated remeshing, is
-  next.
+  `neutral-remesh` fixture, the same day. IV-11, repeated remeshing,
+  followed the same day: it found the complementary transfer magnifying
+  the part of `b` that changes from sample to sample, until a field
+  remeshed back and forth grew without bound (fixed by an L2 projection).
+  IV-12, baffle sides, is next.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the

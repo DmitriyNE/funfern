@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/canonical_transfer.rs b/crates/funfern-core/src/canonical_transfer.rs
+--- a/crates/funfern-core/src/canonical_transfer.rs
++++ b/crates/funfern-core/src/canonical_transfer.rs
+@@ -1200,7 +1200,7 @@
+                 let target_region = self
+                     .same_region
+                     .then(|| target_mesh.triangles[sample.element as usize].region);
+-                if target_index % QUADRATURE_SAMPLES == 0 {
++                if target_index % QUADRATURE_SAMPLES == QUADRATURE_SAMPLES {
+                     let element = target_index / QUADRATURE_SAMPLES;
+                     let projected = projected_blocks(
+                         self.bins.as_ref().unwrap(),

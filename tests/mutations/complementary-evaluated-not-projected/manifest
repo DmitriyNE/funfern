@@ -1,0 +1,4 @@
+about: a remesh carries each new complementary sample by evaluating the old element's quadratic at it, as until 2026-11-01, which magnifies the part of b that changes from sample to sample, so that a field remeshed back and forth grows without bound
+test: cargo test --release -p funfern-app --test invariants -- a_repeated_remesh_keeps_the_field_and_its_energy
+expect: Still\(12\): b's energy rose at most [0-9.]+e[0-9]
+needs: cpu

@@ -31262,3 +31262,117 @@ from. This one holds what the device itself does with it.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-01 — IV-11: remeshing back and forth, and `b` projected
+
+Milestone C's IV-11, repeated remeshing
+(`crates/funfern-app/tests/invariants.rs`,
+`a_repeated_remesh_keeps_the_field_and_its_energy`). It found the
+complementary transfer growing `b` without bound, fixed here on the CPU and
+the device.
+
+- **The test.**
+  - **Scene.** IV-10's parted box, its outer walls reflecting too, so that
+    no energy leaves it (`parted` takes `closed`).
+  - **Runs.** Struck by IV-10's pulse and run at the finer mesh's time step,
+    256 steps at the default edge and 512 at half it. On the way the box is
+    remeshed to 0.7 of its edge and back K times, through the runtime as the
+    mesh slider does. The control is the same run left on its mesh.
+  - **Checks.** Each part's total must come through every handoff to 1e-12.
+    At the end, on the mesh it set out from, Q and `b` read node by node
+    against the control must stand within 1.5 times one round trip's
+    distance, and the energy no more than 1e-4 above the control's. A handoff
+    moves the energy by up to 4e-4 either way, given back on the way home,
+    so it is read at the end.
+  - **Still leg.** Struck, run 64 steps, then remeshed back and forth with no
+    step between: `b`'s energy must never rise over a round trip.
+- **What it found: `b` grown by its transfer.**
+  - **Symptom.** Sixteen round trips at half the default edge left Q 4.0
+    and `b` 43 from the control, the energy 255 times the start. The
+    handoffs booked the energy they added, eight round trips' ledger closing
+    to 2.2e-7. With no
+    steps between, `b`'s energy rose from the first round trip, and
+    twenty-four took it to 6e12 times the start at the default edge.
+  - **Cause.** Each new sample took the old element's quadratic, through
+    its six samples, evaluated at it (`quadratic_sample_weights`). At an
+    element's corners the six-point rule's Lagrange functions sum to 3.55 in
+    magnitude. The part of `b` that changes from sample to sample lies
+    mostly where no step reads or moves it, the force reading `b` only
+    through the quadratic nodes, so every handoff magnified it, and once it
+    took over its size grew about threefold a round trip. The device used
+    the same weights.
+  - **Prototype.** Three rules, behind a switch in the scratch tree:
+    | | one-way, smooth | 12 cycles | 16 trips, Q / b |
+    |---|---|---|---|
+    | evaluate (old) | 1.4e-5 | 4.7e-3 | 4.0 / 43 |
+    | clip to the old samples' range | 7.1e-4 | 8.3e-3 | 3.5e-3 / 2.6e-2 |
+    | L2 projection | 1.1e-5 | 1.4e-5 | 2.3e-3 / 5.5e-3 |
+
+    The first two columns are the core's irregular meshes carrying a smooth
+    field; the last is the parted box against its control. The clip also
+    broke the exact reconstruction of a quadratic. IV-10's 18 nightly cases
+    read alike under all three, 0.43 to 0.44 of a halving's move.
+- **Fix: an L2 projection.**
+  - **Rule.** A new element the old mesh covers on its own side, three
+    quarters of it at least, takes the L2 projection of the old piecewise
+    quadratic (`projected_blocks` in
+    `crates/funfern-core/src/canonical_transfer.rs`). It reproduces a
+    quadratic and never enlarges `b`.
+  - **Integrals.** Each overlap is clipped exactly and fanned into
+    triangles. The products of the two elements' Lagrange functions are
+    quartic, so the six-point rule takes them exactly; the mass over the
+    covered part is solved against. A sliver a curve meshed again leaves
+    uncovered, under a tenth of an element as IV-10 measured it, is fitted
+    across.
+  - **Side.** The old elements the new one overlaps, reached from the one
+    under its centre through the edges they share. A reflecting wall gives
+    each side its own nodes, so the walk never crosses one; this holds for a
+    free-ended baffle, whose two sides are one component.
+  - **Uncovered elements.** An element an edit leaves mostly uncovered
+    still takes each sample from the old element under it, or extends one;
+    IV-12 and IV-08 judge that case.
+  - **Map.** `CanonicalVectorTransferMap` holds a block for each old element
+    a new one draws on, six rows of six weights. A new packing phase builds
+    the sample-by-sample elements' blocks. It prepares 0.04 onto 0.028 in
+    167 ms, against 47 ms before.
+- **Device.** The transfer table holds a word for each new element, naming
+  its blocks, and each block's old element and 36 weights;
+  `transfer_vector` and `transfer_invariant` sum their sample's row. The
+  transfer layout is now version 5.
+  - **Version check.** The first device suite run of the draft found
+    `canonical_transfer.wgsl` still naming version 4, and every device
+    handoff refused, which no CPU test saw.
+    `latest_state_transfer_plan_packs_every_physical_state_class` now
+    requires both shaders that check the version to name the host's.
+  - **Size.** 3.85 blocks a new element refining 0.04 onto 0.028, 7.98
+    coarsening back: 14.6 MB against 8.9 MB before, and 14.4 against 4.3.
+  - **At the slider's finest edge.** At 0.02 onto 0.014 the table reaches
+    59 MB, within WebGPU's 128 MiB binding.
+- **Numbers.**
+  - **Gate.** One and eight round trips and twelve still ones at the
+    default edge, in 2.8 s. Eight read 1.14 and 1.09 of one's in Q and `b`,
+    totals within 9.3e-15, energy 4.1e-5 below the control.
+  - **Nightly.** Up to sixteen round trips at the default edge and half it,
+    and twenty-four still ones. The worst read 1.25 and 1.19, sixteen at half
+    the edge. The energy rose 3.1e-5 at most and fell by up to 1.8e-4, the
+    projection shedding what the coarser mesh cannot hold.
+  - **Still legs.** They fall every round trip.
+- **Core test.** `a_rough_field_carried_back_and_forth_never_gains_energy`
+  carries a field with no smoothness at all between the core's irregular
+  meshes of the box with a hole, twelve times there and back. Its energy
+  must never rise. It falls to 0.73 and then 0.86 of itself on the first
+  round trip. Evaluated on the old quadratics, it rose 0.5% and 8.5%, and
+  twelve round trips took it to 3.4e5 times the start.
+- **Mutation.** `complementary-evaluated-not-projected` puts the evaluation
+  back. Eight round trips read 2.23 and 6.82 of one's, sixteen 244 and 1010,
+  and the still leg's energy multiplies by up to 6.8 in a round trip. The
+  core test catches it too.
+- **Device suite.** On the M1 Max every handoff, remesh and AMR run and
+  every end-to-end fixture passes (`target/device-suite/20261101-191104`
+  for the 33 runs the version slip failed, `20261101-182158` for the
+  rest). `canonical_gpu_cavity_modes --physics te` hangs after opening its
+  window until the timeout, as it does on the tree before this change; it
+  passed on 2026-10-31.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

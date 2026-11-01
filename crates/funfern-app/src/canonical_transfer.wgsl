@@ -1,8 +1,9 @@
 // Latest-state canonical generation transfer. Rust transfer layout version 3.
-const TRANSFER_LAYOUT_VERSION: u32 = 4u;
+const TRANSFER_LAYOUT_VERSION: u32 = 5u;
 const WORKGROUP_SIZE: u32 = 128u;
 const PRIMARY_WORDS: u32 = 4u;
-const VECTOR_WORDS: u32 = 4u;
+// A complementary block: the old element, then six rows of six weights.
+const VECTOR_BLOCK_WORDS: u32 = 10u;
 const GAP_WORDS: u32 = 3u;
 const NO_INDEX: u32 = 0xffffffffu;
 const STATUS_LAYOUT: u32 = 1u;
@@ -210,20 +211,17 @@ fn transfer_vector(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         return;
     }
-    let base = header(3u).x + target_index * VECTOR_WORDS;
-    let indices_a = transfer[base].data;
-    let metadata = transfer[base + 2u].data;
-    let count = metadata.w & 255u;
-    let exact = (metadata.w & 256u) != 0u;
+    // The new element's word: where its blocks start and how many there
+    // are. Each block gives this sample its row of weights on one old
+    // element's six samples.
+    let element = transfer[header(3u).x + target_index / 6u].data;
+    let row = (target_index % 6u) * 6u;
     var value = vec2<f32>(0.0);
-    if exact {
-        value = old_b(indices_a.x);
-    } else {
-        for (var slot = 0u; slot < min(count, 4u); slot += 1u) {
-            value += old_b(indices_a[slot]) * transfer_float(base + 1u, slot);
-        }
-        for (var slot = 4u; slot < count; slot += 1u) {
-            value += old_b(metadata[slot - 4u]) * transfer_float(base + 3u, slot - 4u);
+    for (var block = 0u; block < element.y; block += 1u) {
+        let base = element.x + block * VECTOR_BLOCK_WORDS;
+        let first = transfer[base].data.x * 6u;
+        for (var column = 0u; column < 6u; column += 1u) {
+            value += old_b(first + column) * packed_transfer_float(base + 1u, row + column);
         }
     }
     set_candidate_b(target_index, value);

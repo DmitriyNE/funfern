@@ -10,7 +10,8 @@
 // arrangement. It runs once, after
 // `transfer_integrated`, and overwrites what `transfer_vector` wrote; with
 // either side lacking `r` it leaves that untouched.
-const VECTOR_WORDS: u32 = 4u;
+// A complementary block: the old element, then six rows of six weights.
+const VECTOR_BLOCK_WORDS: u32 = 10u;
 const STATUS_NON_FINITE: u32 = 4u;
 // The exponent bits of an f32 that is infinite or NaN. Finiteness is read
 // from them rather than against a float bound: naga writes an f32 constant
@@ -89,6 +90,9 @@ fn target_integrated_count() -> u32 { return header(9u).z; }
 fn vector_identity() -> bool { return header(7u).z != 0u; }
 fn old_slot() -> u32 { return old_control.event.z & 1u; }
 fn new_slot() -> u32 { return new_control.event.z & 1u; }
+fn packed_transfer_float(offset: u32, index: u32) -> f32 {
+    return transfer_float(offset + index / 4u, index % 4u);
+}
 fn transfer_float(word: u32, lane: u32) -> f32 {
     return bitcast<f32>(transfer[word].data[lane]);
 }
@@ -182,24 +186,15 @@ fn transfer_invariant(@builtin(global_invocation_id) id: vec3<u32>) {
         flux = old_b(target_index);
         carried = source_potential(target_index);
     } else {
-        let base = header(3u).x + target_index * VECTOR_WORDS;
-        let indices_a = transfer[base].data;
-        let metadata = transfer[base + 2u].data;
-        let count = metadata.w & 255u;
-        let exact = (metadata.w & 256u) != 0u;
-        if exact {
-            flux = old_b(indices_a.x);
-            carried = source_potential(indices_a.x);
-        } else {
-            for (var slot = 0u; slot < min(count, 4u); slot += 1u) {
-                let weight = transfer_float(base + 1u, slot);
-                flux += old_b(indices_a[slot]) * weight;
-                carried += source_potential(indices_a[slot]) * weight;
-            }
-            for (var slot = 4u; slot < count; slot += 1u) {
-                let weight = transfer_float(base + 3u, slot - 4u);
-                flux += old_b(metadata[slot - 4u]) * weight;
-                carried += source_potential(metadata[slot - 4u]) * weight;
+        let element = transfer[header(3u).x + target_index / 6u].data;
+        let row = (target_index % 6u) * 6u;
+        for (var block = 0u; block < element.y; block += 1u) {
+            let base = element.x + block * VECTOR_BLOCK_WORDS;
+            let first = transfer[base].data.x * 6u;
+            for (var column = 0u; column < 6u; column += 1u) {
+                let weight = packed_transfer_float(base + 1u, row + column);
+                flux += old_b(first + column) * weight;
+                carried += source_potential(first + column) * weight;
             }
         }
     }

@@ -1401,7 +1401,19 @@ back within 1e-12, and a remesh's must read at the common points within one
 halving's move of the original. 6 cases in the gate in about 4 s, 18 in the
 nightly; its mutation is `component-share-over-source-support`. Its device
 half is the `neutral-remesh` fixture, whose mutation is
-`device-correction-of-the-first-component`.
+`device-correction-of-the-first-component`. IV-11, repeated remeshing: the
+same box, its outer walls reflecting too, runs at the finer mesh's time step
+and is remeshed to 0.7 of its edge and back K times on the way. Each part's
+total must come through every handoff within 1e-12. At the end, on the mesh
+it set out from, the field read node by node against the same run left on
+its mesh must stand within 1.5 times one round trip's distance, and its
+energy no more than 1e-4 above that run's. Struck, run, and then remeshed
+back and forth with no step between, the complementary field's energy must
+never rise. The gate runs one and eight round trips and twelve still ones
+at the default edge in about 3 s, the nightly up to sixteen at the default
+edge and half it. Its mutation is `complementary-evaluated-not-projected`,
+which the core's `a_rough_field_carried_back_and_forth_never_gains_energy`
+catches too.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

@@ -866,8 +866,10 @@ fn nearest_donor_in_sight(
     })
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum VectorTarget {
+    /// One of the samples of an element the projection carries whole.
+    Projected,
     Reconstruct {
         source_element: u32,
         weights: [f64; 6],
@@ -878,21 +880,36 @@ enum VectorTarget {
     Exposed,
 }
 
+/// What one new element's samples take from one old element's: row `i`
+/// holds new sample `i`'s weights on the old element's six samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CanonicalVectorTransferTarget {
-    pub source_samples: [u32; QUADRATURE_SAMPLES],
-    pub weights: [f64; QUADRATURE_SAMPLES],
-    pub source_count: u8,
-    pub exact: bool,
+pub struct CanonicalVectorTransferBlock {
+    pub source_element: u32,
+    pub weights: [[f64; QUADRATURE_SAMPLES]; QUADRATURE_SAMPLES],
 }
 
-/// Quadratic physical-coordinate reconstruction for the six independent
-/// complementary samples in each old element.
+/// The complementary samples of each new element as weighted sums of the
+/// old elements' samples, the six samples of an element standing for the
+/// quadratic through them.
+///
+/// A new element the old mesh covers on its own side takes the L2
+/// projection of the old piecewise quadratic, integrated over the exact
+/// overlaps. That is exact for a quadratic and never enlarges `b`. Evaluating
+/// the old element's quadratic at each new sample, as the map did before,
+/// magnified the part of `b` that changes from sample to sample, by up to the
+/// samples' Lebesgue constant, 3.55, at an element's corners: remeshed back
+/// and forth, that part grew threefold a round trip once it took over. An
+/// element the old mesh leaves mostly uncovered, as an edit can, still takes
+/// each sample from the old element under it, or extends one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanonicalVectorTransferMap {
     source_samples: usize,
     identity: bool,
-    targets: Vec<VectorTarget>,
+    /// Each new element's first block and its number of blocks.
+    ranges: Vec<[u32; 2]>,
+    blocks: Vec<CanonicalVectorTransferBlock>,
+    extended: usize,
+    exposed: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -903,6 +920,7 @@ enum CanonicalVectorTransferPhase {
     PrepareExtension,
     IndexDonors,
     Extend(usize),
+    Pack(usize),
     Done,
 }
 
@@ -915,6 +933,7 @@ impl CanonicalVectorTransferPhase {
             Self::PrepareExtension => "Indexing complementary extension",
             Self::IndexDonors => "Indexing complementary donors",
             Self::Extend(_) => "Extending complementary samples",
+            Self::Pack(_) => "Packing complementary transfer",
             Self::Done => "Finished",
         }
     }
@@ -1032,6 +1051,25 @@ impl CanonicalSourceBins {
             })
     }
 
+    /// Every source element filed in a bin that `lo..hi` touches.
+    fn around(&self, lo: Point2, hi: Point2) -> Vec<usize> {
+        let [x0, y0] = self.bin_index(lo);
+        let [x1, y1] = self.bin_index(hi);
+        let mut elements = Vec::new();
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                elements.extend(
+                    self.bins[y * self.dimension + x]
+                        .iter()
+                        .map(|element| *element as usize),
+                );
+            }
+        }
+        elements.sort_unstable();
+        elements.dedup();
+        elements
+    }
+
     fn bin_index(&self, point: Point2) -> [usize; 2] {
         let index = |value: f64, minimum: f64, width: f64| {
             (((value - minimum) / width).floor() as isize).clamp(0, self.dimension as isize - 1)
@@ -1057,6 +1095,10 @@ struct CanonicalVectorTransferWork {
     donors: Option<RegionCentroidIndex>,
     sight: Option<WallGrid>,
     targets: Vec<VectorTarget>,
+    ranges: Vec<[u32; 2]>,
+    blocks: Vec<CanonicalVectorTransferBlock>,
+    extended: usize,
+    exposed: usize,
     distance: Vec<usize>,
     walls: Vec<[usize; 2]>,
 }
@@ -1071,6 +1113,10 @@ impl CanonicalVectorTransferWork {
             donors: None,
             sight: None,
             targets: Vec::new(),
+            ranges: Vec::new(),
+            blocks: Vec::new(),
+            extended: 0,
+            exposed: 0,
             distance: Vec::new(),
             walls: Vec::new(),
         }
@@ -1100,11 +1146,7 @@ impl CanonicalVectorTransferWork {
                 // every complementary sample again.
                 if std::ptr::eq(source, target) {
                     self.phase = CanonicalVectorTransferPhase::Done;
-                    return Ok(Some(CanonicalVectorTransferMap {
-                        source_samples: source.complementary_degrees_of_freedom(),
-                        identity: true,
-                        targets: Vec::new(),
-                    }));
+                    return Ok(Some(CanonicalVectorTransferMap::identity(source)));
                 }
                 // Revisions identify transactions, not discretizations. A
                 // law-only rebuild commonly republishes an identical mesh
@@ -1119,6 +1161,7 @@ impl CanonicalVectorTransferWork {
                     self.same_region = !crate::transfer::has_unified_topology(source_mesh)
                         && !crate::transfer::has_unified_topology(target_mesh);
                     self.targets = Vec::with_capacity(target.complementary_degrees_of_freedom());
+                    self.ranges = vec![[0, 0]; target_mesh.triangles.len()];
                     self.bins = Some(CanonicalSourceBins::new(source_mesh)?);
                     self.phase = CanonicalVectorTransferPhase::Bins(0);
                 }
@@ -1136,11 +1179,7 @@ impl CanonicalVectorTransferWork {
                 if target_index == samples.len() {
                     if self.identity {
                         self.phase = CanonicalVectorTransferPhase::Done;
-                        return Ok(Some(CanonicalVectorTransferMap {
-                            source_samples: source.complementary_degrees_of_freedom(),
-                            identity: true,
-                            targets: Vec::new(),
-                        }));
+                        return Ok(Some(CanonicalVectorTransferMap::identity(source)));
                     }
                     self.phase = CanonicalVectorTransferPhase::PrepareExtension;
                     return Ok(None);
@@ -1161,6 +1200,30 @@ impl CanonicalVectorTransferWork {
                 let target_region = self
                     .same_region
                     .then(|| target_mesh.triangles[sample.element as usize].region);
+                if target_index % QUADRATURE_SAMPLES == 0 {
+                    let element = target_index / QUADRATURE_SAMPLES;
+                    let projected = projected_blocks(
+                        self.bins.as_ref().unwrap(),
+                        (source_mesh, source),
+                        (target_mesh, target),
+                        element,
+                        target_region,
+                    )?;
+                    if let Some(blocks) = projected {
+                        let [start, count] = [self.blocks.len(), blocks.len()].map(|value| {
+                            u32::try_from(value).map_err(|_| {
+                                WaveError::InvalidMesh("too many complementary transfer blocks")
+                            })
+                        });
+                        self.ranges[element] = [start?, count?];
+                        self.blocks.extend(blocks);
+                        self.targets
+                            .extend([VectorTarget::Projected; QUADRATURE_SAMPLES]);
+                        self.phase =
+                            CanonicalVectorTransferPhase::Locate(target_index + QUADRATURE_SAMPLES);
+                        return Ok(None);
+                    }
+                }
                 let donor = self
                     .bins
                     .as_ref()
@@ -1202,12 +1265,8 @@ impl CanonicalVectorTransferWork {
             }
             CanonicalVectorTransferPhase::Extend(target_index) => {
                 if target_index == self.targets.len() {
-                    self.phase = CanonicalVectorTransferPhase::Done;
-                    return Ok(Some(CanonicalVectorTransferMap {
-                        source_samples: source.complementary_degrees_of_freedom(),
-                        identity: false,
-                        targets: std::mem::take(&mut self.targets),
-                    }));
+                    self.phase = CanonicalVectorTransferPhase::Pack(0);
+                    return Ok(None);
                 }
                 let entry = &mut self.targets[target_index];
                 if matches!(entry, VectorTarget::Exposed)
@@ -1227,6 +1286,65 @@ impl CanonicalVectorTransferWork {
                     }
                 }
                 self.phase = CanonicalVectorTransferPhase::Extend(target_index + 1);
+            }
+            CanonicalVectorTransferPhase::Pack(element) => {
+                if element == self.ranges.len() {
+                    self.phase = CanonicalVectorTransferPhase::Done;
+                    return Ok(Some(CanonicalVectorTransferMap {
+                        source_samples: source.complementary_degrees_of_freedom(),
+                        identity: false,
+                        ranges: std::mem::take(&mut self.ranges),
+                        blocks: std::mem::take(&mut self.blocks),
+                        extended: self.extended,
+                        exposed: self.exposed,
+                    }));
+                }
+                // An element taken sample by sample: a block for each old
+                // element its samples draw on, holding the rows of those
+                // samples.
+                let samples =
+                    &self.targets[element * QUADRATURE_SAMPLES..(element + 1) * QUADRATURE_SAMPLES];
+                if samples[0] != VectorTarget::Projected {
+                    let start = self.blocks.len();
+                    for (row, sample) in samples.iter().enumerate() {
+                        let (source_element, weights) = match *sample {
+                            VectorTarget::Reconstruct {
+                                source_element,
+                                weights,
+                            } => (source_element, weights),
+                            VectorTarget::ExtendConstant { source_element } => {
+                                self.extended += 1;
+                                (source_element, [1.0 / QUADRATURE_SAMPLES as f64; 6])
+                            }
+                            VectorTarget::Exposed => {
+                                self.exposed += 1;
+                                continue;
+                            }
+                            VectorTarget::Projected => return Err(WaveError::InvalidState),
+                        };
+                        let block = match self.blocks[start..]
+                            .iter()
+                            .position(|block| block.source_element == source_element)
+                        {
+                            Some(offset) => start + offset,
+                            None => {
+                                self.blocks.push(CanonicalVectorTransferBlock {
+                                    source_element,
+                                    weights: [[0.0; QUADRATURE_SAMPLES]; QUADRATURE_SAMPLES],
+                                });
+                                self.blocks.len() - 1
+                            }
+                        };
+                        self.blocks[block].weights[row] = weights;
+                    }
+                    let [start, count] = [start, self.blocks.len() - start].map(|value| {
+                        u32::try_from(value).map_err(|_| {
+                            WaveError::InvalidMesh("too many complementary transfer blocks")
+                        })
+                    });
+                    self.ranges[element] = [start?, count?];
+                }
+                self.phase = CanonicalVectorTransferPhase::Pack(element + 1);
             }
             CanonicalVectorTransferPhase::Done => {}
         }
@@ -1297,6 +1415,17 @@ impl CanonicalVectorTransferJob {
 }
 
 impl CanonicalVectorTransferMap {
+    fn identity(source: &CanonicalWaveOperator) -> Self {
+        Self {
+            source_samples: source.complementary_degrees_of_freedom(),
+            identity: true,
+            ranges: Vec::new(),
+            blocks: Vec::new(),
+            extended: 0,
+            exposed: 0,
+        }
+    }
+
     pub fn prepare(
         source_mesh: &TriMesh,
         source: &CanonicalWaveOperator,
@@ -1326,56 +1455,20 @@ impl CanonicalVectorTransferMap {
         self.identity
     }
 
-    pub fn targets(&self) -> Vec<CanonicalVectorTransferTarget> {
-        if self.identity {
-            return (0..self.source_samples)
-                .map(|index| CanonicalVectorTransferTarget {
-                    source_samples: [index as u32, 0, 0, 0, 0, 0],
-                    weights: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                    source_count: 1,
-                    exact: true,
-                })
-                .collect();
-        }
-        self.targets
-            .iter()
-            .map(|target| {
-                let mut source_samples = [0_u32; QUADRATURE_SAMPLES];
-                let mut weights = [0.0; QUADRATURE_SAMPLES];
-                let (source_count, exact) = match target {
-                    VectorTarget::Reconstruct {
-                        source_element,
-                        weights: prepared,
-                    } => {
-                        for (local, source_sample) in source_samples.iter_mut().enumerate() {
-                            *source_sample =
-                                *source_element * QUADRATURE_SAMPLES as u32 + local as u32;
-                        }
-                        weights = *prepared;
-                        (QUADRATURE_SAMPLES as u8, false)
-                    }
-                    VectorTarget::ExtendConstant { source_element } => {
-                        for (local, (source_sample, weight)) in source_samples
-                            .iter_mut()
-                            .zip(weights.iter_mut())
-                            .enumerate()
-                        {
-                            *source_sample =
-                                *source_element * QUADRATURE_SAMPLES as u32 + local as u32;
-                            *weight = 1.0 / QUADRATURE_SAMPLES as f64;
-                        }
-                        (QUADRATURE_SAMPLES as u8, false)
-                    }
-                    VectorTarget::Exposed => (0, false),
-                };
-                CanonicalVectorTransferTarget {
-                    source_samples,
-                    weights,
-                    source_count,
-                    exact,
-                }
-            })
-            .collect()
+    /// New elements the map describes; none on an identity map, which
+    /// copies every sample.
+    pub fn target_element_count(&self) -> usize {
+        self.ranges.len()
+    }
+
+    /// New element `element`'s blocks, in the order they are summed.
+    pub fn element_blocks(&self, element: usize) -> &[CanonicalVectorTransferBlock] {
+        let [start, count] = self.ranges[element].map(|value| value as usize);
+        &self.blocks[start..start + count]
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.blocks.len()
     }
 
     pub fn transfer(
@@ -1388,37 +1481,19 @@ impl CanonicalVectorTransferMap {
         if self.identity {
             return Ok((source.to_vec(), CanonicalTransferReport::default()));
         }
-        let mut exposed = 0;
-        let mut extended = 0;
-        let values = self
-            .targets
-            .iter()
-            .map(|target| match target {
-                VectorTarget::Reconstruct {
-                    source_element,
-                    weights,
-                } => {
-                    let start = *source_element as usize * QUADRATURE_SAMPLES;
-                    weights
+        let mut values = vec![Point2::default(); self.ranges.len() * QUADRATURE_SAMPLES];
+        for (element, values) in values.chunks_exact_mut(QUADRATURE_SAMPLES).enumerate() {
+            for block in self.element_blocks(element) {
+                let start = block.source_element as usize * QUADRATURE_SAMPLES;
+                let donors = &source[start..start + QUADRATURE_SAMPLES];
+                for (value, weights) in values.iter_mut().zip(&block.weights) {
+                    *value = weights
                         .iter()
-                        .enumerate()
-                        .fold(Point2::default(), |value, (local, weight)| {
-                            value + source[start + local] * *weight
-                        })
+                        .zip(donors)
+                        .fold(*value, |value, (weight, donor)| value + *donor * *weight);
                 }
-                VectorTarget::ExtendConstant { source_element } => {
-                    extended += 1;
-                    let start = *source_element as usize * QUADRATURE_SAMPLES;
-                    (0..QUADRATURE_SAMPLES).fold(Point2::default(), |value, local| {
-                        value + source[start + local] / QUADRATURE_SAMPLES as f64
-                    })
-                }
-                VectorTarget::Exposed => {
-                    exposed += 1;
-                    Point2::default()
-                }
-            })
-            .collect::<Vec<_>>();
+            }
+        }
         if values.iter().any(|value| !value.finite()) {
             return Err(WaveError::InvalidState);
         }
@@ -1426,8 +1501,8 @@ impl CanonicalVectorTransferMap {
             values,
             CanonicalTransferReport {
                 maximum_correction_ratio: 0.0,
-                exposed_values: exposed,
-                extended_values: extended,
+                exposed_values: self.exposed,
+                extended_values: self.extended,
             },
         ))
     }
@@ -2377,6 +2452,228 @@ fn barycentric(mesh: &TriMesh, vertices: [usize; 3], point: Point2) -> Option<[f
     Some([1.0 - l1 - l2, l1, l2])
 }
 
+/// The share of a new element the old mesh must cover on its side for the
+/// element to take the projection. A curve meshed again with other chords
+/// leaves a new element's corner on the curve beyond the old chord: IV-10
+/// saw new nodes up to 0.065 of an element's height outside the old mesh,
+/// a sliver under a tenth of the element, which the projection's quadratic
+/// is fitted across. An edit that uncovers more leaves the element to its
+/// samples, each taken as before.
+const PROJECTED_COVER: f64 = 0.75;
+
+/// New element `element`'s samples as the L2 projection of the old
+/// piecewise quadratic over the part of it the old mesh covers on its side:
+/// a block for each old element it overlaps there, or `None` where its
+/// centre lies outside the old mesh or the old mesh covers too little of it.
+fn projected_blocks(
+    bins: &CanonicalSourceBins,
+    (source_mesh, source): (&TriMesh, &CanonicalWaveOperator),
+    (target_mesh, target): (&TriMesh, &CanonicalWaveOperator),
+    element: usize,
+    region: Option<crate::RegionId>,
+) -> Result<Option<Vec<CanonicalVectorTransferBlock>>, WaveError> {
+    let triangle = target_mesh.triangles[element];
+    let corners = triangle
+        .vertices
+        .map(|vertex| target_mesh.vertices[vertex].point);
+    let area = polygon_area(&corners);
+    let centre = (corners[0] + corners[1] + corners[2]) / 3.0;
+    let Some((home, _)) = bins.locate(source_mesh, centre, region) else {
+        return Ok(None);
+    };
+    let lo = Point2::new(
+        corners[0].x.min(corners[1].x).min(corners[2].x),
+        corners[0].y.min(corners[1].y).min(corners[2].y),
+    );
+    let hi = Point2::new(
+        corners[0].x.max(corners[1].x).max(corners[2].x),
+        corners[0].y.max(corners[1].y).max(corners[2].y),
+    );
+    let overlaps = bins
+        .around(lo, hi)
+        .into_iter()
+        .filter_map(|donor| {
+            let donor_triangle = source_mesh.triangles[donor];
+            if region.is_some_and(|region| donor_triangle.region != region) {
+                return None;
+            }
+            let polygon = clipped(
+                corners,
+                donor_triangle
+                    .vertices
+                    .map(|vertex| source_mesh.vertices[vertex].point),
+            );
+            (polygon_area(&polygon) > 0.0).then_some((donor, polygon))
+        })
+        .collect::<Vec<_>>();
+    // Its own side's: the overlaps reached from the one under its centre
+    // through the edges they share. A reflecting wall gives each side its
+    // own nodes, so the walk never crosses one, where the other side's
+    // elements, across a curve meshed again, overlap it in a sliver.
+    let edges = |donor: usize| &source.element_nodes()[donor][3..6];
+    let mut reached = overlaps
+        .iter()
+        .map(|(donor, _)| *donor == home)
+        .collect::<Vec<_>>();
+    let mut frontier = reached
+        .iter()
+        .position(|reached| *reached)
+        .into_iter()
+        .collect::<Vec<_>>();
+    while let Some(from) = frontier.pop() {
+        for to in 0..overlaps.len() {
+            if !reached[to]
+                && edges(overlaps[from].0)
+                    .iter()
+                    .any(|node| edges(overlaps[to].0).contains(node))
+            {
+                reached[to] = true;
+                frontier.push(to);
+            }
+        }
+    }
+    let own = element_samples(target, element);
+    let basis = lagrange(own)?;
+    // `mass` and each block's `weights` are the integrals of products of
+    // the new element's Lagrange functions with its own and with the old
+    // element's, over the overlap, in units of the new element's area. A
+    // product is quartic, which the six-point rule takes exactly.
+    let mut mass = [[0.0; 6]; 6];
+    let mut covered = 0.0;
+    let mut blocks = Vec::new();
+    for ((donor, polygon), _) in overlaps
+        .iter()
+        .zip(&reached)
+        .filter(|(_, reached)| **reached)
+    {
+        let donor_triangle = source_mesh.triangles[*donor];
+        let theirs = element_samples(source, *donor);
+        let donor_basis = if theirs
+            .iter()
+            .zip(own)
+            .all(|(theirs, own)| theirs.barycentric == own.barycentric)
+        {
+            basis
+        } else {
+            lagrange(theirs)?
+        };
+        let mut weights = [[0.0; 6]; 6];
+        for fan in 1..polygon.len() - 1 {
+            let piece = [polygon[0], polygon[fan], polygon[fan + 1]];
+            let share = polygon_area(&piece) / area;
+            if share <= 0.0 {
+                continue;
+            }
+            covered += share;
+            for (at, weight) in crate::wave_quadratic::stiffness_quadrature() {
+                let point = piece[0] * at[0] + piece[1] * at[1] + piece[2] * at[2];
+                let (Some(here), Some(there)) = (
+                    barycentric(target_mesh, triangle.vertices, point),
+                    barycentric(source_mesh, donor_triangle.vertices, point),
+                ) else {
+                    return Err(WaveError::InvalidMesh(
+                        "the vector projection meets a degenerate element",
+                    ));
+                };
+                let (here, there) = (evaluate(&basis, here), evaluate(&donor_basis, there));
+                for row in 0..6 {
+                    for column in 0..6 {
+                        weights[row][column] += share * weight * here[row] * there[column];
+                        mass[row][column] += share * weight * here[row] * here[column];
+                    }
+                }
+            }
+        }
+        blocks.push(CanonicalVectorTransferBlock {
+            source_element: u32::try_from(*donor)
+                .map_err(|_| WaveError::InvalidMesh("too many complementary donor elements"))?,
+            weights,
+        });
+    }
+    if covered < PROJECTED_COVER {
+        return Ok(None);
+    }
+    // The mass matrix's inverse, column by column.
+    let mut inverse = [[0.0; 6]; 6];
+    for (index, column) in inverse.iter_mut().enumerate() {
+        *column = solve_six(mass, std::array::from_fn(|row| f64::from(row == index)))?;
+    }
+    for block in &mut blocks {
+        let integrals = block.weights;
+        block.weights = std::array::from_fn(|row| {
+            std::array::from_fn(|column| {
+                inverse
+                    .iter()
+                    .zip(&integrals)
+                    .map(|(inverse, integrals)| inverse[row] * integrals[column])
+                    .sum()
+            })
+        });
+    }
+    Ok(Some(blocks))
+}
+
+fn element_samples(
+    operator: &CanonicalWaveOperator,
+    element: usize,
+) -> &[crate::LinearConstitutiveSample] {
+    &operator.constitutive_samples()
+        [element * QUADRATURE_SAMPLES..(element + 1) * QUADRATURE_SAMPLES]
+}
+
+/// `subject` cut to `clipper`, both counter-clockwise; empty, or fewer than
+/// three corners, where they do not overlap.
+fn clipped(subject: [Point2; 3], clipper: [Point2; 3]) -> Vec<Point2> {
+    let mut polygon = subject.to_vec();
+    for edge in 0..3 {
+        let (a, b) = (clipper[edge], clipper[(edge + 1) % 3]);
+        let side = |point: Point2| (b - a).cross(point - a);
+        let input = std::mem::take(&mut polygon);
+        for (index, &current) in input.iter().enumerate() {
+            let previous = input[(index + input.len() - 1) % input.len()];
+            let (here, before) = (side(current), side(previous));
+            if (here >= 0.0) != (before >= 0.0) {
+                polygon.push(previous + (current - previous) * (before / (before - here)));
+            }
+            if here >= 0.0 {
+                polygon.push(current);
+            }
+        }
+        if polygon.is_empty() {
+            break;
+        }
+    }
+    polygon
+}
+
+fn polygon_area(polygon: &[Point2]) -> f64 {
+    if polygon.len() < 3 {
+        return 0.0;
+    }
+    0.5 * (1..polygon.len() - 1)
+        .map(|fan| (polygon[fan] - polygon[0]).cross(polygon[fan + 1] - polygon[0]))
+        .sum::<f64>()
+}
+
+/// Rows `L` with `L · monomials(λ)` the six Lagrange functions of `samples`.
+fn lagrange(samples: &[crate::LinearConstitutiveSample]) -> Result<[[f64; 6]; 6], WaveError> {
+    let mut basis = [[0.0; 6]; 6];
+    for column in 0..6 {
+        let mut monomial = [0.0; 6];
+        monomial[column] = 1.0;
+        let weights = quadratic_sample_weights_for(samples, monomial)?;
+        for row in 0..6 {
+            basis[row][column] = weights[row];
+        }
+    }
+    Ok(basis)
+}
+
+fn evaluate(basis: &[[f64; 6]; 6], at: [f64; 3]) -> [f64; 6] {
+    let values = monomials(at);
+    std::array::from_fn(|row| (0..6).map(|k| basis[row][k] * values[k]).sum())
+}
+
 fn monomials([_l0, l1, l2]: [f64; 3]) -> [f64; 6] {
     [1.0, l1, l2, l1 * l1, l1 * l2, l2 * l2]
 }
@@ -2384,6 +2681,15 @@ fn monomials([_l0, l1, l2]: [f64; 3]) -> [f64; 6] {
 fn quadratic_sample_weights(
     samples: &[crate::LinearConstitutiveSample],
     target: [f64; 3],
+) -> Result<[f64; 6], WaveError> {
+    quadratic_sample_weights_for(samples, monomials(target))
+}
+
+/// The weights on `samples` that give the quadratic whose monomials, as
+/// [`monomials`] orders them, take the values `target`.
+fn quadratic_sample_weights_for(
+    samples: &[crate::LinearConstitutiveSample],
+    target: [f64; 6],
 ) -> Result<[f64; 6], WaveError> {
     if samples.len() != QUADRATURE_SAMPLES {
         return Err(WaveError::InvalidMesh(
@@ -2399,7 +2705,7 @@ fn quadratic_sample_weights(
             matrix[column][row] = values[column];
         }
     }
-    solve_six(matrix, monomials(target))
+    solve_six(matrix, target)
 }
 
 fn solve_six(mut matrix: [[f64; 6]; 6], mut right: [f64; 6]) -> Result<[f64; 6], WaveError> {
@@ -2797,7 +3103,7 @@ mod tests {
         let vector =
             CanonicalVectorTransferMap::prepare(&mesh, &canonical, &mesh, &canonical).unwrap();
         assert!(vector.is_identity());
-        assert!(vector.targets.is_empty());
+        assert!(vector.ranges.is_empty() && vector.blocks.is_empty());
         let b = canonical
             .constitutive_samples()
             .iter()
@@ -2819,7 +3125,7 @@ mod tests {
         )
         .unwrap();
         assert!(vector.is_identity());
-        assert!(vector.targets.is_empty());
+        assert!(vector.ranges.is_empty() && vector.blocks.is_empty());
         assert_eq!(
             vector.exact_samples(),
             canonical.complementary_degrees_of_freedom(),
@@ -3180,6 +3486,69 @@ mod tests {
             {
                 assert!((*got - *want).norm() < 1.0e-13, "{got:?} against {want:?}");
             }
+        }
+    }
+
+    /// IV-11: a field with no smoothness at all, as the part of `b` that
+    /// changes from sample to sample is, carried between two irregular
+    /// meshes of the box with a hole and back twelve times. Each carry is a
+    /// projection but for the slivers the two meshes' chords leave by the
+    /// rim, so its energy, the samples' weighted squares, must never rise.
+    /// It falls to 0.73 and then 0.86 of itself on the first round trip and
+    /// by about 1% on the twelfth. With each new sample evaluated on the old
+    /// element's quadratic, as before 2026-11-01, it rose 0.5% and then 8.5%
+    /// on the first, and twelve took it to 3.4e5 times the start.
+    #[test]
+    fn a_rough_field_carried_back_and_forth_never_gains_energy() {
+        let scene = initial();
+        let mesh_at = |seed, edge| {
+            meshed(
+                &scene,
+                seed,
+                MeshingOptions {
+                    target_edge_length: edge,
+                    ..MeshingOptions::default()
+                },
+            )
+            .unwrap()
+        };
+        let (coarse_mesh, fine_mesh) = (mesh_at(41, 0.28), mesh_at(42, 0.18));
+        let (_, coarse) = compile_with_scene(&coarse_mesh, &scene);
+        let (_, fine) = compile_with_scene(&fine_mesh, &scene);
+        let to_fine =
+            CanonicalVectorTransferMap::prepare(&coarse_mesh, &coarse, &fine_mesh, &fine).unwrap();
+        let to_coarse =
+            CanonicalVectorTransferMap::prepare(&fine_mesh, &fine, &coarse_mesh, &coarse).unwrap();
+        let energy = |operator: &CanonicalWaveOperator, field: &[Point2]| {
+            field
+                .iter()
+                .zip(operator.constitutive_samples())
+                .map(|(value, sample)| sample.integration_weight * value.dot(*value))
+                .sum::<f64>()
+        };
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut rough = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 52) as f64 - 1.0
+        };
+        let mut field = coarse
+            .constitutive_samples()
+            .iter()
+            .map(|_| Point2::new(rough(), rough()))
+            .collect::<Vec<_>>();
+        let mut before = energy(&coarse, &field);
+        for trip in 1..=12 {
+            let carried = to_fine.transfer(&field).unwrap().0;
+            let there = energy(&fine, &carried);
+            field = to_coarse.transfer(&carried).unwrap().0;
+            let back = energy(&coarse, &field);
+            assert!(
+                there <= before * (1.0 + 1.0e-12) && back <= there * (1.0 + 1.0e-12),
+                "round trip {trip}: {before:e} carried to {there:e} and back to {back:e}"
+            );
+            before = back;
         }
     }
 

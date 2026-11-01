@@ -164,7 +164,12 @@ support and available domain margin. Exact component conservation tolerances are
 `1e-11 Qscale` in f64 and `5e-6 Qscale` in f32.
 
 Transfer `b` by a physical-coordinate quadratic reconstruction from the old six
-quadrature samples, restricted to the same material side and baffle trace. An
+quadrature samples, restricted to the same material side and baffle trace.
+Since 2026-11-01 (IV-11) a new element the old mesh covers on its own side,
+three quarters of it at least, takes the L2 projection of that piecewise
+quadratic instead, which never enlarges `b`; sampling it magnified the part
+of `b` that changes from sample to sample until repeated remeshes grew it
+without bound. An
 unchanged element/sample is an exact copy. A connected new cell takes a bounded
 constant-preserving extension from donors no farther than two element rings; a
 new island is zero. There is no global harmonic relaxation.

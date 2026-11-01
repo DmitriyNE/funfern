@@ -2493,12 +2493,25 @@ impl Parts {
 }
 
 /// The default box in `physics` with IV-10's baffle and island drawn in
-/// through the editor, and where they are.
-fn parted(physics: PhysicsModel) -> Result<(TopologyDocument, Parts), String> {
+/// through the editor, and where they are; with its outer walls reflecting
+/// too where `closed`, so that every part keeps its own total and energy.
+fn parted(physics: PhysicsModel, closed: bool) -> Result<(TopologyDocument, Parts), String> {
     let mut editor = TopologyEditor::from_document(TopologyDocument::default())?;
     settle(&mut editor);
     editor.set_physics(physics)?;
     settle(&mut editor);
+    if closed {
+        editor.set_outer_condition(
+            &BTreeSet::from([
+                OuterSide::Left,
+                OuterSide::Right,
+                OuterSide::Bottom,
+                OuterSide::Top,
+            ]),
+            OuterBoundaryCondition::Reflecting,
+        )?;
+        settle(&mut editor);
+    }
     let scene = &editor.document.model.accepted;
     let material = scene
         .region(BACKGROUND_REGION)
@@ -2733,7 +2746,7 @@ fn a_neutral_remesh_keeps_every_components_total() {
     } else {
         &[Some(0.7), Some(1.4), None]
     };
-    let (document, parts) = parted(PhysicsModel::Mechanical).unwrap();
+    let (document, parts) = parted(PhysicsModel::Mechanical, false).unwrap();
     let domain = document.model.accepted.geometry.domain;
     let edges = factors
         .iter()
@@ -2811,5 +2824,251 @@ fn a_neutral_remesh_keeps_every_components_total() {
         "{} cases, the worst {worst:.2} of a halving's move",
         cases.len()
     );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// IV-11's second mesh, as a fraction of the first's edge.
+const REMESHED: f64 = 0.7;
+
+/// The steps IV-11's runs take at the default edge, at the finer mesh's
+/// time step; at half the edge they take twice as many, to the same time.
+const REMESHED_STEPS: f64 = 256.0;
+
+/// How far a field remeshed back and forth may read from the same run left
+/// on its mesh, as a multiple of what one round trip moves it. On
+/// 2026-11-01 eight round trips at the default edge read 1.14 and 1.09 of
+/// one's in Q and b, and sixteen at half the edge 1.25 and 1.19; with each
+/// new sample evaluated on the old element's quadratic, as before then,
+/// eight read 2.23 and 6.82, and sixteen 244 and 1010.
+const REPEATED: f64 = 1.5;
+
+/// How far the energy of a field remeshed back and forth may end above the
+/// same run's left on its mesh, relatively. A handoff moves the energy by up
+/// to 4e-4 either way as the field crosses, given back on the way home,
+/// which is why it is read at the end, on the mesh it set out from. On
+/// 2026-11-01 it rose 3.1e-5 at most, one round trip at half the edge, and
+/// fell by up to 1.8e-4, sixteen at the default edge, the projection
+/// shedding what the coarser mesh cannot hold. With the new samples
+/// evaluated on the old quadratics, eight round trips gained 1.4e-3 and
+/// sixteen 27 times the energy.
+const ENERGY_KEPT: f64 = 1.0e-4;
+
+/// The complementary field's energy.
+fn complementary_energy(prepared: &PreparedTopology, run: &Run) -> f64 {
+    run.complementary()
+        .iter()
+        .zip(prepared.canonical_operator.constitutive_samples())
+        .map(|(value, sample)| {
+            0.5 * sample.integration_weight * sample.complementary_inverse.quadratic_form(*value)
+        })
+        .sum()
+}
+
+/// One of IV-11's legs: the field run with `trips` round trips on the way,
+/// or struck, run and remeshed back and forth with no step between.
+#[derive(Clone, Copy, Debug)]
+enum Leg {
+    Running(u64),
+    Still(u64),
+}
+
+/// What a leg read: for a running one, the most any part's total moved at a
+/// handoff relative to its magnitude, and where the run ended on which
+/// mesh; for a still one, the most the complementary field's energy rose
+/// over a round trip, relatively.
+enum Read {
+    Running {
+        drift: f64,
+        run: Run,
+        prepared: Arc<PreparedTopology>,
+    },
+    Still(f64),
+}
+
+/// IV-11's `leg` on the closed parted box at `edges`, its own and the
+/// finer, struck by IV-10's pulse and stepped at `time_step`: a running leg
+/// for `steps` steps with its handoffs spread evenly among them, a still
+/// leg after `STEPS`.
+fn remeshed_back_and_forth(
+    (document, parts): (&TopologyDocument, &Parts),
+    edges: [f64; 2],
+    leg: Leg,
+    (steps, time_step): (u64, f64),
+) -> Result<Read, String> {
+    let pulse = parted_pulse(document.model.accepted.geometry.domain);
+    let (editor, mut runtime, mut active) = prepare_at(document, edges[0])?;
+    let mut run = Run::struck_by(&active, time_step, pulse)?;
+    match leg {
+        Leg::Running(trips) => {
+            let handoffs = 2 * trips;
+            let (mut drift, mut taken): (f64, u64) = (0.0, 0);
+            for handoff in 1..=handoffs {
+                while taken < handoff * steps / (handoffs + 1) {
+                    run.step(&active)?;
+                    taken += 1;
+                }
+                let (before, sizes) = parts.totals(&active.canonical_operator, run.primary())?;
+                let edge = edges[(handoff % 2) as usize];
+                let (target, maps) = remeshed(&editor, &mut runtime, Some(edge))?;
+                run = handed((&active, &run), &target, &maps, time_step)?;
+                active = target;
+                let (after, _) = parts.totals(&active.canonical_operator, run.primary())?;
+                for part in 0..3 {
+                    drift = drift.max((after[part] - before[part]).abs() / sizes[part]);
+                }
+            }
+            for _ in taken..steps {
+                run.step(&active)?;
+            }
+            Ok(Read::Running {
+                drift,
+                run,
+                prepared: active,
+            })
+        }
+        Leg::Still(trips) => {
+            for _ in 0..STEPS {
+                run.step(&active)?;
+            }
+            let mut energy = complementary_energy(&active, &run);
+            let mut rise: f64 = f64::NEG_INFINITY;
+            for _ in 0..trips {
+                for edge in [edges[1], edges[0]] {
+                    let (target, maps) = remeshed(&editor, &mut runtime, Some(edge))?;
+                    run = handed((&active, &run), &target, &maps, time_step)?;
+                    active = target;
+                }
+                let now = complementary_energy(&active, &run);
+                rise = rise.max(now / energy - 1.0);
+                energy = now;
+            }
+            Ok(Read::Still(rise))
+        }
+    }
+}
+
+/// IV-11, repeated remeshing. IV-10's parted box, its outer walls
+/// reflecting too so that no energy leaves it, is struck by a pulse all
+/// three parts take some of and run at the finer mesh's time step,
+/// remeshed to 0.7 of its edge and back K times on the way through the
+/// runtime, as the mesh slider does. Each part's total must come through
+/// every handoff to roundoff. At the end, on the mesh it set out from, the
+/// field read node by node against the same run left on its mesh must
+/// stand within 1.5 times what one round trip moves it, and its energy no
+/// more than 1e-4 above that run's. Struck, run, and then remeshed back and
+/// forth with no step between, the complementary field's energy must never
+/// rise.
+#[test]
+fn a_repeated_remesh_keeps_the_field_and_its_energy() {
+    let all = std::env::var_os("FUNFERN_INVARIANTS_ALL").is_some();
+    let factors: &[f64] = if all { &[1.0, 0.5] } else { &[1.0] };
+    let legs = if all {
+        vec![
+            Leg::Running(0),
+            Leg::Running(1),
+            Leg::Running(2),
+            Leg::Running(4),
+            Leg::Running(8),
+            Leg::Running(16),
+            Leg::Still(24),
+        ]
+    } else {
+        vec![
+            Leg::Running(0),
+            Leg::Running(1),
+            Leg::Running(8),
+            Leg::Still(12),
+        ]
+    };
+    let (document, parts) = parted(PhysicsModel::Mechanical, true).unwrap();
+    let mut failures = Vec::new();
+    for factor in factors {
+        let edges = [1.0, REMESHED].map(|share| document.presentation.mesh_edge * factor * share);
+        let (_, _, finer) = prepare_at(&document, edges[1]).unwrap();
+        let time_step = finer.recommended_time_step();
+        let steps = (REMESHED_STEPS / factor).round() as u64;
+        let outcomes = in_parallel(&legs, |leg| {
+            let started = Instant::now();
+            let outcome =
+                remeshed_back_and_forth((&document, &parts), edges, *leg, (steps, time_step));
+            (outcome, started.elapsed().as_secs_f64())
+        });
+        let mut reference = None;
+        let mut one = None;
+        for (leg, (outcome, seconds)) in legs.iter().zip(outcomes) {
+            let label = format!("edge {:.3}, {leg:?}", edges[0]);
+            let read = match outcome {
+                Ok(read) => read,
+                Err(error) => {
+                    eprintln!("FAILED {label}: {error}");
+                    failures.push(format!("{label}: {error}"));
+                    continue;
+                }
+            };
+            let (line, held) = match (leg, read) {
+                (Leg::Running(0), Read::Running { run, prepared, .. }) => {
+                    let energy = run.energy(&prepared);
+                    reference = Some((run, prepared, energy));
+                    continue;
+                }
+                (
+                    Leg::Running(_),
+                    Read::Running {
+                        drift,
+                        run,
+                        prepared,
+                    },
+                ) => {
+                    let Some((control, mesh, Ok(energy))) = &reference else {
+                        failures.push(format!("{label}: no run to read it against"));
+                        continue;
+                    };
+                    if prepared.canonical_operator.node_points()
+                        != mesh.canonical_operator.node_points()
+                    {
+                        failures.push(format!("{label}: it ended on another mesh"));
+                        continue;
+                    }
+                    let q = apart(run.primary(), |node| node, control.primary(), scalar);
+                    let b = apart(
+                        run.complementary(),
+                        |sample| sample,
+                        control.complementary(),
+                        vector,
+                    );
+                    let kept = match run.energy(&prepared) {
+                        Ok(end) => end / energy - 1.0,
+                        Err(error) => {
+                            failures.push(format!("{label}: {error}"));
+                            continue;
+                        }
+                    };
+                    let [q_one, b_one] = *one.get_or_insert([q, b]);
+                    (
+                        format!(
+                            "{label}: totals {drift:.1e}, Q {q:.2e} ({:.2} of one trip's), b {b:.2e} ({:.2}), energy {kept:.1e} ({seconds:.1} s)",
+                            q / q_one,
+                            b / b_one
+                        ),
+                        drift <= ROUNDOFF
+                            && q <= REPEATED * q_one
+                            && b <= REPEATED * b_one
+                            && kept <= ENERGY_KEPT,
+                    )
+                }
+                (Leg::Still(trips), Read::Still(rise)) => (
+                    format!(
+                        "{label}: b's energy rose at most {rise:.1e} a round trip over {trips} ({seconds:.1} s)"
+                    ),
+                    rise <= ROUNDOFF,
+                ),
+                _ => unreachable!("a leg reads as it ran"),
+            };
+            eprintln!("{line}");
+            if !held {
+                failures.push(line);
+            }
+        }
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -907,6 +907,45 @@ magnitude.
   Of the device suite's 30 remesh and handoff entries, only this fixture
   fails under it.
 
+**IV-11 done on 2026-11-01**, `a_repeated_remesh_keeps_the_field_and_its_energy`
+in `crates/funfern-app/tests/invariants.rs`. IV-10's box, its outer walls
+reflecting too, runs at the finer mesh's time step and is remeshed to 0.7
+of its edge and back K times on the way, through the runtime.
+- **Checks.** Each part's total must come through every handoff to 1e-12.
+  At the end the field, read node by node against the same run left on its
+  mesh, must stand within 1.5 times one round trip's distance, and its energy
+  no more than 1e-4 above that run's. A still leg is struck, run, and
+  remeshed back and forth with no step between; the complementary field's
+  energy must never rise over a round trip.
+- **What it found: `b` grown by its transfer.** Sixteen round trips at half
+  the default edge left Q 4.0 and `b` 43 from the control, and the energy
+  255 times the start, every handoff booking what it added. Each new sample
+  took the old element's quadratic evaluated at it, and at an element's
+  corners the six samples' Lagrange functions sum to 3.55 in magnitude.
+  The part of `b` that changes from sample to sample, which no step touches,
+  was magnified at every handoff and grew threefold a round trip once it took
+  over. A prototype weighed three rules: the old one, a clip to the old
+  samples' range, which held but drifted and lost 50 times the accuracy on a
+  smooth field, and an L2 projection, which held flat.
+- **Fix.** A new element the old mesh covers on its own side, three quarters
+  of it at least, takes the L2 projection of the old piecewise quadratic.
+  The overlaps are clipped exactly and integrated with the six-point rule,
+  exact for the products. The projection reproduces a quadratic and never
+  enlarges `b`. Its side is the old elements reached from the one under its
+  centre through the edges they share, which a reflecting wall splits. An
+  element an edit leaves mostly uncovered still takes its samples one by one;
+  IV-12 and IV-08 judge that case. The device's table holds a block of 36
+  weights for each old element a new one draws on: 14.6 MB against 8.9 MB
+  for 0.04 onto 0.028, and 14.4 against 4.3 back.
+- **Numbers.** The gate's eight round trips read 1.14 and 1.09 of one's in Q
+  and `b`, the nightly's worst 1.25 and 1.19, sixteen at half the edge. The
+  energy rose 3.1e-5 at most, and fell by up to 1.8e-4, the projection
+  shedding what the coarser mesh cannot hold. The still legs fall every
+  round trip.
+- **Mutation** `complementary-evaluated-not-projected` puts the evaluation
+  back: eight round trips read 2.23 and 6.82, and the still leg's energy
+  multiplies by up to 6.8 in a round trip.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

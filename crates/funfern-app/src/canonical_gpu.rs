@@ -100,10 +100,13 @@ const EVENT_TEMPORAL_SWITCH: u32 = 7;
 const EVENT_TEMPORAL_LAW_PATCH: u32 = 8;
 const RESIDENT_FILTER_DISPATCHES: u64 = 7;
 const RESIDENT_FILTER_ACCOUNTING_DISPATCHES: u64 = 1;
-const TRANSFER_LAYOUT_VERSION: u32 = 4;
+const TRANSFER_LAYOUT_VERSION: u32 = 5;
 /// The tenth word locates the integrated-field rows (Gate O), the eleventh
 /// the edited carriers' phase steps.
 const TRANSFER_HEADER_WORDS: usize = 11;
+/// A complementary block: the old element, then its weights in six rows of
+/// six, one row for each of the new element's samples.
+const VECTOR_BLOCK_WORDS: usize = 10;
 const HANDOFF_RECEIPT_MAGIC: u32 = 0x4841_4e44;
 const DRIVE_TARGET_PARAMETERS: u32 = 1 << 31;
 const DRIVE_INDEX_MASK: u32 = !DRIVE_TARGET_PARAMETERS;
@@ -2705,11 +2708,6 @@ impl CanonicalGpuTransferPlan {
             primary.targets()
         };
         let vector_identity = complementary.is_identity();
-        let vector_targets = if vector_identity {
-            Vec::new()
-        } else {
-            complementary.targets()
-        };
         let gap_targets = thin_gap.targets();
         let source_gap_count = source.thin_gap_samples().len();
         let target_gap_count = target.thin_gap_samples().len();
@@ -2730,7 +2728,8 @@ impl CanonicalGpuTransferPlan {
                 source.complementary_degrees_of_freedom()
                     != target.complementary_degrees_of_freedom()
             } else {
-                vector_targets.len() != target.complementary_degrees_of_freedom()
+                complementary.target_element_count() * 6
+                    != target.complementary_degrees_of_freedom()
             }
             || gap_targets.len() != target_gap_count
             || thin_gap.source_energy_weights().len() != source_gap_count
@@ -2821,29 +2820,25 @@ impl CanonicalGpuTransferPlan {
                 ])?,
             ]);
         }
+        // A word for each new element, the word its blocks start at and their
+        // number, and then the blocks.
         let vector_offset = words.len();
-        for target in vector_targets.iter().filter(|_| !vector_identity) {
-            words.extend([
-                transfer_word(
-                    target.source_samples[0],
-                    target.source_samples[1],
-                    target.source_samples[2],
-                    target.source_samples[3],
-                ),
-                transfer_float_word([
-                    target.weights[0],
-                    target.weights[1],
-                    target.weights[2],
-                    target.weights[3],
-                ])?,
-                transfer_word(
-                    target.source_samples[4],
-                    target.source_samples[5],
-                    0,
-                    u32::from(target.source_count) | (u32::from(target.exact) << 8),
-                ),
-                transfer_float_word([target.weights[4], target.weights[5], 0.0, 0.0])?,
-            ]);
+        if !vector_identity {
+            let elements = complementary.target_element_count();
+            let mut block = vector_offset + elements;
+            for element in 0..elements {
+                let count = complementary.element_blocks(element).len();
+                words.push(transfer_word(usize_u32(block)?, usize_u32(count)?, 0, 0));
+                block += count * VECTOR_BLOCK_WORDS;
+            }
+            for element in 0..elements {
+                for block in complementary.element_blocks(element) {
+                    words.push(transfer_word(block.source_element, 0, 0, 0));
+                    for weights in block.weights.as_flattened().chunks_exact(4) {
+                        words.push(transfer_float_word(weights.try_into().unwrap())?);
+                    }
+                }
+            }
         }
         let gap_offset = words.len();
         let target_gap_energy = thin_gap.target_energy_weights();
@@ -11162,6 +11157,19 @@ mod tests {
             include_str!("canonical_transfer.wgsl")
                 .contains("const HANDOFF_RECEIPT_MAGIC: u32 = 0x48414e44u;")
         );
+        // Each transfer shader refuses a table of another layout, so each
+        // must name the one the host packs: on 2026-11-01 the vector table's
+        // new layout reached one of them and every device handoff refused.
+        let version = format!("const TRANSFER_LAYOUT_VERSION: u32 = {TRANSFER_LAYOUT_VERSION}u;");
+        for shader in [
+            include_str!("canonical_transfer.wgsl"),
+            include_str!("canonical_transfer_runtime.wgsl"),
+        ] {
+            assert!(
+                shader.contains(&version),
+                "a transfer shader lacks {version}"
+            );
+        }
         assert_eq!(transfer.words[7].data.y, 1);
         assert_eq!(transfer.words[7].data.z, 1);
         assert_eq!(transfer.words[7].data.w, 1);

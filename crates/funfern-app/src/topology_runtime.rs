@@ -3322,20 +3322,23 @@ mod tests {
                 ])
                 .unwrap();
             let mut constant = 0;
-            for (entry, sample) in canonical
-                .complementary
-                .targets()
-                .iter()
-                .zip(target.constitutive_samples())
-            {
-                if entry.source_count == 6
-                    && entry.weights.iter().all(|weight| *weight == 1.0 / 6.0)
-                {
-                    constant += 1;
-                    assert_eq!(
-                        Some(entry.source_samples[0] as usize / 6),
-                        donor_in_sight(&old.mesh, &new.mesh, sample.element as usize, sample.point)
-                    );
+            for (index, sample) in target.constitutive_samples().iter().enumerate() {
+                for block in canonical.complementary.element_blocks(index / 6) {
+                    if block.weights[index % 6]
+                        .iter()
+                        .all(|weight| *weight == 1.0 / 6.0)
+                    {
+                        constant += 1;
+                        assert_eq!(
+                            Some(block.source_element as usize),
+                            donor_in_sight(
+                                &old.mesh,
+                                &new.mesh,
+                                sample.element as usize,
+                                sample.point
+                            )
+                        );
+                    }
                 }
             }
             assert_eq!(constant, report.extended_values);
