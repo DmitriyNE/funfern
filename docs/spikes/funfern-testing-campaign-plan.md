@@ -1074,6 +1074,38 @@ converges at first order whatever the scheme.
   less. The halving's move IV-04, IV-09 and IV-08 judge against is the
   scheme's under the strike they use.
 
+**IV-08's device half done on 2026-11-02**, the `separator-mid-run` fixture
+in `crates/funfern-app/src/ui/e2e.rs`, and with it stage C3. The cavity at
+edge 0.04 takes IV-08's medium, anisotropic in a frame turned by 0.4 and
+graded along it, and is struck off its middle by a pulse 0.2 wide. IV-08's
+loop, a subdomain of the same medium, is drawn through the editor at step
+128 and deleted at 192, its face given back to the background as the merge
+picker gives it, and the run goes to 256. Each generation runs at its own
+step, as the app runs it: at this edge the loop leaves the step as it was,
+and the plain cavity meshed again after the deletion steps 1.9% shorter.
+- **Checks.** Each handed state, and the endpoint, against the reference
+  within 5e-6, as every handoff fixture's. The endpoint, read on the
+  device's own state at the centres of a 24 by 24 grid, must stand from the
+  unedited run within one halving's move of it, in Q and in `b`. The
+  unedited run is the reference held at step 128, on the plain cavity, and
+  stepped on to the endpoint's time in whole steps no longer than its own.
+  The halving's move is a constant from the fixture's f64 twin: the
+  unedited run at edge 0.08 against 0.04, 4.6e-4 in Q and 8.9e-4 in `b`.
+- **Numbers.** On the M1 Max the handed states read 4.7e-7 and 5.5e-7 at
+  step 128, 5.6e-7 and 6.9e-7 at 192, and the endpoint 6.4e-7 and 7.9e-7.
+  The endpoint stands 1.53e-4 in Q and 7.1e-5 in `b` from the unedited run,
+  as the f64 twin does, 0.33 and 0.08 of a halving's move.
+- **What only the device's own state sees.** The device's tables are built
+  from the maps. With the complementary field taken only from a new face's
+  own region, as until 2026-10-06, the device stands within 6.5e-7 and
+  7.8e-7 of the reference, which carries the field the same way, while its
+  own state stands 0.30 and 0.36 from the unedited run.
+- **Mutation** `complementary-from-its-own-region-only-on-the-device` is
+  that defect, run against the fixture.
+
+Stage C4, the device's `observers` fixture for IV-05 and IV-01 within f32,
+is next, planned before it starts.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

@@ -102,6 +102,7 @@ pub(crate) fn add(app: &mut App) {
         "remesh" => (Fixture::Remesh, vec![None]),
         "neutral-remesh" => (Fixture::NeutralRemesh, vec![None]),
         "baffle-move" => (Fixture::BaffleMove, vec![None]),
+        "separator-mid-run" => (Fixture::SeparatorMidRun, vec![None]),
         "handoff-memory-rebuild" => (Fixture::HandoffMemory(MemoryHandoff::Rebuild), vec![None]),
         "handoff-memory-remesh" => (Fixture::HandoffMemory(MemoryHandoff::Remesh), vec![None]),
         "handoff-memory-edit" => (Fixture::HandoffMemory(MemoryHandoff::Edit), vec![None]),
@@ -219,6 +220,17 @@ enum Fixture {
     /// was, which an agreement with the reference would not show where both
     /// carried alike.
     BaffleMove,
+    /// IV-08 edited mid-run on the device: the cavity at
+    /// [`SEPARATED_EDGE`] in IV-08's medium, anisotropic in a turned frame
+    /// and graded along it, struck off its middle; IV-08's loop, a subdomain
+    /// of the same medium, drawn through the editor at step 128 and deleted
+    /// at 192, its face given back to the background; the run taken to 256.
+    /// Each handed state is read against the reference at its handoff, and
+    /// the device's endpoint, read on its own state at a grid of points,
+    /// must stand from the unedited run within [`UNEDITED_APART`]: a
+    /// separator within one medium is none, which an agreement with the
+    /// reference would not show where both carried alike.
+    SeparatorMidRun,
     /// The cavity with its bottom side a second-order outgoing wall and its
     /// top side driven, the pulse run into the wall until its pole states
     /// hold memory, then handed off at step 192 of 384 the way named: the
@@ -317,6 +329,7 @@ const HOLE_MESH: &str = "f84998df08704d66/34b4ee47d28f53ae";
 const PARTED_MESH: &str = "6f134ce035236366/db143b236f3be3fb";
 const FINER_PARTED_MESH: &str = "345ff654d5d190eb/7b78d839d7290095";
 const BAFFLED_MESH: &str = "cb876407d8c1eb75/63a98d72da510426";
+const SEPARATED_MESH: &str = "8a6e5526c63c5d41/5927bf38c673576e";
 
 /// The batches [`Fixture::CavityBatches`] asks for its steps in: one at a
 /// time, a number that divides nothing, half the most a frame may ask for
@@ -351,6 +364,12 @@ enum Action {
     /// The cavity's baffle selected and dragged up [`BAFFLE_SHIFT`] edges, as
     /// the Move tool does.
     Move,
+    /// [`SEPARATOR_LOOP`] drawn round part of the cavity, a subdomain of the
+    /// medium it encloses, as the closed-curve tool draws one.
+    Draw,
+    /// The loop deleted, its face merged with the background's, whose region
+    /// is kept, as the merge picker keeps it.
+    Delete,
 }
 
 impl Fixture {
@@ -364,6 +383,7 @@ impl Fixture {
             }
             Fixture::Remesh | Fixture::NeutralRemesh => (&[(128, Action::Remesh)], 256),
             Fixture::BaffleMove => (&[(BAFFLE_MOVE_STEP, Action::Move)], BAFFLE_MOVE_STEP + 128),
+            Fixture::SeparatorMidRun => (&[(128, Action::Draw), (192, Action::Delete)], 256),
             // The pulse's front reaches the wall near step 150: the handoff
             // comes once the wall holds memory, and the run goes on for as
             // long again, so that what the wall gives back is in the field.
@@ -403,7 +423,10 @@ impl Fixture {
     fn reads_the_handoff(self) -> bool {
         matches!(
             self,
-            Fixture::HandoffDrivenPins | Fixture::NeutralRemesh | Fixture::BaffleMove
+            Fixture::HandoffDrivenPins
+                | Fixture::NeutralRemesh
+                | Fixture::BaffleMove
+                | Fixture::SeparatorMidRun
         )
     }
 
@@ -419,6 +442,12 @@ impl Fixture {
         matches!(self, Fixture::BaffleMove)
     }
 
+    /// Whether the endpoint is read against the run without the fixture's
+    /// actions, which the device must stand near rather than far from.
+    fn reads_unedited(self) -> bool {
+        matches!(self, Fixture::SeparatorMidRun)
+    }
+
     /// The width the fixture sets its pulse to, as the pulse's slider does,
     /// where it does not take the app's.
     fn pulse_width(self) -> Option<f32> {
@@ -426,6 +455,10 @@ impl Fixture {
             // As wide as IV-12's in `tests/invariants.rs`, so that the field
             // beside the baffle is resolved.
             Fixture::BaffleMove => Some(0.2),
+            // As wide, so that the unedited run's own move over a halving of
+            // the mesh, which [`UNEDITED_APART`] is, is the field's and not
+            // the pulse's.
+            Fixture::SeparatorMidRun => Some(0.2),
             _ => None,
         }
     }
@@ -497,6 +530,7 @@ impl Fixture {
             Fixture::FarField | Fixture::FarFieldLate => HOLE_MESH,
             Fixture::NeutralRemesh => PARTED_MESH,
             Fixture::BaffleMove => BAFFLED_MESH,
+            Fixture::SeparatorMidRun => SEPARATED_MESH,
             _ => CAVITY_MESH,
         }
     }
@@ -512,6 +546,7 @@ impl Fixture {
             Fixture::Rejection => (rejection_document(), None),
             Fixture::NeutralRemesh => (parted_document(), None),
             Fixture::BaffleMove => (baffled_document(), None),
+            Fixture::SeparatorMidRun => (separated_document(), None),
             Fixture::HandoffDriven => (pump_document(), None),
             Fixture::HandoffDrivenPins => (pumped_driven_document(), None),
             Fixture::Observables => (observables::observables_document(), None),
@@ -724,6 +759,10 @@ struct Reference {
     /// The baffle's jump on the device's state just before the move, where
     /// the fixture reads the sides.
     sides: Option<SidesBefore>,
+    /// The run without the fixture's actions, held at the first action's
+    /// step on the generation it ran on, where the fixture reads its
+    /// endpoint against it.
+    unedited: Option<(Arc<PreparedTopology>, State)>,
     /// The recorders' twins, read after every step, where the run's probes
     /// are to be judged.
     twin: Option<observables::Twin>,
@@ -1307,13 +1346,11 @@ fn along_the_baffle(document: &TopologyDocument) -> Result<Vec<(Point2, Point2)>
         .collect())
 }
 
-/// The device's `Q` and `b` jumps from the second point of each pair to the
-/// first, read on `prepared` from the display's full snapshot.
-fn device_jumps(
+/// The display's full snapshot as `prepared`'s `Q` and `b`.
+fn device_state(
     prepared: &PreparedTopology,
     display: &CanonicalGpuDisplay,
-    pairs: impl Iterator<Item = (Point2, Point2)>,
-) -> Result<Vec<(f64, Point2)>, String> {
+) -> Result<(Vec<f64>, Vec<Point2>), String> {
     let operator = &prepared.canonical_operator;
     if display.primary_flux.len() != operator.degrees_of_freedom()
         || display.complementary_flux.len() != operator.complementary_degrees_of_freedom()
@@ -1324,32 +1361,50 @@ fn device_jumps(
         .primary_flux
         .iter()
         .map(|value| f64::from(*value))
-        .collect::<Vec<_>>();
+        .collect();
     let complementary = display
         .complementary_flux
         .iter()
         .map(|[x, y]| Point2::new(f64::from(*x), f64::from(*y)))
-        .collect::<Vec<_>>();
-    let read = |point: Point2| {
-        let stencil = funfern_core::QuadraticPointStencil::build_topology(
-            &prepared.mesh,
-            &prepared.operator,
-            &prepared.bundle.plan,
-            prepared.fixed_model(),
-            point,
-        )
-        .map_err(|error| format!("no stencil at {point:?}: {error:?}"))?;
-        funfern_core::CanonicalPointStencil::from_quadratic(stencil, operator)
-            .and_then(|stencil| stencil.sample(&primary, &primary, &complementary))
-            .map_err(|error| format!("no reading at {point:?}: {error}"))
-    };
+        .collect();
+    Ok((primary, complementary))
+}
+
+/// What a point probe on `prepared` reads at `point` of the state `primary`
+/// and `complementary`: the field and the complementary field.
+fn read_at(
+    prepared: &PreparedTopology,
+    primary: &[f64],
+    complementary: &[Point2],
+    point: Point2,
+) -> Result<(f64, Point2), String> {
+    let stencil = funfern_core::QuadraticPointStencil::build_topology(
+        &prepared.mesh,
+        &prepared.operator,
+        &prepared.bundle.plan,
+        prepared.fixed_model(),
+        point,
+    )
+    .map_err(|error| format!("no stencil at {point:?}: {error:?}"))?;
+    funfern_core::CanonicalPointStencil::from_quadratic(stencil, &prepared.canonical_operator)
+        .and_then(|stencil| stencil.sample(primary, primary, complementary))
+        .map(|reading| (reading.primary, reading.complementary))
+        .map_err(|error| format!("no reading at {point:?}: {error}"))
+}
+
+/// The device's `Q` and `b` jumps from the second point of each pair to the
+/// first, read on `prepared` from the display's full snapshot.
+fn device_jumps(
+    prepared: &PreparedTopology,
+    display: &CanonicalGpuDisplay,
+    pairs: impl Iterator<Item = (Point2, Point2)>,
+) -> Result<Vec<(f64, Point2)>, String> {
+    let (primary, complementary) = device_state(prepared, display)?;
+    let read = |point| read_at(prepared, &primary, &complementary, point);
     pairs
         .map(|(above, below)| {
             let (above, below) = (read(above)?, read(below)?);
-            Ok((
-                above.primary - below.primary,
-                above.complementary - below.complementary,
-            ))
+            Ok((above.0 - below.0, above.1 - below.1))
         })
         .collect()
 }
@@ -1448,6 +1503,147 @@ impl SidesBefore {
             jumps_apart(&behind, None, &self.before),
         ))
     }
+}
+
+/// [`Fixture::SeparatorMidRun`]'s cavity edge.
+const SEPARATED_EDGE: f64 = 0.04;
+
+/// IV-08's loop in `tests/invariants.rs`, its centre and radius: round part
+/// of the cavity beside the pulse, which has spread through it by step 128.
+const SEPARATOR_LOOP: (Point2, f64) = (Point2 { x: 0.21, y: 0.13 }, 0.33);
+
+/// How far the device's endpoint may stand from the unedited run, relatively,
+/// in `Q` and in `b`, read at a grid of points: IV-08's bound in
+/// `tests/invariants.rs`, one halving's move, here the unedited run's own
+/// move from twice the edge, 4.6e-4 and 8.9e-4 in f64 on 2026-11-02. The
+/// edited run read 1.5e-4 and 7.1e-5 from the unedited in f64 that day; with
+/// a new face's complementary field taken only from its own region, as
+/// until 2026-10-06, 0.30 and 0.36.
+const UNEDITED_APART: [f64; 2] = [4.6e-4, 8.9e-4];
+
+/// The points across the cavity the endpoint is read at, a side's count:
+/// the centres of a grid of cells.
+const UNEDITED_GRID: usize = 24;
+
+/// The cavity at [`SEPARATED_EDGE`] in IV-08's medium, as IV-08's box: a
+/// density graded along the frame's first axis and an axis ratio of two, the
+/// frame turned by 0.4, which a face the loop makes must carry over as it
+/// is.
+fn separated_document() -> TopologyDocument {
+    let mut document = cavity_document();
+    document.presentation.mesh_edge = SEPARATED_EDGE;
+    for scene in [&mut document.model.draft, &mut document.model.accepted] {
+        for material in &mut scene.materials {
+            material.mass_density = ScalarField::formula("1.7 + 0.3 * x").expect("IV-08's density");
+            material.axis_ratio = ScalarField::constant(2.0);
+        }
+        for region in &mut scene.regions {
+            region.frame.angle_radians = 0.4;
+        }
+    }
+    document
+}
+
+/// The loop: the document's only closed curve.
+fn the_loop(document: &TopologyDocument) -> Result<CurveId, String> {
+    let mut closed = document
+        .model
+        .draft
+        .geometry
+        .curves
+        .iter()
+        .filter(|curve| matches!(curve.spline, funfern_core::CurveSpline::Closed(_)));
+    match (closed.next(), closed.next()) {
+        (Some(curve), None) => Ok(curve.id),
+        _ => Err("the document has no one loop".into()),
+    }
+}
+
+/// [`Action::Draw`]: [`SEPARATOR_LOOP`] drawn as a subdomain of the
+/// cavity's medium.
+fn draw_the_loop(editor: &mut TopologyEditor) -> Result<(), String> {
+    let (centre, radius) = SEPARATOR_LOOP;
+    editor
+        .create_closed_curve(
+            PeriodicCubicSpline::rounded(centre, radius),
+            ClosedCurvePurpose::Subdomain {
+                material: DEFAULT_MATERIAL,
+            },
+        )
+        .map(|_| ())
+}
+
+/// [`Action::Delete`]: the loop removed, the face it merges with keeping
+/// the background's region, the one the loop only divided.
+fn delete_the_loop(editor: &mut TopologyEditor) -> Result<(), String> {
+    let curve = the_loop(&editor.document)?;
+    let choices = editor.curve_removal_choices(curve)?;
+    let keep = match choices.as_slice() {
+        [] => None,
+        [only] => Some(*only),
+        _ if choices.contains(&BACKGROUND_REGION) => Some(BACKGROUND_REGION),
+        _ => {
+            return Err(format!(
+                "the deletion merges {choices:?}, not the background"
+            ));
+        }
+    };
+    editor.remove_curve(curve, keep).map(|_| ())
+}
+
+/// How far the device's state at `time`, on `target`, stands from the
+/// unedited run `held` on `plain` stepped on to `time` in whole steps no
+/// longer than its own, relatively, at a grid of [`UNEDITED_GRID`] points a
+/// side: in `Q` and in `b`.
+fn unedited_apart(
+    plain: &PreparedTopology,
+    held: &State,
+    target: &PreparedTopology,
+    display: &CanonicalGpuDisplay,
+    time: f64,
+) -> Result<[f64; 2], String> {
+    let State::Fixed(held) = held else {
+        return Err("a time-varying unedited run".into());
+    };
+    let rest = time - held.time();
+    let steps = (rest / held.time_step()).ceil().max(1.0);
+    let operator = &plain.canonical_operator;
+    let mut unedited = CanonicalWaveState::new(
+        operator,
+        rest / steps,
+        held.primary_flux().to_vec(),
+        held.complementary_flux().to_vec(),
+    )
+    .and_then(|state| state.with_time_origin(held.time()))
+    .map_err(|error| error.to_string())?;
+    for _ in 0..steps as u64 {
+        unedited
+            .step_with_forcing(operator, &plain.canonical_forcing)
+            .map_err(|error| format!("the unedited run did not step: {error}"))?;
+    }
+    let (primary, complementary) = device_state(target, display)?;
+    let domain = plain.bundle.authored.geometry.domain;
+    let mut sums = [0.0; 4];
+    for index in 0..UNEDITED_GRID * UNEDITED_GRID {
+        let point = Point2::new(
+            domain.min_x
+                + domain.width() * ((index % UNEDITED_GRID) as f64 + 0.5) / UNEDITED_GRID as f64,
+            domain.min_y
+                + domain.height() * ((index / UNEDITED_GRID) as f64 + 0.5) / UNEDITED_GRID as f64,
+        );
+        let device = read_at(target, &primary, &complementary, point)?;
+        let meant = read_at(
+            plain,
+            unedited.primary_flux(),
+            unedited.complementary_flux(),
+            point,
+        )?;
+        sums[0] += (device.0 - meant.0).powi(2);
+        sums[1] += meant.0 * meant.0;
+        sums[2] += (device.1 - meant.1).dot(device.1 - meant.1);
+        sums[3] += meant.1.dot(meant.1);
+    }
+    Ok([(sums[0] / sums[1]).sqrt(), (sums[2] / sums[3]).sqrt()])
 }
 
 /// Each of the parted cavity's parts' totals of `primary` and of its
@@ -1659,6 +1855,7 @@ fn advance(
                         carry: None,
                         departed: None,
                         sides: None,
+                        unedited: None,
                         twin,
                         far,
                     },
@@ -1725,6 +1922,7 @@ fn advance(
                     carry: None,
                     departed: None,
                     sides: None,
+                    unedited: None,
                     twin: None,
                     far: None,
                 },
@@ -1867,6 +2065,16 @@ fn advance(
                         return Some(Err(format!("the baffle did not move: {error}")));
                     }
                 }
+                Action::Draw => {
+                    if let Err(error) = draw_the_loop(&mut state.editor) {
+                        return Some(Err(format!("the loop was not drawn: {error}")));
+                    }
+                }
+                Action::Delete => {
+                    if let Err(error) = delete_the_loop(&mut state.editor) {
+                        return Some(Err(format!("the loop was not deleted: {error}")));
+                    }
+                }
                 Action::Timestep => state.editor.document.presentation.simulation_speed = 0.5,
                 Action::Drive => {
                     let driven = state.editor.set_outer_condition(
@@ -1950,7 +2158,9 @@ fn advance(
                 | Action::Timestep
                 | Action::Drive
                 | Action::Flux
-                | Action::Move => published.is_none(),
+                | Action::Move
+                | Action::Draw
+                | Action::Delete => published.is_none(),
                 // The loss takes its own phase and never waits here.
                 Action::LoseDevice => {
                     return Some(Err("the device's loss is not an action to wait for".into()));
@@ -2027,7 +2237,11 @@ fn advance(
                 }
                 landed
             };
-            if reference.control.is_none() {
+            if driver.fixture.reads_unedited() {
+                if reference.unedited.is_none() {
+                    reference.unedited = Some((reference.active.clone(), reference.state.clone()));
+                }
+            } else if reference.control.is_none() {
                 reference.control = Some((reference.active.clone(), reference.state.clone()));
             }
             match action {
@@ -2072,7 +2286,9 @@ fn advance(
                 | Action::Timestep
                 | Action::Drive
                 | Action::Flux
-                | Action::Move => {
+                | Action::Move
+                | Action::Draw
+                | Action::Delete => {
                     let target = published.expect("an edit waits for its generation");
                     let (from, to) = (
                         reference.active.canonical_operator.degrees_of_freedom(),
@@ -2090,9 +2306,9 @@ fn advance(
                     {
                         return Some(Err(failure));
                     }
-                    // A move meshes the ground it changes again, its nodes
-                    // as many or not.
-                    if !matches!(action, Action::Move)
+                    // A move, and a curve drawn or deleted, mesh the ground
+                    // they change again, its nodes as many or not.
+                    if !matches!(action, Action::Move | Action::Draw | Action::Delete)
                         && matches!(action, Action::Remesh) == (from == to)
                     {
                         return Some(Err(format!(
@@ -3008,7 +3224,8 @@ fn wall_errors(
 /// residual within their bounds; the device's clock at the time the
 /// reference has reached; and, where the fixture acted, the device far from
 /// the run without its actions, or, for a rebuild that changed nothing,
-/// where that run is.
+/// where that run is, or, where the fixture reads it, within
+/// [`UNEDITED_APART`] of that run stepped on to the same time.
 fn compare(
     reference: &Reference,
     display: &CanonicalGpuDisplay,
@@ -3079,6 +3296,22 @@ fn compare(
         if !within(drift, CLOCK_TOLERANCE) {
             return Err(format!(
                 "{summary} {reached:.6} s, beyond {CLOCK_TOLERANCE:.0e}"
+            ));
+        }
+    }
+    if fixture.reads_unedited() {
+        let Some((plain, held)) = &reference.unedited else {
+            return Err(format!("{summary}: the unedited run was never held"));
+        };
+        let [q, b] = unedited_apart(plain, held, &reference.active, display, expected.time())?;
+        summary.push_str(&format!(
+            "; the unedited run stands {q:.3e} off in Q and {b:.3e} in b"
+        ));
+        if !within(q, UNEDITED_APART[0]) || !within(b, UNEDITED_APART[1]) {
+            return Err(format!(
+                "{summary}, beyond a halving's move of it, {:.1e} and {:.1e}: the device \
+                 does not read the separator as none",
+                UNEDITED_APART[0], UNEDITED_APART[1]
             ));
         }
     }

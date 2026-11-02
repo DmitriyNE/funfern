@@ -1321,7 +1321,10 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   mid-run followed the same day, its CPU half. Its study saw the box with
   outgoing walls converge at about first order below the default edge; the
   cause proved the tests' strike, which starts with a share of the pulse at
-  the walls, not the walls. IV-08's device half is next.
+  the walls, not the walls. IV-08's device half, the `separator-mid-run`
+  fixture, followed the same day, which completes stage C3. Stage C4, the
+  device's observers and IV-01 within f32, is next, planned before it
+  starts.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the

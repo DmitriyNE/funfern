@@ -31652,3 +31652,59 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-02 — IV-08 on the device: a separator drawn and deleted running
+
+- **What it is.** IV-08's device half, the `separator-mid-run` fixture in
+  `crates/funfern-app/src/ui/e2e.rs`, which completes stage C3. The cavity
+  at edge 0.04, 33,819 nodes, takes IV-08's medium, anisotropic in a frame
+  turned by 0.4 and graded along it, and is struck off its middle by a
+  pulse 0.2 wide. At step 128 IV-08's loop, a subdomain of the same medium,
+  is drawn through the editor, 33,849 nodes; at 192 it is deleted, its face
+  given back to the background's region as the merge picker gives it,
+  33,795 nodes; the run goes to 256. Each generation runs at its own step,
+  as the app runs it: at this edge the loop leaves the step at 3.986e-3,
+  and the plain cavity meshed again after the deletion steps at 3.912e-3.
+- **Checks.** Each handed state, and the endpoint, against the reference
+  within 5e-6, as every handoff fixture's. The endpoint, read on the
+  device's own state at the centres of a 24 by 24 grid, must stand from the
+  unedited run within one halving's move of it, in Q and in `b`. The
+  unedited run is the reference held at step 128, on the plain cavity, and
+  stepped on to the endpoint's time in whole steps no longer than its own,
+  as IV-08's control runs at its own step.
+- **The bound.** From the fixture's f64 twin, a study not kept: the
+  unedited run at edge 0.08 against 0.04, 4.6e-4 in Q and 8.9e-4 in `b`,
+  recorded as `UNEDITED_APART`. The twin's edited run read 1.529e-4 and
+  7.12e-5 from the unedited, and with IV-08's defect put back 0.30 and
+  0.36.
+- **Numbers.** On the M1 Max:
+
+  | Reading | Q | `b` |
+  |---|---|---|
+  | Handed state at step 128 against the reference | 4.7e-7 | 5.5e-7 |
+  | Handed state at step 192 against the reference | 5.6e-7 | 6.9e-7 |
+  | Endpoint against the reference | 6.4e-7 | 7.9e-7 |
+  | Endpoint against the unedited run | 1.529e-4 | 7.12e-5 |
+
+  The device reads the twin's distance from the unedited run to its last
+  digit, 0.33 and 0.08 of a halving's move.
+- **What only the device's own state sees.** The device has no code of its
+  own for a new face's complementary field: its tables are built from the
+  maps. With the field taken only from the face's own region, as until
+  2026-10-06, the device stands within 6.5e-7 and 7.8e-7 of the reference,
+  which carries the field the same way, while its own state stands 0.303
+  and 0.364 from the unedited run.
+- **Mutation** `complementary-from-its-own-region-only-on-the-device` is
+  that defect, run against the fixture.
+- **The driver.** Two actions, `Draw` and `Delete`, through the editor's own
+  calls; a curve drawn or deleted, like a move, meshes the ground it
+  changes again, its nodes as many or not. The reading at a point is shared
+  with the baffle's jumps (`read_at`, `device_state`).
+- **Suite and CI.** The device suite runs it after `baffle-move`: 116 of
+  116 pass (`target/device-suite/20261102-160700`), the fixture in 4 s.
+  CI's lavapipe job takes it from the suite's run lines, and the nightly
+  browser parts put it in `handoffs`, which took 37 and 50 minutes on
+  2026-11-01 against its 340.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

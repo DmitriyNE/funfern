@@ -141,6 +141,7 @@ RUNS=(
   'FUNFERN_E2E=remesh funfern-fixtures'
   'FUNFERN_E2E=neutral-remesh funfern-fixtures'
   'FUNFERN_E2E=baffle-move funfern-fixtures'
+  'FUNFERN_E2E=separator-mid-run funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-rebuild funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-remesh funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-edit funfern-fixtures'

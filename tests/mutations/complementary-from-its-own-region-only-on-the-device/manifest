@@ -1,0 +1,4 @@
+about: the defect of complementary-from-its-own-region-only read on the device: a loop drawn and deleted mid-run leaves the device's own state far from the unedited run, while the device stands with the reference, which carries the field the same way
+test: scripts/e2e-fixture.sh separator-mid-run
+expect: the device does not read the separator as none
+needs: device

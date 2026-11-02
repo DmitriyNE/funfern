@@ -98,8 +98,16 @@ the move and at the handoff, 0.3 of an edge to each side of 33 points along
 the baffle, the jump at the moved baffle must stand within 0.3 of each
 side's own values and no more than 0.1 of it may be left where the baffle
 was: it reads 0.024 in Q and 0.172 in b, 0.010 and 0.091 left behind, and
-the handed state reads Q `6.7e-7` against the reference. The six `handoff-memory`
-fixtures, `-rebuild`, `-remesh`, `-edit`, `-timestep`, `-flux` and `-running`, give
+the handed state reads Q `6.7e-7` against the reference. `separator-mid-run`,
+IV-08 edited mid-run on the device, gives the cavity at edge 0.04 IV-08's
+medium, anisotropic in a turned frame and graded along it, strikes it off
+its middle, draws IV-08's loop of the same medium through the editor at
+step 128 and deletes it at 192, its face given back to the background.
+Each handed state stands within 7e-7 of the reference, and the endpoint,
+read on the device's own state at a grid of points, must stand from the
+unedited run, stepped on to the same time, within one halving's move of
+that run, 4.6e-4 in Q and 8.9e-4 in b: it reads 1.5e-4 and 7.1e-5. The six
+`handoff-memory` fixtures, `-rebuild`, `-remesh`, `-edit`, `-timestep`, `-flux` and `-running`, give
 the cavity a second-order outgoing wall on its bottom side and a 0.8 Hz drive
 on its top, run the pulse into the wall, and at step 192, once the wall holds
 6.5e-4 of the field's energy, hand the running field over the way the name
@@ -1444,7 +1452,9 @@ at its own step within one halving's move, in the field and the
 complementary field. 9 cases in the gate in about 10 s, 27 in the nightly.
 Its mutation is `complementary-from-its-own-region-only`, which the
 runtime's `a_new_or_retired_region_keeps_its_complementary_field` catches
-too.
+too. Its device half is the `separator-mid-run` fixture, whose mutation
+`complementary-from-its-own-region-only-on-the-device` puts the same defect
+back.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
