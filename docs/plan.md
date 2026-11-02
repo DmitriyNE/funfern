@@ -1332,7 +1332,10 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   reversibility, landed the same day: it found sine-Gordon and φ⁴ media
   stepped by the fourth-order step's drift form, which reads `V″` at the
   step's start and does not step back (fixed: they take the kick form).
-  IV-06, similarity scaling, and IV-13, split/merge reversal, follow.
+  IV-06, similarity scaling, followed the same day: a scene sooner or
+  larger by 4 runs to the original's bits, and no time or length in the
+  solver is absolute. Its device half and IV-13, split/merge reversal,
+  follow.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the

@@ -60,6 +60,10 @@ use funfern_core::{
     RestoringLaw, SpanBehavior, SymmetricTensor2, TimeSignal, TopologyCurve, TopologyScene,
     TopologyVertexId, TopologyVertexLocation, TriMesh,
 };
+use funfern_core::{
+    CoefficientLaw, LawPresetRow, LossChannel, PulseEnvelope, PulseTrain, ScalarField, TimeDrive,
+    primary_coefficient_row, primary_loss_is_electric,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -524,14 +528,27 @@ fn prepare_at(
     document: &TopologyDocument,
     edge: f64,
 ) -> Result<(TopologyEditor, TopologyRuntime, Arc<PreparedTopology>), String> {
+    let editor = accepted(document)?;
+    let domain = editor.document.model.accepted.geometry.domain;
+    prepare_with(editor, meshing(domain, edge))
+}
+
+/// `document` opened and validated to acceptance.
+fn accepted(document: &TopologyDocument) -> Result<TopologyEditor, String> {
     let mut editor = TopologyEditor::from_document(document.clone())
         .map_err(|error| format!("does not load: {error}"))?;
     settle(&mut editor);
     if let TopologyAcceptance::Invalid(issue) = &editor.acceptance {
         return Err(format!("refused at acceptance: {issue}"));
     }
-    let domain = editor.document.model.accepted.geometry.domain;
-    let options = meshing(domain, edge);
+    Ok(editor)
+}
+
+/// `editor`'s document, accepted, prepared at `options` and published.
+fn prepare_with(
+    editor: TopologyEditor,
+    options: MeshingOptions,
+) -> Result<(TopologyEditor, TopologyRuntime, Arc<PreparedTopology>), String> {
     let mut runtime = TopologyRuntime::default();
     runtime.request(
         editor.revision,
@@ -1272,6 +1289,8 @@ enum Motion {
     /// not share, so a run must end before its waves reach them, and no
     /// curve may meet a side.
     Turn { centre: Point2, angle: f64 },
+    /// Everything `s` times as far from the origin.
+    Scale(f64),
 }
 
 impl Motion {
@@ -1287,6 +1306,7 @@ impl Motion {
                     sin * vector.x + cos * vector.y,
                 )
             }
+            Motion::Scale(s) => vector * s,
         }
     }
 
@@ -1302,18 +1322,56 @@ impl Motion {
         matches!(self, Motion::Mirror { .. })
     }
 
+    /// How many times as long a run carried through the motion takes: a
+    /// similarity's factor, one for a rigid motion.
+    fn time(self) -> f64 {
+        match self {
+            Motion::Scale(s) => s,
+            _ => 1.0,
+        }
+    }
+
+    /// The primary field's image. Through a similarity it comes `1/s` as
+    /// strong, so that what a displacement reads, its integral over the
+    /// longer time, stays as it was.
+    fn field(self, value: f64) -> f64 {
+        match self {
+            Motion::Scale(s) => value / s,
+            _ => value,
+        }
+    }
+
     /// The complementary field's image. The field is a gradient turned a
     /// quarter, `R∇ψ`, and a reflection turns it the other way: `-M b`.
+    /// Through a similarity the potential stays as it was, so its gradient
+    /// is `1/s` as steep.
     fn complementary(self, vector: Point2) -> Point2 {
-        let image = self.linear(vector);
+        let image = match self {
+            Motion::Scale(s) => vector / s,
+            _ => self.linear(vector),
+        };
         if self.reflects() { image * -1.0 } else { image }
+    }
+
+    /// `pulse` carried: its centre moved and, through a similarity, its
+    /// width and height with the scene's.
+    fn pulse(self, pulse: Pulse) -> Pulse {
+        let size = match self {
+            Motion::Scale(s) => s,
+            _ => 1.0,
+        };
+        Pulse {
+            centre: self.point(pulse.centre),
+            width: pulse.width * size,
+            height: self.field(pulse.height),
+        }
     }
 
     /// A tensor's image, `L A Lᵀ`.
     fn tensor(self, tensor: SymmetricTensor2) -> SymmetricTensor2 {
         let SymmetricTensor2 { xx, xy, yy } = tensor;
         match self {
-            Motion::Shift(_) => tensor,
+            Motion::Shift(_) | Motion::Scale(_) => tensor,
             Motion::QuarterTurn => SymmetricTensor2 {
                 xx: yy,
                 xy: -xy,
@@ -1352,7 +1410,7 @@ impl Motion {
     /// counterclockwise round the domain.
     fn side(self, side: OuterSide, fraction: f64) -> (OuterSide, f64) {
         match self {
-            Motion::Shift(_) | Motion::Turn { .. } => (side, fraction),
+            Motion::Shift(_) | Motion::Turn { .. } | Motion::Scale(_) => (side, fraction),
             Motion::QuarterTurn => (
                 match side {
                     OuterSide::Bottom => OuterSide::Right,
@@ -1377,7 +1435,7 @@ impl Motion {
         MaterialFrame {
             origin: self.point(frame.origin),
             angle_radians: match self {
-                Motion::Shift(_) => frame.angle_radians,
+                Motion::Shift(_) | Motion::Scale(_) => frame.angle_radians,
                 Motion::QuarterTurn => frame.angle_radians + std::f64::consts::FRAC_PI_2,
                 Motion::Mirror { turn } => turn - frame.angle_radians,
                 Motion::Turn { angle, .. } => frame.angle_radians + angle,
@@ -1472,13 +1530,21 @@ impl Motion {
             }
         }
         model.source.position = self.point(model.source.position);
+        let size = match self {
+            Motion::Scale(s) => s,
+            _ => 1.0,
+        };
+        model.source.width *= size;
         for probe in &mut model.probes {
             match &mut probe.target {
                 TopologyProbeTarget::Point(point) => *point = self.point(*point),
                 TopologyProbeTarget::Segment { start, end, .. } => {
                     (*start, *end) = (self.point(*start), self.point(*end));
                 }
-                TopologyProbeTarget::AreaDisk { center, .. } => *center = self.point(*center),
+                TopologyProbeTarget::AreaDisk { center, radius } => {
+                    *center = self.point(*center);
+                    *radius *= size;
+                }
                 TopologyProbeTarget::Boundary(target) => target.side = self.trace_side(target.side),
                 TopologyProbeTarget::AreaRegion(_) => {}
             }
@@ -1517,11 +1583,14 @@ fn probe_at(prepared: &PreparedTopology, run: &Run, point: Point2) -> Option<(f6
 /// frame as the solver reads it: its density, stiffness and axis ratio, its
 /// loss rates, its restoring law's scale, and each drive's multiplier at
 /// three instants; and its stiffness as a tensor in world axes, the frame's
-/// turn on it, built here from the principal values.
+/// turn on it, built here from the principal values. Its rates and instants
+/// are read in units `later` times as long, so that a scene a similarity
+/// carried reads as its original.
 fn laws_at(
     scene: &TopologyScene,
     region: RegionId,
     point: Point2,
+    later: f64,
 ) -> Result<(Vec<f64>, SymmetricTensor2), String> {
     let region = scene.region(region).ok_or("no such region")?;
     let material = scene.material(region.material).ok_or("no such material")?;
@@ -1542,22 +1611,22 @@ fn laws_at(
         .into_iter()
         .flatten()
     {
-        values.push(field(&loss.base_rate)?);
+        values.push(field(&loss.base_rate)? * later);
         drives.push(&loss.law.drive);
     }
     values.push(match &material.restoring {
         RestoringLaw::None => 0.0,
         RestoringLaw::KleinGordon { omega0 } | RestoringLaw::SineGordon { omega0 } => {
-            field(omega0)?
+            field(omega0)? * later
         }
-        RestoringLaw::Phi4 { lambda, .. } => field(lambda)?,
+        RestoringLaw::Phi4 { lambda, .. } => field(lambda)? * later * later,
     });
     for drive in drives {
         let drive = drive
             .evaluate(parameters)
             .map_err(|error| format!("{error:?}"))?;
         for time in [0.0, 0.37, 1.1] {
-            values.push(drive.multiplier(time, coordinates));
+            values.push(drive.multiplier(time * later, coordinates));
         }
     }
     // Stiffness times the ratio along the frame's first axis and over it
@@ -1633,8 +1702,13 @@ fn carried(
             continue;
         };
         let ((laws_here, tensor_here), (laws_there, tensor_there)) = (
-            laws_at(&original.bundle.authored, here.region, *point)?,
-            laws_at(&other.bundle.authored, there.region, motion.point(*point))?,
+            laws_at(&original.bundle.authored, here.region, *point, 1.0)?,
+            laws_at(
+                &other.bundle.authored,
+                there.region,
+                motion.point(*point),
+                motion.time(),
+            )?,
         );
         let tensor = motion.tensor(tensor_here);
         if laws_here.len() != laws_there.len()
@@ -1674,8 +1748,9 @@ fn moved_apart(
         ) else {
             continue;
         };
-        field += (there.0 - here.0).powi(2);
-        field_norm += here.0 * here.0;
+        let image = motion.field(here.0);
+        field += (there.0 - image).powi(2);
+        field_norm += image * image;
         let expected = motion.complementary(here.1);
         complementary += (there.1 - expected).dot(there.1 - expected);
         complementary_norm += expected.dot(expected);
@@ -1734,18 +1809,18 @@ fn levels_against(
     let edge = document.presentation.mesh_edge;
     let domain = document.model.accepted.geometry.domain;
     let pulse = Pulse::off_centre(domain, 1.0);
-    let moved_pulse = Pulse {
-        centre: motion.point(pulse.centre),
-        ..pulse
-    };
+    let moved_pulse = motion.pulse(pulse);
     let mut duration = 0.0;
     let (mut points, mut law_points) = (Vec::new(), Vec::new());
     let mut levels = Vec::new();
     let mut previous: Option<(Arc<PreparedTopology>, Run)> = None;
     for factor in LEVELS {
         let (_, _, original) = prepare_at(document, edge * factor)?;
-        let (_, _, other) =
-            prepare_at(other_document, edge * factor).map_err(|error| format!("moved: {error}"))?;
+        let (_, _, other) = prepare_at(
+            other_document,
+            other_document.presentation.mesh_edge * factor,
+        )
+        .map_err(|error| format!("moved: {error}"))?;
         if previous.is_none() {
             duration = 64.0 * original.recommended_time_step();
             points = common_points(domain, &original.mesh, edge * LEVELS[0]);
@@ -1754,11 +1829,12 @@ fn levels_against(
             law_points = common_points(domain, &original.mesh, 1.0e-3);
         }
         carried(&original, &other, motion, &law_points)?;
+        let later = motion.time();
         let time_step = original
             .recommended_time_step()
-            .min(other.recommended_time_step());
+            .min(other.recommended_time_step() / later);
         let original_run = run_for(&original, time_step, duration, pulse)?;
-        let other_run = run_for(&other, time_step, duration, moved_pulse)?;
+        let other_run = run_for(&other, time_step * later, duration * later, moved_pulse)?;
         let (field, complementary, _) = moved_apart(
             (&original, &original_run),
             (&other, &other_run),
@@ -3867,4 +3943,825 @@ fn a_conservative_run_retraces_its_way_back() {
         scenes.push(gapped(physics).unwrap());
     }
     over_scenes("retraced", scenes, reversed);
+}
+
+/// `field` times `factor`.
+fn field_times(field: &ScalarField, factor: f64) -> Result<ScalarField, String> {
+    match field {
+        ScalarField::Constant(value) => Ok(ScalarField::Constant(value * factor)),
+        ScalarField::Formula(_) => {
+            let source = field.source().ok_or("a formula without its source")?;
+            ScalarField::formula(format!("({source}) * {factor:?}"))
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+/// A similarity of time by `s`: everything that happens, `s` times sooner.
+#[derive(Clone, Copy, Debug)]
+struct Sooner(f64);
+
+impl Sooner {
+    fn envelope(self, envelope: PulseEnvelope) -> PulseEnvelope {
+        let Sooner(s) = self;
+        match envelope {
+            PulseEnvelope::FlatTop { duration, edge } => PulseEnvelope::FlatTop {
+                duration: duration / s,
+                edge: edge / s,
+            },
+            PulseEnvelope::Gaussian { width } => PulseEnvelope::Gaussian { width: width / s },
+            PulseEnvelope::Sinc {
+                bandwidth_hz,
+                lobes,
+            } => PulseEnvelope::Sinc {
+                bandwidth_hz: bandwidth_hz * s,
+                lobes,
+            },
+        }
+    }
+
+    /// `signal` sooner, and `amplitude` times as strong.
+    fn signal(self, signal: TimeSignal, amplitude: f64) -> TimeSignal {
+        let Sooner(s) = self;
+        match signal {
+            TimeSignal::Harmonic {
+                offset,
+                amplitude: height,
+                frequency_hz,
+                phase_radians,
+            } => TimeSignal::Harmonic {
+                offset: offset * amplitude,
+                amplitude: height * amplitude,
+                frequency_hz: frequency_hz * s,
+                phase_radians,
+            },
+            TimeSignal::Pulsed {
+                offset,
+                amplitude: height,
+                frequency_hz,
+                phase_radians,
+                envelope,
+                start,
+                repeat,
+            } => TimeSignal::Pulsed {
+                offset: offset * amplitude,
+                amplitude: height * amplitude,
+                frequency_hz: frequency_hz * s,
+                phase_radians,
+                envelope: self.envelope(envelope),
+                start: start / s,
+                repeat: repeat / s,
+            },
+        }
+    }
+
+    /// A source's or a Neumann side's signal sooner. It drives the primary
+    /// field's rate, `s²` times as strong, over weights the primary mass
+    /// scales, a pulse as authored and a harmonic as the acceleration it
+    /// integrates, `s³` times as strong.
+    fn acceleration(self, signal: TimeSignal) -> TimeSignal {
+        let Sooner(s) = self;
+        let rate = s * s;
+        self.signal(signal, if signal.is_pulsed() { rate } else { rate * s })
+    }
+
+    /// A Neumann signal sooner: a flux, as strong as it was, a harmonic the
+    /// rate it integrates, `s` times as strong.
+    fn flux(self, signal: TimeSignal) -> TimeSignal {
+        let Sooner(s) = self;
+        self.signal(signal, if signal.is_pulsed() { 1.0 } else { s })
+    }
+
+    fn gate(self, gate: Option<PulseTrain>) -> Option<PulseTrain> {
+        let Sooner(s) = self;
+        gate.map(|gate| PulseTrain {
+            envelope: self.envelope(gate.envelope),
+            start: gate.start / s,
+            repeat: gate.repeat / s,
+        })
+    }
+
+    fn drive(self, drive: &TimeDrive) -> Result<TimeDrive, String> {
+        let Sooner(s) = self;
+        Ok(match drive {
+            TimeDrive::None => TimeDrive::None,
+            TimeDrive::ParametricPump {
+                depth,
+                frequency_hz,
+                phase_radians,
+            } => TimeDrive::ParametricPump {
+                depth: depth.clone(),
+                frequency_hz: field_times(frequency_hz, s)?,
+                phase_radians: phase_radians.clone(),
+            },
+            TimeDrive::TimeCrystal {
+                depth,
+                frequency_hz,
+                phase_radians,
+                sharpness,
+            } => TimeDrive::TimeCrystal {
+                depth: depth.clone(),
+                frequency_hz: field_times(frequency_hz, s)?,
+                phase_radians: phase_radians.clone(),
+                sharpness: sharpness.clone(),
+            },
+            TimeDrive::TravellingModulation {
+                depth,
+                frequency_hz,
+                phase_radians,
+                wavenumber,
+                angle_radians,
+            } => TimeDrive::TravellingModulation {
+                depth: depth.clone(),
+                frequency_hz: field_times(frequency_hz, s)?,
+                phase_radians: phase_radians.clone(),
+                wavenumber: wavenumber.clone(),
+                angle_radians: angle_radians.clone(),
+            },
+        })
+    }
+
+    /// A row's law. On the primary row its field law reads the primary
+    /// field, `s` times as strong; the complementary row's reads what does
+    /// not change.
+    fn law(self, law: &mut CoefficientLaw, primary: bool) -> Result<(), String> {
+        let Sooner(s) = self;
+        if primary {
+            law.field = match &law.field {
+                FieldLaw::Linear => FieldLaw::Linear,
+                FieldLaw::Polynomial {
+                    chi1,
+                    chi2,
+                    amplitude_bound,
+                } => FieldLaw::Polynomial {
+                    chi1: field_times(chi1, 1.0 / s)?,
+                    chi2: field_times(chi2, 1.0 / (s * s))?,
+                    amplitude_bound: amplitude_bound
+                        .as_ref()
+                        .map(|bound| field_times(bound, s))
+                        .transpose()?,
+                },
+                FieldLaw::Saturable { chi, saturation } => FieldLaw::Saturable {
+                    chi: field_times(chi, 1.0 / (s * s))?,
+                    saturation: field_times(saturation, s)?,
+                },
+            };
+        }
+        law.drive = self.drive(&law.drive)?;
+        law.gate = self.gate(law.gate);
+        Ok(())
+    }
+
+    fn loss(self, loss: &mut Option<LossChannel>, primary: bool) -> Result<(), String> {
+        let Sooner(s) = self;
+        let Some(loss) = loss else {
+            return Ok(());
+        };
+        loss.base_rate = field_times(&loss.base_rate, s)?;
+        if primary {
+            loss.law.rate = match &loss.law.rate {
+                RateLaw::Constant => RateLaw::Constant,
+                RateLaw::SaturableAbsorption { saturation } => RateLaw::SaturableAbsorption {
+                    saturation: field_times(saturation, s)?,
+                },
+                RateLaw::Polynomial {
+                    beta1,
+                    beta2,
+                    amplitude_bound,
+                } => RateLaw::Polynomial {
+                    beta1: field_times(beta1, 1.0 / s)?,
+                    beta2: field_times(beta2, 1.0 / (s * s))?,
+                    amplitude_bound: amplitude_bound
+                        .as_ref()
+                        .map(|bound| field_times(bound, s))
+                        .transpose()?,
+                },
+                RateLaw::VanDerPol {
+                    threshold,
+                    amplitude_bound,
+                } => RateLaw::VanDerPol {
+                    threshold: field_times(threshold, s)?,
+                    amplitude_bound: field_times(amplitude_bound, s)?,
+                },
+            };
+        }
+        loss.law.drive = self.drive(&loss.law.drive)?;
+        loss.law.gate = self.gate(loss.law.gate);
+        Ok(())
+    }
+
+    /// `document` sooner: every medium's primary coefficient divided by
+    /// `s²`, so its waves run `s` times faster, every rate and frequency
+    /// times `s`, every duration and instant divided by it, and the laws
+    /// that read the primary field, which comes `s` times as strong,
+    /// carried with it. What a displacement reads, `b`, `r` and a gap's
+    /// jump, stays as it was.
+    fn document(self, document: &TopologyDocument) -> Result<TopologyDocument, String> {
+        let Sooner(s) = self;
+        let mut document = document.clone();
+        let model = &mut document.model;
+        for scene in [&mut model.draft, &mut model.accepted] {
+            let physics = scene.physics;
+            let primary_mass = primary_coefficient_row(physics) == LawPresetRow::Mass;
+            let electric = primary_loss_is_electric(physics);
+            for material in &mut scene.materials {
+                if primary_mass {
+                    material.mass_density = field_times(&material.mass_density, 1.0 / (s * s))?;
+                } else {
+                    material.stiffness = field_times(&material.stiffness, 1.0 / (s * s))?;
+                }
+                self.law(&mut material.mass_law, primary_mass)?;
+                self.law(&mut material.stiffness_law, !primary_mass)?;
+                self.loss(&mut material.electric_loss, electric)?;
+                self.loss(&mut material.magnetic_loss, !electric)?;
+                material.restoring = match &material.restoring {
+                    RestoringLaw::None => RestoringLaw::None,
+                    RestoringLaw::KleinGordon { omega0 } => RestoringLaw::KleinGordon {
+                        omega0: field_times(omega0, s)?,
+                    },
+                    RestoringLaw::SineGordon { omega0 } => RestoringLaw::SineGordon {
+                        omega0: field_times(omega0, s)?,
+                    },
+                    RestoringLaw::Phi4 {
+                        lambda,
+                        amplitude_bound,
+                    } => RestoringLaw::Phi4 {
+                        lambda: field_times(lambda, s * s)?,
+                        amplitude_bound: amplitude_bound.clone(),
+                    },
+                };
+                material.switch_ramp /= s;
+            }
+            for source in &mut scene.volume_sources {
+                source.signal = self.acceleration(source.signal);
+            }
+            for side in &mut scene.outer_boundaries.sides {
+                match side {
+                    OuterBoundaryCondition::Neumann { signal } => *signal = self.flux(*signal),
+                    OuterBoundaryCondition::Dirichlet { signal } => {
+                        *signal = self.signal(*signal, s)
+                    }
+                    _ => {}
+                }
+            }
+            for span in scene
+                .geometry
+                .curves
+                .iter_mut()
+                .flat_map(|curve| &mut curve.spans)
+            {
+                if let SpanBehavior::Separated { left, right, .. } = &mut span.behavior {
+                    for face in [left, right] {
+                        match face {
+                            FaceBoundaryCondition::Neumann { signal } => {
+                                *signal = self.flux(*signal)
+                            }
+                            FaceBoundaryCondition::Dirichlet { signal } => {
+                                *signal = self.signal(*signal, s)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        model.source.signal = self.acceleration(model.source.signal);
+        Ok(document)
+    }
+}
+
+/// A similarity of space by `s`, time with it: everything `s` times as
+/// large and as slow, the media as they were.
+#[derive(Clone, Copy, Debug)]
+struct Larger(f64);
+
+impl Larger {
+    /// `field` read at the point it stood at, `1/s` of the way out.
+    fn spatial(self, field: &ScalarField) -> Result<ScalarField, String> {
+        let Larger(s) = self;
+        match field {
+            ScalarField::Constant(_) => Ok(field.clone()),
+            ScalarField::Formula(_) => {
+                let mut source = field
+                    .source()
+                    .ok_or("a formula without its source")?
+                    .to_string();
+                for variable in ["x", "y", "r"] {
+                    source = funfern_core::replace_identifier(
+                        &source,
+                        variable,
+                        &format!("({variable} / {s:?})"),
+                    );
+                }
+                ScalarField::formula(source).map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    /// `field` carried and times `factor`.
+    fn field(self, field: &ScalarField, factor: f64) -> Result<ScalarField, String> {
+        field_times(&self.spatial(field)?, factor)
+    }
+
+    fn sooner(self) -> Sooner {
+        Sooner(1.0 / self.0)
+    }
+
+    fn drive(self, drive: &TimeDrive) -> Result<TimeDrive, String> {
+        let Larger(s) = self;
+        let f = |field: &ScalarField| self.spatial(field);
+        Ok(match drive {
+            TimeDrive::None => TimeDrive::None,
+            TimeDrive::ParametricPump {
+                depth,
+                frequency_hz,
+                phase_radians,
+            } => TimeDrive::ParametricPump {
+                depth: f(depth)?,
+                frequency_hz: self.field(frequency_hz, 1.0 / s)?,
+                phase_radians: f(phase_radians)?,
+            },
+            TimeDrive::TimeCrystal {
+                depth,
+                frequency_hz,
+                phase_radians,
+                sharpness,
+            } => TimeDrive::TimeCrystal {
+                depth: f(depth)?,
+                frequency_hz: self.field(frequency_hz, 1.0 / s)?,
+                phase_radians: f(phase_radians)?,
+                sharpness: f(sharpness)?,
+            },
+            TimeDrive::TravellingModulation {
+                depth,
+                frequency_hz,
+                phase_radians,
+                wavenumber,
+                angle_radians,
+            } => TimeDrive::TravellingModulation {
+                depth: f(depth)?,
+                frequency_hz: self.field(frequency_hz, 1.0 / s)?,
+                phase_radians: f(phase_radians)?,
+                wavenumber: self.field(wavenumber, 1.0 / s)?,
+                angle_radians: f(angle_radians)?,
+            },
+        })
+    }
+
+    /// A row's law. Both fields come `1/s` times as strong, so every field
+    /// law's amplitude goes with them, on either row.
+    fn law(self, law: &mut CoefficientLaw) -> Result<(), String> {
+        let Larger(s) = self;
+        law.field = match &law.field {
+            FieldLaw::Linear => FieldLaw::Linear,
+            FieldLaw::Polynomial {
+                chi1,
+                chi2,
+                amplitude_bound,
+            } => FieldLaw::Polynomial {
+                chi1: self.field(chi1, s)?,
+                chi2: self.field(chi2, s * s)?,
+                amplitude_bound: amplitude_bound
+                    .as_ref()
+                    .map(|bound| self.field(bound, 1.0 / s))
+                    .transpose()?,
+            },
+            FieldLaw::Saturable { chi, saturation } => FieldLaw::Saturable {
+                chi: self.field(chi, s * s)?,
+                saturation: self.field(saturation, 1.0 / s)?,
+            },
+        };
+        law.drive = self.drive(&law.drive)?;
+        law.gate = self.sooner().gate(law.gate);
+        law.alternate = law
+            .alternate
+            .as_ref()
+            .map(|alternate| self.spatial(alternate))
+            .transpose()?;
+        Ok(())
+    }
+
+    fn loss(self, loss: &mut Option<LossChannel>) -> Result<(), String> {
+        let Larger(s) = self;
+        let Some(loss) = loss else {
+            return Ok(());
+        };
+        loss.base_rate = self.field(&loss.base_rate, 1.0 / s)?;
+        loss.law.rate = match &loss.law.rate {
+            RateLaw::Constant => RateLaw::Constant,
+            RateLaw::SaturableAbsorption { saturation } => RateLaw::SaturableAbsorption {
+                saturation: self.field(saturation, 1.0 / s)?,
+            },
+            RateLaw::Polynomial {
+                beta1,
+                beta2,
+                amplitude_bound,
+            } => RateLaw::Polynomial {
+                beta1: self.field(beta1, s)?,
+                beta2: self.field(beta2, s * s)?,
+                amplitude_bound: amplitude_bound
+                    .as_ref()
+                    .map(|bound| self.field(bound, 1.0 / s))
+                    .transpose()?,
+            },
+            RateLaw::VanDerPol {
+                threshold,
+                amplitude_bound,
+            } => RateLaw::VanDerPol {
+                threshold: self.field(threshold, 1.0 / s)?,
+                amplitude_bound: self.field(amplitude_bound, 1.0 / s)?,
+            },
+        };
+        loss.law.drive = self.drive(&loss.law.drive)?;
+        loss.law.gate = self.sooner().gate(loss.law.gate);
+        Ok(())
+    }
+
+    /// `document` larger: its geometry, frames, source and probes carried
+    /// through [`Motion::Scale`] and its mesh edge with them; every formula
+    /// read where its point stood; every rate and frequency divided by `s`
+    /// and every duration and instant times it; and what drives the field,
+    /// which comes `1/s` times as strong, as strong as that asks. What a
+    /// displacement reads, `r` and a gap's jump, stays as it was.
+    fn document(self, document: &TopologyDocument) -> Result<TopologyDocument, String> {
+        let Larger(s) = self;
+        let mut document = Motion::Scale(s).document(document)?;
+        document.presentation.mesh_edge *= s;
+        let sooner = self.sooner();
+        let model = &mut document.model;
+        for scene in [&mut model.draft, &mut model.accepted] {
+            for material in &mut scene.materials {
+                material.mass_density = self.spatial(&material.mass_density)?;
+                material.stiffness = self.spatial(&material.stiffness)?;
+                material.axis_ratio = self.spatial(&material.axis_ratio)?;
+                self.law(&mut material.mass_law)?;
+                self.law(&mut material.stiffness_law)?;
+                self.loss(&mut material.electric_loss)?;
+                self.loss(&mut material.magnetic_loss)?;
+                material.restoring = match &material.restoring {
+                    RestoringLaw::None => RestoringLaw::None,
+                    RestoringLaw::KleinGordon { omega0 } => RestoringLaw::KleinGordon {
+                        omega0: self.field(omega0, 1.0 / s)?,
+                    },
+                    RestoringLaw::SineGordon { omega0 } => RestoringLaw::SineGordon {
+                        omega0: self.field(omega0, 1.0 / s)?,
+                    },
+                    RestoringLaw::Phi4 {
+                        lambda,
+                        amplitude_bound,
+                    } => RestoringLaw::Phi4 {
+                        lambda: self.field(lambda, 1.0 / (s * s))?,
+                        amplitude_bound: self.spatial(amplitude_bound)?,
+                    },
+                };
+                material.switch_ramp *= s;
+            }
+            // A source drives the primary field's rate, `1/s²` as strong,
+            // over weights the mass and the area scale, a harmonic as the
+            // acceleration it integrates; a Neumann side its flux, over
+            // weights its length scales.
+            let rate = |signal: TimeSignal| {
+                sooner.signal(
+                    signal,
+                    if signal.is_pulsed() {
+                        1.0 / (s * s)
+                    } else {
+                        1.0 / (s * s * s)
+                    },
+                )
+            };
+            let flux = |signal: TimeSignal| {
+                sooner.signal(
+                    signal,
+                    if signal.is_pulsed() {
+                        1.0 / s
+                    } else {
+                        1.0 / (s * s)
+                    },
+                )
+            };
+            for source in &mut scene.volume_sources {
+                source.profile = self.spatial(&source.profile)?;
+                source.signal = rate(source.signal);
+            }
+            for side in &mut scene.outer_boundaries.sides {
+                match side {
+                    OuterBoundaryCondition::Neumann { signal } => *signal = flux(*signal),
+                    OuterBoundaryCondition::Dirichlet { signal } => {
+                        *signal = sooner.signal(*signal, 1.0 / s)
+                    }
+                    _ => {}
+                }
+            }
+            for span in scene
+                .geometry
+                .curves
+                .iter_mut()
+                .flat_map(|curve| &mut curve.spans)
+            {
+                if let SpanBehavior::Separated { left, right, .. } = &mut span.behavior {
+                    for face in [left, right] {
+                        match face {
+                            FaceBoundaryCondition::Neumann { signal } => *signal = flux(*signal),
+                            FaceBoundaryCondition::Dirichlet { signal } => {
+                                *signal = sooner.signal(*signal, 1.0 / s)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        model.source.signal = {
+            let signal = model.source.signal;
+            sooner.signal(
+                signal,
+                if signal.is_pulsed() {
+                    1.0 / (s * s)
+                } else {
+                    1.0 / (s * s * s)
+                },
+            )
+        };
+        Ok(document)
+    }
+}
+
+impl Sooner {
+    fn scales(self) -> Scales {
+        let Sooner(s) = self;
+        Scales {
+            primary_flux: 1.0 / s,
+            complementary: 1.0,
+            field: s,
+            time: 1.0 / s,
+            length: 1.0,
+        }
+    }
+}
+
+impl Larger {
+    fn scales(self) -> Scales {
+        let Larger(s) = self;
+        Scales {
+            primary_flux: s,
+            complementary: 1.0 / s,
+            field: 1.0 / s,
+            time: s,
+            length: s,
+        }
+    }
+}
+
+/// The factor IV-06's exact similarities take: a power of four, so that
+/// every quantity a run carries, and every square root of one, scales by a
+/// power of two. By two, the second-order wall's modal transform, which
+/// takes the square root of the wall's damping, rounds `√2` otherwise.
+const EXACTLY: f64 = 4.0;
+
+/// The factor IV-06's other similarities take, no power of two.
+const GENERICALLY: f64 = 1.37;
+
+/// How a run's quantities scale through a similarity: Q, `b` with the
+/// complementary field, the primary field, time and length. `r`, a gap's
+/// jump and the energy stay as they were.
+#[derive(Clone, Copy, Debug)]
+struct Scales {
+    primary_flux: f64,
+    complementary: f64,
+    field: f64,
+    time: f64,
+    length: f64,
+}
+
+/// `document`, the original's image through a similarity of `scales`,
+/// meshed at `options` with their lengths carried, struck by the pulse
+/// carried and run as many steps as the control, each `time` times as long:
+/// how far it stands from the control, each quantity scaled back, and
+/// whether it is the control's to the bit.
+fn similar_run(
+    (original, control, time_step): (&PreparedTopology, &Run, f64),
+    document: &TopologyDocument,
+    options: MeshingOptions,
+    scales: Scales,
+) -> Result<(Apart, bool), String> {
+    let editor = accepted(document)?;
+    let domain = editor.document.model.accepted.geometry.domain;
+    let options = MeshingOptions {
+        target_edge_length: options.target_edge_length * scales.length,
+        curve_tolerance: options.curve_tolerance * scales.length,
+        ..options
+    }
+    .sized_for_area(domain.width() * domain.height());
+    let (_, _, other) = prepare_with(editor, options)?;
+    if other.mesh.triangles != original.mesh.triangles
+        || other.mesh.vertices.len() != original.mesh.vertices.len()
+        || other
+            .mesh
+            .vertices
+            .iter()
+            .zip(&original.mesh.vertices)
+            .any(|(a, b)| a.point != b.point * scales.length)
+    {
+        return Err("it meshed otherwise".into());
+    }
+    let carried_step = time_step * scales.time;
+    let mut run = Run::struck(&other, carried_step, scales.field)?;
+    for step in 0..STEPS {
+        run.step(&other)
+            .map_err(|error| format!("step {step}: {error}"))?;
+    }
+    let primary = run
+        .primary()
+        .iter()
+        .map(|value| value / scales.primary_flux)
+        .collect::<Vec<_>>();
+    let complementary = run
+        .complementary()
+        .iter()
+        .map(|value| *value / scales.complementary)
+        .collect::<Vec<_>>();
+    let same = |a: &[f64], b: &[f64]| {
+        a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
+    };
+    let flat = |values: &[Point2]| {
+        values
+            .iter()
+            .flat_map(|value| [value.x, value.y])
+            .collect::<Vec<_>>()
+    };
+    let exact = other.recommended_time_step().to_bits() == carried_step.to_bits()
+        && same(&primary, control.primary())
+        && same(&flat(&complementary), &flat(control.complementary()))
+        && same(run.integrated(), control.integrated())
+        && same(run.gaps(), control.gaps());
+    let (read, expected) = (readings(&other, &run)?, readings(original, control)?);
+    let fields = read
+        .iter()
+        .map(|reading| reading.1 / scales.field)
+        .collect::<Vec<_>>();
+    let gradients = read
+        .iter()
+        .map(|reading| reading.2 / scales.complementary)
+        .collect::<Vec<_>>();
+    let (energy, control_energy) = (run.energy(&other)?, control.energy(original)?);
+    Ok((
+        Apart {
+            time_step: (other.recommended_time_step() / carried_step - 1.0).abs(),
+            primary: apart(&primary, |index| index, control.primary(), scalar),
+            complementary: apart(
+                &complementary,
+                |index| index,
+                control.complementary(),
+                vector,
+            ),
+            integrated: apart(
+                run.integrated(),
+                |index| index,
+                control.integrated(),
+                scalar,
+            )
+            .max(apart(run.gaps(), |index| index, control.gaps(), scalar)),
+            energy: (energy - control_energy).abs() / control_energy.abs().max(f64::MIN_POSITIVE),
+            probe_primary: apart(
+                &fields,
+                |index| index,
+                &expected.iter().map(|reading| reading.1).collect::<Vec<_>>(),
+                scalar,
+            ),
+            probe_complementary: apart(
+                &gradients,
+                |index| index,
+                &expected.iter().map(|reading| reading.2).collect::<Vec<_>>(),
+                vector,
+            ),
+        },
+        exact,
+    ))
+}
+
+fn similar(scene: &Scene) -> Result<(String, Apart), String> {
+    let started = Instant::now();
+    let (editor, _, original) = prepare(&scene.document)?;
+    let options = meshing(
+        editor.document.model.accepted.geometry.domain,
+        scene.document.presentation.mesh_edge,
+    );
+    let time_step = original.recommended_time_step();
+    let control = run(&original, time_step)?;
+    let mut lines = Vec::new();
+    let mut worst = Apart::default();
+    for (label, document, scales, exact) in [
+        (
+            format!("{EXACTLY} times sooner"),
+            Sooner(EXACTLY).document(&scene.document)?,
+            Sooner(EXACTLY).scales(),
+            true,
+        ),
+        (
+            format!("{EXACTLY} times larger"),
+            Larger(EXACTLY).document(&scene.document)?,
+            Larger(EXACTLY).scales(),
+            true,
+        ),
+        (
+            format!("{GENERICALLY} times sooner"),
+            Sooner(GENERICALLY).document(&scene.document)?,
+            Sooner(GENERICALLY).scales(),
+            false,
+        ),
+    ] {
+        let (apart, same) =
+            similar_run((&original, &control, time_step), &document, options, scales)
+                .map_err(|error| format!("{label}: {error}"))?;
+        if (exact && !same) || apart.worst() > ROUNDOFF {
+            return Err(format!(
+                "{label}, it runs {} apart: {apart:?}",
+                if same { "the same bits" } else { "otherwise" },
+            ));
+        }
+        lines.push(if same {
+            format!("{label}, the same bits")
+        } else {
+            format!("{label}, {:.1e} apart", apart.worst())
+        });
+        if apart.worst() > worst.worst() {
+            worst = apart;
+        }
+    }
+    Ok((
+        format!(
+            "{}: {}, {:.2} s",
+            scene.name,
+            lines.join("; "),
+            started.elapsed().as_secs_f64()
+        ),
+        worst,
+    ))
+}
+
+/// IV-06, similarity scaling, exactly. Every scene runs as its image through
+/// a similarity of time by [`EXACTLY`]: every medium's primary coefficient
+/// divided by its square, so waves run that much faster, every rate and
+/// frequency times it and every duration divided by it, the laws that read
+/// the primary field, which comes that much stronger, carried with it, the
+/// sources as strong as that asks, and the step divided by it. And through
+/// a similarity of space by [`EXACTLY`], time with it: its geometry, frames,
+/// formulas, source and probes carried, its mesh edge and curve tolerance
+/// with them, every rate divided by it, the primary field that much weaker.
+/// Each must mesh to the original's mesh carried, take the step carried and
+/// run, struck by the pulse carried, to the original's bits: Q, `b`, `r`
+/// and the gaps' jumps, each by its power of two. Through a similarity of
+/// time by [`GENERICALLY`], no power of two, it must run within
+/// [`ROUNDOFF`].
+#[test]
+fn a_similar_scene_runs_as_the_original() {
+    over_every_scene("similar", similar);
+}
+
+/// IV-06's similarity of space by [`GENERICALLY`], which meshes otherwise:
+/// the gate's set covers a turned anisotropic frame, a one-sided baffle,
+/// a graded lens behind a Neumann face and a second-order wall, a
+/// Klein-Gordon plasma with its loss, a travelling modulation and volume
+/// sources; `FUNFERN_INVARIANTS_ALL=1`, nightly, every linear gallery
+/// scene.
+fn larger_cases() -> Vec<Scene> {
+    if std::env::var_os("FUNFERN_INVARIANTS_ALL").is_some() {
+        return topology_examples::catalog()
+            .iter()
+            .filter(|example| linear(&example.document.model.accepted))
+            .map(|example| gallery(example.name))
+            .chain([one_sided_double_slit()])
+            .collect();
+    }
+    vec![
+        gallery("Anisotropic crystal"),
+        one_sided_double_slit(),
+        gallery("Luneburg lens"),
+        gallery("Plasma skin depth"),
+        gallery("Travelling modulation"),
+        gallery("Phased array"),
+    ]
+}
+
+/// IV-06 by [`GENERICALLY`] in space: each case and its image at [`LEVELS`],
+/// read by IV-04's rule, its materials checked against the original's first.
+#[test]
+fn a_larger_scene_reads_as_the_original_at_every_level() {
+    let cases = larger_cases();
+    let outcomes = in_parallel(&cases, |scene| {
+        let started = Instant::now();
+        let outcome = Larger(GENERICALLY)
+            .document(&scene.document)
+            .and_then(|larger| {
+                levels_against(&scene.document, &larger, Motion::Scale(GENERICALLY))
+            });
+        let physics = scene.document.model.accepted.physics;
+        (
+            format!("{} ({physics:?}) {GENERICALLY} times larger", scene.name),
+            outcome,
+            started.elapsed().as_secs_f64(),
+        )
+    });
+    within_a_halving("larger", outcomes);
 }

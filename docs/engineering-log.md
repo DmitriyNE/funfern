@@ -31899,3 +31899,68 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-02 — IV-06: a scene sooner or larger runs to the same bits
+
+- **What it is.** Two tests in `crates/funfern-app/tests/invariants.rs`.
+  `a_similar_scene_runs_as_the_original` carries every scene through two
+  similarities and runs it beside the original:
+  - **sooner by `s`:** every medium's primary coefficient divided by `s²`,
+    so its waves run `s` times faster, every rate and frequency times `s`,
+    every duration and instant divided by it, the step divided by it;
+  - **larger by `s`:** its geometry, frames, formulas, source and probes `s`
+    times as far from the origin, its mesh edge and curve tolerance with
+    them, every rate divided by `s`, the step times it. A formula reads
+    where its point stood, `x`, `y` and `r` divided by `s` through the core's
+    `replace_identifier`.
+  `a_larger_scene_reads_as_the_original_at_every_level` reads a scene
+  larger by 1.37, which meshes otherwise, by IV-04's rule at three levels.
+- **What stays.** What a displacement reads: `r` and a gap's jump in both,
+  and `b` sooner. The primary field comes `s` times as strong sooner and
+  `1/s` larger; the plan had it stay, which sine-Gordon and φ⁴ cannot carry.
+
+  | Quantity | Sooner | Larger |
+  |---|---|---|
+  | Q | `1/s` | `s` |
+  | `b` | 1 | `1/s` |
+  | `r`, energy | 1 | 1 |
+  | step | `1/s` | `s` |
+  | a source's pulse, harmonic | `s²`, `s³` | `1/s²`, `1/s³` |
+  | a Neumann pulse, harmonic | 1, `s` | `1/s`, `1/s²` |
+  | a Dirichlet signal | `s` | `1/s` |
+
+  A source drives the primary field's rate over weights the primary mass
+  scales, and a harmonic is the acceleration it integrates; a Neumann side
+  is a flux over weights the primary mass cancels from.
+- **Why 4.** Sooner by 2, 22 of the 91 scenes run to the original's bits
+  and the other 69 within 1e-15: the second-order wall's modal transform
+  takes the square root of the wall's damping, which scales by `1/s`, and
+  `√2` rounds otherwise. With first-order or reflecting walls all 91 do at
+  2, and at 4 all 91 do as they are.
+- **The mesh.** Twice or four times as large, every scene meshes to the
+  original's mesh scaled, to the bit; 1.37 times, every one meshes
+  otherwise. The mesher caps the curve tolerance at an absolute 2e-3, ten
+  times `WORLD_TOLERANCE`, which four times the app's 5e-4 reaches.
+- **Checks.** Sooner and larger by 4: the original's mesh carried, its step
+  carried and its bits in Q, `b`, `r` and the gaps' jumps, each by its power
+  of two, and the probes within 1e-12. Sooner by 1.37: within 1e-12, 2.9e-13
+  at worst, a segment probe across the spatial soliton. Larger by 1.37: the
+  materials read against the original's first, as IV-04 reads them with
+  their rates and instants in the longer units, then within one halving's
+  move at the two finer levels: the gate's 6 cases within 0.52, the
+  nightly's 40, every linear gallery scene and the one-sided double slit,
+  within 0.53.
+- **IV-04's machinery** takes the similarity as `Motion::Scale`: the run's
+  time, the field's image and the pulse's width and height carried, and
+  each scene meshed at its own edge. IV-04, IV-09 and IV-08's static half
+  read as they did, 0.64, 0.69 and 0.41.
+- **What it found.** Nothing: no time or length in the solver is absolute.
+- **Mutation** `point-profile-reaching-the-default-width` measures a point
+  profile's reach in the default source's widths, not its own. Four times
+  larger, a source is cut off at 2.25 of its widths, and 51 of the 91 scenes
+  run apart, up to 1.9e-2 (the obstacle over a mirror). The core's tests of
+  the reach call it with each width, and the core's 589 and the app's 784
+  library tests pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

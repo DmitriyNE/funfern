@@ -1,0 +1,4 @@
+about: a point profile reaches nine of the default source's widths rather than nine of its own, so a source wider than the default is cut off short of its tail: only a scene carried larger, its source with it, sees it
+test: cargo test --release -p funfern-app --test invariants -- a_similar_scene_runs_as_the_original
+expect: 4 times larger, it runs otherwise apart
+needs: cpu

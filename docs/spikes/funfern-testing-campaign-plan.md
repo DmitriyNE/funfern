@@ -1256,6 +1256,49 @@ nonlinear laws included, by its signed step.
   displaced to where the laws are nonlinear and held relatively, catches it
   too.
 
+**IV-06 done on 2026-11-02**, `a_similar_scene_runs_as_the_original` and
+`a_larger_scene_reads_as_the_original_at_every_level` in the same file.
+Two similarities carry a scene.
+- **Sooner.** Every medium's primary coefficient divided by `s²`, so its
+  waves run `s` times faster; every rate and frequency times `s`, every
+  duration and instant divided by it; the step divided by it.
+- **Larger.** Its geometry, frames, formulas, source and probes `s` times
+  as far from the origin, its mesh edge and curve tolerance with them,
+  every rate divided by `s`, the step times it. A formula reads where its
+  point stood, `x`, `y` and `r` divided by `s`.
+- **What stays.** What a displacement reads stays as it was: `r` and a
+  gap's jump in both, and `b` sooner. The primary field comes `s` times as
+  strong sooner and `1/s` larger; the plan had it stay, which sine-Gordon
+  and φ⁴ cannot carry. So they carry with their scales, and a field law with
+  its amplitudes. A source drives the primary field's rate over weights the
+  primary mass scales, and a harmonic is the acceleration it integrates:
+  sooner, a pulse is `s²` times as strong and a harmonic `s³`. A Neumann
+  side is a flux, and a Dirichlet side holds the field.
+- **The study.** Run sooner by 4, all 91 scenes run to the original's bits,
+  Q a quarter, `b` and `r` as they were; larger by 4, too, Q four times and
+  `b` a quarter. Sooner by 2, 22 do and the other 69 stand within 1e-15:
+  the second-order wall's modal transform takes the square root of the
+  wall's damping, which scales by `1/s`, and `√2` rounds otherwise. With
+  first-order or reflecting walls all 91 run to the bit at 2. A scene twice
+  or four times as large meshes to the original's mesh scaled, to the bit;
+  1.37 times, every scene meshes otherwise. The mesher caps the curve
+  tolerance at an absolute 2e-3, ten times `WORLD_TOLERANCE`, which four
+  times the app's 5e-4 reaches: a larger factor could not mesh alike.
+- **Checks.** Sooner and larger by 4, the same mesh carried, the same step
+  carried and the same bits, each quantity by its power of two, and the
+  probes within 1e-12; sooner by 1.37 within 1e-12, 2.9e-13 at worst, a
+  segment probe across the spatial soliton. Larger by 1.37 at three levels
+  by IV-04's rule, its materials read against the original's first: the
+  gate's 6 cases within 0.52 of a halving's move, the nightly's 40, every
+  linear gallery scene and the one-sided double slit, within 0.53.
+- **What it found.** Nothing: no time or length in the solver is absolute.
+- **Mutation** `point-profile-reaching-the-default-width` measures a point
+  profile's reach in the default source's widths, not its own: a source four
+  times as wide is cut off at 2.25 of its widths, and 4 times larger 51 of
+  the 91 scenes run apart, up to 1.9e-2. The core's tests of the reach call
+  it with each width, and the core's 589 and the app's 784 library tests
+  pass.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

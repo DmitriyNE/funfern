@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+index dcef386..b8f7c1a 100644
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -599,7 +599,7 @@ impl CanonicalForcing {
+             operator.element_nodes(),
+             elements,
+             position,
+-            width,
++            crate::PointSource::default().width,
+         )
+         .iter()
+         .map(|squared| (-0.5 * squared / variance).exp())

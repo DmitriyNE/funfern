@@ -1496,6 +1496,15 @@ fields and its energy must come back within 1e-13 of what the run held,
 1e-11 beside φ⁴. 94 cases in the gate in about 23 s. Its mutation is
 `restoring-form-by-field-laws-only`, which the core's
 `restoring_media_balance_at_second_order_and_reverse` catches too.
+IV-06, similarity scaling: every scene run sooner by 4, every medium's
+primary coefficient divided by 16 and every rate, frequency and duration
+carried, and larger by 4, its geometry, frames, formulas, mesh edge and
+curve tolerance four times as large and time with them, must mesh to the
+original's mesh carried and run to its bits, each quantity by its power of
+two; sooner by 1.37, within 1e-12. 91 scenes in the gate in about 22 s.
+Larger by 1.37, which meshes otherwise, is read at three levels by IV-04's
+rule: 6 cases in the gate in about 23 s, every linear gallery scene in the
+nightly. Its mutation is `point-profile-reaching-the-default-width`.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
