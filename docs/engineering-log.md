@@ -31825,3 +31825,77 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-02 — IV-07: time reversibility, and the kick form beside φ⁴
+
+- **Stage C5 planned.** Milestone C's P2 invariants: IV-07, IV-06 with a
+  device fixture, and IV-13, a commit each (section 6k of the campaign
+  plan).
+- **What IV-07 is.** `a_conservative_run_retraces_its_way_back` in
+  `crates/funfern-app/tests/invariants.rs`. Each of the 91 scenes'
+  conservative twin, its outgoing sides and faces reflecting, its losses
+  and short-wave loss gone and its sources silent, and IV-12's box with its
+  arc a thin gap in each skin, since no scene carries a gap, is struck and
+  run 256 steps on and 256 back. A fixed generation goes back through
+  `CanonicalWaveState::time_reversed`, new in core, which negates the
+  primary flux: Störmer's step makes a step of the reversed state the
+  reversed state of a step back. A time-driven one, drives and nonlinear
+  laws included, goes back by its signed step, its clock running back.
+- **Check.** Q, `b`, `r` with the gaps' jumps, and the energy, each against
+  the most of it the run held at either end of its way out: within 1e-13,
+  and 1e-11 beside φ⁴, whose top, `V″ = −λ` at `r = 0`, grows what roundoff
+  leaves.
+- **What it found.** The three scenes with a nonlinear restoring law did
+  not come back:
+
+  | Scene | Law | One step and back, `b` | 256 steps, Q |
+  |---|---|---|---|
+  | Josephson line | sine-Gordon | 3.8e-10 | 4.4e-9 |
+  | Pinned domain wall | φ⁴ | 1.6e-10 | 7.3e-2 |
+  | Symmetry breaking | φ⁴ | 9.1e-10 | 0.98 |
+
+  Linear and Kerr media miss by 1e-17 in one step, and a shifted strike
+  grew 2.7 times at most in 256: the step did not invert.
+- **Cause.** The production fourth-order step put its correction in the
+  kicks beside a stiffness-side field law, in the drift otherwise. The drift
+  form's correction reads `V″(r)` at the step's start, which sine-Gordon
+  and φ⁴ change during the step, so a step back reads it at the other end.
+  `FourthOrderForm`'s own documentation has the kick form exact under any
+  restoring law over a linear mass, the drift form only while the other
+  side is quadratic; the choice had left the restoring laws out. Over 8192
+  steps the symmetry breaking's energy stood 3.6e-3 above its start at step
+  4096 and 9.1e-3 at 8192. The core's sine-Gordon reversal held a small
+  field to an absolute 1e-10 and passed.
+- **Fix.** A restoring law whose `V″` follows `r`
+  (`RestoringLawValues::is_linear`) picks the kick form, as a stiffness-side
+  field law does. The device takes its form from the CPU's choice, and its
+  kick form carries the restoring curvature already. The three scenes come
+  back within 6.0e-15, 1.7e-13 and 8.8e-13; the symmetry breaking's energy
+  keeps within 1.0e-3 over 8192 steps, with no trend.
+- **The trade.** On PH-16's uniform oscillators the kick form's phase is up
+  to twice as far off as the drift form's, both second order:
+
+  | Case | Trajectory, drift → kick | Amplitude drift, drift → kick |
+  |---|---|---|
+  | sine-Gordon, 0.001 rad | 1.56e-3 → 3.12e-3 | 1.2e-8 → 1.2e-8 |
+  | sine-Gordon, 2.5 rad | 0.126 → 0.184 | 2.9e-4 → 2.2e-5 |
+  | φ⁴ in a well, small | 2.42e-5 → 4.76e-5 | 7.2e-7 → 6.6e-7 |
+  | φ⁴ near the barrier | 0.114 → 0.102 | 8.3e-5 → 3.7e-6 |
+
+  Their bounds were measured again, at about twice the kick form's
+  readings, as they stood over the drift form's. On the gallery scenes the
+  errors at four steps are the same either way.
+- **The core's reversal.** `restoring_media_balance_at_second_order_and_reverse`
+  now starts each law displaced to 1.2, where sine-Gordon and φ⁴ are
+  nonlinear, φ⁴ added, and holds the way back to 1e-13 of what the run
+  reached: 3.7e-16 to 7.4e-16, and 2.0e-7 for sine-Gordon by the old rule.
+- **Numbers.** Every other scene and the gaps come back within 6.0e-15, the
+  Josephson line's `b`, drives, Kerr, plasma, Klein-Gordon and the
+  travelling modulation included: 94 cases in 23 s on ten threads, in the
+  gate.
+- **Mutation** `restoring-form-by-field-laws-only` puts the old rule back:
+  the Josephson line misses by 8.8e-9, the φ⁴ scenes by 7.3e-2 and 0.98.
+  The core's reversal catches it too.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

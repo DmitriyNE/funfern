@@ -1181,6 +1181,15 @@ impl RestoringLawValues {
         matches!(self, Self::None)
     }
 
+    /// Whether `V′` is linear in `r`, so that the law's stiffness `V″` is
+    /// the same whatever the field: none, or Klein-Gordon.
+    pub fn is_linear(self) -> bool {
+        match self {
+            Self::None | Self::KleinGordon { .. } => true,
+            Self::SineGordon { .. } | Self::Phi4 { .. } => false,
+        }
+    }
+
     /// The potential `V(r)` per unit authored mass, zero at the vacuum.
     pub fn potential(self, r: f64) -> f64 {
         match self {

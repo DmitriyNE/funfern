@@ -1948,9 +1948,10 @@ impl CanonicalWallStep {
 ///
 /// Each form is the exact gradient of a modified store while the other side
 /// of the system is quadratic, and so keeps the step symplectic there. A
-/// generation with a field law on the stiffness side takes the kick form;
-/// every other generation, linear ones included, takes the drift form, the
-/// more accurate of the two where both apply.
+/// generation with a field law on the stiffness side, or a restoring law
+/// whose stiffness `V″` follows `r`, takes the kick form; every other
+/// generation, linear ones included, takes the drift form, the more accurate
+/// of the two where both apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FourthOrderForm {
     /// The drift and everything that drifts beside `b` read
@@ -2229,6 +2230,26 @@ impl CanonicalWaveState {
         }
         self.time_origin = origin;
         Ok(self)
+    }
+
+    /// The state whose evolution retraces this one's: the primary flux
+    /// negated, the complementary flux and the gaps' jumps kept. Störmer's
+    /// step is symmetric, so a step of the reversed state is the reversed
+    /// state of a step back, and a conservative autonomous run stepped on,
+    /// reversed, stepped as far again and reversed comes back to where it
+    /// started (IV-07). A wall's pole currents have no reversed counterpart,
+    /// and a loss keeps taking energy either way.
+    pub fn time_reversed(&self) -> Result<Self, WaveError> {
+        if !self.outgoing_z().is_empty() {
+            return Err(WaveError::Unsupported(
+                "a wall's memory has no time reversal",
+            ));
+        }
+        let mut reversed = self.clone();
+        for value in &mut reversed.primary_flux {
+            *value = -*value;
+        }
+        Ok(reversed)
     }
 
     pub fn estimated_state_bytes(&self) -> usize {

@@ -1,0 +1,11 @@
+--- a/crates/funfern-core/src/canonical_temporal.rs
++++ b/crates/funfern-core/src/canonical_temporal.rs
+@@ -2907,7 +2907,7 @@
+     /// and a φ⁴ scene's energy rose by 9e-3 over 8192 steps (found by
+     /// IV-07, 2026-11-02).
+     pub fn fourth_order_form(&self) -> FourthOrderForm {
+-        if self.has_complementary_field_laws || self.has_nonlinear_restoring {
++        if self.has_complementary_field_laws {
+             FourthOrderForm::Kick
+         } else {
+             FourthOrderForm::Drift

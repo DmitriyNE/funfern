@@ -443,7 +443,8 @@ with their reports in `docs/spikes/`.
   metamorphic tests and the real-device fuzzing need none of the reference
   machinery and can start whenever a stage leaves room. The P1 invariants,
   IV-01 to IV-05 and IV-08 to IV-12, were planned on 2026-10-31
-  (section 6j).
+  (section 6j), the P2 invariants, IV-06, IV-07 and IV-13, on 2026-11-02
+  (section 6k).
 
 ## 6a. Stage B1: energy accounting and wall passivity
 
@@ -1178,6 +1179,82 @@ negated.
   run stands with its reference and the sum with its parts, and 10,701 of
   the 11,121 values of Q in the negated run are not the first's negated.
   The app's 784 library tests pass with it.
+
+## 6k. Milestone C: the P2 invariants
+
+**Planned on 2026-11-02**, on the user's go, as stage C5: IV-07, IV-06 with
+a device fixture, and IV-13, a commit each, each with an f64 study first and
+a mutation.
+- **IV-07, time reversibility.** A conservative run stepped on, reversed and
+  stepped as far again comes back to where it started: on the fixed path by
+  negating Q, which Störmer's step makes exact algebra, on the time-driven
+  path by its signed step. Over every scene's conservative twin, its
+  outgoing sides and faces reflecting, its losses gone, its sources silent.
+  No device half: the device refuses a negative step, every fixture holds
+  its stepping to the reference, and the superposition fixture holds its
+  oddness to the bit.
+- **IV-06, similarity scaling.** In time: every density divided by s², so
+  waves run s times faster, every rate and frequency carried along, the
+  step divided by s; at s = 2 the same bits up to powers of two, at another
+  s roundoff. In length: coordinates, edge, curve tolerance and time times
+  s, every rate divided by s; exact at s = 2 if a doubled scene meshes to
+  the original doubled, otherwise IV-04's rule. A `similarity` fixture holds
+  the device to the time similarity at s = 2.
+- **IV-13, split/merge reversal.** Through the editor and the runtime: a
+  separator of the box's own material drawn and deleted, the same detached
+  from a wall and welded back, and two reflecting arcs welded tip to tip and
+  undone, each K times, read as IV-11 reads: the end field within a multiple
+  of one cycle's distance from the unedited run, its energy within 1e-4 of
+  that run's, and a still leg never raising the complementary field's
+  energy. It probes the elements an edit leaves mostly uncovered, which
+  still take their samples one by one. No device half: the device's tables
+  are built from the maps.
+
+**IV-07 done on 2026-11-02**, `a_conservative_run_retraces_its_way_back` in
+`crates/funfern-app/tests/invariants.rs`. Each of the 91 scenes'
+conservative twin, and IV-12's box with its arc a thin gap in each skin,
+since no scene carries a gap, is struck and run 256 steps on and 256 back.
+A fixed generation goes back through the core's new `time_reversed`, its
+primary flux negated before and after; a time-driven one, drives and
+nonlinear laws included, by its signed step.
+- **Check.** Q, `b`, `r` with the gaps' jumps, and the energy, each against
+  the most of it the run held at either end of its way out, within 1e-13;
+  within 1e-11 beside φ⁴, whose top grows what roundoff leaves.
+- **What it found: sine-Gordon and φ⁴ stepped by a form that does not step
+  back.** The production fourth-order step put its correction in the kicks
+  beside a stiffness-side field law and in the drift otherwise. The drift
+  form's correction reads the restoring law's stiffness `V″(r)` at the
+  step's start, which sine-Gordon and φ⁴ change during the step, so a step
+  back reads it at the other end. One step there and back missed by
+  1.6e-10 to 9.1e-10 in `b`, where linear and Kerr media miss by 1e-17; 256
+  steps missed by 4.4e-9 (the Josephson line), 7.3e-2 (the pinned domain
+  wall) and 0.98 (the symmetry breaking), while a shifted strike grew 2.7
+  times at most. Over 8192 steps the symmetry breaking's energy stood 3.6e-3
+  above its start at step 4096 and 9.1e-3 at 8192. The forms' own
+  documentation has the kick form exact under any restoring law over a
+  linear mass, the drift form only while the other side is quadratic; the
+  rule had left the restoring laws out. The core's sine-Gordon reversal
+  held a small field to an absolute 1e-10 and passed.
+- **Fix.** A restoring law whose `V″` follows `r` picks the kick form, as a
+  stiffness-side field law does. The device takes its form from the CPU's
+  choice, and its kick form carries the restoring curvature already. The
+  three scenes now come back within 6.0e-15, 1.7e-13 and 8.8e-13, and the
+  symmetry breaking's energy keeps within 1.0e-3 over 8192 steps, with no
+  trend.
+- **The trade.** On PH-16's uniform oscillators the kick form's phase is up
+  to twice as far off as the drift form's, both second order, and its
+  amplitude 15 to 20 times steadier at the larger swings. PH-16's
+  sine-Gordon and φ⁴ bounds were measured again, at about twice the kick
+  form's readings as they stood over the drift form's. On the gallery
+  scenes the errors at four steps are the same either way.
+- **Numbers.** Every other scene and the gaps come back within 6.0e-15,
+  drives, Kerr, plasma, Klein-Gordon and the travelling modulation
+  included: 94 cases in 23 s on ten threads, in the gate.
+- **Mutation** `restoring-form-by-field-laws-only` puts the old rule back:
+  the Josephson line misses by 8.8e-9, the φ⁴ scenes by 7.3e-2 and 0.98.
+  The core's `restoring_media_balance_at_second_order_and_reverse`, now
+  displaced to where the laws are nonlinear and held relatively, catches it
+  too.
 
 ## 7. Infrastructure
 

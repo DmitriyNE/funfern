@@ -51,13 +51,14 @@ use funfern_app::topology_runtime::{
 };
 use funfern_app::topology_viewport::TopologyTransformUpdate;
 use funfern_core::{
-    BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalHandoffMaps, CanonicalPointStencil,
-    CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState, CurveId, CurveSpanId,
-    CurveSpline, CurveTraceSide, DomainRect, ElectromagneticPolarization, FaceAnchor,
-    FaceBoundaryCondition, FieldLaw, MaterialFrame, MaterialId, MeshTriangle, MeshingOptions,
-    OpenCubicSpline, OuterBoundaryCondition, OuterSide, PeriodicCubicSpline, PhysicsModel, Point2,
-    QuadraticPointStencil, RateLaw, RegionId, RestoringLaw, SpanBehavior, SymmetricTensor2,
-    TimeSignal, TopologyCurve, TopologyScene, TopologyVertexId, TopologyVertexLocation, TriMesh,
+    BACKGROUND_REGION, BoundaryEdge, BoundaryLabel, CanonicalAuxiliaryState, CanonicalHandoffMaps,
+    CanonicalPointStencil, CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState,
+    CurveId, CurveSpanId, CurveSpline, CurveTraceSide, DomainRect, ElectromagneticPolarization,
+    FaceAnchor, FaceBoundaryCondition, FieldLaw, InternalBoundaryCoupling, MaterialFrame,
+    MaterialId, MeshTriangle, MeshingOptions, OpenCubicSpline, OuterBoundaryCondition, OuterSide,
+    PeriodicCubicSpline, PhysicsModel, Point2, QuadraticPointStencil, RateLaw, RegionId,
+    RestoringLaw, SpanBehavior, SymmetricTensor2, TimeSignal, TopologyCurve, TopologyScene,
+    TopologyVertexId, TopologyVertexLocation, TriMesh,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -987,7 +988,15 @@ fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> 
 /// Runs `check` over every scene on all threads, prints each line, and
 /// fails with every scene that failed.
 fn over_every_scene(what: &str, check: fn(&Scene) -> Result<(String, Apart), String>) {
-    let scenes = scenes();
+    over_scenes(what, scenes(), check);
+}
+
+/// [`over_every_scene`] over `scenes`.
+fn over_scenes(
+    what: &str,
+    scenes: Vec<Scene>,
+    check: fn(&Scene) -> Result<(String, Apart), String>,
+) {
     let started = Instant::now();
     let outcomes = in_parallel(&scenes, check)
         .into_iter()
@@ -3597,4 +3606,265 @@ fn a_baffle_keeps_its_sides_through_a_remesh_and_a_move() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Steps IV-07's runs take each way.
+const REVERSED_STEPS: u64 = 256;
+
+/// How far a conservative run, stepped `REVERSED_STEPS` on and as far back,
+/// may stand from where it started, relatively: roundoff. On 2026-11-02 the
+/// worst of the 91 scenes and the three gaps read 6.0e-15, the Josephson
+/// line's `b`; with the drift form beside sine-Gordon and φ⁴, which read
+/// `V″` at the step's start, the Josephson line read 4.4e-9.
+const REVERSIBLE: f64 = 1.0e-13;
+
+/// [`REVERSIBLE`] beside a φ⁴ medium, whose top, `V″ = −λ` at `r = 0`,
+/// grows what roundoff leaves: 8.8e-13 at worst, the symmetry breaking's Q,
+/// and 0.98 with the drift form.
+const REVERSIBLE_PAST_A_TOP: f64 = 1.0e-11;
+
+/// The thin gaps' stiffness, against the medium's, IV-07's gaps take.
+const GAP_STIFFNESS: f64 = 0.1;
+
+/// IV-12's box in `physics`, its arc a thin gap: the 91 scenes carry none.
+fn gapped(physics: PhysicsModel) -> Result<Scene, String> {
+    let (document, curve) = baffled(physics)?;
+    let mut editor = TopologyEditor::from_document(document)?;
+    settle(&mut editor);
+    let spans = baffle_curve(&editor.document, curve)?
+        .spans
+        .iter()
+        .map(|span| span.id)
+        .collect();
+    editor.set_span_behavior(
+        &spans,
+        SpanBehavior::Separated {
+            left: FaceBoundaryCondition::Reflecting,
+            right: FaceBoundaryCondition::Reflecting,
+            coupling: InternalBoundaryCoupling::ThinGap {
+                stiffness_ratio: GAP_STIFFNESS,
+            },
+        },
+    )?;
+    settle(&mut editor);
+    match &editor.acceptance {
+        TopologyAcceptance::Valid => Ok(Scene {
+            name: format!("the box ({physics:?}) with a thin gap"),
+            document: editor.document.clone(),
+        }),
+        other => Err(format!("the gapped box is {other:?}")),
+    }
+}
+
+/// `document` with nothing left in it that gives energy away or takes it in:
+/// every outgoing side and face reflecting, every loss channel and
+/// short-wave loss gone, every source silent. Its media, gaps, junctions,
+/// frames and drives are the scene's own.
+fn conservative(document: &TopologyDocument) -> TopologyDocument {
+    let mut document = sources_scaled(document, 0.0);
+    let model = &mut document.model;
+    for scene in [&mut model.draft, &mut model.accepted] {
+        for side in &mut scene.outer_boundaries.sides {
+            if matches!(
+                side,
+                OuterBoundaryCondition::FirstOrderOutgoing
+                    | OuterBoundaryCondition::SecondOrderOutgoing
+            ) {
+                *side = OuterBoundaryCondition::Reflecting;
+            }
+        }
+        for span in scene
+            .geometry
+            .curves
+            .iter_mut()
+            .flat_map(|curve| &mut curve.spans)
+        {
+            if let SpanBehavior::Separated { left, right, .. } = &mut span.behavior {
+                for face in [left, right] {
+                    if matches!(
+                        face,
+                        FaceBoundaryCondition::Impedance { .. }
+                            | FaceBoundaryCondition::SecondOrderOutgoing
+                    ) {
+                        *face = FaceBoundaryCondition::Reflecting;
+                    }
+                }
+            }
+        }
+        for material in &mut scene.materials {
+            material.electric_loss = None;
+            material.magnetic_loss = None;
+            material.short_wave_loss = 0.0;
+        }
+    }
+    document
+}
+
+impl Run {
+    fn gaps(&self) -> &[f64] {
+        match self {
+            Run::Fixed(state) => match state.auxiliaries() {
+                CanonicalAuxiliaryState::Linear(auxiliaries) => auxiliaries.thin_gap_jump(),
+                _ => &[],
+            },
+            Run::Temporal(state) => state.thin_gap_jump(),
+        }
+    }
+}
+
+/// How far `run`, stepped `steps` on and as far back, stands from where it
+/// started, quantity by quantity, each against the most of it the run held
+/// at either end of its way out; and which way it went back.
+fn retraced(
+    prepared: &PreparedTopology,
+    time_step: f64,
+    steps: u64,
+) -> Result<(Apart, &'static str), String> {
+    let start = Run::struck(prepared, time_step, 1.0)?;
+    let mut run = start.clone();
+    for step in 0..steps {
+        run.step(prepared)
+            .map_err(|error| format!("step {step}: {error}"))?;
+    }
+    let turn = run.clone();
+    let how = match (&mut run, &prepared.canonical_temporal_operator) {
+        (Run::Fixed(state), _) => {
+            *state = state.time_reversed().map_err(|error| error.to_string())?;
+            for step in 0..steps {
+                state
+                    .step_with_forcing(&prepared.canonical_operator, &prepared.canonical_forcing)
+                    .map_err(|error| format!("reversed, step {step}: {error}"))?;
+            }
+            *state = state.time_reversed().map_err(|error| error.to_string())?;
+            "reversed"
+        }
+        (Run::Temporal(state), Some(temporal)) => {
+            for step in 0..steps {
+                state
+                    .step_with_forcing_by(temporal, &prepared.canonical_forcing, -time_step)
+                    .map_err(|error| format!("back, step {step}: {error}"))?;
+            }
+            "stepped back"
+        }
+        (Run::Temporal(_), None) => unreachable!("a temporal state on a fixed generation"),
+    };
+    fn against<T: Copy>(values: [&[T]; 3], square: impl Fn(T, T) -> (f64, f64), zero: T) -> f64 {
+        let [end, start, turn] = values;
+        if start.is_empty() {
+            return 0.0;
+        }
+        let norm = |values: &[T]| {
+            values
+                .iter()
+                .map(|value| square(*value, zero).0)
+                .sum::<f64>()
+        };
+        let difference = end
+            .iter()
+            .zip(start)
+            .map(|(end, start)| square(*end, *start).0)
+            .sum::<f64>();
+        (difference / norm(start).max(norm(turn)).max(f64::MIN_POSITIVE)).sqrt()
+    }
+    let energy = |run: &Run| run.energy(prepared);
+    let (started, ended, turned) = (energy(&start)?, energy(&run)?, energy(&turn)?);
+    Ok((
+        Apart {
+            primary: against(
+                [run.primary(), start.primary(), turn.primary()],
+                scalar,
+                0.0,
+            ),
+            complementary: against(
+                [
+                    run.complementary(),
+                    start.complementary(),
+                    turn.complementary(),
+                ],
+                vector,
+                Point2::default(),
+            ),
+            integrated: against(
+                [run.integrated(), start.integrated(), turn.integrated()],
+                scalar,
+                0.0,
+            )
+            .max(against(
+                [run.gaps(), start.gaps(), turn.gaps()],
+                scalar,
+                0.0,
+            )),
+            energy: (ended - started).abs()
+                / started.abs().max(turned.abs()).max(f64::MIN_POSITIVE),
+            ..Apart::default()
+        },
+        how,
+    ))
+}
+
+fn reversed(scene: &Scene) -> Result<(String, Apart), String> {
+    let started = Instant::now();
+    let document = conservative(&scene.document);
+    let (_, _, prepared) =
+        prepare(&document).map_err(|error| format!("its conservative twin: {error}"))?;
+    let time_step = prepared.recommended_time_step();
+    let (apart, how) = retraced(&prepared, time_step, REVERSED_STEPS)?;
+    let bound = if document
+        .model
+        .accepted
+        .materials
+        .iter()
+        .any(|material| matches!(material.restoring, RestoringLaw::Phi4 { .. }))
+    {
+        REVERSIBLE_PAST_A_TOP
+    } else {
+        REVERSIBLE
+    };
+    if apart.worst() > bound {
+        return Err(format!(
+            "{how}, it stands {:.1e} from where it started, past {bound:.0e}: {apart:?}",
+            apart.worst()
+        ));
+    }
+    Ok((
+        format!(
+            "{}: {how}, Q {:.1e}, b {:.1e}, r and gaps {:.1e}, energy {:.1e}, {:.2} s",
+            scene.name,
+            apart.primary,
+            apart.complementary,
+            apart.integrated,
+            apart.energy,
+            started.elapsed().as_secs_f64()
+        ),
+        apart,
+    ))
+}
+
+/// IV-07, time reversibility. A conservative autonomous run, stepped on and
+/// as far back, comes back to where it started: Störmer's step, in both its
+/// fourth-order forms, is symmetric. Every scene's conservative twin, its
+/// outgoing sides and faces reflecting, its losses gone and its sources
+/// silent, and IV-12's box with its arc a thin gap in each skin, struck by
+/// the pulse, run `REVERSED_STEPS` steps on and as many back. A fixed
+/// generation goes back reversed, `time_reversed` before and after; a
+/// time-driven one, its drives and nonlinear laws included, by its signed
+/// step, its clock running back. Each of Q, `b`, `r` with the gaps' jumps,
+/// and the energy, against the most of it the run held at either end of
+/// its way out, must come back within [`REVERSIBLE`], or
+/// [`REVERSIBLE_PAST_A_TOP`] beside φ⁴.
+#[test]
+fn a_conservative_run_retraces_its_way_back() {
+    let mut scenes = scenes();
+    for physics in [
+        PhysicsModel::Mechanical,
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        },
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        },
+    ] {
+        scenes.push(gapped(physics).unwrap());
+    }
+    over_scenes("retraced", scenes, reversed);
 }

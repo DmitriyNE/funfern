@@ -1090,9 +1090,11 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   correction in the drift for most generations, in the kicks where a
   stiffness-side field law is present, because each is symplectic only when
   the other side is quadratic (the drift form leaks 38% of a stiffness-side
-  Kerr medium's energy by t = 160). Sources need a fourth-order kick
-  quadrature; a prescribed node reads its signal expanded as the free
-  nodes' field is. Stage B, both CPU paths with tests, done the same day.
+  Kerr medium's energy by t = 160); in the kicks too, since 2026-11-02,
+  beside a restoring law whose stiffness follows `r` (IV-07). Sources need
+  a fourth-order kick quadrature; a prescribed node reads its signal
+  expanded as the free nodes' field is. Stage B, both CPU paths with tests,
+  done the same day.
   Stages C and D, done the same day: the device takes its integrator from the
   CPU state it is compiled from; the drift form is three passes before the
   drift, the kick form two before each kick; every canonical GPU example and
@@ -1325,8 +1327,12 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   fixture, followed the same day, which completes stage C3. Stage C4, the
   device, began the same day with IV-05, observers, the `observers`
   fixture, and closed with IV-01 within f32, the `superposition` fixture,
-  which completes milestone C's P1 invariants. What follows them is
-  planned before it starts.
+  which completes milestone C's P1 invariants. The P2 invariants were
+  planned on 2026-11-02 (section 6k) as stage C5. IV-07, time
+  reversibility, landed the same day: it found sine-Gordon and φ⁴ media
+  stepped by the fourth-order step's drift form, which reads `V″` at the
+  step's start and does not step back (fixed: they take the kick form).
+  IV-06, similarity scaling, and IV-13, split/merge reversal, follow.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the

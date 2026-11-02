@@ -1,0 +1,4 @@
+about: the fourth-order step takes its kick form only beside a field law on the stiffness side, as until 2026-11-02, so sine-Gordon and φ⁴ media take the drift form, which reads V″ at the step's start, and a run stepped on and back does not come back
+test: cargo test --release -p funfern-app --test invariants -- a_conservative_run_retraces_its_way_back
+expect: Josephson line: stepped back, it stands [0-9.]+e-[0-9]+ from where it started
+needs: cpu

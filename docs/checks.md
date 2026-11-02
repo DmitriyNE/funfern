@@ -785,11 +785,13 @@ from inside and outside its cycle over 40 s. Read at the production step:
 the integrated field's and the field's largest difference from RK4 relative
 to RK4's largest, the period, a conservative case's energy drift, and the
 field's amplitude over its last three periods. Each case keeps within bounds
-about twice its reading - the worst the swing at 2.9 rad, its period 2.6e-2
+about twice its reading - the worst the swing at 2.9 rad, its period 3.3e-2
 off where the period diverges at the separatrix, then φ⁴ near the barrier at
-8.3e-3, everything else under 3.4e-3 - the energy under 1e-2 (4.5e-3), the
-amplitude under 2e-3 (9.7e-4), the nodes together within 1e-6, and half the
-step divides the trajectory's error by at least 3 (3.3 to 9.7). The
+7.2e-3, everything else under 5.3e-3 - the energy under 1e-2 (8.2e-3), the
+amplitude under 2e-3 (1.6e-3), the nodes together within 1e-6, and half the
+step divides the trajectory's error by at least 3 (4.0 to 4.3). Sine-Gordon
+and φ⁴ take the kick form since 2026-11-02 (IV-07), its phase up to twice
+as far off as the drift form's and its amplitude steadier. The
 references are checked first (`the_oscillator_references_agree_with_each_other`):
 RK4's periods meet the closed forms within 1e-7 (4e-8), and its van der Pol
 cycle is one from inside and outside and within 1e-3 of the weak-gain
@@ -1394,7 +1396,7 @@ packer and the one the packer's own tests use, and the two must agree. It
 runs in the gate, about a second on ten threads.
 
 `cargo test --release -p funfern-app --test invariants -- --nocapture`
-holds milestone C's invariants (section 6j of the campaign plan). IV-03,
+holds milestone C's invariants (sections 6j and 6k of the campaign plan). IV-03,
 renumbering: every regression, frozen and gallery scene is prepared at its
 own edge, its mesh shuffled (vertices, triangles, each triangle's first
 vertex, boundary edges) and prepared again through the path an adaptation's
@@ -1485,6 +1487,15 @@ device's rounding, and its negation to the bit. Its mutation
 `pulse-rounded-down` converts a pulse's increment to f32 rounding toward
 minus infinity, which moves no value by more than an ulp and only the
 negation sees.
+IV-07, time reversibility: every scene's conservative twin, its outgoing
+sides and faces reflecting, its losses gone and its sources silent, and
+IV-12's box with its arc a thin gap in each skin, is struck and run 256
+steps on and as many back, a fixed generation reversed through
+`time_reversed` and a time-driven one by its signed step. Each of its
+fields and its energy must come back within 1e-13 of what the run held,
+1e-11 beside φ⁴. 94 cases in the gate in about 23 s. Its mutation is
+`restoring-form-by-field-laws-only`, which the core's
+`restoring_media_balance_at_second_order_and_reverse` catches too.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

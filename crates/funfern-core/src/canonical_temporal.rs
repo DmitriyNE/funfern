@@ -2289,6 +2289,9 @@ pub struct CanonicalTemporalWaveOperator {
     /// Whether any complementary sample follows its own field: a field law on
     /// the stiffness side, which picks the fourth-order step's kick form.
     has_complementary_field_laws: bool,
+    /// Whether any contribution carries a restoring law whose stiffness `V″`
+    /// follows `r`, sine-Gordon or φ⁴, which picks the kick form too.
+    has_nonlinear_restoring: bool,
     /// Primary contributions grouped by node, in contribution order, so each
     /// node's assembled nonlinear map is one contiguous run of terms. Empty
     /// when no law follows the field.
@@ -2478,6 +2481,7 @@ impl CanonicalTemporalWaveOperator {
         // the mass in force, so its curvature is scaled by the lowest mass
         // factor the trajectory reaches.
         let has_restoring = primary.iter().any(|sample| !sample.restoring.is_none());
+        let has_nonlinear_restoring = primary.iter().any(|sample| !sample.restoring.is_linear());
         let has_active_loss = primary
             .iter()
             .any(|sample| matches!(sample.loss.law.rate, RateLawValues::VanDerPol { .. }));
@@ -2605,6 +2609,7 @@ impl CanonicalTemporalWaveOperator {
             has_temporal_laws,
             has_field_laws,
             has_complementary_field_laws,
+            has_nonlinear_restoring,
             node_contribution_offsets,
             node_contributions,
             has_loss,
@@ -2895,9 +2900,14 @@ impl CanonicalTemporalWaveOperator {
     }
 
     /// Where this generation's fourth-order step puts its correction: in the
-    /// kicks beside a stiffness-side field law, in the drift otherwise.
+    /// kicks beside a stiffness-side field law or a restoring law whose
+    /// stiffness follows `r`, in the drift otherwise. The drift form reads
+    /// `V″(r)` at the step's start, so beside sine-Gordon or φ⁴ a step back
+    /// read it at the other end: one step there and back missed by 4e-10,
+    /// and a φ⁴ scene's energy rose by 9e-3 over 8192 steps (found by
+    /// IV-07, 2026-11-02).
     pub fn fourth_order_form(&self) -> FourthOrderForm {
-        if self.has_complementary_field_laws {
+        if self.has_complementary_field_laws || self.has_nonlinear_restoring {
             FourthOrderForm::Kick
         } else {
             FourthOrderForm::Drift
@@ -14261,35 +14271,54 @@ mod tests {
 
     /// Both laws balance at second order, and a step and its inverse return
     /// the state, integrated field included.
+    /// Each law balances at second order, and runs 40 steps out from a
+    /// field displaced as far as it is nonlinear and 40 back to where it
+    /// started, to roundoff of what it reached. Held to an absolute 1e-10 on
+    /// a small field, sine-Gordon passed while the drift form read `V″` at
+    /// the step's start and missed by 4e-10 a step (IV-07, 2026-11-02).
     #[test]
     fn restoring_media_balance_at_second_order_and_reverse() {
-        for law in [klein_gordon(2.0), sine_gordon(2.0)] {
-            let operator = restoring_operator(law, 0.3);
-            let forcing = CanonicalForcing::none(operator.base());
-            nonlinear_balance_is_second_order(&operator, &forcing, 0.4, 0.5);
-
-            let (primary, complementary) = reference_fluxes(&operator);
-            let h = 0.4 * operator.maximum_time_step();
-            let start =
-                CanonicalTemporalWaveState::new(&operator, h, primary, complementary).unwrap();
+        for law in [klein_gordon(2.0), sine_gordon(2.0), phi4(4.0, 2.0)] {
+            let operator = restoring_operator(law.clone(), 0.3);
+            if !matches!(law, crate::RestoringLaw::Phi4 { .. }) {
+                let forcing = CanonicalForcing::none(operator.base());
+                nonlinear_balance_is_second_order(&operator, &forcing, 0.4, 0.5);
+            }
+            let displaced = operator
+                .base()
+                .node_points()
+                .iter()
+                .map(|point| 1.2 * (1.3 * point.x + 0.4).sin() * (0.9 * point.y).cos())
+                .collect::<Vec<_>>();
+            let start = resting_state(&operator, displaced);
+            let h = start.time_step();
             let mut state = start.clone();
             for _ in 0..40 {
                 state.step_by(&operator, h).unwrap();
             }
-            assert!(state.integrated_field().iter().any(|r| r.abs() > 1.0e-3));
+            let turn = state.clone();
             for _ in 0..40 {
                 state.step_by(&operator, -h).unwrap();
             }
-            for (a, b) in state
-                .integrated_field()
-                .iter()
-                .zip(start.integrated_field())
-            {
-                assert!((a - b).abs() < 1.0e-10);
-            }
-            for (a, b) in state.primary_flux().iter().zip(start.primary_flux()) {
-                assert!((a - b).abs() < 1.0e-10);
-            }
+            let largest = |values: &[f64]| {
+                values
+                    .iter()
+                    .fold(0.0_f64, |most, value| most.max(value.abs()))
+            };
+            let apart = |a: &[f64], b: &[f64]| {
+                a.iter()
+                    .zip(b)
+                    .fold(0.0_f64, |most, (a, b)| most.max((a - b).abs()))
+            };
+            let r = apart(state.integrated_field(), start.integrated_field())
+                / largest(start.integrated_field());
+            let q =
+                apart(state.primary_flux(), start.primary_flux()) / largest(turn.primary_flux());
+            eprintln!("{law:?}: r {r:.1e}, Q {q:.1e}");
+            assert!(
+                r < 1.0e-13 && q < 1.0e-13,
+                "{law:?}: r {r:.1e}, Q {q:.1e} apart"
+            );
         }
     }
 
@@ -17899,12 +17928,18 @@ mod tests {
         // own modes, which each pass near the top amplifies from rounding:
         // that case runs one period past its first. There too the period
         // diverges, so the production step's second-order energy breathing,
-        // 3e-3, moves it most: 2.9 rad reads its period 2.6e-2 off.
+        // 4e-3, moves it most: 2.9 rad reads its period 3.3e-2 off.
+        //
+        // Sine-Gordon and φ⁴ take the kick form since 2026-11-02 (IV-07):
+        // their bounds stand about twice its readings, as they stood over
+        // the drift form's. Its phase is up to twice as far off as the drift
+        // form's was, and its amplitude 15 to 20 times steadier at the
+        // larger swings.
         for (amplitude, periods, bounds) in [
-            (1.0e-3_f64, 4.5, [3.0e-3, 3.0e-5, 1.5e-6]),
+            (1.0e-3_f64, 4.5, [6.0e-3, 3.0e-5, 1.5e-6]),
             (1.0, 4.5, [1.2e-2, 1.0e-2, 4.0e-4]),
-            (2.5, 4.5, [0.25, 0.18, 7.0e-3]),
-            (2.9, 2.2, [1.1, 0.8, 5.0e-2]),
+            (2.5, 4.5, [0.37, 0.25, 1.05e-2]),
+            (2.9, 2.2, [1.25, 0.9, 6.7e-2]),
         ] {
             let k = (0.5 * amplitude).sin();
             let period = 4.0 * complete_elliptic_k(k) / omega0;
@@ -17925,7 +17960,7 @@ mod tests {
         let period = 4.0 * complete_elliptic_k(2.0 * omega0 / u0) / u0;
         cases.push(OscillatorCase {
             name: "sine-Gordon rotating".into(),
-            bounds: [5.0e-3, 3.5e-2, 4.0e-3],
+            bounds: [6.5e-3, 4.5e-2, 5.5e-3],
             author: Box::new(restoring(sine_gordon(omega0))),
             start: (0.0, u0),
             seconds: 6.5 * period,
@@ -17962,21 +17997,21 @@ mod tests {
                 (1.0, 0.05),
                 in_well(0.5 * 0.05 * 0.05),
                 1.0,
-                [5.0e-5, 9.0e-5, 3.0e-6],
+                [9.5e-5, 9.0e-5, 3.0e-6],
             ),
             (
                 "φ⁴ in a well, near the barrier",
                 (1.0, (2.0 * 0.95 * lambda / 4.0).sqrt()),
                 in_well(0.95 * lambda / 4.0),
                 1.0,
-                [0.23, 0.9, 1.7e-2],
+                [0.2, 0.8, 1.5e-2],
             ),
             (
                 "φ⁴ over the barrier",
                 (0.0, 1.0),
                 over(0.5 + lambda / 4.0),
                 0.0,
-                [1.0e-2, 3.6e-2, 6.0e-4],
+                [1.4e-2, 5.1e-2, 6.0e-4],
             ),
         ] {
             cases.push(OscillatorCase {
