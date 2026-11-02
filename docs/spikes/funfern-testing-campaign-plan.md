@@ -1004,6 +1004,48 @@ baffle was: IV-12's bounds.
 - **Mutation** `old-ground-sided-by-the-new-wall-on-the-device` is that
   defect, run against the fixture.
 
+**IV-08 edited mid-run done on 2026-11-02**, its CPU half,
+`a_separator_drawn_or_deleted_mid_run_reads_as_none` in the same file. The
+static half's box takes its loop, wall or free separator halfway through a
+run, loses it halfway, or takes it at a third and loses it at two thirds,
+through the editor as a user draws and deletes one. The runtime prepares
+each edit, the running field is carried over as the app carries it, and
+each generation runs at the step it recommends.
+- **Control.** The plan had the control step through the edited run's steps.
+  It cannot: the plain box prepared again has no maps to hand over with, and
+  a separator can raise the step past what the plain box allows, the wall
+  to 0.016518 against 0.016332. The control is the plain box run alone to
+  the same time at its own step, as the app runs it unedited, so the step
+  change at each handoff is under test too.
+- **Check.** At the two finer levels the box must read against the control
+  within one halving's move, in the field and the complementary field. The
+  gate runs each separator and edit in one skin, a Latin square of 9 cases
+  in about 10 s; the nightly runs all 27.
+- **Numbers.** All 27 read within 0.51 of a halving's move, a wall deleted;
+  drawn, within 0.27. A deletion reads about as its separator standing
+  still, 0.37 to 0.42 at the default edge. A separator lowers the step by up
+  to 2.4 times (the loop) or raises it by 5% (the wall), and a handoff
+  changes the energy by 9.5e-5 at most at twice the edge, 5e-6 at the
+  default edge.
+- **What the study found: the outgoing walls converge at about first
+  order.** At a fourth level, a quarter of the edge, the loop and the wall
+  level off near 1.1e-4, 0.52 to 0.58 of a halving's move, static too. The
+  floor is the plain box's own: a uniform medium shows it, it is spread
+  over the box, halving the step leaves it, and with reflecting outer walls
+  it goes. The box's own move halves per halving below the default edge
+  with all four walls outgoing (5.2e-4, 2.2e-4, 1.1e-4) and with one
+  first-order wall alone (3.7e-4, 1.4e-4, 7.0e-5), against 2.5e-4, 4.2e-5
+  and 1.5e-5 with every wall reflecting. PH-04, PH-06 and PH-07 read the walls'
+  reflection on a channel and on circles, at about second order; none reads
+  the field inside a box. Investigated next.
+- **Mutation** `complementary-from-its-own-region-only` takes each new
+  element's complementary field only from old elements of its own region,
+  as until 2026-10-06: the loops and walls read 890 to 1340 times a
+  halving's move, the free curves, which divide nothing, unchanged. The
+  runtime's `a_new_or_retired_region_keeps_its_complementary_field`, that
+  fix's regression test, catches it too, and so does
+  `edits_the_field_cannot_tell_leave_it_as_the_mesh_allows_and_a_static_flux_static`.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

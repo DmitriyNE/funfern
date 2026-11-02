@@ -31536,3 +31536,73 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-02 — IV-08 edited mid-run: a separator drawn or deleted running
+
+- **What it is.** IV-08's second half,
+  `a_separator_drawn_or_deleted_mid_run_reads_as_none` in
+  `crates/funfern-app/tests/invariants.rs`. The static half's box, its
+  medium anisotropic in a turned frame and graded along it, takes its loop,
+  wall or free separator halfway through a run, loses it halfway, or takes
+  it at a third and loses it at two thirds. The editor draws and deletes
+  the separator as a user does, a deletion keeping the background's region;
+  the runtime prepares each edit, and the running field is carried over as
+  the app carries it.
+- **Control at its own step.** The plan had the control step through the
+  edited run's steps. It cannot: the plain box prepared again has no maps
+  to hand over with, and a separator can raise the step past what the
+  plain box allows, the wall to 0.016518 against 0.016332. Each generation
+  runs at the step it recommends, and the control is the plain box run
+  alone to the same time at its own, as the app runs it unedited: the step
+  change at each handoff is under test too.
+- **Check.** At the two finer levels the box must read against the control
+  within one halving's move, in the field and the complementary field. The
+  gate runs each separator and edit in one skin, a Latin square of 9 cases
+  in about 10 s; the nightly runs all 27.
+- **Numbers.** Ratios to a halving's move at the default edge and half it,
+  the worst skin of each:
+
+  | Separator | Drawn | Deleted | Drawn and deleted |
+  |---|---|---|---|
+  | Loop | 0.25 | 0.49 | 0.49 |
+  | Wall | 0.27 | 0.51 | 0.39 |
+  | Free | 0.19 | 0.16 | 0.46 |
+
+  A deletion reads about as its separator standing still, 0.37 to 0.42 at
+  the default edge. The loop lowers the step from 1.6e-2 to 6.8e-3 and the
+  free curve to 8.0e-3; the wall raises it to 1.71e-2. A handoff changes
+  the energy by 9.5e-5 at most at twice the edge, 5e-6 at the edge and
+  2.5e-6 at half it.
+- **Found: the outgoing walls converge at about first order.** At a fourth
+  level, a quarter of the edge, the loop and the wall level off near
+  1.1e-4, 0.52 to 0.58 of a halving's move, static too. The floor is the
+  plain box's own: a uniform medium shows it, 84% of it in `u` lies more
+  than 0.25 from the loop, halving the step leaves it, and with reflecting
+  outer walls it goes. The box's own move per halving:
+
+  | Outer walls | 0.08 | 0.04 | 0.02 | 0.01 |
+  |---|---|---|---|---|
+  | All outgoing (the default) | 2.5e-3 | 5.2e-4 | 2.2e-4 | 1.1e-4 |
+  | Left only, first order | 2.1e-3 | 3.7e-4 | 1.4e-4 | 7.0e-5 |
+  | All reflecting | 1.9e-3 | 2.5e-4 | 4.2e-5 | 1.5e-5 |
+
+  One first-order wall alone halves per halving, so neither the
+  second-order wall's memory nor two outgoing walls meeting at a corner is
+  the cause; the step accounts for 1.9e-5 of 2.2e-4 at 0.02. PH-04, PH-06
+  and PH-07 read the walls' reflection on a channel and on circles; none
+  reads the field inside a box. The halving's move IV-04, IV-09 and IV-08
+  judge against is measured on such scenes, so it is looser than the
+  scheme alone makes it. Investigated next.
+- **Mutation** `complementary-from-its-own-region-only` takes each new
+  element's complementary field only from old elements of its own region,
+  as until 2026-10-06: the gate's loops and walls read 0.34 to 0.55 apart,
+  890 to 1340 times a halving's move, the free curves unchanged. The
+  runtime's `a_new_or_retired_region_keeps_its_complementary_field`, that
+  fix's regression test, catches it too, and so does
+  `edits_the_field_cannot_tell_leave_it_as_the_mesh_allows_and_a_static_flux_static`.
+- **Nightly.** The `invariants` job ran IV-04 and IV-09 alone with
+  `FUNFERN_INVARIANTS_ALL`, so IV-10 to IV-12's nightly sets never ran in
+  CI. It now runs the whole file.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

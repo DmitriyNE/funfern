@@ -1435,6 +1435,16 @@ cases in the gate in about a second, 16 in the nightly. Its mutation is
 `a_moved_wall_keeps_each_side_its_own_value` catches too. Its device half is
 the `baffle-move` fixture, whose mutation
 `old-ground-sided-by-the-new-wall-on-the-device` puts the same defect back.
+IV-08 edited mid-run: the static half's box and separators, each drawn
+halfway through a run, deleted halfway, or drawn at a third and deleted at
+two thirds, through the editor and the runtime, the field carried over as
+the app carries it and each generation run at the step it recommends. At
+the two finer levels the box must read against the plain box run unedited
+at its own step within one halving's move, in the field and the
+complementary field. 9 cases in the gate in about 10 s, 27 in the nightly.
+Its mutation is `complementary-from-its-own-region-only`, which the
+runtime's `a_new_or_retired_region_keeps_its_complementary_field` catches
+too.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

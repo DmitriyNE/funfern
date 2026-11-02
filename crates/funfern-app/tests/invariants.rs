@@ -2321,6 +2321,15 @@ fn separated(
     physics: PhysicsModel,
     separator: Separator,
 ) -> Result<(TopologyDocument, TopologyDocument), String> {
+    let mut editor = separator_box(physics)?;
+    let base = editor.document.clone();
+    draw_separator(&mut editor, separator)?;
+    Ok((base, editor.document.clone()))
+}
+
+/// The default box in `physics` in the editor, of the medium IV-08 draws
+/// into.
+fn separator_box(physics: PhysicsModel) -> Result<TopologyEditor, String> {
     // An anisotropic medium in a turned frame, its density graded along the
     // frame's first axis, which a new face must carry over as it is.
     let mut document = TopologyDocument::default();
@@ -2337,23 +2346,26 @@ fn separated(
     settle(&mut editor);
     editor.set_physics(physics)?;
     settle(&mut editor);
-    if editor.acceptance != TopologyAcceptance::Valid {
-        return Err(format!("the box is {:?}", editor.acceptance));
+    match &editor.acceptance {
+        TopologyAcceptance::Valid => Ok(editor),
+        other => Err(format!("the box is {other:?}")),
     }
-    let base = editor.document.clone();
-    let scene = &base.model.accepted;
+}
+
+/// `separator` drawn into the box `editor` holds, as a user draws one, and
+/// its curve.
+fn draw_separator(editor: &mut TopologyEditor, separator: Separator) -> Result<CurveId, String> {
+    let scene = &editor.document.model.accepted;
     let material = scene
         .region(BACKGROUND_REGION)
         .ok_or("the box has no background")?
         .material;
     let domain = scene.geometry.domain;
-    match separator {
-        Separator::Loop => {
-            editor.create_closed_curve(
-                PeriodicCubicSpline::rounded(Point2::new(0.21, 0.13), 0.33),
-                ClosedCurvePurpose::Subdomain { material },
-            )?;
-        }
+    let curve = match separator {
+        Separator::Loop => editor.create_closed_curve(
+            PeriodicCubicSpline::rounded(Point2::new(0.21, 0.13), 0.33),
+            ClosedCurvePurpose::Subdomain { material },
+        )?,
         Separator::Wall => {
             let (bottom, top) = (0.137, 0.237);
             let spline = OpenCubicSpline::polyline(vec![
@@ -2367,13 +2379,15 @@ fn separated(
                     fraction,
                 }))
             };
-            editor.create_open_curve(
-                spline,
-                OpenCurvePurpose::SubdomainSeparator { material },
-                along(OuterSide::Bottom, (bottom - domain.min_x) / domain.width()),
-                // The top side runs right to left.
-                along(OuterSide::Top, (domain.max_x - top) / domain.width()),
-            )?;
+            editor
+                .create_open_curve(
+                    spline,
+                    OpenCurvePurpose::SubdomainSeparator { material },
+                    along(OuterSide::Bottom, (bottom - domain.min_x) / domain.width()),
+                    // The top side runs right to left.
+                    along(OuterSide::Top, (domain.max_x - top) / domain.width()),
+                )?
+                .curve
         }
         Separator::Free => {
             let spline = OpenCubicSpline::uniform(vec![
@@ -2383,18 +2397,43 @@ fn separated(
                 Point2::new(0.45, 0.5),
             ])
             .map_err(|error| format!("{error:?}"))?;
-            editor.create_open_curve(
-                spline,
-                OpenCurvePurpose::SubdomainSeparator { material },
-                None,
-                None,
-            )?;
+            editor
+                .create_open_curve(
+                    spline,
+                    OpenCurvePurpose::SubdomainSeparator { material },
+                    None,
+                    None,
+                )?
+                .curve
         }
-    }
-    settle(&mut editor);
+    };
+    settle(editor);
     match &editor.acceptance {
-        TopologyAcceptance::Valid => Ok((base, editor.document.clone())),
+        TopologyAcceptance::Valid => Ok(curve),
         other => Err(format!("with its separator, the box is {other:?}")),
+    }
+}
+
+/// `curve` deleted from the box `editor` holds, as a user deletes it: where
+/// the deletion merges two faces and asks which keeps its region, the
+/// background's, which the separator only divided.
+fn delete_separator(editor: &mut TopologyEditor, curve: CurveId) -> Result<(), String> {
+    let choices = editor.curve_removal_choices(curve)?;
+    let keep = match choices.as_slice() {
+        [] => None,
+        [only] => Some(*only),
+        _ if choices.contains(&BACKGROUND_REGION) => Some(BACKGROUND_REGION),
+        _ => {
+            return Err(format!(
+                "the deletion merges {choices:?}, not the background"
+            ));
+        }
+    };
+    editor.remove_curve(curve, keep)?;
+    settle(editor);
+    match &editor.acceptance {
+        TopologyAcceptance::Valid => Ok(()),
+        other => Err(format!("its separator deleted, the box is {other:?}")),
     }
 }
 
@@ -2425,6 +2464,165 @@ fn a_separator_within_one_medium_reads_as_none() {
         )
     });
     within_a_halving("separated", outcomes);
+}
+
+/// When IV-08 edits its box mid-run.
+#[derive(Clone, Copy, Debug)]
+enum MidRun {
+    /// The plain box, its separator drawn halfway through the run.
+    Drawn,
+    /// The box with its separator, deleted halfway.
+    Deleted,
+    /// The plain box, its separator drawn a third of the way through the run
+    /// and deleted at two thirds.
+    DrawnAndDeleted,
+}
+
+impl MidRun {
+    /// Each edit in turn: whether it draws the separator or deletes it.
+    fn draws(self) -> &'static [bool] {
+        match self {
+            MidRun::Drawn => &[true],
+            MidRun::Deleted => &[false],
+            MidRun::DrawnAndDeleted => &[true, false],
+        }
+    }
+}
+
+/// `run` on `prepared` stepped `steps` times.
+fn advance(run: &mut Run, prepared: &PreparedTopology, steps: u64) -> Result<(), String> {
+    for step in 0..steps {
+        run.step(prepared)
+            .map_err(|error| format!("step {step}: {error}"))?;
+    }
+    Ok(())
+}
+
+/// How many whole steps no longer than `prepared`'s own take `duration`,
+/// and how long each is.
+fn steps_within(prepared: &PreparedTopology, duration: f64) -> (u64, f64) {
+    let steps = (duration / prepared.recommended_time_step()).ceil();
+    (steps as u64, duration / steps)
+}
+
+/// One IV-08 case at each of [`LEVELS`]: the box in `physics` struck and
+/// run to a fixed time, `separator` drawn or deleted through the editor on
+/// the way as `edit` says. The runtime prepares each edit and the running
+/// field is carried over as the app carries it, each generation stepped at
+/// the step it recommends, which a separator lowers or raises. The control
+/// is the plain box run alone to the same time at its own step, as the app
+/// runs it unedited. Per level as [`levels_against`] reads them.
+fn edited_levels(
+    physics: PhysicsModel,
+    separator: Separator,
+    edit: MidRun,
+) -> Result<Levels, String> {
+    let mut editor = separator_box(physics)?;
+    let plain = editor.document.clone();
+    let curve = draw_separator(&mut editor, separator)?;
+    let start = if edit.draws()[0] {
+        plain.clone()
+    } else {
+        editor.document.clone()
+    };
+    let edge = plain.presentation.mesh_edge;
+    let domain = plain.model.accepted.geometry.domain;
+    let pulse = Pulse::off_centre(domain, 1.0);
+    let segments = edit.draws().len() + 1;
+    let mut duration = 0.0;
+    let mut points = Vec::new();
+    let mut levels = Vec::new();
+    let mut previous: Option<(Arc<PreparedTopology>, Run)> = None;
+    for factor in LEVELS {
+        let edge = edge * factor;
+        let (mut editor, mut runtime, mut prepared) = prepare_at(&start, edge)?;
+        let (_, _, control) = prepare_at(&plain, edge)?;
+        if previous.is_none() {
+            duration = 64.0 * control.recommended_time_step();
+            points = common_points(domain, &control.mesh, edge);
+        }
+        let segment = duration / segments as f64;
+        let (steps, time_step) = steps_within(&prepared, segment);
+        let control_run = run_for(&control, control.recommended_time_step(), duration, pulse)?;
+        let mut run = Run::struck_by(&prepared, time_step, pulse)?;
+        advance(&mut run, &prepared, steps)?;
+        let mut drawn = (!edit.draws()[0]).then_some(curve);
+        for draws in edit.draws() {
+            if *draws {
+                drawn = Some(draw_separator(&mut editor, separator)?);
+            } else {
+                delete_separator(&mut editor, drawn.take().ok_or("nothing to delete")?)?;
+            }
+            let (target, maps) = remeshed(&editor, &mut runtime, Some(edge))?;
+            let (steps, time_step) = steps_within(&target, segment);
+            run = handed((&prepared, &run), &target, &maps, time_step)?;
+            prepared = target;
+            advance(&mut run, &prepared, steps)?;
+        }
+        let (field, complementary, _) =
+            moved_apart((&control, &control_run), (&prepared, &run), STILL, &points);
+        let own = match &previous {
+            Some((coarser, coarser_run)) => moved_apart(
+                (coarser, coarser_run),
+                (&control, &control_run),
+                STILL,
+                &points,
+            ),
+            None => (f64::NAN, f64::NAN, 0),
+        };
+        levels.push([field, complementary, own.0, own.1, edge]);
+        previous = Some((control, control_run));
+    }
+    Ok(levels)
+}
+
+/// IV-08 edited mid-run, a separator within one medium drawn or deleted
+/// while the box runs. Its loop, wall or free separator is drawn halfway
+/// through the run, deleted halfway, or drawn at a third and deleted at two
+/// thirds, and at each of the two finer [`LEVELS`] the box must read against
+/// the plain box run unedited within that box's own move over a halving, in
+/// the field and the complementary field. The gate runs each separator and
+/// edit in one skin, a Latin square of 9 cases; `FUNFERN_INVARIANTS_ALL`
+/// runs all 27. On 2026-11-02 the 27 read within 0.51 of a halving's move, a
+/// wall deleted, and those drawn within 0.27; a deletion reads about as its
+/// separator standing still. A separator lowers the step by up to 2.4 times
+/// or raises it by 5%, and the handoffs changed the energy by 9.5e-5 at most.
+#[test]
+fn a_separator_drawn_or_deleted_mid_run_reads_as_none() {
+    let all = std::env::var_os("FUNFERN_INVARIANTS_ALL").is_some();
+    let skins = [
+        PhysicsModel::Mechanical,
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        },
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        },
+    ];
+    let edits = [MidRun::Drawn, MidRun::Deleted, MidRun::DrawnAndDeleted];
+    let mut cases = Vec::new();
+    for (row, separator) in [Separator::Loop, Separator::Wall, Separator::Free]
+        .into_iter()
+        .enumerate()
+    {
+        for (column, edit) in edits.into_iter().enumerate() {
+            for (skin, physics) in skins.into_iter().enumerate() {
+                if all || skin == (row + column) % skins.len() {
+                    cases.push((physics, separator, edit));
+                }
+            }
+        }
+    }
+    let outcomes = in_parallel(&cases, |(physics, separator, edit)| {
+        let started = Instant::now();
+        let outcome = edited_levels(*physics, *separator, *edit);
+        (
+            format!("the box ({physics:?}), its {separator:?} separator {edit:?}"),
+            outcome,
+            started.elapsed().as_secs_f64(),
+        )
+    });
+    within_a_halving("edited mid-run", outcomes);
 }
 
 /// IV-10's box: a reflecting baffle from its bottom side to its top, and

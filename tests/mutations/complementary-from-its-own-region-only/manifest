@@ -1,0 +1,4 @@
+about: a remesh takes each new element's complementary field only from old elements of its own region, as until 2026-10-06, so ground a separator drawn or deleted mid-run gives a new region ID arrives with none
+test: cargo test --release -p funfern-app --test invariants -- a_separator_drawn_or_deleted_mid_run_reads_as_none
+expect: the box \(Mechanical\), its Loop separator Drawn: edge .*: [0-9]{3,}\.[0-9]+ of a halving's move
+needs: cpu

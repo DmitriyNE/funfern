@@ -173,8 +173,8 @@ jobs:
   # Nightly: IV-04 carries every linear gallery scene through a shift, a
   # quarter turn and a mirror, and the scenes whose contents may turn through
   # a turn by 37°, and IV-09 reads each against its curves rewritten, at
-  # three levels; the gate carries a set of them
-  # (crates/funfern-app/tests/invariants.rs).
+  # three levels; IV-08 and IV-10 to IV-12 run every case. The gate carries
+  # a set of each (crates/funfern-app/tests/invariants.rs).
   invariants:
     name: Invariants, every scene
     if: github.event_name == 'schedule'
@@ -213,10 +213,10 @@ jobs:
             target/
           key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Carry and rewrite every linear scene
+      - name: Every invariant case
         env:
           FUNFERN_INVARIANTS_ALL: 1
-        run: cargo test --release -p funfern-app --test invariants --locked -- a_moved_scene_reads_as_the_original_moved a_rewritten_scene_reads_as_the_original --nocapture
+        run: cargo test --release -p funfern-app --test invariants --locked -- --nocapture
 
   # Nightly: PH-04, the first- and second-order walls' reflection against
   # their law at 0°, 45° and 75° on three meshes, held to steady state; about

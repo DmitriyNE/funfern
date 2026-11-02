@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/canonical_transfer.rs b/crates/funfern-core/src/canonical_transfer.rs
+--- a/crates/funfern-core/src/canonical_transfer.rs
++++ b/crates/funfern-core/src/canonical_transfer.rs
+@@ -1196,8 +1196,7 @@ impl CanonicalVectorTransferWork {
+                 if self.identity {
+                     self.phase = CanonicalVectorTransferPhase::Locate(0);
+                 } else {
+-                    self.same_region = !crate::transfer::has_unified_topology(source_mesh)
+-                        && !crate::transfer::has_unified_topology(target_mesh);
++                    self.same_region = true;
+                     self.targets = Vec::with_capacity(target.complementary_degrees_of_freedom());
+                     self.ranges = vec![[0, 0]; target_mesh.triangles.len()];
+                     self.bins = Some(CanonicalSourceBins::new(source_mesh)?);
