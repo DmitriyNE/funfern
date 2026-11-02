@@ -104,6 +104,7 @@ pub(crate) fn add(app: &mut App) {
         "baffle-move" => (Fixture::BaffleMove, vec![None]),
         "separator-mid-run" => (Fixture::SeparatorMidRun, vec![None]),
         "observers" => (Fixture::Observers, vec![None, None]),
+        "superposition" => (Fixture::Superposition, vec![None; SUPERPOSED.len()]),
         "handoff-memory-rebuild" => (Fixture::HandoffMemory(MemoryHandoff::Rebuild), vec![None]),
         "handoff-memory-remesh" => (Fixture::HandoffMemory(MemoryHandoff::Remesh), vec![None]),
         "handoff-memory-edit" => (Fixture::HandoffMemory(MemoryHandoff::Edit), vec![None]),
@@ -140,6 +141,7 @@ pub(crate) fn add(app: &mut App) {
         base: 0,
         start_time: 0.0,
         observing: Observing::default(),
+        endpoints: Vec::new(),
         deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(120)),
     })
     .add_systems(EguiPrimaryContextPass, drive.before(frame))
@@ -245,6 +247,17 @@ enum Fixture {
     /// hides, is drawn from then on. The two endpoints must be the same
     /// bits, and each observer must show it took.
     Observers,
+    /// IV-01 of the testing campaign on the device: `HandoffMemory`'s cavity,
+    /// its bottom side a second-order outgoing wall and its top driven, run
+    /// to step 384 four times, as [`SUPERPOSED`] says: struck at two points
+    /// and driven, struck at the first and driven, struck at the second, near
+    /// the wall, with the drive at zero, and all of it negated. Each run's
+    /// waves fill the wall's memory. At the endpoints the first must be the
+    /// sum of the next two within [`SUPERPOSED_RESIDUAL`], and the last the
+    /// first negated, every value of Q, b and the wall's pole states:
+    /// rounding is symmetric, so only an operation of the device's that is
+    /// not odd can part them.
+    Superposition,
     /// The cavity with its bottom side a second-order outgoing wall and its
     /// top side driven, the pulse run into the wall until its pole states
     /// hold memory, then handed off at step 192 of 384 the way named: the
@@ -397,6 +410,9 @@ impl Fixture {
             }
             Fixture::Remesh | Fixture::NeutralRemesh => (&[(128, Action::Remesh)], 256),
             Fixture::BaffleMove => (&[(BAFFLE_MOVE_STEP, Action::Move)], BAFFLE_MOVE_STEP + 128),
+            // The pulse's front reaches the wall near step 150, and the wall
+            // holds memory for the rest of the run.
+            Fixture::Superposition => (&[], 384),
             Fixture::SeparatorMidRun => (&[(128, Action::Draw), (192, Action::Delete)], 256),
             // The pulse's front reaches the wall near step 150: the handoff
             // comes once the wall holds memory, and the run goes on for as
@@ -495,6 +511,17 @@ impl Fixture {
                 domain.min_x + 0.5 * domain.width(),
                 domain.min_y + 0.38 * domain.height(),
             )],
+            // The usual point, and one near the wall.
+            Fixture::Superposition => vec![
+                Point2::new(
+                    domain.min_x + 0.37 * domain.width(),
+                    domain.min_y + 0.58 * (domain.max_y - domain.min_y),
+                ),
+                Point2::new(
+                    domain.min_x + 0.7 * domain.width(),
+                    domain.min_y + 0.3 * domain.height(),
+                ),
+            ],
             _ => vec![Point2::new(
                 domain.min_x + 0.37 * domain.width(),
                 domain.min_y + 0.58 * (domain.max_y - domain.min_y),
@@ -567,6 +594,7 @@ impl Fixture {
             Fixture::BaffleMove => (baffled_document(), None),
             Fixture::SeparatorMidRun => (separated_document(), None),
             Fixture::Observers => (observers_document(), None),
+            Fixture::Superposition => (wall_document(true), None),
             Fixture::HandoffDriven => (pump_document(), None),
             Fixture::HandoffDrivenPins => (pumped_driven_document(), None),
             Fixture::Observables => (observables::observables_document(), None),
@@ -607,6 +635,9 @@ pub(crate) struct Driver {
     start_time: f64,
     /// What the observed run's observers have done so far.
     observing: Observing,
+    /// Each finished run's endpoint where the fixture reads the runs against
+    /// each other: Q, b and the wall's pole states.
+    endpoints: Vec<[Vec<f32>; 3]>,
     deadline: Instant,
 }
 
@@ -1002,6 +1033,9 @@ fn drive(
         return;
     }
     let verdict = verdict.and_then(|summary| match driver.hashes.as_slice() {
+        _ if matches!(fixture, Fixture::Superposition) => {
+            superposed(&driver.endpoints).map(|read| format!("{summary}; {read}"))
+        }
         [(_, first), rest @ ..] if rest.iter().any(|(_, hash)| hash != first) => Err(format!(
             "the endpoint differs {}: {}",
             match fixture {
@@ -1785,6 +1819,89 @@ fn observed(
     ))
 }
 
+/// [`Fixture::Superposition`]'s four runs: which of its two points are
+/// struck, the pulses' amplitude, which the pulse slider takes to -5, and
+/// the factor on [`WALL_DRIVE`]'s amplitude. The first run is the sum of the
+/// next two, and the last the first negated.
+const SUPERPOSED: [(&[usize], f32, f64); 4] = [
+    (&[0, 1], 1.0, 1.0),
+    (&[0], 1.0, 1.0),
+    (&[1], 1.0, 0.0),
+    (&[0, 1], -1.0, -1.0),
+];
+
+/// How far the first of [`SUPERPOSED`]'s runs may stand from the sum of the
+/// next two at the endpoint, relative to the largest of the three, in each
+/// of Q, b and the wall's pole states: the device's own rounding, which is
+/// not linear.
+const SUPERPOSED_RESIDUAL: f64 = 1.0e-5;
+
+/// [`Fixture::Superposition`]'s four endpoints against each other: the
+/// first less the next two, relative to the largest of the three, within
+/// [`SUPERPOSED_RESIDUAL`], and the last the first negated, value for value,
+/// in Q, b and the wall's pole states.
+fn superposed(endpoints: &[[Vec<f32>; 3]]) -> Result<String, String> {
+    let [sum, struck, driven, negated] = endpoints else {
+        return Err(format!(
+            "{} endpoints, where the runs are four",
+            endpoints.len()
+        ));
+    };
+    let norm = |values: &[f32]| {
+        values
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    };
+    let mut read = Vec::new();
+    for (index, name) in ["Q", "b", "the wall's pole states"].into_iter().enumerate() {
+        let (sum, struck, driven, negated) =
+            (&sum[index], &struck[index], &driven[index], &negated[index]);
+        if struck.len() != sum.len() || driven.len() != sum.len() || negated.len() != sum.len() {
+            return Err(format!("the runs hold {name} of different lengths"));
+        }
+        if sum.is_empty() {
+            return Err(format!("the runs hold no {name}"));
+        }
+        let residual = sum
+            .iter()
+            .zip(struck)
+            .zip(driven)
+            .map(|((sum, struck), driven)| {
+                (f64::from(*sum) - f64::from(*struck) - f64::from(*driven)).powi(2)
+            })
+            .sum::<f64>()
+            .sqrt()
+            / norm(sum).max(norm(struck)).max(norm(driven));
+        // A zero of either sign is its negation.
+        let parted = sum
+            .iter()
+            .zip(negated)
+            .filter(|(sum, negated)| **negated != -**sum)
+            .count();
+        if !within(residual, SUPERPOSED_RESIDUAL) {
+            return Err(format!(
+                "{name} stands {residual:.3e} from the sum of its parts' runs, beyond \
+                 {SUPERPOSED_RESIDUAL:.0e}"
+            ));
+        }
+        if parted != 0 {
+            return Err(format!(
+                "{parted} of {} values of {name} in the negated run are not the first run's \
+                 negated: the device is not odd",
+                sum.len()
+            ));
+        }
+        read.push(format!("{name} {residual:.3e}"));
+    }
+    Ok(format!(
+        "the sum of its parts' runs stands {}; the negated run is the first negated, every \
+         value",
+        read.join(", ")
+    ))
+}
+
 /// [`Fixture::SeparatorMidRun`]'s cavity edge.
 const SEPARATED_EDGE: f64 = 0.04;
 
@@ -2032,6 +2149,14 @@ fn advance(
                     _ => {}
                 }
             }
+            if matches!(driver.fixture, Fixture::Superposition) {
+                let factor = SUPERPOSED[driver.hashes.len()].2;
+                let signal = TimeSignal::harmonic(0.0, 0.3 * factor, 0.8, 0.0);
+                for scene in [&mut document.model.draft, &mut document.model.accepted] {
+                    scene.outer_boundaries.sides[OuterSide::Top.index()] =
+                        OuterBoundaryCondition::Dirichlet { signal };
+                }
+            }
             // Auto exposure is the app's default; the quiet run turns it off.
             let observed = driver.fixture.observes() && !driver.hashes.is_empty();
             if driver.fixture.observes() {
@@ -2191,7 +2316,12 @@ fn advance(
             if let Some(width) = driver.fixture.pulse_width() {
                 state.pulse_width = width;
             }
-            let points = driver.fixture.pulses_at(domain);
+            let mut points = driver.fixture.pulses_at(domain);
+            if matches!(driver.fixture, Fixture::Superposition) {
+                let (struck, amplitude, _) = SUPERPOSED[driver.hashes.len()];
+                points = struck.iter().map(|index| points[*index]).collect();
+                state.pulse_amplitude = amplitude;
+            }
             let queued_before = state.coordinator.pending_pulses.len();
             for point in &points {
                 state.place_pulse(*point);
@@ -2994,6 +3124,18 @@ fn advance(
                 summary,
                 hash: hash(&display.accepted_storage_bits()),
             });
+            if matches!(driver.fixture, Fixture::Superposition) {
+                driver.endpoints.push([
+                    display.primary_flux.clone(),
+                    display
+                        .complementary_flux
+                        .iter()
+                        .flatten()
+                        .copied()
+                        .collect(),
+                    display.history_auxiliary().to_vec(),
+                ]);
+            }
             if driver.fixture.observes() && !driver.hashes.is_empty() {
                 return match run.and_then(|mut run| {
                     run.summary +=

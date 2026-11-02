@@ -1,0 +1,4 @@
+about: a pulse's increment is converted to f32 for the device rounding toward minus infinity, not to the nearest: no value moves by more than an ulp, but a pulse and its negation land a rounding apart, which only the device's negated run can see
+test: scripts/e2e-fixture.sh superposition
+expect: values of Q in the negated run are not the first run's negated
+needs: device

@@ -31770,3 +31770,58 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-02 — IV-01 on the device: a sum to the rounding, a negation exact
+
+- **What it is.** Stage C4's second fixture, `superposition` in
+  `crates/funfern-app/src/ui/e2e.rs`, which completes milestone C's P1
+  invariants. The `handoff-memory` cavity, 11,121 nodes, its bottom side a
+  second-order outgoing wall and its top driven at 0.8 Hz, runs to step 384
+  four times:
+
+  | Run | Struck at | Pulse amplitude | Drive |
+  |---|---|---|---|
+  | sum | (-0.26, 0.16) and (0.4, -0.4) | 1 | 0.3 |
+  | first part | (-0.26, 0.16) | 1 | 0.3 |
+  | second part | (0.4, -0.4), near the wall | 1 | 0 |
+  | negated | both | -1 | -0.3 |
+
+- **Why by pulses.** The plan split the sum into a struck run and a run
+  driven alone. Driven alone, the wall holds almost no memory by step 384,
+  the drive's wave just arriving, 1.6e-9 of energy against 7.0e-5, and its
+  pole states read 4.3e-4 of their own size from the reference, beyond the
+  fixture's 1e-4, where the device's rounding is about 2e-6 of the struck
+  runs'. Each run now fills the wall's memory, and the drive is still a part
+  of the sum. The top side shares no corner with the wall, so the run with
+  the drive at zero, which pins its nodes to a zero signal, keeps the wall's
+  trace whole: the four runs prepare the same operator.
+- **Checks.** Each run against its reference, as every fixture. At the
+  endpoints the sum must stand from its parts' runs within 1e-5, relative to
+  the largest of the three, in Q, b and the wall's pole states. The negated
+  run must be the sum's negated, every value, a zero of either sign counting
+  as its negation. Rounding to the nearest is symmetric, so only an
+  operation of the device's that is not odd can part those two: a bias, a
+  clamp, a directed rounding, far below any tolerance.
+- **Numbers.** On the M1 Max:
+
+  | Reading | Q | `b` | Pole states |
+  |---|---|---|---|
+  | Runs against their references, worst | 9.4e-7 | 1.23e-6 | 2.8e-6 |
+  | Sum against its parts | 9.1e-7 | 1.3e-6 | 2.0e-6 |
+  | Negated run against the sum negated | exact | exact | exact |
+
+  Chrome on the same machine ends each run on the same bits as the native
+  run, its four hashes and the residuals to their last digit the same.
+- **Mutation** `pulse-rounded-down` converts a pulse's increment to f32 for
+  the device rounding toward minus infinity, not to the nearest. No value
+  moves by more than an ulp: each run stands with its reference and the sum
+  with its parts, and 10,701 of the 11,121 values of Q in the negated run
+  are not the sum's negated. The app's 784 library tests pass with it.
+- **Suite and CI.** The device suite runs it after `observers`: 118 of 118
+  pass (`target/device-suite/20261102-185821`), the fixture in 15 s. CI's
+  lavapipe job takes it from the suite's run lines, and the nightly browser
+  run puts it beside `observers` in the `invariants` part, as long as four
+  of the `handoff-memory` pages.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

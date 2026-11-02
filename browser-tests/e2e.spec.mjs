@@ -46,12 +46,14 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // past its 100 minutes isolated, beside the worker pool, on 2026-10-19 and
 // 2026-10-20 both; far-field runs 1150 twice, and far-field-late once.
 // observers runs the cavity's 256 twice, the second time recording, paused
-// for a second and resized.
+// for a second and resized; superposition runs the walled cavity's 384 four
+// times, as long as four of the handoff-memory pages.
 const runLength = {
   "handoff-memory-running": 2,
   "handoff-memory-running-late": 2,
   observables: 6,
   observers: 2,
+  superposition: 4,
   "far-field": 3,
   "far-field-late": 2,
 };

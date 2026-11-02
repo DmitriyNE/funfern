@@ -1147,7 +1147,37 @@ them on.
   `canonical_gpu_temporal_consumer`, which reads the overlay's arrows
   against their contract, passes with it.
 
-IV-01 within f32, the `superposition` fixture, is next.
+**IV-01 within f32 done on 2026-11-02**, the `superposition` fixture in the
+same file, and with it stage C4 and milestone C's P1 invariants. The
+`handoff-memory` cavity, its bottom side a second-order outgoing wall and
+its top driven at 0.8 Hz, runs to step 384 four times: struck at two
+points and driven, struck at the first and driven, struck at the second,
+near the wall, with the drive at zero, and all of it negated, the pulses at
+amplitude -1, which the pulse slider reaches, and the drive's amplitude
+negated.
+- **Why by pulses.** A run driven alone, the plan's, leaves the wall almost
+  no memory by step 384, the drive's wave just arriving: 1.6e-9 of energy
+  against 7.0e-5, so its pole states read 4.3e-4 of their own size from
+  the reference, the device's rounding about 2e-6 of the struck runs'. Each
+  run now fills the wall's memory, and the drive is still a part of the
+  sum. The top side shares no corner with the wall, so the run with the
+  drive at zero, which pins its nodes to a zero signal, keeps the wall's
+  trace whole.
+- **Checks.** Each run against its reference, as every fixture. At the
+  endpoints the first run must stand from the sum of the next two within
+  1e-5, relative to the largest of the three, in Q, b and the wall's pole
+  states; the last must be the first negated, every value, a zero of either
+  sign counting as its negation. Rounding to the nearest is symmetric, so
+  only an operation of the device's that is not odd can part them.
+- **Numbers.** On the M1 Max each run stands 8.0e-7 to 9.4e-7 from its
+  reference in Q and the wall's pole states up to 2.8e-6. The sum stands
+  9.1e-7 in Q, 1.3e-6 in b and 2.0e-6 in the pole states from its parts'
+  runs, and the negated run is the first negated, every value.
+- **Mutation** `pulse-rounded-down` converts a pulse's increment to f32
+  rounding toward minus infinity: no value moves by more than an ulp, each
+  run stands with its reference and the sum with its parts, and 10,701 of
+  the 11,121 values of Q in the negated run are not the first's negated.
+  The app's 784 library tests pass with it.
 
 ## 7. Infrastructure
 

@@ -118,8 +118,16 @@ whatever it does. The two endpoints must be the same bits, and each
 observer must show it took: the overlay's samples read back, the exposure's
 level, the readout window drawn with a sample, the recording's file
 written, the step count held through the pause, the viewport's size
-changed. Natively and in Chrome the endpoint is the
-same bits, one hash on both. The six
+changed. Natively and in Chrome the endpoint is the same bits, one hash on
+both. `superposition`, IV-01 on the device, runs the `handoff-memory`
+cavity, its bottom side a second-order outgoing wall and its top driven, to
+step 384 four times: struck at two points and driven, struck at the first
+and driven, struck at the second, near the wall, with the drive at zero,
+and all of it negated. Each run stands within the tolerance of its
+reference; the first must stand from the sum of the next two within 1e-5,
+relative to the largest, in Q, b and the wall's pole states, and it reads
+9.1e-7, 1.3e-6 and 2.0e-6; the last must be the first negated, every
+value, and it is. The six
 `handoff-memory` fixtures, `-rebuild`, `-remesh`, `-edit`, `-timestep`, `-flux` and `-running`, give
 the cavity a second-order outgoing wall on its bottom side and a 0.8 Hz drive
 on its top, run the pulse into the wall, and at step 192, once the wall holds
@@ -1471,7 +1479,12 @@ back.
 IV-05, observers, is the device's `observers` fixture: the cavity run with
 every observer off and with all of them on must end on the same bits. Its
 mutation `overlay-pass-takes-a-step` makes a pass of the solver the vector
-overlay opens with no steps pending take a step.
+overlay opens with no steps pending take a step. IV-01 within f32 is the
+device's `superposition` fixture: a run the sum of two others to the
+device's rounding, and its negation to the bit. Its mutation
+`pulse-rounded-down` converts a pulse's increment to f32 rounding toward
+minus infinity, which moves no value by more than an ulp and only the
+negation sees.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
