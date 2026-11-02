@@ -103,6 +103,7 @@ pub(crate) fn add(app: &mut App) {
         "neutral-remesh" => (Fixture::NeutralRemesh, vec![None]),
         "baffle-move" => (Fixture::BaffleMove, vec![None]),
         "separator-mid-run" => (Fixture::SeparatorMidRun, vec![None]),
+        "observers" => (Fixture::Observers, vec![None, None]),
         "handoff-memory-rebuild" => (Fixture::HandoffMemory(MemoryHandoff::Rebuild), vec![None]),
         "handoff-memory-remesh" => (Fixture::HandoffMemory(MemoryHandoff::Remesh), vec![None]),
         "handoff-memory-edit" => (Fixture::HandoffMemory(MemoryHandoff::Edit), vec![None]),
@@ -138,6 +139,7 @@ pub(crate) fn add(app: &mut App) {
         hashes: Vec::new(),
         base: 0,
         start_time: 0.0,
+        observing: Observing::default(),
         deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(120)),
     })
     .add_systems(EguiPrimaryContextPass, drive.before(frame))
@@ -231,6 +233,18 @@ enum Fixture {
     /// separator within one medium is none, which an agreement with the
     /// reference would not show where both carried alike.
     SeparatorMidRun,
+    /// IV-05 of the testing campaign on the device: the cavity with a point
+    /// probe, struck off its middle and run to step 256 twice, once with
+    /// every observer the app has off and once with all of them on. The
+    /// vector overlay, which samples the solver's state inside the solver's
+    /// own pass, auto exposure and the probe's readout window are on from
+    /// the start, and a recording runs from the start; at step [`PAUSE_AT`]
+    /// the run is paused for [`PAUSE_FOR`], and at [`RESIZE_AT`] the
+    /// recording stops and the window is resized and zoomed, which uploads
+    /// the overlay's lattice again. The readout window, which a recording
+    /// hides, is drawn from then on. The two endpoints must be the same
+    /// bits, and each observer must show it took.
+    Observers,
     /// The cavity with its bottom side a second-order outgoing wall and its
     /// top side driven, the pulse run into the wall until its pole states
     /// hold memory, then handed off at step 192 of 384 the way named: the
@@ -376,7 +390,7 @@ impl Fixture {
     /// The step each action is taken at, in order, and the endpoint.
     fn script(self) -> (&'static [(u64, Action)], u64) {
         match self {
-            Fixture::Cavity | Fixture::CavityBatches => (&[], 256),
+            Fixture::Cavity | Fixture::CavityBatches | Fixture::Observers => (&[], 256),
             Fixture::Switch => (&[(128, Action::Switch)], 256),
             Fixture::Handoff | Fixture::HandoffDriven | Fixture::HandoffDrivenPins => {
                 (&[(128, Action::Edit)], 256)
@@ -446,6 +460,11 @@ impl Fixture {
     /// actions, which the device must stand near rather than far from.
     fn reads_unedited(self) -> bool {
         matches!(self, Fixture::SeparatorMidRun)
+    }
+
+    /// Whether the fixture's second run turns every observer on.
+    fn observes(self) -> bool {
+        matches!(self, Fixture::Observers)
     }
 
     /// The width the fixture sets its pulse to, as the pulse's slider does,
@@ -547,6 +566,7 @@ impl Fixture {
             Fixture::NeutralRemesh => (parted_document(), None),
             Fixture::BaffleMove => (baffled_document(), None),
             Fixture::SeparatorMidRun => (separated_document(), None),
+            Fixture::Observers => (observers_document(), None),
             Fixture::HandoffDriven => (pump_document(), None),
             Fixture::HandoffDrivenPins => (pumped_driven_document(), None),
             Fixture::Observables => (observables::observables_document(), None),
@@ -585,7 +605,26 @@ pub(crate) struct Driver {
     /// The time the run starts at: zero, but where the fixture starts its
     /// clock late.
     start_time: f64,
+    /// What the observed run's observers have done so far.
+    observing: Observing,
     deadline: Instant,
+}
+
+/// What [`Fixture::Observers`]' observed run has seen of its observers.
+#[derive(Default)]
+struct Observing {
+    /// Whether the recording was asked for.
+    recording_asked: bool,
+    /// When the pause began, and the device's step count halfway through it.
+    pause: Option<(Instant, Option<u64>)>,
+    /// The step the device held at through the pause's second half, once
+    /// the run went on.
+    paused_at: Option<u64>,
+    /// How long the recording ran and, natively, the frame slots it asked
+    /// for, once stopped.
+    recorded: Option<(std::time::Duration, Option<u64>)>,
+    /// The viewport's size before the resize, once taken.
+    resized_from: Option<egui::Vec2>,
 }
 
 /// A run that held: what it measured, and a hash of the accepted state at its
@@ -647,6 +686,12 @@ enum Phase {
         reference: Reference,
         seen: u64,
     },
+    /// The endpoint held, and the recording the observed run stopped is
+    /// still being written.
+    Recorded {
+        run: Run,
+        since: Instant,
+    },
     /// The endpoint held, and its probes' last records are on their way.
     Observe {
         reference: Reference,
@@ -679,6 +724,7 @@ impl Phase {
             Phase::Departing { .. } => "waiting for the snapshot before the action",
             Phase::Carried { .. } => "waiting for the handoff's snapshot",
             Phase::Snapshot { .. } => "waiting for the endpoint's snapshot",
+            Phase::Recorded { .. } => "waiting for the recording to be written",
             Phase::Observe { .. } => "waiting for the probes' last records",
             Phase::Refused { .. } => "waiting for the app to pause on the refusal",
             Phase::Done => "done",
@@ -905,11 +951,15 @@ impl Reference {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn drive(
     mut driver: ResMut<Driver>,
     mut state: ResMut<Playground>,
     mut request: ResMut<CanonicalGpuRequest>,
     display: Res<CanonicalGpuDisplay>,
+    overlay: Res<VectorOverlayDisplay>,
+    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+    mut contexts: bevy_egui::EguiContexts,
     stopped: Option<Res<crate::stopped::RenderStopped>>,
     mut lose: ResMut<LoseDevice>,
     mut exit: MessageWriter<AppExit>,
@@ -918,11 +968,15 @@ fn drive(
         return;
     }
     let fixture = driver.fixture;
+    let context = contexts.ctx_mut().ok().cloned();
     let run = match advance(
         &mut driver,
         &mut state,
         &mut request,
         &display,
+        &overlay,
+        &mut windows,
+        context.as_ref(),
         stopped.as_deref(),
         &mut lose,
     ) {
@@ -953,6 +1007,7 @@ fn drive(
             match fixture {
                 Fixture::Observables => "with the probes off",
                 Fixture::FarField => "with the far field off",
+                Fixture::Observers => "with every observer on",
                 _ => "with the batching",
             },
             driver
@@ -967,6 +1022,9 @@ fn drive(
         )),
         [_, _, ..] if matches!(fixture, Fixture::FarField) => Ok(format!(
             "{summary}; the endpoint is the same bits with the far field off"
+        )),
+        [_, _, ..] if matches!(fixture, Fixture::Observers) => Ok(format!(
+            "{summary}; the endpoint is the same bits with every observer on"
         )),
         [_, _, ..] => Ok(format!(
             "the endpoint is the same bits in all {} batchings",
@@ -1505,6 +1563,228 @@ impl SidesBefore {
     }
 }
 
+/// [`Fixture::Observers`]' point probe, where the pulse's wave passes.
+const OBSERVED_PROBE: ProbeId = ProbeId(1);
+const OBSERVED_POINT: Point2 = Point2 { x: 0.3, y: -0.2 };
+
+/// The step the observed run is paused at, once it has reached it running,
+/// and for how long.
+const PAUSE_AT: u64 = 96;
+const PAUSE_FOR: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The step the observed run's recording stops and its window is resized
+/// and zoomed at, once it has reached it running, the window's new logical
+/// size, and the zoom. A window manager may refuse the resize, as a tiling
+/// one does; the zoom, as Cmd+= sets it, changes the viewport whatever it
+/// does.
+const RESIZE_AT: u64 = 160;
+const RESIZED: [f32; 2] = [1040.0, 680.0];
+const ZOOMED: f32 = 1.25;
+
+/// How long the recording must have run when it stops, and, natively, how
+/// many frame slots it must have asked for by then: half its rate's worth.
+const RECORDED_FOR: std::time::Duration = std::time::Duration::from_secs(1);
+const RECORDED_SLOTS: u64 = 30;
+
+/// How long the recording may take to be written once stopped.
+const RECORDING_FINISH: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The cavity with [`OBSERVED_PROBE`], a point probe, whose readout window
+/// the observed run opens; probes only read, as `observables` holds.
+fn observers_document() -> TopologyDocument {
+    let mut document = cavity_document();
+    document.model.probes = vec![crate::topology_editor::TopologyProbeDefinition {
+        id: OBSERVED_PROBE,
+        name: "Observed".into(),
+        color: [91, 220, 194],
+        enabled: true,
+        target: crate::topology_editor::TopologyProbeTarget::Point(OBSERVED_POINT),
+    }];
+    document
+}
+
+/// Where the observed run records to natively: the run's own home, which
+/// the fixture's runner makes for it. The encoder adds its extension.
+#[cfg(not(target_arch = "wasm32"))]
+fn recording_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("funfern-observers")
+}
+
+/// Whether the observed run's recording was written natively: a file of
+/// [`recording_path`]'s name, whatever its extension, that is not empty.
+#[cfg(not(target_arch = "wasm32"))]
+fn recording_written() -> Result<(), String> {
+    let path = recording_path();
+    let folder = path.parent().ok_or("the recording has no folder")?;
+    let written = std::fs::read_dir(folder)
+        .map_err(|error| format!("the recording's folder does not open: {error}"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().file_stem() == path.file_name())
+        .filter_map(|entry| entry.metadata().ok())
+        .map(|metadata| metadata.len())
+        .max();
+    match written {
+        Some(bytes) if bytes > 0 => Ok(()),
+        _ => Err(format!("the recording wrote nothing at {}", path.display())),
+    }
+}
+
+/// The observed run's pause, the recording's stop and the resize and zoom,
+/// each taken once the run has reached its step running. The pause must hold
+/// the device's step count through its second half, and all three must
+/// come before the endpoint.
+fn observe_mid_run(
+    observing: &mut Observing,
+    state: &mut Playground,
+    windows: &mut Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+    context: Option<&egui::Context>,
+    completed: u64,
+    endpoint: u64,
+) -> Result<(), String> {
+    match observing.pause {
+        None if completed >= PAUSE_AT => {
+            state.wave_running = false;
+            observing.pause = Some((Instant::now(), None));
+        }
+        Some((since, halfway)) if observing.paused_at.is_none() => {
+            let elapsed = since.elapsed();
+            match halfway {
+                None if elapsed >= PAUSE_FOR / 2 => {
+                    observing.pause = Some((since, Some(completed)));
+                }
+                Some(halfway) if elapsed >= PAUSE_FOR => {
+                    if completed != halfway {
+                        return Err(format!(
+                            "paused, the device stepped on from {halfway} to {completed}"
+                        ));
+                    }
+                    observing.paused_at = Some(completed);
+                    state.wave_running = true;
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    if observing.paused_at.is_some() && observing.resized_from.is_none() && completed >= RESIZE_AT {
+        let Some(started) = state
+            .recording_started
+            .filter(|_| state.recording_state == RecordingState::Recording)
+        else {
+            return Err(format!(
+                "the recording was {:?} at step {completed}",
+                state.recording_state
+            ));
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let slots = state.recording_last_requested_slot;
+        #[cfg(target_arch = "wasm32")]
+        let slots = None;
+        observing.recorded = Some((started.elapsed(), slots));
+        state.stop_video_recording();
+        observing.resized_from = Some(state.viewport_rect.size());
+        resize(windows)?;
+        let context = context.ok_or("no egui context to zoom")?;
+        context.set_zoom_factor(context.zoom_factor() * ZOOMED);
+    }
+    if completed >= endpoint && observing.resized_from.is_none() {
+        return Err(format!(
+            "the run reached step {completed} before its {}",
+            if observing.paused_at.is_none() {
+                "pause was over"
+            } else {
+                "resize"
+            }
+        ));
+    }
+    Ok(())
+}
+
+/// Resizes the window, as dragging its corner does; in the browser, where
+/// the canvas follows its page, the page's body.
+fn resize(
+    windows: &mut Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+) -> Result<(), String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut window = windows
+            .single_mut()
+            .map_err(|error| format!("no window to resize: {error}"))?;
+        window.resolution.set(RESIZED[0], RESIZED[1]);
+        Ok(())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = windows;
+        let body = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.body())
+            .ok_or("the page has no body to resize")?;
+        body.set_attribute(
+            "style",
+            &format!("width: {}px; height: {}px", RESIZED[0], RESIZED[1]),
+        )
+        .map_err(|error| format!("the page did not resize: {error:?}"))
+    }
+}
+
+/// What the observed run's observers show they did, for the summary, or
+/// the first that did not: an observer that never took would prove
+/// nothing.
+fn observed(
+    state: &Playground,
+    overlay: &VectorOverlayDisplay,
+    observing: &Observing,
+    generation: u64,
+) -> Result<String, String> {
+    if overlay.generation != generation || overlay.samples.is_empty() || overlay.readbacks == 0 {
+        return Err("the vector overlay read nothing back".into());
+    }
+    let Some(level) = state
+        .field_exposure
+        .reference()
+        .filter(|_| state.editor.document.presentation.field_auto_exposure)
+    else {
+        return Err("auto exposure set no level".into());
+    };
+    let Some(view) = state
+        .probe_views
+        .get(&OBSERVED_PROBE)
+        .filter(|view| view.end_time > 0.0)
+    else {
+        return Err("the probe's readout window was never drawn with a sample".into());
+    };
+    let Some((recorded, slots)) = observing.recorded else {
+        return Err("the recording was never stopped".into());
+    };
+    if recorded < RECORDED_FOR || slots.is_some_and(|slots| slots < RECORDED_SLOTS) {
+        return Err(format!(
+            "the recording ran {:.2} s and asked for {slots:?} frames",
+            recorded.as_secs_f64()
+        ));
+    }
+    let (Some(paused), Some(before)) = (observing.paused_at, observing.resized_from) else {
+        return Err("the run was not paused and resized".into());
+    };
+    let after = state.viewport_rect.size();
+    if after == before {
+        return Err(format!("the viewport stayed {before:?} through the resize"));
+    }
+    Ok(format!(
+        "; the overlay read {} samples, auto exposure a level of {level:.3e}, the readout \
+         window its probe to {:.3} s; recorded {:.1} s{}, paused at step {paused}, the \
+         viewport {:.0}x{:.0} resized and zoomed to {:.0}x{:.0}",
+        overlay.samples.len(),
+        view.end_time,
+        recorded.as_secs_f64(),
+        slots.map_or(String::new(), |slots| format!(" in {slots} frame slots")),
+        before.x,
+        before.y,
+        after.x,
+        after.y
+    ))
+}
+
 /// [`Fixture::SeparatorMidRun`]'s cavity edge.
 const SEPARATED_EDGE: f64 = 0.04;
 
@@ -1708,11 +1988,15 @@ fn part_totals(
 }
 
 /// Advances the fixture a phase; answers a run's verdict once it has one.
+#[allow(clippy::too_many_arguments)]
 fn advance(
     driver: &mut Driver,
     state: &mut Playground,
     request: &mut CanonicalGpuRequest,
     display: &CanonicalGpuDisplay,
+    overlay: &VectorOverlayDisplay,
+    windows: &mut Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+    context: Option<&egui::Context>,
     stopped: Option<&crate::stopped::RenderStopped>,
     lose: &mut LoseDevice,
 ) -> Option<Result<Run, String>> {
@@ -1748,9 +2032,25 @@ fn advance(
                     _ => {}
                 }
             }
+            // Auto exposure is the app's default; the quiet run turns it off.
+            let observed = driver.fixture.observes() && !driver.hashes.is_empty();
+            if driver.fixture.observes() {
+                let physics = document.model.accepted.physics;
+                let presentation = &mut document.presentation;
+                presentation.field_auto_exposure = observed;
+                presentation.vector_overlay = if observed {
+                    crate::document::VectorOverlay::choices(physics)[1]
+                } else {
+                    crate::document::VectorOverlay::Off
+                };
+            }
             driver.material = material;
             if let Err(error) = state.set_document(document, false, true) {
                 return Some(Err(format!("the document did not open: {error}")));
+            }
+            driver.observing = Observing::default();
+            if observed {
+                state.probe_windows.insert(OBSERVED_PROBE);
             }
             driver.phase = Phase::Install;
             None
@@ -1783,6 +2083,30 @@ fn advance(
                     "the document prepared a {} generation",
                     if temporal { "time-varying" } else { "fixed" }
                 )));
+            }
+            // The observed run records from its start: the recording is asked
+            // for, and running, before the pulse is placed.
+            if driver.fixture.observes()
+                && !driver.hashes.is_empty()
+                && state.recording_state != RecordingState::Recording
+            {
+                if !driver.observing.recording_asked {
+                    driver.observing.recording_asked = true;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        *crate::recording::FIXTURE_DESTINATION.lock().unwrap() =
+                            Some(recording_path());
+                    }
+                    state.request_video_recording();
+                }
+                if state.recording_state == RecordingState::Idle {
+                    return Some(Err(format!(
+                        "the recording did not start: {}",
+                        state.message
+                    )));
+                }
+                driver.phase = Phase::Install;
+                return None;
             }
             let time_step = state.coordinator.uploaded_time_step;
             if !driver.fixture.pulses() {
@@ -1985,6 +2309,19 @@ fn advance(
                     retried: false,
                 };
                 return None;
+            }
+            if driver.fixture.observes()
+                && !driver.hashes.is_empty()
+                && let Err(failure) = observe_mid_run(
+                    &mut driver.observing,
+                    state,
+                    windows,
+                    context,
+                    completed,
+                    target,
+                )
+            {
+                return Some(Err(failure));
             }
             if completed < target {
                 driver.phase = Phase::Run { reference, next };
@@ -2657,6 +2994,22 @@ fn advance(
                 summary,
                 hash: hash(&display.accepted_storage_bits()),
             });
+            if driver.fixture.observes() && !driver.hashes.is_empty() {
+                return match run.and_then(|mut run| {
+                    run.summary +=
+                        &observed(state, overlay, &driver.observing, request.generation())?;
+                    Ok(run)
+                }) {
+                    Ok(run) => {
+                        driver.phase = Phase::Recorded {
+                            run,
+                            since: Instant::now(),
+                        };
+                        None
+                    }
+                    failed => Some(failed),
+                };
+            }
             match run {
                 Ok(run) if reference.twin.is_some() || reference.far.is_some() => {
                     driver.phase = Phase::Observe {
@@ -2668,6 +3021,26 @@ fn advance(
                 }
                 run => Some(run),
             }
+        }
+        Phase::Recorded { run, since } => {
+            if state.recording_state != RecordingState::Idle {
+                if since.elapsed() > RECORDING_FINISH {
+                    return Some(Err(format!(
+                        "the recording was not written within {} s of its stop",
+                        RECORDING_FINISH.as_secs()
+                    )));
+                }
+                driver.phase = Phase::Recorded { run, since };
+                return None;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                *crate::recording::FIXTURE_DESTINATION.lock().unwrap() = None;
+                if let Err(failure) = recording_written() {
+                    return Some(Err(failure));
+                }
+            }
+            Some(Ok(run))
         }
         Phase::Observe {
             reference,

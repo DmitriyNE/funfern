@@ -45,10 +45,13 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // runs 256 once: 55 to 57 minutes a page on SwiftShader served as Pages, and
 // past its 100 minutes isolated, beside the worker pool, on 2026-10-19 and
 // 2026-10-20 both; far-field runs 1150 twice, and far-field-late once.
+// observers runs the cavity's 256 twice, the second time recording, paused
+// for a second and resized.
 const runLength = {
   "handoff-memory-running": 2,
   "handoff-memory-running-late": 2,
   observables: 6,
+  observers: 2,
   "far-field": 3,
   "far-field-late": 2,
 };

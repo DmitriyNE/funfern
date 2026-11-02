@@ -106,7 +106,20 @@ step 128 and deletes it at 192, its face given back to the background.
 Each handed state stands within 7e-7 of the reference, and the endpoint,
 read on the device's own state at a grid of points, must stand from the
 unedited run, stepped on to the same time, within one halving's move of
-that run, 4.6e-4 in Q and 8.9e-4 in b: it reads 1.5e-4 and 7.1e-5. The six
+that run, 4.6e-4 in Q and 8.9e-4 in b: it reads 1.5e-4 and 7.1e-5.
+`observers`, IV-05 on the device, runs the cavity with a point probe twice
+to step 256, once with every observer the app has off and once with all of
+them on: the vector overlay, which samples the solver's state inside its own
+pass, auto exposure, the probe's readout window, a recording from the start,
+a pause of a second at step 96, and at step 160 the recording stopped and
+the window resized and zoomed, which uploads the overlay's lattice again; a
+window manager may refuse the resize, the zoom changes the viewport
+whatever it does. The two endpoints must be the same bits, and each
+observer must show it took: the overlay's samples read back, the exposure's
+level, the readout window drawn with a sample, the recording's file
+written, the step count held through the pause, the viewport's size
+changed. Natively and in Chrome the endpoint is the
+same bits, one hash on both. The six
 `handoff-memory` fixtures, `-rebuild`, `-remesh`, `-edit`, `-timestep`, `-flux` and `-running`, give
 the cavity a second-order outgoing wall on its bottom side and a 0.8 Hz drive
 on its top, run the pulse into the wall, and at step 192, once the wall holds
@@ -1455,6 +1468,10 @@ runtime's `a_new_or_retired_region_keeps_its_complementary_field` catches
 too. Its device half is the `separator-mid-run` fixture, whose mutation
 `complementary-from-its-own-region-only-on-the-device` puts the same defect
 back.
+IV-05, observers, is the device's `observers` fixture: the cavity run with
+every observer off and with all of them on must end on the same bits. Its
+mutation `overlay-pass-takes-a-step` makes a pass of the solver the vector
+overlay opens with no steps pending take a step.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

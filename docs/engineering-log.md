@@ -31708,3 +31708,65 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-02 — IV-05 on the device: every observer on, the same bits
+
+- **What it is.** Stage C4's first fixture, `observers` in
+  `crates/funfern-app/src/ui/e2e.rs`. The cavity with a point probe,
+  11,121 nodes, struck off its middle, runs to step 256 twice: once with
+  every observer the app has off, auto exposure turned off since it is the
+  default, and once with all of them on. The device already held three
+  observers to the bit: probes off (`observables`), the far field off
+  (`far-field`) and the step batching (`cavity-batches`).
+- **What can reach the solver.** The vector overlay binds the solver's
+  state, nodes and tables, read-only, samples them inside the solver's own
+  pass after the steps, and opens that pass where no step is pending. The
+  recording reads the swapchain. Auto exposure only scales the paint, the
+  readout windows plot what the recorders recorded, and a pause only groups
+  the steps otherwise, which the batching already shows changes nothing. A
+  resize re-uploads the overlay's lattice.
+- **The observed run.**
+  - From the start: the overlay, auto exposure, the probe's readout window,
+    and a recording begun before the pulse. Natively it records to the
+    run's own home, through `recording::FIXTURE_DESTINATION`, a fixture's
+    destination in place of the file dialog; in the browser through
+    MediaRecorder.
+  - At step 96, reached running: paused for a second.
+  - At step 160: the recording stopped, since a recording hides the readout
+    windows, and the window resized, natively the window and in the browser
+    the page's body, and zoomed by a quarter, as Cmd+= zooms; the overlay's
+    lattice is uploaded again. The zoom is there because a window manager
+    may refuse the resize: in the first device suite this machine's kept
+    the window, its viewport 756×846, and the fixture failed there on its
+    own evidence, the viewport unchanged.
+- **Checks.** Each run against its reference within 5e-6, the two
+  endpoints the same bits, and each observer must show it took: the
+  overlay's samples read back on the run's generation, the exposure's level
+  set, the readout window drawn with a sample, the recording run a second
+  at least, asked natively for 30 frame slots or more, and its file
+  written, the step count held through the pause's second half, the
+  viewport's size changed.
+- **Numbers.**
+
+  | | M1 Max, device suite | Chrome on the M1 Max |
+  |---|---|---|
+  | Endpoint hash, both runs | `cbdc03b9f734a1bb` | `cbdc03b9f734a1bb` |
+  | Overlay samples | 144 | 64 |
+  | Recorded | 2.3 s, 136 frame slots | 2.3 s |
+  | Paused at step | 99 | 100 |
+  | Viewport | 756×846 to 605×663 | 1100×689 to 832×473 |
+
+  Natively and in the browser the endpoint is the same bits.
+- **Mutation** `overlay-pass-takes-a-step`: a pass of the solver the overlay
+  opens with no steps pending takes a step, so the run steps where nothing
+  asked it to, and the pulse lands at step 2, not 1. Everything the overlay
+  binds of the solver's is read-only, so the pass's composition is the only
+  way it can reach the solver. `canonical_gpu_temporal_consumer`, which
+  reads the overlay's arrows against their contract, passes with it.
+- **Suite and CI.** The device suite runs it after `separator-mid-run`:
+  117 of 117 pass (`target/device-suite/20261102-180228`). CI's lavapipe
+  and mutation jobs install ffmpeg for it, and the nightly browser run puts
+  it in a part of its own, `invariants`, for stage C4's fixtures.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

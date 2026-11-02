@@ -1103,8 +1103,51 @@ and the plain cavity meshed again after the deletion steps 1.9% shorter.
 - **Mutation** `complementary-from-its-own-region-only-on-the-device` is
   that defect, run against the fixture.
 
-Stage C4, the device's `observers` fixture for IV-05 and IV-01 within f32,
-is next, planned before it starts.
+**C4 planned on 2026-11-02**, on the user's go: IV-05's `observers` fixture
+and IV-01's `superposition` fixture, a commit each. Of the six observers the
+11 October plan lists and no fixture ran, one reaches the solver: the
+vector overlay binds the solver's state, nodes and tables and samples them
+inside the solver's own pass, and opens that pass where no step is pending.
+The recording reads the swapchain; auto exposure, the readout windows and
+the pause are the CPU's, and a resize re-uploads the overlay's lattice.
+
+**IV-05 done on 2026-11-02**, the `observers` fixture in
+`crates/funfern-app/src/ui/e2e.rs`. The cavity with a point probe, struck
+off its middle, runs to step 256 twice: once with every observer off, auto
+exposure turned off since it is the app's default, and once with all of
+them on.
+- **The observed run.** The vector overlay, auto exposure and the probe's
+  readout window from the start, and a recording started before the pulse,
+  to a file in the run's own home natively, through a fixture's destination
+  in place of the file dialog, and through MediaRecorder in the browser. At
+  step 96, reached running, the run is paused for a second; at step 160 the
+  recording stops, since a recording hides the readout windows, and the
+  window is resized, natively the window and in the browser the page's
+  body, and zoomed by a quarter, as Cmd+= zooms, which uploads the
+  overlay's lattice again. The zoom is there because a window manager may
+  refuse the resize: in the device suite this machine's kept the window,
+  its viewport 756 by 846, where the fixture alone had it resized.
+- **Checks.** Each run against its reference within 5e-6, the two
+  endpoints the same bits, and each observer must show it took, or the run
+  fails: the overlay's samples read back on the run's generation, the
+  exposure's level set, the readout window drawn with a sample, the
+  recording run a second at least, asked natively for 30 frame slots or
+  more, and its file written, the device's step count held through the
+  pause's second half, the viewport's size changed.
+- **Numbers.** The M1 Max in the device suite: one hash at both endpoints,
+  the overlay's 144 samples, the readout to 1.950 s, 2.3 s recorded in 136
+  frame slots, paused at step 99, the viewport 756 by 846 zoomed to 605 by
+  663. Chrome on the same machine: the same hash, 64 samples, 2.3 s
+  recorded, paused at step 100, the viewport 1100 by 689 resized and zoomed
+  to 832 by 473.
+- **Mutation** `overlay-pass-takes-a-step`: a pass of the solver the overlay
+  opens with no steps pending takes a step, so the run steps where nothing
+  asked it to: the pulse lands at step 2, not 1. The overlay can reach the
+  solver no other way: everything it binds of the solver's is read-only.
+  `canonical_gpu_temporal_consumer`, which reads the overlay's arrows
+  against their contract, passes with it.
+
+IV-01 within f32, the `superposition` fixture, is next.
 
 ## 7. Infrastructure
 

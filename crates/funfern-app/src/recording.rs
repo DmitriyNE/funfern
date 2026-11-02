@@ -108,6 +108,9 @@ pub(crate) fn elapsed_label(started: Instant) -> String {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) use backend::FIXTURE_DESTINATION;
+
+#[cfg(not(target_arch = "wasm32"))]
 mod backend {
     use super::*;
     use bevy::prelude::Image;
@@ -134,6 +137,10 @@ mod backend {
     }
 
     type PreparationResult = Result<Option<PreparedDestination>, String>;
+
+    /// Where a fixture records to, in place of the file dialog's choice; none,
+    /// the dialog. Only the `observers` fixture sets it.
+    pub(crate) static FIXTURE_DESTINATION: Mutex<Option<PathBuf>> = Mutex::new(None);
 
     pub(crate) struct NativeFrame {
         image: Image,
@@ -192,12 +199,15 @@ mod backend {
                 return Err("A recording is already being prepared".into());
             }
             let (sender, receiver) = mpsc::channel();
+            let fixture = FIXTURE_DESTINATION.lock().unwrap().clone();
             thread::spawn(move || {
                 let result = probe_encoder().map(|encoder| {
-                    let path = rfd::FileDialog::new()
-                        .add_filter(encoder.description, &[encoder.extension])
-                        .set_file_name(format!("funfern-recording.{}", encoder.extension))
-                        .save_file();
+                    let path = fixture.or_else(|| {
+                        rfd::FileDialog::new()
+                            .add_filter(encoder.description, &[encoder.extension])
+                            .set_file_name(format!("funfern-recording.{}", encoder.extension))
+                            .save_file()
+                    });
                     path.map(|mut path| {
                         if path.extension().and_then(|value| value.to_str())
                             != Some(encoder.extension)
