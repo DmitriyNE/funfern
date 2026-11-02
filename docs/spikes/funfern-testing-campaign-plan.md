@@ -1027,8 +1027,8 @@ each generation runs at the step it recommends.
   to 2.4 times (the loop) or raises it by 5% (the wall), and a handoff
   changes the energy by 9.5e-5 at most at twice the edge, 5e-6 at the
   default edge.
-- **What the study found: the outgoing walls converge at about first
-  order.** At a fourth level, a quarter of the edge, the loop and the wall
+- **What the study found: with outgoing walls the box converges at about
+  first order.** At a fourth level, a quarter of the edge, the loop and the wall
   level off near 1.1e-4, 0.52 to 0.58 of a halving's move, static too. The
   floor is the plain box's own: a uniform medium shows it, it is spread
   over the box, halving the step leaves it, and with reflecting outer walls
@@ -1037,7 +1037,7 @@ each generation runs at the step it recommends.
   first-order wall alone (3.7e-4, 1.4e-4, 7.0e-5), against 2.5e-4, 4.2e-5
   and 1.5e-5 with every wall reflecting. PH-04, PH-06 and PH-07 read the walls'
   reflection on a channel and on circles, at about second order; none reads
-  the field inside a box. Investigated next.
+  the field inside a box. The cause is the strike, not the walls (below).
 - **Mutation** `complementary-from-its-own-region-only` takes each new
   element's complementary field only from old elements of its own region,
   as until 2026-10-06: the loops and walls read 890 to 1340 times a
@@ -1045,6 +1045,34 @@ each generation runs at the step it recommends.
   runtime's `a_new_or_retired_region_keeps_its_complementary_field`, that
   fix's regression test, catches it too, and so does
   `edits_the_field_cannot_tell_leave_it_as_the_mesh_allows_and_a_static_flux_static`.
+
+**The outgoing walls cleared on 2026-11-02.** The first order was the
+tests' strike. Their Gaussian, 0.3 wide in the default box, its centre 0.74
+from the left side, stands at 2.3e-3 of its peak there at the start. A
+strike sets the field with no flux, which the outgoing law cannot hold at
+a wall, so a jump leaves the wall at once and travels in, and a jump
+converges at first order whatever the scheme.
+- **The wall alone.** A plane pulse, 1e-12 at the wall, meets the left wall
+  at normal incidence, where the first-order law is exact, between
+  reflecting floor and ceiling. Against the exact solution, once its
+  left-going half has left, its error falls 9, 6.4 and 4.5 times over the
+  halvings from 0.08, to 6e-6 at 0.01: the wall's own second order. With
+  every side reflecting it falls 8 times.
+- **Where and when.** With the tests' strike and the left wall outgoing, at
+  a quarter of the run, 0.02 to 0.01 stands further apart than 0.04 to
+  0.02, 2.1e-4 against 1.5e-4, most of it 0.2 to 0.4 from the wall, where
+  the jump is by then.
+- **A strike clear of the walls.** At width 0.15, 2.7e-11 of its peak at
+  the walls, the box's own move per halving from 0.08 reads 2.3e-3, 2.4e-4
+  and 3.3e-5 with the left wall first-order outgoing, 3.2e-3, 2.9e-4 and
+  4.4e-5 with every wall second-order outgoing, and 2.3e-3, 2.3e-4 and
+  2.9e-5 with every wall reflecting.
+- **The tests keep their strike.** Struck at width 0.15, IV-08 reads 0.21
+  of a halving's move at worst instead of 0.51, but only because the
+  narrower pulse is resolved worse: the box's own move at the finest level
+  rises from 4.1e-4 to 3.3e-3, so a defect of a given size would stand out
+  less. The halving's move IV-04, IV-09 and IV-08 judge against is the
+  scheme's under the strike they use.
 
 ## 7. Infrastructure
 

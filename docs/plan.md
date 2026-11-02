@@ -1318,9 +1318,10 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   moved leaving its jump in the medium where it had stood, and holding none
   itself (fixed: ground the wall swept over extends from its own side), and
   its device half, the `baffle-move` fixture, the same day. IV-08 edited
-  mid-run followed the same day, its CPU half. Its study found the box's
-  outgoing walls converging at about first order below the default edge,
-  which is investigated next; IV-08's device half follows.
+  mid-run followed the same day, its CPU half. Its study saw the box with
+  outgoing walls converge at about first order below the default edge; the
+  cause proved the tests' strike, which starts with a share of the pulse at
+  the walls, not the walls. IV-08's device half is next.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the

@@ -31606,3 +31606,49 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-02 — The outgoing walls are second order; the first was the strike
+
+- **What it corrects.** The IV-08 entry above records the box with outgoing
+  walls converging at about first order below the default edge, and the
+  walls as its cause. The cause is the invariant tests' strike: their
+  Gaussian, 0.3 wide in the default box, its centre 0.74 from the left
+  side, stands at 2.3e-3 of its peak there at the start. A strike sets the
+  field with no flux, which the outgoing law cannot hold at a wall, so a
+  jump leaves the wall at once and travels in. A jump converges at first
+  order whatever the scheme.
+- **The wall alone.** A plane pulse, 1e-12 at the wall, meets the left wall
+  at normal incidence, where the first-order law is exact, between
+  reflecting floor and ceiling, and is read against the exact solution at
+  t = 1.55, once its left-going half has left:
+
+  | Left side | 0.08 | 0.04 | 0.02 | 0.01 |
+  |---|---|---|---|---|
+  | First-order outgoing | 1.62e-3 | 1.81e-4 | 2.81e-5 | 6.21e-6 |
+  | Reflecting | 1.43e-3 | 1.41e-4 | 1.62e-5 | 2.08e-6 |
+
+  The wall's error falls at its own second order, as the wall-step spike
+  derived, with a small constant.
+- **Where and when.** With the tests' strike and the left wall outgoing, at
+  a quarter of the run, 0.02 to 0.01 stands further apart than 0.04 to
+  0.02, 2.1e-4 against 1.5e-4, most of it 0.2 to 0.4 from the wall, where
+  the jump is by then.
+- **A strike clear of the walls.** At width 0.15, 2.7e-11 of its peak at
+  the walls, the box's own move per halving is the same whatever its walls:
+
+  | Walls | 0.08→0.04 | 0.04→0.02 | 0.02→0.01 |
+  |---|---|---|---|
+  | Left first-order outgoing | 2.3e-3 | 2.4e-4 | 3.3e-5 |
+  | All second-order outgoing | 3.2e-3 | 2.9e-4 | 4.4e-5 |
+  | All reflecting | 2.3e-3 | 2.3e-4 | 2.9e-5 |
+  | Left first-order, the tests' strike | 3.7e-4 | 1.4e-4 | 6.9e-5 |
+
+- **The tests keep their strike.** Struck at width 0.15, IV-08 reads 0.21
+  of a halving's move at worst instead of 0.51, but only because the
+  narrower pulse is resolved worse: the box's own move at the finest level
+  rises from 4.1e-4 to 3.3e-3, so a defect of a given size would stand out
+  less. The halving's move IV-04, IV-09 and IV-08 judge against is the
+  scheme's under the strike they use, not looser than it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.
