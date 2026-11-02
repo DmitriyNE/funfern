@@ -1,0 +1,16 @@
+diff --git a/crates/funfern-app/src/canonical_gpu.rs b/crates/funfern-app/src/canonical_gpu.rs
+index 3c8d63d..55cdbe1 100644
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -689,7 +689,10 @@ impl CanonicalGpuLiveEvent {
+         // place a driven medium's mass is known. See `live_event_stage`.
+         let values = field_increment
+             .iter()
+-            .map(|increment| finite_f32(*increment, "live primary pulse"))
++            .map(|increment| {
++                finite_f32(*increment, "live primary pulse")
++                    .map(|value| if value.abs() < 1.0e-6 { 0.0 } else { value })
++            })
+             .collect::<Result<Vec<_>, _>>()?;
+         Self::scalar_payload(EVENT_PRIMARY_PULSE, serial, 5, &values, 0)
+     }

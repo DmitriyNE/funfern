@@ -127,7 +127,13 @@ and all of it negated. Each run stands within the tolerance of its
 reference; the first must stand from the sum of the next two within 1e-5,
 relative to the largest, in Q, b and the wall's pole states, and it reads
 9.1e-7, 1.3e-6 and 2.0e-6; the last must be the first negated, every
-value, and it is. The six
+value, and it is. `similarity`, IV-06 on the device, runs the same cavity
+struck by the widest pulse the slider takes to step 384, and again four
+times sooner: its density divided by 16, its drive four times as fast and
+as strong, its pulse four times as strong, at the step the app takes for
+it. That step must be the first's over four, and at the endpoints the
+second's Q times four, and its b and the wall's pole states as they are,
+the first's, every value; they are, natively and in Chrome. The six
 `handoff-memory` fixtures, `-rebuild`, `-remesh`, `-edit`, `-timestep`, `-flux` and `-running`, give
 the cavity a second-order outgoing wall on its bottom side and a 0.8 Hz drive
 on its top, run the pulse into the wall, and at step 192, once the wall holds
@@ -1501,10 +1507,14 @@ primary coefficient divided by 16 and every rate, frequency and duration
 carried, and larger by 4, its geometry, frames, formulas, mesh edge and
 curve tolerance four times as large and time with them, must mesh to the
 original's mesh carried and run to its bits, each quantity by its power of
-two; sooner by 1.37, within 1e-12. 91 scenes in the gate in about 22 s.
+two, the walls' pole states among them; sooner by 1.37, within 1e-12. 91
+scenes in the gate in about 22 s.
 Larger by 1.37, which meshes otherwise, is read at three levels by IV-04's
 rule: 6 cases in the gate in about 23 s, every linear gallery scene in the
-nightly. Its mutation is `point-profile-reaching-the-default-width`.
+nightly. Its mutation is `point-profile-reaching-the-default-width`. Its
+device half is the `similarity` fixture, whose mutation
+`pulse-tail-dropped-below-a-fixed-size` drops a pulse's increments below a
+fixed size.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

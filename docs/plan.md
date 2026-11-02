@@ -1334,8 +1334,10 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   step's start and does not step back (fixed: they take the kick form).
   IV-06, similarity scaling, followed the same day: a scene sooner or
   larger by 4 runs to the original's bits, and no time or length in the
-  solver is absolute. Its device half and IV-13, split/merge reversal,
-  follow.
+  solver is absolute. Its device half, the `similarity` fixture, followed
+  on 2026-11-03: the device is as homogeneous in time, but for f32's
+  floor, which a pulse that leaves nodes to the stencil reaches. IV-13,
+  split/merge reversal, follows.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the

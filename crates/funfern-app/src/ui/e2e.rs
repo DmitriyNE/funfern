@@ -105,6 +105,7 @@ pub(crate) fn add(app: &mut App) {
         "separator-mid-run" => (Fixture::SeparatorMidRun, vec![None]),
         "observers" => (Fixture::Observers, vec![None, None]),
         "superposition" => (Fixture::Superposition, vec![None; SUPERPOSED.len()]),
+        "similarity" => (Fixture::Similarity, vec![None; 2]),
         "handoff-memory-rebuild" => (Fixture::HandoffMemory(MemoryHandoff::Rebuild), vec![None]),
         "handoff-memory-remesh" => (Fixture::HandoffMemory(MemoryHandoff::Remesh), vec![None]),
         "handoff-memory-edit" => (Fixture::HandoffMemory(MemoryHandoff::Edit), vec![None]),
@@ -142,6 +143,7 @@ pub(crate) fn add(app: &mut App) {
         start_time: 0.0,
         observing: Observing::default(),
         endpoints: Vec::new(),
+        time_steps: Vec::new(),
         deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(120)),
     })
     .add_systems(EguiPrimaryContextPass, drive.before(frame))
@@ -258,6 +260,17 @@ enum Fixture {
     /// rounding is symmetric, so only an operation of the device's that is
     /// not odd can part them.
     Superposition,
+    /// IV-06 of the testing campaign on the device: `HandoffMemory`'s cavity,
+    /// its bottom side a second-order outgoing wall and its top driven, run
+    /// to step 384, and run again [`SOONER`] times sooner: its medium's
+    /// density divided by the square, so that its waves run that much
+    /// faster, its drive that much faster and stronger and its pulse that
+    /// much stronger, at the step the app takes for it, the first's divided
+    /// by [`SOONER`]. At the endpoints the second's Q times [`SOONER`], and
+    /// its b and the wall's pole states as they are, must be the first's,
+    /// every value: a power of four moves no rounding, so only an operation
+    /// of the device's that is not homogeneous in time can part them.
+    Similarity,
     /// The cavity with its bottom side a second-order outgoing wall and its
     /// top side driven, the pulse run into the wall until its pole states
     /// hold memory, then handed off at step 192 of 384 the way named: the
@@ -412,7 +425,7 @@ impl Fixture {
             Fixture::BaffleMove => (&[(BAFFLE_MOVE_STEP, Action::Move)], BAFFLE_MOVE_STEP + 128),
             // The pulse's front reaches the wall near step 150, and the wall
             // holds memory for the rest of the run.
-            Fixture::Superposition => (&[], 384),
+            Fixture::Superposition | Fixture::Similarity => (&[], 384),
             Fixture::SeparatorMidRun => (&[(128, Action::Draw), (192, Action::Delete)], 256),
             // The pulse's front reaches the wall near step 150: the handoff
             // comes once the wall holds memory, and the run goes on for as
@@ -494,6 +507,13 @@ impl Fixture {
             // the mesh, which [`UNEDITED_APART`] is, is the field's and not
             // the pulse's.
             Fixture::SeparatorMidRun => Some(0.2),
+            // The slider's widest, which reaches every node from the start,
+            // 1e-11 of its peak at the farthest. A node the pulse leaves for
+            // the stencil to reach holds values down to where f32 flushes
+            // them to zero, and the sooner run's Q, a quarter of the first's,
+            // flushes nodes the first's keeps: one bit apart, every rounding
+            // after it parts, and the runs stood 9e-7 apart by step 384.
+            Fixture::Similarity => Some(0.25),
             _ => None,
         }
     }
@@ -594,7 +614,7 @@ impl Fixture {
             Fixture::BaffleMove => (baffled_document(), None),
             Fixture::SeparatorMidRun => (separated_document(), None),
             Fixture::Observers => (observers_document(), None),
-            Fixture::Superposition => (wall_document(true), None),
+            Fixture::Superposition | Fixture::Similarity => (wall_document(true), None),
             Fixture::HandoffDriven => (pump_document(), None),
             Fixture::HandoffDrivenPins => (pumped_driven_document(), None),
             Fixture::Observables => (observables::observables_document(), None),
@@ -638,6 +658,8 @@ pub(crate) struct Driver {
     /// Each finished run's endpoint where the fixture reads the runs against
     /// each other: Q, b and the wall's pole states.
     endpoints: Vec<[Vec<f32>; 3]>,
+    /// The step each of those runs took.
+    time_steps: Vec<f64>,
     deadline: Instant,
 }
 
@@ -1035,6 +1057,9 @@ fn drive(
     let verdict = verdict.and_then(|summary| match driver.hashes.as_slice() {
         _ if matches!(fixture, Fixture::Superposition) => {
             superposed(&driver.endpoints).map(|read| format!("{summary}; {read}"))
+        }
+        _ if matches!(fixture, Fixture::Similarity) => {
+            similar(&driver.endpoints, &driver.time_steps).map(|read| format!("{summary}; {read}"))
         }
         [(_, first), rest @ ..] if rest.iter().any(|(_, hash)| hash != first) => Err(format!(
             "the endpoint differs {}: {}",
@@ -1819,6 +1844,107 @@ fn observed(
     ))
 }
 
+/// How many times sooner [`Fixture::Similarity`]'s second run is: a power of
+/// four, so that every quantity, and the square root of the wall's damping
+/// its modal transform takes, scales by a power of two.
+const SOONER: f64 = 4.0;
+
+/// [`Fixture::Similarity`]'s second run: the cavity [`SOONER`] times sooner,
+/// its medium's density divided by the square, and its drive that much
+/// faster and, the field it holds coming that much stronger, stronger. The
+/// cavity carries no other rate.
+fn sooner(document: &mut TopologyDocument) {
+    let TimeSignal::Harmonic {
+        offset,
+        amplitude,
+        frequency_hz,
+        phase_radians,
+    } = WALL_DRIVE
+    else {
+        unreachable!("the wall's drive is harmonic");
+    };
+    for scene in [&mut document.model.draft, &mut document.model.accepted] {
+        assert_eq!(
+            scene.physics,
+            PhysicsModel::Mechanical,
+            "the density is the primary row"
+        );
+        for material in &mut scene.materials {
+            let ScalarField::Constant(density) = material.mass_density else {
+                unreachable!("the cavity's density is constant");
+            };
+            material.mass_density = ScalarField::Constant(density / (SOONER * SOONER));
+        }
+        scene.outer_boundaries.sides[OuterSide::Top.index()] = OuterBoundaryCondition::Dirichlet {
+            signal: TimeSignal::Harmonic {
+                offset: offset * SOONER,
+                amplitude: amplitude * SOONER,
+                frequency_hz: frequency_hz * SOONER,
+                phase_radians,
+            },
+        };
+    }
+}
+
+/// [`Fixture::Similarity`]'s two endpoints: the sooner run's step the
+/// first's divided by [`SOONER`], and its Q times [`SOONER`], b and the
+/// wall's pole states as they are, the first's, value for value.
+fn similar(endpoints: &[[Vec<f32>; 3]], time_steps: &[f64]) -> Result<String, String> {
+    let ([first, sooner], [step, sooner_step]) = (endpoints, time_steps) else {
+        return Err(format!(
+            "{} endpoints and {} steps, where the runs are two",
+            endpoints.len(),
+            time_steps.len()
+        ));
+    };
+    if *sooner_step * SOONER != *step {
+        return Err(format!(
+            "the sooner run steps {sooner_step:e}, not the first's {step:e} over {SOONER}"
+        ));
+    }
+    let mut read = Vec::new();
+    for (index, (name, factor)) in [
+        ("Q", SOONER as f32),
+        ("b", 1.0),
+        ("the wall's pole states", 1.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (first, sooner) = (&first[index], &sooner[index]);
+        if first.len() != sooner.len() || first.is_empty() {
+            return Err(format!(
+                "the runs hold {} and {} values of {name}",
+                first.len(),
+                sooner.len()
+            ));
+        }
+        // A zero of either sign is itself scaled.
+        let parted = first
+            .iter()
+            .zip(sooner)
+            .filter(|(first, sooner)| **sooner * factor != **first)
+            .count();
+        if parted != 0 {
+            return Err(format!(
+                "{parted} of {} values of {name} in the sooner run are not the first run's{}: \
+                 the device is not homogeneous in time",
+                first.len(),
+                if factor == 1.0 {
+                    String::new()
+                } else {
+                    format!(" over {SOONER}")
+                }
+            ));
+        }
+        read.push(format!("{} of {name}", first.len()));
+    }
+    Ok(format!(
+        "the sooner run is the first, its step and every value: {}",
+        read.join(", ")
+    ))
+}
+
 /// [`Fixture::Superposition`]'s four runs: which of its two points are
 /// struck, the pulses' amplitude, which the pulse slider takes to -5, and
 /// the factor on [`WALL_DRIVE`]'s amplitude. The first run is the sum of the
@@ -2157,6 +2283,9 @@ fn advance(
                         OuterBoundaryCondition::Dirichlet { signal };
                 }
             }
+            if matches!(driver.fixture, Fixture::Similarity) && !driver.hashes.is_empty() {
+                sooner(&mut document);
+            }
             // Auto exposure is the app's default; the quiet run turns it off.
             let observed = driver.fixture.observes() && !driver.hashes.is_empty();
             if driver.fixture.observes() {
@@ -2321,6 +2450,9 @@ fn advance(
                 let (struck, amplitude, _) = SUPERPOSED[driver.hashes.len()];
                 points = struck.iter().map(|index| points[*index]).collect();
                 state.pulse_amplitude = amplitude;
+            }
+            if matches!(driver.fixture, Fixture::Similarity) && !driver.hashes.is_empty() {
+                state.pulse_amplitude = SOONER as f32;
             }
             let queued_before = state.coordinator.pending_pulses.len();
             for point in &points {
@@ -3124,7 +3256,8 @@ fn advance(
                 summary,
                 hash: hash(&display.accepted_storage_bits()),
             });
-            if matches!(driver.fixture, Fixture::Superposition) {
+            if matches!(driver.fixture, Fixture::Superposition | Fixture::Similarity) {
+                driver.time_steps.push(state.coordinator.uploaded_time_step);
                 driver.endpoints.push([
                     display.primary_flux.clone(),
                     display

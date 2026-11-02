@@ -144,6 +144,7 @@ RUNS=(
   'FUNFERN_E2E=separator-mid-run funfern-fixtures'
   'FUNFERN_E2E=observers funfern-fixtures'
   'FUNFERN_E2E=superposition funfern-fixtures'
+  'FUNFERN_E2E=similarity funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-rebuild funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-remesh funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-edit funfern-fixtures'

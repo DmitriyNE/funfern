@@ -1299,6 +1299,42 @@ Two similarities carry a scene.
   it with each width, and the core's 589 and the app's 784 library tests
   pass.
 
+**IV-06's device half done on 2026-11-03**, the `similarity` fixture in
+`crates/funfern-app/src/ui/e2e.rs`. The `handoff-memory` cavity, its bottom
+side a second-order outgoing wall and its top driven, runs to step 384, and
+again four times sooner: its density divided by 16, its drive four times as
+fast and as strong, its pulse four times as strong, at the step the app
+takes for it. The plan's factor was two; it is four for the wall's square
+root, as on the CPU.
+- **Checks.** Each run against its reference, as every fixture. The sooner
+  run's step must be the first's over four, and at the endpoints its Q times
+  four, and its b and the wall's pole states as they are, the first's, every
+  value. The pole states are in energy coordinates and stay as they were,
+  which IV-06 on the CPU now checks too, to the bit at 4; by 1.37 they stood
+  up to 1.8 apart where the fields and the energy agreed within 1e-15, the
+  wall's modal basis rounded otherwise, so there the energy reads them.
+- **What the study found: f32's floor.** Struck by the app's usual pulse,
+  the sooner run stood 8.2e-7 from the first in Q by step 384, every run
+  within its reference. Its first parted values, at step 8, were near
+  8e-38: a node the pulse leaves for the stencil to reach holds values down
+  to where the GPU flushes them to zero, and the sooner run's Q, a quarter
+  of the first's, flushes nodes the first keeps. One bit apart, every
+  rounding after it parts, and the distance grew to f32's roundoff by step
+  128. Struck by the slider's widest pulse, which reaches every node from
+  the start, 1e-11 of its peak at the farthest, the runs are the same to
+  the bit.
+- **Numbers.** On the M1 Max and in Chrome on the same machine, both runs
+  stand 8.5e-7 from their references in Q, 1.1e-6 in b and 1.7e-6 in the
+  wall's pole states, and the sooner run is the first, its step and every
+  value: 11,121 of Q, 43,860 of b, 240 pole states. The same hashes natively
+  and in Chrome.
+- **Mutation** `pulse-tail-dropped-below-a-fixed-size` drops a pulse's
+  increments below 1e-6 on their way to the device, a size fixed in the
+  field's units: each run stands with its reference, and the sooner run's
+  pulse, four times as strong, keeps a tail the first drops, 10,740 values
+  of Q apart. The `cavity` and `superposition` fixtures and the app's 55
+  `canonical_gpu` tests pass with it.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

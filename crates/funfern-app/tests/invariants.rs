@@ -3786,6 +3786,17 @@ impl Run {
             Run::Temporal(state) => state.thin_gap_jump(),
         }
     }
+
+    /// The second-order walls' pole states, in energy coordinates.
+    fn poles(&self) -> &[f64] {
+        match self {
+            Run::Fixed(state) => match state.auxiliaries() {
+                CanonicalAuxiliaryState::Linear(auxiliaries) => auxiliaries.outgoing_z(),
+                _ => &[],
+            },
+            Run::Temporal(state) => state.outgoing_z(),
+        }
+    }
 }
 
 /// How far `run`, stepped `steps` on and as far back, stands from where it
@@ -4524,7 +4535,8 @@ const GENERICALLY: f64 = 1.37;
 
 /// How a run's quantities scale through a similarity: Q, `b` with the
 /// complementary field, the primary field, time and length. `r`, a gap's
-/// jump and the energy stay as they were.
+/// jump, a wall's pole states, which are in energy coordinates, and the
+/// energy stay as they were.
 #[derive(Clone, Copy, Debug)]
 struct Scales {
     primary_flux: f64,
@@ -4594,7 +4606,8 @@ fn similar_run(
         && same(&primary, control.primary())
         && same(&flat(&complementary), &flat(control.complementary()))
         && same(run.integrated(), control.integrated())
-        && same(run.gaps(), control.gaps());
+        && same(run.gaps(), control.gaps())
+        && same(run.poles(), control.poles());
     let (read, expected) = (readings(&other, &run)?, readings(original, control)?);
     let fields = read
         .iter()
@@ -4710,10 +4723,13 @@ fn similar(scene: &Scene) -> Result<(String, Apart), String> {
 /// formulas, source and probes carried, its mesh edge and curve tolerance
 /// with them, every rate divided by it, the primary field that much weaker.
 /// Each must mesh to the original's mesh carried, take the step carried and
-/// run, struck by the pulse carried, to the original's bits: Q, `b`, `r`
-/// and the gaps' jumps, each by its power of two. Through a similarity of
-/// time by [`GENERICALLY`], no power of two, it must run within
-/// [`ROUNDOFF`].
+/// run, struck by the pulse carried, to the original's bits: Q, `b`, `r`,
+/// the gaps' jumps and the walls' pole states, each by its power of two.
+/// Through a similarity of time by [`GENERICALLY`], no power of two, it
+/// must run within [`ROUNDOFF`]. The pole states are coordinates in the
+/// wall's modal basis, which that rounds otherwise: they stood up to 1.8
+/// apart where the fields and the energy, which holds them, agreed within
+/// 1e-15, so there the energy reads them.
 #[test]
 fn a_similar_scene_runs_as_the_original() {
     over_every_scene("similar", similar);

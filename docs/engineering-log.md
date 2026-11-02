@@ -31964,3 +31964,59 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-03 — IV-06 on the device: the run four times sooner, to the bit
+
+- **What it is.** The `similarity` fixture in
+  `crates/funfern-app/src/ui/e2e.rs`. The `handoff-memory` cavity, 11,121
+  nodes, its bottom side a second-order outgoing wall and its top driven at
+  0.8 Hz, runs to step 384, and again four times sooner: its density divided
+  by 16, its drive four times as fast and as strong, its pulse four times as
+  strong, at the step the app takes for it, 1.904e-3 against 7.616e-3. The
+  plan's factor was two; it is four for the wall's square root, as on the
+  CPU.
+- **Checks.** Each run against its reference, as every fixture. The sooner
+  run's step must be the first's over four, and at the endpoints its Q times
+  four, and its b and the wall's pole states as they are, the first's, every
+  value, a zero of either sign counting as itself.
+- **What the study found: f32's floor.** Struck by the app's usual pulse,
+  the runs stood 8.2e-7 apart in Q by step 384, every run within its
+  reference. The cavity alone, its walls reflecting and undriven, parted the
+  same way, relatively:
+
+  | Steps | 8 | 16 | 32 | 64 | 128 | 384 |
+  |---|---|---|---|---|---|---|
+  | Q apart | 9.8e-34 | 3.4e-30 | 2.3e-25 | 4.1e-17 | 1.9e-7 | 9.3e-7 |
+
+  The first parted values, at step 8, stood near 8e-38. A node the pulse
+  leaves for the stencil to reach holds values down to where the GPU
+  flushes them to zero, and the sooner run's Q, a quarter of the first's,
+  flushes nodes the first keeps. One bit apart, every rounding after it
+  parts. The fixture strikes with the slider's widest pulse, 0.25, which
+  reaches every node from the start, 1e-11 of its peak at the farthest: the
+  runs are then the same to the bit, at 128 steps and at 384.
+- **The pole states on the CPU.** They are in energy coordinates and stay as
+  they were through both similarities; `a_similar_scene_runs_as_the_original`
+  now holds them to the bit at 4, through
+  `CanonicalTemporalWaveState::outgoing_z`, new in core. By 1.37 they stood
+  up to 1.8 apart where the fields and the energy, which holds them, agreed
+  within 1e-15: the wall's modal basis rounds otherwise, and there the energy
+  reads them.
+- **Numbers.** On the M1 Max both runs stand 8.5e-7 from their references in
+  Q, 1.1e-6 in b and 1.7e-6 in the pole states, and the sooner run is the
+  first, its step and every value: 11,121 of Q, 43,860 of b, 240 pole
+  states. Chrome on the same machine ends on the same hashes,
+  `7187b1a402be1d9e` and `ab4eb04f651aee31`.
+- **Mutation** `pulse-tail-dropped-below-a-fixed-size` drops a pulse's
+  increments below 1e-6 on their way to the device, a size fixed in the
+  field's units where a tail is negligible against its own peak. Each run
+  stands with its reference, 8.6e-7 in Q, and the sooner run's pulse, four
+  times as strong, keeps a tail the first drops: 10,740 of the 11,121 values
+  of Q part. The `cavity` and `superposition` fixtures and the app's 55
+  `canonical_gpu` tests pass with it.
+- **Suite and CI.** The device suite runs it after `superposition`: 119 of
+  119 pass (`target/device-suite/20261103-002421`), the fixture in 7 s. The
+  nightly browser run puts it in the `invariants` part.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

@@ -1,0 +1,4 @@
+about: a pulse's increment below 1e-6 is dropped as negligible on its way to the device, a size fixed in the field's units where a tail is negligible against its own peak: each run stands with its reference, and only the run four times sooner, its pulse four times as strong, keeps a tail the first drops
+test: scripts/e2e-fixture.sh similarity
+expect: values of Q in the sooner run are not the first run's over 4
+needs: device

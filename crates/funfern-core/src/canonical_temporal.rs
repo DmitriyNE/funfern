@@ -4111,6 +4111,11 @@ impl CanonicalTemporalWaveState {
         )
     }
 
+    /// The second-order outgoing walls' pole currents, in energy coordinates.
+    pub fn outgoing_z(&self) -> &[f64] {
+        &self.outgoing_z
+    }
+
     pub fn thin_gap_jump(&self) -> &[f64] {
         &self.thin_gap_jump
     }
