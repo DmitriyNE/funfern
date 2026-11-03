@@ -36,7 +36,10 @@ through the app's handlers - it opens a document, places a pulse, presses Run -
 and reads only what the device accepted, its accepted-step counter, the serial
 of the last event it processed, and a full snapshot stamped with the step it
 holds. The f64 reference steps on the generation the app accepted, so on the
-same mesh. The one thing the driver adds to the app is where a run stops, since
+same mesh. After a handoff it takes away the stationary flux the app's cleanup
+takes, once a full readback shows the maintenance serial the cleanup moved:
+the part is the same at every step, so wherever the snapshot falls the two
+read one field. The one thing the driver adds to the app is where a run stops, since
 the app asks for steps by the wall clock. The process exits 0 when the fixture
 holds; the suite runs each. `cavity` strikes a closed reflecting box of the
 default medium, grid filter off, with one pulse at step 0 and compares Q and b

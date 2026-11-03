@@ -32226,3 +32226,22 @@ the device.
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs, then
   `scripts/device-suite.sh`.
+
+## 2026-11-03 — The app fixtures' reference follows the flux cleanup
+
+- **What the suite found.** The device suite after a2b3013 passed 117 of 119.
+  `remesh` and `handoff-memory-remesh` read the flux 2.6e-2 and 4.8e-3 from
+  their reference, Q still within 8e-7. The app now takes away the stationary
+  flux a remesh leaves, and the fixtures' f64 reference carried the field
+  through the handoff maps and kept it. Q agreeing is the cleanup moving
+  nothing on the device.
+- **Fix.** The reference takes away its own stationary part once a full
+  readback shows the maintenance serial the app's flux maintenance moved.
+  The part is the same at every step of a fixed lossless generation, so
+  whichever side of the cleanup a snapshot falls, the two read one field.
+  `remesh` reads the flux at 1.2e-6 and `handoff-memory-remesh` at 1.1e-6;
+  their references took away 6.6e-4 and 2.1e-5 of the flux's energy.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs; the
+  suite's handoff fixtures, 14 of 14, with commit 2's changes beside them.

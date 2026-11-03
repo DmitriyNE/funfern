@@ -41,8 +41,9 @@ use bevy::render::{
 use bevy_egui::EguiPrimaryContextPass;
 use check::{within, worse};
 use funfern_core::{
-    CanonicalHandoffMaps, CanonicalTemporalWaveState, CanonicalWaveOperator, CanonicalWaveState,
-    FaceAnchor, OpenCubicSpline, OuterBoundaryCondition, OuterBoundaryConditions, SpanBehavior,
+    CanonicalHandoffMaps, CanonicalStationaryFluxJob, CanonicalTemporalWaveState,
+    CanonicalWaveOperator, CanonicalWaveState, FaceAnchor, OpenCubicSpline, OuterBoundaryCondition,
+    OuterBoundaryConditions, SpanBehavior,
 };
 use std::collections::{BTreeSet, VecDeque};
 
@@ -867,6 +868,10 @@ struct Reference {
     twin: Option<observables::Twin>,
     /// The far-field recorder's twin, where its records are to be judged.
     far: Option<far_field::FarFieldTwin>,
+    /// The maintenance serial the device last showed: the app's flux
+    /// maintenance moves it when it takes away the stationary flux a
+    /// handoff left, and the reference follows.
+    maintenance_seen: u32,
 }
 
 #[derive(Clone)]
@@ -982,6 +987,46 @@ impl State {
 
 impl Reference {
     /// Steps the reference, and the control, to the accepted step `step`.
+    /// Takes away the stationary flux the device's cleanup took after the
+    /// last handoff, once a full readback shows the maintenance serial it
+    /// moved. The part is the same at every step of a fixed lossless
+    /// generation, so taking it here, at whatever step the reference stands,
+    /// is what the device's subtraction comes to; a comparison is then of
+    /// the same field whichever side of the cleanup its snapshot fell.
+    fn follow_flux_cleanup(&mut self, display: &CanonicalGpuDisplay) -> Result<(), String> {
+        if display.full_readback_at != display.readbacks
+            || display.runtime_serials[3] <= self.maintenance_seen
+        {
+            return Ok(());
+        }
+        self.maintenance_seen = display.runtime_serials[3];
+        let State::Fixed(state) = &mut self.state else {
+            return Err("the device took a driven generation's stationary flux away".into());
+        };
+        let operator = &self.active.canonical_operator;
+        let mut job =
+            CanonicalStationaryFluxJob::new(operator.clone(), state.complementary_flux().to_vec())
+                .map_err(|error| error.to_string())?;
+        let found = loop {
+            if let Some(found) = job.advance(1 << 16) {
+                break found.map_err(|error| error.to_string())?;
+            }
+        };
+        let increment = found
+            .stationary
+            .iter()
+            .map(|value| *value * -1.0)
+            .collect::<Vec<_>>();
+        state
+            .apply_complementary_increment(operator, &increment)
+            .map_err(|error| error.to_string())?;
+        report(&format!(
+            "e2e: the reference took away the handoff's stationary flux, {:.2e} of the flux's energy",
+            found.energy / found.flux_energy
+        ));
+        Ok(())
+    }
+
     fn advance_to(&mut self, step: u64) -> Result<(), String> {
         while self.steps < step {
             self.state.step(&self.active)?;
@@ -2436,6 +2481,7 @@ fn advance(
                         unedited: None,
                         twin,
                         far,
+                        maintenance_seen: 0,
                     },
                     next: 0,
                 };
@@ -2511,6 +2557,7 @@ fn advance(
                     unedited: None,
                     twin: None,
                     far: None,
+                    maintenance_seen: 0,
                 },
                 processed: request.stats().processed_event(),
             };
@@ -3048,6 +3095,9 @@ fn advance(
                 };
                 return None;
             }
+            if let Err(error) = reference.follow_flux_cleanup(display) {
+                return Some(Err(error));
+            }
             if !holds {
                 if let Err(error) = reference.advance_to(stamped) {
                     return Some(Err(format!("the reference did not step: {error}")));
@@ -3241,7 +3291,10 @@ fn advance(
                 hash: 0,
             }))
         }
-        Phase::Snapshot { reference, seen } => {
+        Phase::Snapshot {
+            mut reference,
+            seen,
+        } => {
             // Only a snapshot of this generation, stamped with the endpoint
             // inside the state it copied, is the endpoint's.
             let arrived = display.full_readbacks > seen
@@ -3251,6 +3304,9 @@ fn advance(
                 request.request_full_state_readback();
                 driver.phase = Phase::Snapshot { reference, seen };
                 return None;
+            }
+            if let Err(error) = reference.follow_flux_cleanup(display) {
+                return Some(Err(error));
             }
             let run = compare(&reference, display, driver.fixture, endpoint).map(|summary| Run {
                 summary,
@@ -3444,6 +3500,9 @@ fn advance(
                         return Some(Err(format!(
                             "the device refused the step after {step}, which the reference takes"
                         )));
+                    }
+                    if let Err(error) = reference.follow_flux_cleanup(display) {
+                        return Some(Err(error));
                     }
                     let summary = match compare(&reference, display, driver.fixture, step) {
                         Ok(summary) => summary,
