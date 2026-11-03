@@ -363,6 +363,12 @@ pub struct Playground {
     pub(super) amr_adaptation_source: Option<AdaptationSource>,
     /// What adaptation keeps from one estimate to the next.
     pub(super) amr: AdaptationController,
+    /// Taking away the stationary flux the last handoff left; see
+    /// `flux_cleanup`.
+    pub(super) flux_cleanup: Option<FluxCleanup>,
+    /// Its solve where no worker took it, and a solve's answer not yet read.
+    pub(super) flux_cleanup_job: Option<CanonicalStationaryFluxJob>,
+    pub(super) flux_cleanup_completed: Option<Result<CanonicalStationaryFlux, WaveError>>,
     pub(super) amr_report: Option<MeshAdaptationReport>,
     pub(super) gpu_status: &'static str,
     /// The grid filter is asked for but the running generation does not admit
@@ -586,6 +592,9 @@ impl Default for Playground {
             amr_adaptation_completed: None,
             amr_adaptation_source: None,
             amr: AdaptationController::default(),
+            flux_cleanup: None,
+            flux_cleanup_job: None,
+            flux_cleanup_completed: None,
             amr_report: None,
             gpu_status: "loading",
             grid_filter_refused: false,

@@ -43,6 +43,9 @@ impl Playground {
                     BackgroundAmrResult::Adaptation(result) => {
                         self.amr_adaptation_completed = Some(result);
                     }
+                    BackgroundAmrResult::Stationary(result) => {
+                        self.flux_cleanup_completed = Some(result);
+                    }
                 }
             }
         }
@@ -64,6 +67,7 @@ impl Playground {
                 self.amr_adaptation_source = None;
                 self.amr_status = "adaptation failed".into();
             }
+            Some(BackgroundAmrKind::Stationary) => self.drop_flux_cleanup(),
             None => {}
         }
         self.amr_error = Some("the adaptation worker stopped and was restarted".into());
@@ -136,7 +140,7 @@ impl Playground {
                     self.amr_indicator_job = Some(*job);
                     return;
                 }
-                Err(BackgroundAmrJob::Adaptation(_)) => unreachable!(),
+                Err(_) => unreachable!("the worker hands back the job it was given"),
             }
         }
         self.amr_indicator_job = Some(job);
@@ -153,15 +157,18 @@ impl Playground {
                     self.amr_adaptation_job = Some(*job);
                     return;
                 }
-                Err(BackgroundAmrJob::Indicator(_)) => unreachable!(),
+                Err(_) => unreachable!("the worker hands back the job it was given"),
             }
         }
         self.amr_adaptation_job = Some(job);
     }
 
+    /// Cancels the estimate or adaptation on the worker, and leaves a
+    /// handoff's stationary solve there to finish.
     pub(super) fn cancel_background_amr(&mut self) {
         if let Some(worker) = &mut self.background_amr {
-            worker.cancel();
+            worker.cancel_kind(BackgroundAmrKind::Indicator);
+            worker.cancel_kind(BackgroundAmrKind::Adaptation);
         }
     }
 
@@ -362,6 +369,12 @@ impl Playground {
             self.amr_status = "waiting for solution".into();
             return;
         };
+        // What an estimate read now of the stationary flux the last handoff
+        // left would be error the next event takes away.
+        if self.flux_cleanup_pending(request.generation()) {
+            self.amr_status = "clearing the handoff's stationary flux".into();
+            return;
+        }
         let dofs = active.operator.degrees_of_freedom();
         if !request.ready()
             || display.generation != request.generation()

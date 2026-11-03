@@ -1783,6 +1783,12 @@ is next touched.
   crossed before IV-11's projection; a projection along the trace is the
   candidate. IV-13 holds the energy within 4e-4 (found by IV-13 on
   2026-11-03).
+- The device's flux grows by `C u` each step in f32, and what its rounding
+  leaves outside `C`'s range is stationary, as a handoff's carry is: it
+  never leaves, and only after a handoff is the stationary part taken away
+  (2026-11-03). How much a long run gathers is unmeasured; C9's long runs
+  are the place to read it, from a readback through
+  `CanonicalStationaryFluxJob`.
 
 ## Working practice
 

@@ -1625,6 +1625,16 @@ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
         }
         return;
     }
+    // A flux maintenance: an increment for each complementary sample, held
+    // where the samples' rows of scratch begin.
+    if operation == 9u {
+        if i < control.counts_a.y && i < upload.z {
+            let word = boundary[1u + i].data;
+            scratch[control.counts_a.x + i].values.x = bitcast<f32>(word.x);
+            scratch[control.counts_a.x + i].values.y = bitcast<f32>(word.y);
+        }
+        return;
+    }
     if operation == 3u {
         if i < control.counts_a.x {
             nodes[i].mass_loss.w = bitcast<f32>(boundary[1u + i].data.x);
@@ -1901,6 +1911,11 @@ fn event_simple_stage(@builtin(global_invocation_id) id: vec3<u32>) {
         if !finite_scalar(fraction) || fraction < 0.0 || fraction > 1.0 {
             reject(STATUS_LAYOUT);
         }
+    } else if operation == 9u && i < control.counts_a.x + control.counts_a.y {
+        let sample = i - complementary_offset();
+        let next = accepted_b(sample) + scratch[i].values.xy;
+        set_candidate_b(sample, next);
+        if !finite_vec2(next) { reject(STATUS_NON_FINITE); }
     }
 }
 
@@ -2142,7 +2157,7 @@ fn event_validate(@builtin(local_invocation_id) id: vec3<u32>) {
             if change > tolerance { reject(STATUS_TIMESTEP); }
             control.candidate_accounting_b.y += max(-change, 0.0);
         }
-        case 4u: { control.candidate_accounting_b.z += change; }
+        case 4u, 9u: { control.candidate_accounting_b.z += change; }
         default: {}
     }
 }
@@ -2222,7 +2237,7 @@ fn commit_event() {
         control.runtime_serials.y = control.event.y;
     } else if operation == 1u {
         control.runtime_serials.z = control.event.y;
-    } else if operation == 4u {
+    } else if operation == 4u || operation == 9u {
         control.runtime_serials.w = control.event.y;
     } else if operation == 5u || operation == 6u {
         control.runtime_serials.x = control.event.y;

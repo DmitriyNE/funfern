@@ -225,11 +225,14 @@ pub(super) fn spawn_preparation_worker(
 pub(super) enum BackgroundAmrKind {
     Indicator,
     Adaptation,
+    /// The stationary flux a handoff left, solved for; see `flux_cleanup`.
+    Stationary,
 }
 
 pub(super) enum BackgroundAmrJob {
     Indicator(Box<AmrIndicatorJob>),
     Adaptation(Box<MeshAdaptationJob>),
+    Stationary(Box<CanonicalStationaryFluxJob>),
 }
 
 impl BackgroundAmrJob {
@@ -237,6 +240,7 @@ impl BackgroundAmrJob {
         match self {
             Self::Indicator(_) => BackgroundAmrKind::Indicator,
             Self::Adaptation(_) => BackgroundAmrKind::Adaptation,
+            Self::Stationary(_) => BackgroundAmrKind::Stationary,
         }
     }
 
@@ -244,6 +248,7 @@ impl BackgroundAmrJob {
         match self {
             Self::Indicator(job) => job.phase(),
             Self::Adaptation(job) => job.phase(),
+            Self::Stationary(job) => job.phase(),
         }
     }
 }
@@ -264,6 +269,7 @@ pub(super) enum BackgroundAmrCommand {
 pub(super) enum BackgroundAmrResult {
     Indicator(Result<SolutionIndicatorResult, AmrIndicatorError>),
     Adaptation(Result<MeshAdaptationResult, MeshAdaptationError>),
+    Stationary(Result<CanonicalStationaryFlux, WaveError>),
 }
 
 #[cfg_attr(
@@ -463,6 +469,9 @@ pub(super) fn run_amr_worker(
                     }
                     BackgroundAmrJob::Adaptation(job) => {
                         job.advance(64).map(BackgroundAmrResult::Adaptation)
+                    }
+                    BackgroundAmrJob::Stationary(job) => {
+                        job.advance(64).map(BackgroundAmrResult::Stationary)
                     }
                 };
                 if result.is_some() || started.elapsed() >= BackgroundAmrWorker::QUANTUM {

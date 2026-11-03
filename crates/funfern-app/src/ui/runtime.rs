@@ -833,6 +833,13 @@ impl Playground {
                         }
                         self.restart_exposures_after_handoff(upload.fresh);
                         self.amr.published(&active);
+                        // A fresh field started from rest holds no stationary
+                        // flux; a handoff's carry may.
+                        self.drop_flux_cleanup();
+                        if !upload.fresh {
+                            self.flux_cleanup =
+                                FluxCleanup::after_handoff(&active, request.generation());
+                        }
                         if let Some(worker) = &mut self.background_amr {
                             worker.cancel_kind(BackgroundAmrKind::Indicator);
                         }
@@ -903,6 +910,7 @@ impl Playground {
                         // to a step counter that now starts at zero. The mesh and
                         // its adaptation history stay; Reset did not change them.
                         self.stop_adaptation_work();
+                        self.drop_flux_cleanup();
                         self.amr_last_analyzed_step = None;
                         self.amr_last_started = None;
                         self.amr.energy_peak = 0.0;
@@ -1020,6 +1028,12 @@ impl Playground {
                         }
                     }
                 }
+            }
+            // A handoff's stationary flux waits behind the user's own events.
+            if self.coordinator.pending_switches.is_empty()
+                && let Some(active) = self.runtime.active().cloned()
+            {
+                self.send_flux_cleanup(&active, request, assets);
             }
             // Drain once the packed candidate is ready so begin_handoff gets a
             // complete requested-step boundary. After that, keep advancing the

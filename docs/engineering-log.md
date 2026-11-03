@@ -32145,3 +32145,84 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-03 — A handoff's stationary flux is taken away after it
+
+- **What the study found.** AMR-01's study (campaign plan, section 6l) ran a
+  packet across the default box, adapted at the app's cadence. After the
+  packet left, the mesh refined at every estimate until the smallest element
+  allowed filled the box, 29,130 triangles at a quarter of the speed and
+  45,764 at a tenth, and never came back. The energy held at 1.1e-4 of the
+  peak, just over the dormant floor, and the estimate read it as all error.
+  93% of it was the stationary part of the complementary flux, the part
+  `C^T W J` takes to no force: it never moves and never leaves, no wall
+  absorbs it and the grid filter keeps it on purpose. The packet started with
+  none, and a run on one mesh never makes any (1e-22 to 1e-17).
+- **Cause.** A handoff carries `b` through its L2 projection, each old
+  element's quadratic onto the new elements, and on a new element that
+  straddles old ones the projection of a potential's flux is the flux of no
+  potential the new mesh holds. Refinement's Delaunay flips leave such
+  elements: 726 of the 1,866 the packet's first refinement changed, 93% of
+  what it left stationary. The rest is the bubble: a parent's cubic bubble is
+  not in its children's space. That refinement left 1.3e-3 of the energy
+  stationary, and a remesh, as an edit that keeps the field makes, 5.6e-3.
+  The device carries `b` through the same blocks.
+- **What did not work.** A local map that keeps a potential's flux a
+  potential's, each new element reading the old potential, fitted over the
+  old elements its projection draws on, at its seven nodes. It carried the
+  packet with 6e-22 stationary, but back and forth between the two meshes it
+  grew without bound: after 100 round trips the packet's energy stood 2e5
+  times higher and a rough flux's 1e6, where the projection's falls to 0.89
+  to 0.996. Fitting the edge midpoints and the centroid instead of reading
+  them left the packet 121 times higher. Reading at nodes the neighbours
+  share is interpolation, and it amplifies some mode between meshes that do
+  not nest. The projection is stable because it is orthogonal, which is why
+  it replaced sample evaluation on 2026-11-01, so it stays.
+- **Fix.** The stationary part is inert, so it is the same at every step of
+  its generation, and taking it away changes nothing of how the field moves.
+  After a handoff onto a fixed generation whose flux loses nothing, the app
+  solves for it from the generation's first full readback on the adaptation
+  worker: `CanonicalStationaryFluxJob`, Jacobi-preconditioned conjugate
+  gradients on `C^T W J C` to 1e-6 of the flux's force, an element per slice.
+  Single-threaded it takes 0.07 s at 2,772 triangles, 0.6 s at 11,190 and
+  5.7 s at 45,203. The increment that removes the part goes as a flux
+  maintenance, a new live event that adds a vector to each complementary
+  sample and books its energy in the maintenance lane. It is exact whenever
+  it lands. Estimates wait for a full readback a step past it, since an event
+  flips the state lanes. A driven generation, and one whose flux decays, are
+  left as they are: neither holds a part that stays put.
+- **With it.** The packet's mesh at speed 1 peaks at 5,805 triangles, goes
+  dormant at 4.5 s and coarsens to 4,781 by 7.5 s, where it was at 9,877 and
+  still growing at 5.3 s. At a quarter of the speed it peaks at 11,349 and
+  coarsens from 4.5 s, 6,229 by 7.9 s.
+- **Also corrected in the study.** It ran without the grid filter the app
+  applies every 16 steps by default, which left the coarse mesh's residue in
+  the box for good: the ring's mesh filling the box, reported earlier today,
+  was that. With the filter the ring goes dormant at 4.4 s and coarsens. The
+  study's common step is also lowered to 0.5 of the fine mesh's. At 0.7, an
+  adapted mesh at a tenth of the speed allowed only 0.69: refinement's
+  bisections are thinner than the mesher's elements at the same edge.
+- **Tests.**
+  - Core, `canonical_stationary`: the job's part is the oracle's to 1e-12 of
+    it, the same bits in any slices; a potential's flux leaves under 1e-12,
+    and a stationary one is found whole and pushes no node.
+  - App: `a_handoffs_stationary_flux_is_found_from_its_readback_and_holds_estimates_back`,
+    `nothing_is_sent_for_a_clean_flux_or_a_replaced_generation`,
+    `a_driven_generation_is_not_cleaned` and
+    `a_flux_maintenance_covers_every_sample`.
+  - `tests/adaptation.rs`'s `a_handoffs_stationary_flux_is_taken_away_and_moves_nothing`:
+    the carry leaves 1.27e-3 and 5.63e-3 stationary, and the cleanup leaves
+    3e-22. 400 steps on, the field is the uncleaned run's to 3.9e-7 and
+    5.2e-7, and none of the part has grown back.
+  - Mutation: `flux-cleanup-adds-the-stationary-part`.
+  - Device: `canonical_gpu_live_events` adds a stationary flux, a tenth of the
+    field's energy, as its sixth paused event. On the M1 Max, Q reads 3.1e-7
+    and `b` 6.6e-7 after 48 steps, and the maintenance lane 1.5e-6.
+  - The harness moved to `tests/adaptation.rs` and `tests/support`, beside
+    the invariants, which share it.
+- **Not done.** Whether the device's f32 stepping gathers a stationary part of
+  its own over a long run is unmeasured (plan.md, Worth checking sometime).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs, then
+  `scripts/device-suite.sh`.

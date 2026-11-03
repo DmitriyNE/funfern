@@ -1130,7 +1130,10 @@ complementary loss, prescribed exchange, thin-gap jump history, first-order
 outgoing impedance and the passive nonlocal three-state second-order boundary all
 participate in the same accepted/candidate transaction. The paired grid filter,
 pulses, maintenance and linear-law events use that global acceptance boundary as
-well. Its fixed-cadence production filter is resident in the solver command
+well, and so does the flux maintenance that takes away the stationary part of
+`b` a handoff's L2 projection leaves: inert, it is the same at every step of its
+generation, so the host solves for it from a readback (`CanonicalStationaryFluxJob`)
+and the event subtracts it whenever it lands. Its fixed-cadence production filter is resident in the solver command
 stream; authored pulses and edits remain host-queued events. A rejected step or
 event leaves accepted physical state and its clock unchanged.
 

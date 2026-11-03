@@ -2895,6 +2895,29 @@ impl CanonicalWaveState {
             .sum()
     }
 
+    /// Adds `increment` to the complementary flux at the accepted event
+    /// time, as the device's flux maintenance event does, and answers with
+    /// what it changed the stored energy by. Taking away a stationary part,
+    /// found by a [`crate::CanonicalStationaryFluxJob`], changes no force, so
+    /// the field moves on as it would have.
+    pub fn apply_complementary_increment(
+        &mut self,
+        operator: &CanonicalWaveOperator,
+        increment: &[Point2],
+    ) -> Result<f64, WaveError> {
+        operator.validate_complementary(increment)?;
+        let before = self.complementary_energy(operator);
+        for (flux, increment) in self.complementary_flux.iter_mut().zip(increment) {
+            *flux = *flux + *increment;
+        }
+        operator.validate_complementary(&self.complementary_flux)?;
+        let change = self.complementary_energy(operator) - before;
+        change
+            .is_finite()
+            .then_some(change)
+            .ok_or(WaveError::InvalidState)
+    }
+
     fn apply_primary_increment(
         &mut self,
         operator: &CanonicalWaveOperator,

@@ -55,6 +55,7 @@ mod draw_tools;
 pub(crate) mod e2e;
 mod events;
 mod exposure;
+mod flux_cleanup;
 mod gesture;
 mod gizmo;
 mod guide;
@@ -101,6 +102,7 @@ pub use state::Playground;
 use coordinator::Coordinator;
 use events::*;
 use exposure::*;
+use flux_cleanup::*;
 use gesture::*;
 use guide::*;
 use material_session::MaterialSession;
@@ -469,6 +471,8 @@ enum ProtocolNote {
     Pulse(bool),
     /// A waiting Switch's event, built or not.
     Switch(bool),
+    /// A handoff's stationary flux sent to be taken away, queued or not.
+    FluxCleanup(bool),
     /// The speed no longer asks for the running step: requested again.
     Retimed,
 }
@@ -2638,6 +2642,7 @@ pub fn frame(
         state.display_material_runtime.as_ref(),
         &mut display,
     );
+    state.refresh_flux_cleanup(&request, &canonical_display);
     state.refresh_amr(&request, &canonical_display, &display);
     state.ingest_probes(&probe_display);
     state.ingest_spatial_probes(&curve_display, &area_display, &far_display);

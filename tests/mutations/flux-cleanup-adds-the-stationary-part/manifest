@@ -1,0 +1,4 @@
+about: the cleanup sends the stationary flux a handoff left as found instead of negated, so the event doubles it rather than taking it away
+test: cargo test --release -p funfern-app --lib -- flux_cleanup::tests::a_handoffs_stationary_flux_is_found_from_its_readback_and_holds_estimates_back
+expect: the increment leaves [0-9.]+e[0-9] of the added flux
+needs: cpu

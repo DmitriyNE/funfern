@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-app/src/ui/flux_cleanup.rs b/crates/funfern-app/src/ui/flux_cleanup.rs
+--- a/crates/funfern-app/src/ui/flux_cleanup.rs
++++ b/crates/funfern-app/src/ui/flux_cleanup.rs
+@@ -213,7 +213,7 @@
+         match result {
+             Ok(found) => {
+                 if found.energy > FLUX_CLEANUP_FLOOR * found.flux_energy {
+-                    let increment = found.stationary.iter().map(|value| *value * -1.0).collect();
++                    let increment = found.stationary.iter().map(|value| *value).collect();
+                     if let Some(cleanup) = &mut self.flux_cleanup {
+                         cleanup.stage = FluxCleanupStage::Found(increment);
+                     }

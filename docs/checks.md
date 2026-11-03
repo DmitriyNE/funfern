@@ -1529,6 +1529,26 @@ default edge and half it. Its mutation is
 `complementary-projected-for-remeshes-only`, which the core's
 `a_rough_field_carried_back_and_forth_never_gains_energy` catches too.
 
+`cargo test --release -p funfern-app --test adaptation` drives the app's own
+adaptation on runs stepped on the CPU (section 6l of the campaign plan). A
+handoff's stationary flux: `a_handoffs_stationary_flux_is_taken_away_and_moves_nothing`
+carries the packet AMR-01 launches onto its first adaptive refinement, whose
+edge flips leave new elements across old ones, and onto the box meshed a
+twentieth finer, as an edit that keeps the field remeshes it. The carry
+leaves 1.27e-3 and 5.63e-3 of the energy stationary, required to be over
+1e-4 so that the check reads a real one; the cleanup the app runs after a
+handoff must take it to within a millionth and leave under 1e-12, and 400
+steps on the field must stand within 2e-6 of the run left uncleaned (3.9e-7
+and 5.2e-7) with under 1e-12 grown back. The app's half,
+`a_handoffs_stationary_flux_is_found_from_its_readback_and_holds_estimates_back`,
+solves a full readback holding a stationary part and requires the increment
+it sends to take it to 1e-8 of itself, and no estimate to start meanwhile;
+its mutation is `flux-cleanup-adds-the-stationary-part`. The device's half is
+`canonical_gpu_live_events`' last paused event, which adds a stationary flux
+a tenth of the field's energy: the run must go on as the reference does, Q
+and b within 3e-5 (3.1e-7 and 6.6e-7 on the M1 Max), and the maintenance
+lane must book it within 1e-4 (1.5e-6).
+
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
 catch it and the pattern its failure must match; the script applies each,

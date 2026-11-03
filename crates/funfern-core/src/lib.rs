@@ -1,6 +1,7 @@
 //! Dependency-free f64 geometry for the funfern editor.
 mod canonical_consumer;
 mod canonical_recovery;
+mod canonical_stationary;
 mod canonical_temporal;
 mod canonical_transfer;
 mod canonical_wave;
@@ -29,6 +30,7 @@ mod wave;
 mod wave_quadratic;
 pub use canonical_consumer::*;
 pub use canonical_recovery::*;
+pub use canonical_stationary::*;
 pub use canonical_temporal::*;
 pub use canonical_transfer::*;
 pub use canonical_wave::*;

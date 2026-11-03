@@ -1,5 +1,10 @@
 //! Paused zero-duration edits on the production canonical GPU core.
 //!
+//! The last of them adds a stationary flux, as the flux maintenance that
+//! takes one away after a handoff does with the opposite sign: it pushes no
+//! node, so the run goes on as the reference does, carrying it, and its
+//! energy is booked in the maintenance lane.
+//!
 //! After them and 48 steps, a pulse whose energy overflows f32 is refused,
 //! and the wall's loss lane, read 16 steps on, must hold the reference's sum:
 //! a refused event left the accepted lane's accounting bank in the base the
@@ -23,13 +28,13 @@ use funfern_core::TopologyWaveModel;
 use funfern_core::test_scenes::*;
 use funfern_core::{
     CanonicalForcing, CanonicalSource, CanonicalWaveOperator, CanonicalWaveState, MeshingOptions,
-    OuterBoundaryCondition, TimeSignal,
+    OuterBoundaryCondition, Point2, TimeSignal,
 };
 
 const WARMUP_STEPS: u64 = 20;
 const MEASURED_STEPS: u64 = 48;
 const FILTER_STRENGTH: f64 = 0.35;
-const EVENT_COUNT: u32 = 5;
+const EVENT_COUNT: u32 = 6;
 const LEDGER_STEPS: u64 = 16;
 
 #[derive(Resource)]
@@ -46,6 +51,8 @@ struct Expected {
     /// The reference's summed wall loss over every step, the refused
     /// event's last sixteen included.
     escaped: f64,
+    /// The energy the flux maintenance added.
+    maintained: f64,
     phase: Phase,
     paused_time: f64,
     event_started: Option<Instant>,
@@ -155,6 +162,20 @@ fn main() -> AppExit {
         .iter()
         .map(|point| 0.002 * (0.8 * point.x - 0.4 * point.y).sin())
         .collect::<Vec<_>>();
+    let smooth = operator
+        .constitutive_samples()
+        .iter()
+        .map(|sample| {
+            let p = sample.point;
+            Point2::new(
+                (1.3 * p.x).sin() * (0.7 * p.y).cos(),
+                (0.9 * p.y).sin() + 0.2 * p.x,
+            )
+        })
+        .collect::<Vec<_>>();
+    let stationary = operator
+        .stationary_complementary_component(&smooth)
+        .expect("a stationary flux to add");
     let events = VecDeque::from([
         CanonicalGpuLiveEvent::linear_loss_patch(
             time_step,
@@ -175,6 +196,7 @@ fn main() -> AppExit {
         CanonicalGpuLiveEvent::maintenance(&vec![0.0; operator.degrees_of_freedom()], 5)
             .expect("live maintenance event"),
     ]);
+    let mut events = events;
 
     let mut oracle = initial;
     let mut escaped = 0.0;
@@ -209,6 +231,28 @@ fn main() -> AppExit {
     oracle
         .apply_grid_filter(&operator, &accepted_new_forcing, FILTER_STRENGTH)
         .expect("filter oracle event");
+    // The stationary flux, a tenth of the field's energy at the edit.
+    let scale = (0.1 * oracle.energy(&operator).expect("the edit's energy")
+        / stationary
+            .iter()
+            .zip(operator.constitutive_samples())
+            .map(|(value, sample)| {
+                0.5 * sample.integration_weight
+                    * value.dot(sample.complementary_inverse.apply(*value))
+            })
+            .sum::<f64>())
+    .sqrt();
+    let increment = stationary
+        .iter()
+        .map(|value| *value * scale)
+        .collect::<Vec<_>>();
+    events.push_back(
+        CanonicalGpuLiveEvent::flux_maintenance(&operator, &increment, 6)
+            .expect("live flux maintenance event"),
+    );
+    let maintained = oracle
+        .apply_complementary_increment(&operator, &increment)
+        .expect("flux maintenance oracle event");
     for _ in 0..MEASURED_STEPS {
         escaped += oracle
             .step_with_forcing(&operator, &accepted_new_forcing)
@@ -239,6 +283,7 @@ fn main() -> AppExit {
         primary: primary_expected,
         complementary: complementary_expected,
         escaped,
+        maintained,
         phase: Phase::Warmup,
         paused_time: edit_time,
         event_started: None,
@@ -351,7 +396,7 @@ fn validate(
             if processed != EVENT_COUNT {
                 return;
             }
-            if display.runtime_serials != [2, 1, 3, 5]
+            if display.runtime_serials != [2, 1, 3, 6]
                 || clock.accepted_steps != WARMUP_STEPS
                 || !within(
                     (clock.absolute_seconds - expected.paused_time).abs(),
@@ -389,7 +434,7 @@ fn validate(
                     .flat_map(|value| value.iter().copied()),
             );
             println!(
-                "five paused events committed in {:.2} ms total ({:.2} ms maximum); Q {:.3e}, b {:.3e}, clock unchanged",
+                "six paused events committed in {:.2} ms total ({:.2} ms maximum); Q {:.3e}, b {:.3e}, clock unchanged",
                 expected.batch_started.unwrap().elapsed().as_secs_f64() * 1_000.0,
                 expected.maximum_event_elapsed.as_secs_f64() * 1_000.0,
                 q_error,
@@ -438,9 +483,18 @@ fn validate(
                 "a refused pulse, then {LEDGER_STEPS} steps: wall lane {lane:.6e} against {:.6e} ({error:.2e})",
                 expected.escaped
             );
+            let maintained = f64::from(display.accounting[6]);
+            let maintained_error =
+                (maintained - expected.maintained).abs() / expected.maintained.abs();
+            println!(
+                "the flux maintenance's lane {maintained:.6e} against {:.6e} ({maintained_error:.2e})",
+                expected.maintained
+            );
             // Within 1e-5, as the nonlinear gate holds its wall lane: the
-            // M1 Max reads 7.9e-8, and a bank counted twice 5.9e-1.
-            expected.failed = !within(error, 1.0e-5);
+            // M1 Max reads 7.9e-8, and a bank counted twice 5.9e-1. The
+            // maintenance lane is the difference of two f32 totals, ten
+            // times the change it books.
+            expected.failed = !within(error, 1.0e-5) || !within(maintained_error, 1.0e-4);
             expected.phase = Phase::Done;
         }
         _ => {}

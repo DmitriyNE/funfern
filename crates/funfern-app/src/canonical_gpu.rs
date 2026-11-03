@@ -98,6 +98,7 @@ const EVENT_SOURCE_PATCH: u32 = 5;
 const EVENT_SOURCE_WEIGHT_PATCH: u32 = 6;
 const EVENT_TEMPORAL_SWITCH: u32 = 7;
 const EVENT_TEMPORAL_LAW_PATCH: u32 = 8;
+const EVENT_FLUX_MAINTENANCE: u32 = 9;
 const RESIDENT_FILTER_DISPATCHES: u64 = 7;
 const RESIDENT_FILTER_ACCOUNTING_DISPATCHES: u64 = 1;
 const TRANSFER_LAYOUT_VERSION: u32 = 5;
@@ -704,6 +705,47 @@ impl CanonicalGpuLiveEvent {
             .map(|value| finite_f32(value, "live maintenance correction"))
             .collect::<Result<Vec<_>, _>>()?;
         Self::scalar_payload(EVENT_MAINTENANCE, serial, 5, &values, 0)
+    }
+
+    /// Adds `increment` to the complementary flux, sample by sample, booked
+    /// as maintenance. The app takes away the stationary part a handoff left,
+    /// which pushes no node, so the field moves on as it would have.
+    pub fn flux_maintenance(
+        operator: &CanonicalWaveOperator,
+        increment: &[Point2],
+        serial: u32,
+    ) -> Result<Self, CanonicalGpuBuildError> {
+        Self::validate_serial(serial)?;
+        if increment.len() != operator.complementary_degrees_of_freedom() {
+            return Err(CanonicalGpuBuildError::InvalidLayout(
+                "a flux maintenance must cover every complementary sample",
+            ));
+        }
+        let mut upload = Vec::with_capacity(increment.len() + 1);
+        upload.push(GpuCanonicalTableWord {
+            data: UVec4::new(
+                EVENT_FLUX_MAINTENANCE,
+                serial,
+                usize_u32(increment.len())?,
+                0,
+            ),
+        });
+        for value in increment {
+            upload.push(GpuCanonicalTableWord {
+                data: UVec4::new(
+                    finite_f32(value.x, "live flux maintenance")?.to_bits(),
+                    finite_f32(value.y, "live flux maintenance")?.to_bits(),
+                    0,
+                    0,
+                ),
+            });
+        }
+        Ok(Self {
+            kind: EVENT_FLUX_MAINTENANCE,
+            serial,
+            dispatches: 5,
+            upload,
+        })
     }
 
     pub fn grid_filter(strength: f64, serial: u32) -> Result<Self, CanonicalGpuBuildError> {
@@ -5361,7 +5403,10 @@ impl CanonicalGpuRequest {
         if handles.field_laws
             && matches!(
                 event.kind,
-                EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE | EVENT_TEMPORAL_LAW_PATCH
+                EVENT_PRIMARY_PULSE
+                    | EVENT_MAINTENANCE
+                    | EVENT_TEMPORAL_LAW_PATCH
+                    | EVENT_FLUX_MAINTENANCE
             )
         {
             return Err(
@@ -5378,10 +5423,23 @@ impl CanonicalGpuRequest {
         {
             return Err("a law patch on an oscillator medium takes a new generation".into());
         }
+        // A driven generation's flux moves with its runtime, and an
+        // oscillator's carries the integrated field's invariant: neither
+        // holds a stationary part that stays put to be taken away.
+        if event.kind == EVENT_FLUX_MAINTENANCE
+            && (handles.integrated_count != 0
+                || self
+                    .manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.temporal.is_some()))
+        {
+            return Err("a flux maintenance is for a fixed generation".into());
+        }
         let payload_valid = match event.kind {
             EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE => {
                 event.upload.len() == handles.node_count as usize + 1
             }
+            EVENT_FLUX_MAINTENANCE => event.upload.len() == handles.sample_count as usize + 1,
             EVENT_GRID_FILTER => event.upload.len() == 1,
             EVENT_LINEAR_LAW_PATCH => {
                 event.upload.len()
@@ -8321,7 +8379,7 @@ fn compute_canonical_wave(
             1,
         );
         match event_kind {
-            EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE => {
+            EVENT_PRIMARY_PULSE | EVENT_MAINTENANCE | EVENT_FLUX_MAINTENANCE => {
                 pass.set_pipeline(pipelines[15]);
                 pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
                 pass.set_pipeline(pipelines[19]);
@@ -11602,6 +11660,51 @@ mod tests {
         assert_eq!(pulse.upload.len(), operator_nodes + 1);
         assert!(CanonicalGpuLiveEvent::grid_filter(2.1, 8).is_err());
         assert!(CanonicalGpuLiveEvent::maintenance(&[], 0).is_err());
+    }
+
+    /// A flux maintenance carries a pair for every complementary sample, and
+    /// nothing else: not a sample short, not an unrepresentable value and not
+    /// a zero serial.
+    #[test]
+    fn a_flux_maintenance_covers_every_sample() {
+        let scene = initial();
+        let mesh = meshed(
+            &scene,
+            1,
+            MeshingOptions {
+                target_edge_length: 0.24,
+                ..MeshingOptions::default()
+            },
+        )
+        .unwrap();
+        let scalar = assembled(&mesh, &scene, OuterBoundaryCondition::Reflecting).unwrap();
+        let operator = CanonicalWaveOperator::compile(
+            &mesh,
+            &scalar,
+            TopologyWaveModel::from_topology_scene(&scene),
+            7,
+        )
+        .unwrap();
+        let samples = operator.complementary_degrees_of_freedom();
+        let increment = (0..samples)
+            .map(|sample| Point2::new(sample as f64 * 1.0e-3, -0.5))
+            .collect::<Vec<_>>();
+        let event = CanonicalGpuLiveEvent::flux_maintenance(&operator, &increment, 9).unwrap();
+        assert_eq!(event.kind, EVENT_FLUX_MAINTENANCE);
+        assert_eq!(event.serial, 9);
+        assert_eq!(event.upload.len(), samples + 1);
+        assert_eq!(event.upload[0].data.z as usize, samples);
+        let last = event.upload[samples].data;
+        assert_eq!(
+            f32::from_bits(last.x),
+            ((samples - 1) as f64 * 1.0e-3) as f32
+        );
+        assert_eq!(f32::from_bits(last.y), -0.5);
+        assert!(CanonicalGpuLiveEvent::flux_maintenance(&operator, &increment[1..], 9).is_err());
+        let mut overflowing = increment.clone();
+        overflowing[3].y = 1.0e40;
+        assert!(CanonicalGpuLiveEvent::flux_maintenance(&operator, &overflowing, 9).is_err());
+        assert!(CanonicalGpuLiveEvent::flux_maintenance(&operator, &increment, 0).is_err());
     }
 
     #[test]

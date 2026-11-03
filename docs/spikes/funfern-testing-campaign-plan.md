@@ -444,7 +444,7 @@ with their reports in `docs/spikes/`.
   machinery and can start whenever a stage leaves room. The P1 invariants,
   IV-01 to IV-05 and IV-08 to IV-12, were planned on 2026-10-31
   (section 6j), the P2 invariants, IV-06, IV-07 and IV-13, on 2026-11-02
-  (section 6k).
+  (section 6k), the rest on 2026-11-03 (section 6l).
 
 ## 6a. Stage B1: energy accounting and wall passivity
 
@@ -1347,7 +1347,8 @@ the field carried over as the app carries it.
   `detach_endpoint` asks no merge choice: left touching the side, the tip
   makes the draft invalid, and dragged off, the merged face is claimed
   twice (`DuplicateFace`); the inspector's Detach button reaches the same
-  state. And two curves may not meet tip to tip with no junction between.
+  state; a detach has asked since 960ba65, the next day. And two curves
+  may not meet tip to tip with no junction between.
 - **Checks.** At the end, the field and the complementary field, read at
   IV-04's common points against the box run unedited, within that run's own
   move from the mesh twice as coarse, and the energy no more than 4e-4
@@ -1389,6 +1390,60 @@ the field carried over as the app carries it.
   cycle. IV-08 edited mid-run, IV-10 and IV-11 pass with it; the core's
   `a_rough_field_carried_back_and_forth_never_gains_energy`, whose two
   meshes carry different revisions, catches it too.
+
+## 6l. Milestone C: adaptation, the runtime and stress
+
+**Planned on 2026-11-03**, on the user's go: AMR-01 to AMR-04, RT-01 to
+RT-08, the numerical edge cases, the long runs and the resource lifecycle
+of the 11 October plan's sections 4 and 5, and PH-19, milestone B's last
+fixture. What each had and lacked:
+
+| ID | Had | Lacked |
+|---|---|---|
+| AMR-01 closed loop | one refinement from the estimator and 48 steps, a device example; refining and coarsening one step at a time in unit tests | a run that estimates, adapts, hands off and steps more than once; coarse, fine and adaptive runs compared; the error and the element count over time |
+| AMR-02 calibration | `temporal_amr_calibration`, effectivities of 0.86 to 1.67 over about twenty kinds of scene, printed and never asserted | a bound held, localized packets, and whether it refines the elements where the error is |
+| AMR-03 long adaptation | IV-11 and IV-13, uniform remeshes | estimator-driven cycles repeated; the settled fiber's empty coarsening about once a second |
+| AMR-04 edits during adaptation | stale estimates and adapted meshes dropped, in host tests | an edit landing while an adapted mesh uploads or hands off; the fuzzers and the protocol proofs run with adaptation off |
+| RT-01 asynchronous fuzzing | the host fuzzer in lockstep with the protocol model, against a fake device; the Kani proofs | random actions through the production runtime on an adapter; the decision log, test builds only |
+| RT-02 batching | `cavity-batches`, 1, 7, 32 and 64 steps a batch to the same bits | anything but the reflecting cavity; the encode cap, the lead fence and fenced against unfenced stepping |
+| RT-03 stale completions | generation tags and token guards, in host tests | a late readback or handoff receipt from an old generation: the fake device delivers for the current one only |
+| RT-04 event ordering | serials, switches and pulses one at a time, each fixture holding its step | many events at once on the device, none held |
+| RT-05 failure and rollback | the `rejection` fixture; rollback examples on Metal | a handoff's or a live event's rejection in the app, and a retry that succeeds; the fault hooks used by examples only |
+| RT-06 clock | rebases on the device and in fixtures; one retime fixture | a retime beside or across a rebase, and retimes repeated |
+| RT-07 and 5.4 lifecycle | the far field's asset count; pipelines built once | a count of buffers, staging, readbacks, bind groups and jobs after scenes are cycled |
+| RT-08 scheduling | preparation slices yield; a dead worker is replaced | frame time during a large preparation; cancel and replace on the device |
+| 5.2 edge cases | subnormal flux, a nonlinear law's turning point, a singular system, rebasing, limit refusals | dispatches at N-1, N and N+1 around 128, 32, 64, 16 and 512; empty resources as a matrix; amplitude sweeps; the device's nonlinear solve failing; contrast past 25 and axis ratios past 4; solutions on slivers; a step just past the ceiling refused; cancelling reductions against f64 |
+| 5.3 long runs | conservative and wall runs past 1000 s, nightly; Kerr to t = 160 | phase and modal drift; long φ⁴, sine-Gordon and van der Pol runs; a long driven run; an adaptive one |
+| PH-19 manufactured solutions | forcing as a sum of space weights times signals; per-node Dirichlet | all of it: sinusoidal solutions fit those signals, damping, modulation and cubic laws as further harmonics |
+
+Five stages, a commit per item, each with an f64 study first and a
+mutation, in this order:
+
+- **C6, adaptation on the CPU:** AMR-01 to AMR-04 on one deterministic
+  harness that drives the production estimator, adaptation job, runtime
+  and handoff by units of work, stepping on the CPU. The decision rule,
+  `adaptation_decision` and `adaptation_field`, leaves `ui` for a module
+  the harness calls, its behaviour unchanged; the UI keeps its wall-clock
+  pacing. AMR-01's study found two defects before its bounds could be set,
+  and each is fixed first, with the user: a handoff's carry left part of
+  the flux stationary, which never left and held the mesh refined
+  (2026-11-03, taken away after each handoff), and the floor that ends
+  adaptation's chase of a draining field, with the display's quiet floor,
+  is measured against the run's loudest moment, not the experiment's.
+- **PH-19**, after C6.
+- **C7, the runtime on the device:** RT-03 on the host first, then RT-02,
+  RT-04, RT-05, the adaptive loop's device half, held to statistics rather
+  than bits, and RT-01 last, the largest. Device means the production
+  runtime on whatever adapter runs: lavapipe in every pull request, Metal
+  in the local device suite. RT-01's fixture plays seeded actions through
+  the app's handlers, the decision log compiled into the fixtures binary,
+  and its CPU reference replays the timeline the runtime accepted, not the
+  one planned: a few seeds a pull request, more in the device suite.
+- **C8, robustness:** the 5.2 edge cases, on the CPU and then the device;
+  RT-06; RT-07 with 5.4, a debug count of live shader buffers, staging,
+  readbacks, bind groups and jobs in the fixtures binary, not wgpu's own
+  counters; RT-08.
+- **C9, long runs:** 5.3's gaps, an adaptive run among them.
 
 ## 7. Infrastructure
 
