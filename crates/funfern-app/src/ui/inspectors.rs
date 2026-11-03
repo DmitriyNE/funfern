@@ -112,13 +112,7 @@ impl Playground {
                     ))
                     .clicked()
                 {
-                    match self.editor.detach_endpoint(curve, endpoint) {
-                        Ok(()) => {
-                            self.selection = TopologySelection::None;
-                            self.invalidate_samples();
-                        }
-                        Err(error) => self.notify(error),
-                    }
+                    self.detach(curve, endpoint, None);
                 }
             }
         }
@@ -135,7 +129,9 @@ impl Playground {
                         .iter()
                         .any(|curve| curve.spans.iter().any(|candidate| candidate.id == *span))
                 }),
-                MergeAction::Weld { curve, .. } => geometry.curve(*curve).is_none(),
+                MergeAction::Weld { curve, .. } | MergeAction::Detach { curve, .. } => {
+                    geometry.curve(*curve).is_none()
+                }
             }
         }) {
             self.pending_merge = None;
@@ -333,6 +329,11 @@ impl Playground {
             } => {
                 let (curve, node, endpoint, target) = (*curve, *node, *endpoint, *target);
                 if self.weld(curve, node, endpoint, target, Some(region)) {
+                    self.pending_merge = None;
+                }
+            }
+            MergeAction::Detach { curve, endpoint } => {
+                if self.detach(*curve, *endpoint, Some(region)) {
                     self.pending_merge = None;
                 }
             }
@@ -744,6 +745,101 @@ mod tests {
     use super::*;
     use crate::topology_editor::{ClosedCurvePurpose, TopologyEditor};
     use crate::topology_viewport::screen_side;
+
+    /// The junction inspector's Detach on a wall-to-wall separator, as a
+    /// user presses it: the separator's two subdomains merge, so the scene
+    /// asks which keeps its material, and a click on one answers it with a
+    /// valid draft and the freed end selected, ready to drag. Until
+    /// 2026-11-03 the button left the end on the side, "touch with no
+    /// junction", and dragged off, "two anchors claim the same subdomain",
+    /// every later edit refused.
+    #[test]
+    fn detaching_a_separator_from_the_inspector_asks_and_settles() {
+        use crate::topology_editor::{OpenCurvePurpose, TopologyAcceptance, TopologyAttachment};
+        use crate::ui::test_support::{PanelDriver, click, settle};
+        let mut state = Playground {
+            editor: TopologyEditor::default(),
+            ..Playground::default()
+        };
+        let outer = |side, fraction| {
+            Some(TopologyAttachment::Boundary(FaceAnchor::Outer {
+                side,
+                fraction,
+            }))
+        };
+        let curve = state
+            .editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.0, -0.8),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.0, 0.8),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: DEFAULT_MATERIAL,
+                },
+                outer(OuterSide::Bottom, 0.5),
+                outer(OuterSide::Top, 0.5),
+            )
+            .unwrap()
+            .curve;
+        settle(&mut state.editor);
+        let vertex = state
+            .editor
+            .document
+            .model
+            .draft
+            .geometry
+            .curve(curve)
+            .unwrap()
+            .nodes[0]
+            .vertex
+            .unwrap();
+        let driver = PanelDriver::new();
+        let handle = TopologyHandle::Junction(vertex);
+        let widgets = driver.pass(vec![], |ui| state.handle_inspector(ui, handle));
+        let button = widgets
+            .iter()
+            .find(|widget| widget.label == format!("Detach curve {} start", curve.0))
+            .expect("the junction offers its curve's detach")
+            .clone();
+        driver.pass(click(&button), |ui| state.handle_inspector(ui, handle));
+        let pending = state.pending_merge.clone().expect("a survivor question");
+        assert!(matches!(
+            pending.action,
+            MergeAction::Detach { curve: asked, endpoint: 0 } if asked == curve
+        ));
+        assert_eq!(pending.choices.len(), 2);
+        assert_eq!(state.editor.document.model.draft.regions.len(), 2);
+
+        let right = Point2::new(0.5, 0.0);
+        let kept = state.draft_region_at(right).unwrap();
+        let material = state
+            .editor
+            .document
+            .model
+            .draft
+            .region(kept)
+            .unwrap()
+            .material;
+        state.pick_merge_survivor(right);
+        settle(&mut state.editor);
+        assert!(state.pending_merge.is_none(), "{}", state.message);
+        assert_eq!(state.editor.acceptance, TopologyAcceptance::Valid);
+        let draft = &state.editor.document.model.draft;
+        assert_eq!(draft.regions.len(), 1);
+        assert_eq!(draft.region(BACKGROUND_REGION).unwrap().material, material);
+        assert_eq!(
+            state.selection,
+            TopologySelection::Handle(TopologyHandle::Control { curve, control: 0 })
+        );
+        assert!(
+            state.message.starts_with("Detached the start"),
+            "{}",
+            state.message
+        );
+    }
 
     /// The picker lists one set of names and the two condition enums answer
     /// with their own, so a condition used to rename itself the moment it was

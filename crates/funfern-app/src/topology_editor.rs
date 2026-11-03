@@ -188,6 +188,31 @@ pub struct TopologyWeld {
     pub removed_probes: Vec<ProbeId>,
 }
 
+/// What detaching an end did. `control` is the control the freed end now
+/// sits on, pulled back off what it was attached to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TopologyDetach {
+    pub curve: CurveId,
+    pub control: usize,
+    pub removed_regions: Vec<RegionId>,
+    pub region_remaps: Vec<(RegionId, RegionId)>,
+    pub removed_probes: Vec<ProbeId>,
+}
+
+/// What a detach did, or what it needs before it can be done.
+///
+/// A divider separates two faces only while its circuit closes, and freeing
+/// one of its ends opens it: the two regions become one face, and nothing
+/// says which material survives. The detach reports that instead of
+/// performing it, as a weld or a deletion that merges does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum TopologyDetachOutcome {
+    Detached(TopologyDetach),
+    /// The regions the detach would fold together. Ask, then detach again
+    /// with the answer.
+    NeedsSurvivor(Vec<RegionId>),
+}
+
 /// What a weld did, or what it needs before it can be done.
 ///
 /// A weld never removes an edge, but it does move the end it welds, and a
@@ -1265,7 +1290,54 @@ impl TopologyEditor {
         })
     }
 
-    pub fn detach_endpoint(&mut self, curve: CurveId, endpoint: usize) -> Result<(), String> {
+    /// Frees an end from its junction and does nothing more, as a detach did
+    /// until 2026-11-03: the end left where it was attached and a divider's
+    /// two faces not merged. An autosave from before then may hold a draft so
+    /// left, which a weld must still mend.
+    #[cfg(test)]
+    pub(crate) fn loosen_endpoint(&mut self, curve: CurveId, endpoint: usize) {
+        let mut candidate = self.document.model.clone();
+        let target = candidate
+            .draft
+            .geometry
+            .curves
+            .iter_mut()
+            .find(|candidate| candidate.id == curve)
+            .expect("the curve to loosen");
+        let node = if endpoint == 0 {
+            0
+        } else {
+            target.nodes.len() - 1
+        };
+        target.nodes[node].vertex = None;
+        prune_unreferenced_vertices(&mut candidate.draft.geometry);
+        self.begin();
+        self.document.model = candidate;
+        self.changed();
+        self.commit();
+    }
+
+    /// Frees `endpoint` of open `curve` from its junction, as one edit that
+    /// leaves the draft valid: the end is pulled back along the curve off
+    /// what it was attached to, and a divider's two faces, which its circuit
+    /// no longer separates, merge into the region `keep_region` names. Until
+    /// it is named, a detach that merges reports the regions it would fold
+    /// together and changes nothing.
+    pub fn detach_endpoint(
+        &mut self,
+        curve: CurveId,
+        endpoint: usize,
+        keep_region: Option<RegionId>,
+    ) -> Result<TopologyDetachOutcome, String> {
+        let revision = self.revision.wrapping_add(1);
+        // A draft already invalid, or not yet validated and invalid, would
+        // refuse the detach for what it already was.
+        if matches!(self.acceptance, TopologyAcceptance::Invalid(_))
+            || self.acceptance == TopologyAcceptance::Pending
+                && self.document.model.draft.compile(revision).is_err()
+        {
+            return Err("Resolve the invalid draft before detaching".into());
+        }
         let mut candidate = self.document.model.clone();
         let target = candidate
             .draft
@@ -1282,16 +1354,61 @@ impl TopologyEditor {
         } else {
             target.nodes.len() - 1
         };
-        let Some(vertex) = target.nodes[node].vertex.take() else {
+        if target.nodes[node].vertex.take().is_none() {
             return Err("Endpoint is already free".into());
-        };
-        let _ = vertex;
+        }
         prune_unreferenced_vertices(&mut candidate.draft.geometry);
+        let freed = candidate.draft.geometry.clone();
+        let mut refusal = None;
+        let mut pulled = None;
+        for share in DETACH_PULL_BACK {
+            let mut geometry = freed.clone();
+            let control = pull_back_end(&mut geometry, curve, endpoint, share)?;
+            match compile_topology(&geometry, revision) {
+                Ok(topology) => {
+                    pulled = Some((geometry, control, topology));
+                    break;
+                }
+                Err(issue) => refusal = Some(issue),
+            }
+        }
+        let Some((geometry, control, topology)) = pulled else {
+            return Err(match refusal {
+                Some(issue) => format!("This end cannot come free here: {issue}"),
+                None => "This end cannot come free here".into(),
+            });
+        };
+        candidate.draft.geometry = geometry;
+        // Nothing is deleted by a detach, so every anchor still resolves; two
+        // of them resolving to one face is the whole question.
+        let landings = weld_landings(&candidate, &topology)?;
+        if landings.merges.len() > 1 {
+            return Err(
+                "This detach would merge subdomains in more than one place; detach a smaller part"
+                    .into(),
+            );
+        }
+        if landings.merge().is_some() && keep_region.is_none() {
+            return Ok(TopologyDetachOutcome::NeedsSurvivor(landings.choices()));
+        }
+        // Settled even with nothing to ask: two anchors that name no region
+        // between them, holes run together, still have to become one.
+        let settlement = settle_merge(&mut candidate, &topology, &landings, keep_region)?;
+        candidate
+            .draft
+            .compile(revision)
+            .map_err(|issue| issue.to_string())?;
         self.begin();
         self.document.model = candidate;
         self.changed();
         self.commit();
-        Ok(())
+        Ok(TopologyDetachOutcome::Detached(TopologyDetach {
+            curve,
+            control,
+            removed_regions: settlement.removed_regions,
+            region_remaps: settlement.region_remaps,
+            removed_probes: settlement.removed_probes,
+        }))
     }
 
     pub fn attach_endpoint(
@@ -5486,6 +5603,47 @@ fn prune_dangling_junctions(geometry: &mut TopologyGeometry) {
 /// shared junction uses this rather than [`prune_dangling_junctions`]: the other
 /// arm keeps its breakpoint, so re-attaching to the same junction restores the
 /// scene exactly instead of materialising a second vertex beside the first.
+/// How far a detached end is pulled back along its end tangent, as shares of
+/// the way to the control before it, tried in turn: 0.3 takes it about a
+/// tenth of its end span back from where it was attached, beside it, where it
+/// can be taken, and an end too short for that to clear what it touched goes
+/// further. Short of that control, the curve cannot fold back on itself, as
+/// it does where the end control is set past it.
+const DETACH_PULL_BACK: [f64; 3] = [0.3, 0.6, 0.9];
+
+/// Moves `endpoint` of open `curve` back along its end tangent, `share` of
+/// the way to the control before it, as a drag of its end control would,
+/// and answers that control.
+fn pull_back_end(
+    geometry: &mut TopologyGeometry,
+    curve: CurveId,
+    endpoint: usize,
+    share: f64,
+) -> Result<usize, String> {
+    let owner = geometry
+        .curves
+        .iter_mut()
+        .find(|candidate| candidate.id == curve)
+        .ok_or("Curve no longer exists")?;
+    let CurveSpline::Open(spline) = &mut owner.spline else {
+        return Err("Choose the start or end of an open curve".into());
+    };
+    let last = spline.controls().len() - 1;
+    let (control, before) = if endpoint == 0 {
+        (0, 1)
+    } else {
+        (last, last - 1)
+    };
+    let point = spline.controls()[control].lerp(spline.controls()[before], share);
+    spline
+        .set_control(control, point)
+        .map_err(|error| error.to_string())?;
+    geometry
+        .synchronize_vertices()
+        .map_err(|issue| issue.to_string())?;
+    Ok(control)
+}
+
 fn prune_unreferenced_vertices(geometry: &mut TopologyGeometry) {
     prune_vertices(geometry, |_, references| references == 0);
 }
@@ -7087,6 +7245,8 @@ mod tests {
     /// divider's loose end onto a baffle that reaches no wall opens that
     /// circuit: the two regions become one face, and nothing says which
     /// material survives. The weld reports that instead of performing it.
+    /// The end is loosened as a detach left it before 2026-11-03, which an
+    /// autosave may hold: a detach now merges the faces itself.
     fn divider_welded_onto_a_free_baffle() -> (TopologyEditor, CurveId, TopologyAttachment) {
         let mut editor = TopologyEditor::default();
         let free = editor
@@ -7121,7 +7281,7 @@ mod tests {
         settle(&mut editor);
         assert_eq!(editor.document.model.draft.regions.len(), 2);
         let (_, onto) = span_anchor(&editor, free, 1, true);
-        editor.detach_endpoint(divider, 1).unwrap();
+        editor.loosen_endpoint(divider, 1);
         settle(&mut editor);
         (editor, divider, onto)
     }
@@ -7755,13 +7915,141 @@ mod tests {
         }
     }
 
-    /// Invalid because the detached end still lies on the outer wall with no
-    /// junction holding it there, not because it transmits: a transmitting end
-    /// that meets nothing is a state the compiler accepts.
+    /// A wall-to-wall divider, separator or reflecting baffle, with an end
+    /// detached divides nothing, so its two faces merge, and the detach asks
+    /// which region keeps the merged face before it changes anything. Once
+    /// answered it is one edit with a valid draft, the freed end pulled back
+    /// off the side, and one undo restores the divider. Until 2026-11-03 the
+    /// detach left the end on the side, an invalid draft, and dragged off,
+    /// the merged face kept both regions' anchors: two anchors claimed one
+    /// subdomain, every later edit was refused, and only undo or attaching
+    /// the end again mended it.
     #[test]
-    fn detaching_a_separator_is_an_invalid_draft_that_undo_restores() {
+    fn detaching_a_divider_asks_which_region_survives_and_leaves_a_valid_draft() {
+        for purpose in [
+            OpenCurvePurpose::SubdomainSeparator {
+                material: DEFAULT_MATERIAL,
+            },
+            OpenCurvePurpose::BoundaryBaffle,
+        ] {
+            let mut editor = TopologyEditor::default();
+            let other = editor.add_material().unwrap();
+            settle(&mut editor);
+            let purpose = match purpose {
+                OpenCurvePurpose::SubdomainSeparator { .. } => {
+                    OpenCurvePurpose::SubdomainSeparator { material: other }
+                }
+                purpose => purpose,
+            };
+            let divider = editor
+                .create_open_curve(
+                    OpenCubicSpline::polyline(vec![
+                        Point2::new(0.0, -0.8),
+                        Point2::new(0.0, 0.0),
+                        Point2::new(0.0, 0.8),
+                    ])
+                    .unwrap(),
+                    purpose,
+                    Some(outer(OuterSide::Bottom, 0.5)),
+                    Some(outer(OuterSide::Top, 0.5)),
+                )
+                .unwrap()
+                .curve;
+            settle(&mut editor);
+            let divided = editor.document.model.clone();
+            let history = editor.history_len();
+            assert_eq!(divided.draft.regions.len(), 2, "{purpose:?}");
+
+            let outcome = editor.detach_endpoint(divider, 0, None).unwrap();
+            let TopologyDetachOutcome::NeedsSurvivor(choices) = outcome else {
+                panic!("{purpose:?}: the detach went ahead: {outcome:?}");
+            };
+            assert_eq!(choices.len(), 2, "{purpose:?}: {choices:?}");
+            assert_eq!(
+                editor.document.model, divided,
+                "nothing changes until it is answered"
+            );
+            assert_eq!(editor.history_len(), history);
+
+            let kept = *choices
+                .iter()
+                .find(|region| **region != BACKGROUND_REGION)
+                .unwrap();
+            let kept_material = divided.draft.region(kept).unwrap().material;
+            let outcome = editor.detach_endpoint(divider, 0, Some(kept)).unwrap();
+            let TopologyDetachOutcome::Detached(detached) = outcome else {
+                panic!("{purpose:?}: answered, the detach asked again: {outcome:?}");
+            };
+            settle(&mut editor);
+            assert_eq!(editor.acceptance, TopologyAcceptance::Valid, "{purpose:?}");
+            let draft = &editor.document.model.draft;
+            assert_eq!(draft.regions.len(), 1, "{purpose:?}");
+            assert_eq!(
+                draft.region(BACKGROUND_REGION).unwrap().material,
+                kept_material,
+                "{purpose:?}: the exterior takes the kept region's material"
+            );
+            assert_eq!(detached.removed_regions, vec![kept], "{purpose:?}");
+            let curve = draft.geometry.curve(divider).unwrap();
+            assert_eq!(curve.nodes[0].vertex, None, "{purpose:?}");
+            let CurveSpline::Open(spline) = &curve.spline else {
+                panic!("the divider closed");
+            };
+            assert_eq!(detached.control, 0);
+            let tip = spline.controls()[0];
+            let gap = tip.y - draft.geometry.domain.min_y;
+            assert!(
+                gap > 10.0 * WORLD_TOLERANCE && gap < 0.25,
+                "{purpose:?}: the freed end stands {gap} off the side"
+            );
+            assert_eq!(editor.history_len(), (history.0 + 1, 0), "one edit");
+
+            assert!(editor.undo());
+            settle(&mut editor);
+            assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+            assert_eq!(
+                editor.document.model, divided,
+                "{purpose:?}: one undo restores it"
+            );
+        }
+    }
+
+    /// A curve that divides nothing detaches without a question, its end
+    /// pulled back off the side; on a draft already invalid a detach is
+    /// refused, so a merge it causes is never left unsettled.
+    #[test]
+    fn detaching_a_curve_that_divides_nothing_asks_nothing() {
         let mut editor = TopologyEditor::default();
-        let separator = editor
+        let curve = editor
+            .create_open_curve(
+                OpenCubicSpline::polyline(vec![
+                    Point2::new(0.0, -0.8),
+                    Point2::new(0.0, 0.0),
+                    Point2::new(0.0, 0.5),
+                ])
+                .unwrap(),
+                OpenCurvePurpose::SubdomainSeparator {
+                    material: DEFAULT_MATERIAL,
+                },
+                Some(outer(OuterSide::Bottom, 0.5)),
+                None,
+            )
+            .unwrap()
+            .curve;
+        settle(&mut editor);
+        let outcome = editor.detach_endpoint(curve, 0, None).unwrap();
+        let TopologyDetachOutcome::Detached(detached) = outcome else {
+            panic!("a free curve asked: {outcome:?}");
+        };
+        assert!(detached.removed_regions.is_empty());
+        settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        assert!(editor.document.model.draft.geometry.vertices.is_empty());
+        let error = editor.detach_endpoint(curve, 0, None).unwrap_err();
+        assert!(error.contains("already free"), "{error}");
+
+        let mut editor = TopologyEditor::default();
+        let divider = editor
             .create_open_curve(
                 OpenCubicSpline::polyline(vec![
                     Point2::new(0.0, -0.8),
@@ -7769,57 +8057,23 @@ mod tests {
                     Point2::new(0.0, 0.8),
                 ])
                 .unwrap(),
-                OpenCurvePurpose::SubdomainSeparator {
-                    material: DEFAULT_MATERIAL,
-                },
+                OpenCurvePurpose::BoundaryBaffle,
                 Some(outer(OuterSide::Bottom, 0.5)),
                 Some(outer(OuterSide::Top, 0.5)),
             )
-            .unwrap();
-        settle(&mut editor);
-        let accepted = editor.document.model.accepted.clone();
-        let vertex = editor
-            .document
-            .model
-            .draft
-            .geometry
-            .curves
-            .iter()
-            .find(|curve| curve.id == separator.curve)
             .unwrap()
-            .nodes[0]
-            .vertex
-            .unwrap();
-        let face = editor
-            .compiled_accepted
-            .topology
-            .vertices
-            .iter()
-            .find(|candidate| candidate.authored == Some(vertex))
-            .unwrap()
-            .traces[0]
-            .face;
-        editor.detach_endpoint(separator.curve, 0).unwrap();
+            .curve;
         settle(&mut editor);
-        assert!(matches!(editor.acceptance, TopologyAcceptance::Invalid(_)));
-        assert_eq!(editor.document.model.accepted, accepted);
+        // Its middle dragged out of the domain.
         editor
-            .attach_endpoint(
-                separator.curve,
-                0,
-                TopologyAttachment::Junction { vertex, face },
-            )
+            .set_control(divider, 1, Point2::new(9.0, 0.0))
             .unwrap();
         settle(&mut editor);
-        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
-        assert_eq!(editor.document.model.draft, accepted);
-        assert!(editor.undo());
-        settle(&mut editor);
         assert!(matches!(editor.acceptance, TopologyAcceptance::Invalid(_)));
-        assert!(editor.undo());
-        settle(&mut editor);
-        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
-        assert_eq!(editor.document.model.draft, accepted);
+        let before = editor.document.model.clone();
+        let error = editor.detach_endpoint(divider, 0, None).unwrap_err();
+        assert!(error.contains("invalid draft"), "{error}");
+        assert_eq!(editor.document.model, before);
     }
 
     #[test]
@@ -8397,8 +8651,27 @@ mod tests {
             .vertex
             .unwrap();
 
-        editor.detach_endpoint(separator.curve, 0).unwrap();
+        // The chord divided the loop's inside; freed, it divides nothing.
+        let outcome = editor
+            .detach_endpoint(separator.curve, 0, Some(BACKGROUND_REGION))
+            .unwrap_err();
+        assert!(outcome.contains("not adjacent"), "{outcome}");
+        let TopologyDetachOutcome::NeedsSurvivor(choices) =
+            editor.detach_endpoint(separator.curve, 0, None).unwrap()
+        else {
+            panic!("the chord's detach did not ask");
+        };
+        editor
+            .detach_endpoint(separator.curve, 0, Some(choices[0]))
+            .unwrap();
         settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
+        // Off the chord, which still runs through the centre.
+        let interior = editor
+            .compiled_accepted
+            .topology
+            .face_at(Point2::new(0.2, 0.0))
+            .unwrap();
         assert_eq!(
             host_links(&editor),
             before,
@@ -8696,8 +8969,11 @@ mod tests {
         settle(&mut editor);
         assert_eq!(editor.document.model.draft.geometry.vertices.len(), 2);
 
-        editor.detach_endpoint(edit.curve, 0).unwrap();
+        editor
+            .detach_endpoint(edit.curve, 0, Some(BACKGROUND_REGION))
+            .unwrap();
         settle(&mut editor);
+        assert_eq!(editor.acceptance, TopologyAcceptance::Valid);
         let orphans = |editor: &TopologyEditor| {
             let referenced = editor
                 .document

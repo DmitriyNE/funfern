@@ -34,8 +34,8 @@
 use super::test_support::*;
 use super::*;
 use crate::topology_editor::{
-    ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment, TopologyDocument,
-    TopologyDocumentModel, TopologyProbeTarget,
+    ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment,
+    TopologyDetachOutcome, TopologyDocument, TopologyDocumentModel, TopologyProbeTarget,
 };
 use crate::topology_persistence as persistence;
 use crate::topology_viewport::{TopologyHandle, plan_handle_drag};
@@ -134,10 +134,12 @@ enum Action {
         curve: u8,
         keep: u8,
     },
-    /// Let go of an end of the `curve`th open curve.
+    /// Let go of an end of the `curve`th open curve, keeping the `keep`th
+    /// region of those a merge would offer.
     Detach {
         curve: u8,
         end: u8,
+        keep: u8,
     },
     /// Place a point probe in the `cell`th cell.
     Probe {
@@ -1131,7 +1133,7 @@ impl Panel {
                 let kept = (!choices.is_empty()).then(|| choices[keep as usize % choices.len()]);
                 state.editor.remove_curve(target.id, kept).map(drop)
             }
-            Action::Detach { curve, end } => {
+            Action::Detach { curve, end, keep } => {
                 let open = curves
                     .iter()
                     .filter(|curve| matches!(curve.spline, CurveSpline::Open(_)))
@@ -1140,7 +1142,26 @@ impl Panel {
                 else {
                     return Ok(());
                 };
-                state.editor.detach_endpoint(target.id, end as usize % 2)
+                let (curve, end) = (target.id, end as usize % 2);
+                let kept = match state.editor.detach_endpoint(curve, end, None)? {
+                    TopologyDetachOutcome::Detached(_) => None,
+                    TopologyDetachOutcome::NeedsSurvivor(choices) => {
+                        let kept = choices[keep as usize % choices.len()];
+                        state.editor.detach_endpoint(curve, end, Some(kept))?;
+                        Some(kept)
+                    }
+                };
+                // A detach is one edit that leaves the draft valid: until
+                // 2026-11-03 it left the end on its side, and a divider's two
+                // faces, run together, with an anchor each on one face.
+                settle(&mut state.editor);
+                assert_eq!(
+                    state.editor.acceptance,
+                    TopologyAcceptance::Valid,
+                    "detaching curve {} keeping {kept:?}",
+                    curve.0
+                );
+                Ok(())
             }
             Action::Probe { cell } => {
                 let name = format!("Probe {}", state.editor.document.model.probes.len() + 1);

@@ -109,7 +109,10 @@ running; this file covers using it.
   curve is drawn, not from which side of a boundary a click landed on - clicking
   a boundary names the boundary.
   Attached endpoints share an authoritative junction, follow outer-domain
-  resizing, and can be detached from the selected junction.
+  resizing, and can be detached from the selected junction. A detached end is
+  pulled back a little off what it held and stays selected, ready to drag. A
+  divider whose end comes free divides nothing, so its two subdomains merge,
+  and the scene asks which keeps its material, as deleting the divider does.
   While drawing an open curve, eligible outer edges, inner curves, existing
   junctions, loose ends, and vertex-less corners are highlighted; the hovered
   attachment uses a fixed screen-space snap radius, independent of zoom. Starting

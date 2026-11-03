@@ -2951,8 +2951,9 @@ mod tests {
 
     #[test]
     fn invalid_detached_separator_draft_round_trips_with_valid_accepted_scene() {
+        // As a detach left it until 2026-11-03, which an autosave may hold.
         let (mut editor, curve) = divider_document();
-        editor.detach_endpoint(curve, 0).unwrap();
+        editor.loosen_endpoint(curve, 0);
         settle(&mut editor);
         assert!(matches!(editor.acceptance, TopologyAcceptance::Invalid(_)));
         let encoded = save(&editor.document).unwrap();

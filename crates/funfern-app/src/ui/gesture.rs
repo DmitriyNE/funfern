@@ -92,10 +92,11 @@ pub(super) struct PendingMerge {
     pub(super) choices: Vec<RegionId>,
 }
 
-/// What will be done once the question is answered. Both kinds fold two
+/// What will be done once the question is answered. Each kind folds two
 /// subdomains into one face - a deletion by removing the edge between them, a
 /// weld by moving an end until the circuit that separated them no longer
-/// closes - and neither says by itself which material survives.
+/// closes, a detach by freeing an end of it - and none says by itself which
+/// material survives.
 #[derive(Clone, Debug)]
 pub(super) enum MergeAction {
     /// The span selection the deletion named, rather than the target planned
@@ -107,6 +108,10 @@ pub(super) enum MergeAction {
         node: usize,
         endpoint: usize,
         target: TopologyAttachment,
+    },
+    Detach {
+        curve: CurveId,
+        endpoint: usize,
     },
 }
 

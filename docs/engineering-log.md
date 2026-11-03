@@ -32072,3 +32072,51 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-03 — A detached divider asks which subdomain survives
+
+- **What the user met.** Detaching an end of a curve that divides, a
+  wall-to-wall separator or reflecting baffle, or a chord across a loop,
+  through the junction inspector's Detach, left the draft invalid: the end
+  still on the side, "touch with no junction between them". Dragged off, the
+  draft stayed invalid wherever it went, "two anchors claim the same
+  subdomain". Every later edit was refused, a new curve with the same
+  message and a deletion with "Resolve the invalid draft before deleting";
+  the run kept the last accepted scene. Undo past the detach or attaching
+  the end again mended it, and an autosave kept the stuck draft, which
+  opens with no history to undo. The user guide's way to switch a wall off
+  without deleting it, a separator that meets nothing, could not be
+  reached.
+- **Cause.** `detach_endpoint` cleared the end's junction and nothing more.
+  It is the one edit that folds two faces into one without the merge a
+  weld or a deletion settles, which landed two days after it (18f820f,
+  2026-09-16), and the merge appeared only at the drag that took the end
+  off the side, which merges nothing. Its test held the first invalid state
+  as intended and never dragged the end off.
+- **Fix.** A detach is one edit that leaves the draft valid. The end is
+  pulled back along its end tangent, 0.3 of the way to the control before
+  it, about a tenth of its end span, or 0.6 and 0.9 where that does not
+  clear what it touched; short of that control the curve cannot fold. Where
+  its two faces merge, `detach_endpoint` answers
+  `TopologyDetachOutcome::NeedsSurvivor` and changes nothing; the scene asks
+  which subdomain keeps its material, as for a weld or a deletion, and the
+  answer settles the merge as theirs do. The freed end is selected. A draft
+  already invalid, or invalid and not yet validated, refuses the detach.
+- **What it found along the way.** Setting the end control on the curve
+  itself, half its end span back, put it behind the control before it on a
+  straight divider, and the curve folded and could not be sampled; the
+  reopening machine, run with 400 cases, found it.
+- **Tests.** The editor's
+  `detaching_a_divider_asks_which_region_survives_and_leaves_a_valid_draft`
+  (separator and baffle, the exterior taking the kept material, one undo)
+  and `detaching_a_curve_that_divides_nothing_asks_nothing`; the chord and
+  orphan-vertex tests answer the merge. The UI's
+  `detaching_a_separator_from_the_inspector_asks_and_settles` presses the
+  button and clicks the subdomain kept. The reopening machine's detach
+  answers a merge with one of the regions offered and must leave the draft
+  valid. The weld's survivor tests and the invalid-draft round trip loosen
+  the end as a detach did before, through a test-only `loosen_endpoint`: an
+  autosave from before may hold such a draft, which a weld still mends.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

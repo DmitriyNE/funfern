@@ -29,7 +29,8 @@ fn geometry() -> BoxedStrategy<Action> {
         4 => (any::<u8>(), any::<u8>(), any::<u8>())
             .prop_map(|(curve, control, step)| Action::Nudge { curve, control, step }),
         2 => (any::<u8>(), any::<u8>()).prop_map(|(curve, keep)| Action::Remove { curve, keep }),
-        2 => (any::<u8>(), any::<u8>()).prop_map(|(curve, end)| Action::Detach { curve, end }),
+        2 => (any::<u8>(), any::<u8>(), any::<u8>())
+            .prop_map(|(curve, end, keep)| Action::Detach { curve, end, keep }),
         1 => any::<u8>().prop_map(|cell| Action::Probe { cell }),
         1 => (any::<u8>(), any::<bool>()).prop_map(|(cell, on)| Action::Source { cell, on }),
         1 => any::<u8>().prop_map(Action::Domain),

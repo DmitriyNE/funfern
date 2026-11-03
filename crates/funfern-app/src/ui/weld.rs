@@ -1,7 +1,7 @@
 //! Attaching an open end: what a drag can join to, the highlights that say
 //! so, and the weld that commits it.
 
-use crate::topology_editor::{TopologyAttachment, TopologyWeldOutcome};
+use crate::topology_editor::{TopologyAttachment, TopologyDetachOutcome, TopologyWeldOutcome};
 use crate::topology_viewport::{
     AttachmentHit, ScreenPoint, TopologyHandle, TopologySelection, weld_hit,
 };
@@ -303,6 +303,67 @@ impl Playground {
         self.notify(parts.join(" · "));
         true
     }
+
+    /// Detaches an end, or stages the question first, as `weld` does: a
+    /// divider whose end comes free folds the two subdomains it separated
+    /// into one face. The freed end is selected, pulled back off where it was
+    /// attached, for the drag that usually follows. Answers whether the
+    /// detach is settled, so a question that still stands is not cleared.
+    pub(super) fn detach(
+        &mut self,
+        curve: CurveId,
+        endpoint: usize,
+        keep_region: Option<RegionId>,
+    ) -> bool {
+        let detached = match self.editor.detach_endpoint(curve, endpoint, keep_region) {
+            Ok(TopologyDetachOutcome::Detached(detached)) => detached,
+            Ok(TopologyDetachOutcome::NeedsSurvivor(choices)) => {
+                self.pending_merge = Some(PendingMerge {
+                    action: MergeAction::Detach { curve, endpoint },
+                    choices,
+                });
+                return false;
+            }
+            Err(error) => {
+                self.message = error;
+                return false;
+            }
+        };
+        self.selection = TopologySelection::Handle(TopologyHandle::Control {
+            curve,
+            control: detached.control,
+        });
+        self.invalidate_samples();
+        let mut parts = vec![format!(
+            "Detached the {} of curve {}",
+            if endpoint == 0 { "start" } else { "end" },
+            curve.0
+        )];
+        if !detached.removed_regions.is_empty() {
+            parts.push(format!(
+                "{} subdomain{} merged away",
+                detached.removed_regions.len(),
+                if detached.removed_regions.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        if !detached.removed_probes.is_empty() {
+            parts.push(format!(
+                "{} probe{} dropped",
+                detached.removed_probes.len(),
+                if detached.removed_probes.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        self.notify(parts.join(" · "));
+        true
+    }
 }
 
 #[cfg(test)]
@@ -411,7 +472,8 @@ mod tests {
             side,
             parameter,
         });
-        state.editor.detach_endpoint(divider, 1).unwrap();
+        // As a detach left it until 2026-11-03, which an autosave may hold.
+        state.editor.loosen_endpoint(divider, 1);
         settle(&mut state.editor);
         let node = state
             .editor

@@ -701,9 +701,12 @@ restrict later editing.
   both endpoints are attached, the path lies inside the selected face, and the
   result creates two valid daughter faces without an illegal crossing or contact.
   Otherwise keep the construction gesture active with a short reason; Escape
-  cancels it without changing the document. A later edit may still detach or
-  invalidate an accepted separator, in which case the normal persistent-invalid-
-  draft behavior applies.
+  cancels it without changing the document. A later edit may still invalidate
+  an accepted separator, in which case the normal persistent-invalid-draft
+  behavior applies. Detaching one of its ends is not such an edit: the end is
+  pulled back off what it held and the two daughter faces merge, the user
+  asked which keeps its material as a deletion asks, so the draft stays
+  valid (since 2026-11-03).
 - A completed separator keeps the old material on the daughter containing the old
   face anchor; the other daughter receives the selected material. This avoids
   asking the user to reason about left/right before the curve has a direction.

@@ -396,8 +396,9 @@ link and by the browser's autosave, each through the handler the app has for
 it. A reopened document must equal what a file keeps of the saved one, and
 validation must bring it where the session would have come. After every
 action, in every panel machine, the document must save, and a Valid
-acceptance must mean the accepted scene is the draft. Its seeds have a file
-of their own.
+acceptance must mean the accepted scene is the draft. A detached end must
+leave the draft valid, a divider's merge answered with one of the regions it
+offers. Its seeds have a file of their own.
 
 A third machine (`ui/sequences/unfinished.rs`,
 `unfinished_edits_land_on_their_own_document_or_nowhere`) runs the panel with
