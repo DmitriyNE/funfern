@@ -1,0 +1,15 @@
+diff --git a/crates/funfern-core/src/canonical_transfer.rs b/crates/funfern-core/src/canonical_transfer.rs
+index e32d677..8ed71de 100644
+--- a/crates/funfern-core/src/canonical_transfer.rs
++++ b/crates/funfern-core/src/canonical_transfer.rs
+@@ -1239,7 +1239,9 @@ impl CanonicalVectorTransferWork {
+                 let target_region = self
+                     .same_region
+                     .then(|| target_mesh.triangles[sample.element as usize].region);
+-                if target_index % QUADRATURE_SAMPLES == 0 {
++                if target_index % QUADRATURE_SAMPLES == 0
++                    && source_mesh.geometry_revision == target_mesh.geometry_revision
++                {
+                     let element = target_index / QUADRATURE_SAMPLES;
+                     let projected = projected_blocks(
+                         self.bins.as_ref().unwrap(),

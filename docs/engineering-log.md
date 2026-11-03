@@ -32020,3 +32020,55 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-03 — IV-13: a box split and merged back, again and again
+
+- **What it is.** `repeated_splits_and_merges_keep_the_field_and_its_energy`
+  in `crates/funfern-app/tests/invariants.rs`. IV-08's box, anisotropic in
+  a turned frame and graded along it, is split and merged back through the
+  editor K times while it runs, each edit prepared by the runtime and the
+  field carried over as the app carries it, at one step. Three cycles: the
+  wall-to-wall separator drawn and deleted, the loop drawn and deleted, and
+  two pieces of a free separator of the box's medium welded and undone.
+- **Checks.** At the end, the field and the complementary field at the
+  common points within the unedited run's own move from the mesh twice as
+  coarse, and the energy no more than 4e-4 above that run's. Cycled with no
+  step between, the complementary field's energy never rises.
+- **Two cycles of the plan's are out.** A wall detached from a side merges
+  its faces, but `detach_endpoint` asks no merge choice, and the draft is
+  left invalid (`DuplicateFace` once the tip is dragged off), as through
+  the inspector's Detach button. Two curves may not meet tip to tip with no
+  junction.
+- **The step.** 0.7 of the smaller of the box's step and its first edit's.
+  The runtime repairs an edit's mesh about the mesh it ran on, so an undo
+  meshes otherwise: the weld's generations recommended 0.73 to 1.07 of that
+  base, with no trend over sixteen cycles.
+- **What it found: second-order walls gain energy across a split.** The
+  wall's cycles end above the unedited run, relatively:
+
+  | Cycles | 1 | 2 | 4 | 8 | 16 |
+  |---|---|---|---|---|---|
+  | Mechanical, TE | 4.5e-5 | 4.4e-5 | 7.5e-5 | 1.4e-4 | 2.5e-4 |
+  | TM | 5.1e-5 | 5.6e-5 | 9.5e-5 | 1.7e-4 | 3.2e-4 |
+  | Half the edge | 3.0e-5 | 1.5e-5 | 2.0e-5 | 7.0e-6 | -1.0e-5 |
+
+  At 0.9 of the step sixteen gain 1.1e-3. Reflecting or first-order walls,
+  the loop and the weld stay within 5.4e-5 either way. Each deletion takes
+  the junctions out of the top and bottom sides' traces and raises the
+  energy the walls' memory holds, up to 23% of the total, by up to 2.5e-4
+  of it: a third of the gain, the rest in the steps after. Twelve cycles
+  back to back at a frozen state lose 1.0e-4. The memory crosses by the
+  bulk transfer's quadratic weights on the pole currents. Kept as a weak
+  todo, by the user's choice: `docs/plan.md`, "Worth checking sometime".
+- **Numbers.** The nightly's 18 cases in 159 s on ten threads: within 0.65
+  of a halving's move, one cycle 0.12 to 0.49, none growing with K; the
+  still legs' `b` falls 2e-10 to 1e-8 a cycle. The gate's 3 cases in 4 s.
+- **Mutation** `complementary-projected-for-remeshes-only` keeps the
+  projection to handoffs within one geometry revision: the still legs' `b`
+  gains 1.1e-2, 2.4e-1 and 2.5e-5 a cycle. IV-08 edited mid-run, IV-10 and
+  IV-11 pass with it; the core's
+  `a_rough_field_carried_back_and_forth_never_gains_energy` catches it too,
+  and the core's other 588 tests pass.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

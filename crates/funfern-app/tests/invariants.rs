@@ -41,7 +41,7 @@ use funfern_app::canonical_gpu::CanonicalGpuRuntimeTransfer;
 use funfern_app::document::ProbeId;
 use funfern_app::topology_editor::{
     ClosedCurvePurpose, OpenCurvePurpose, TopologyAcceptance, TopologyAttachment, TopologyDocument,
-    TopologyEditor, TopologyProbeTarget,
+    TopologyEditor, TopologyProbeTarget, TopologyWeldOutcome,
 };
 use funfern_app::topology_examples;
 use funfern_app::topology_persistence;
@@ -3150,7 +3150,7 @@ fn complementary_energy(prepared: &PreparedTopology, run: &Run) -> f64 {
 
 /// One of IV-11's legs: the field run with `trips` round trips on the way,
 /// or struck, run and remeshed back and forth with no step between.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Leg {
     Running(u64),
     Still(u64),
@@ -4780,4 +4780,425 @@ fn a_larger_scene_reads_as_the_original_at_every_level() {
         )
     });
     within_a_halving("larger", outcomes);
+}
+
+/// IV-13's splits and merges, each undone by the other.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Cycle {
+    /// IV-08's wall-to-wall separator of the box's own medium drawn, which
+    /// splits its face, and deleted, which merges the two back.
+    DrawnAndDeleted,
+    /// IV-08's loop of the box's own medium drawn, which splits off a
+    /// subdomain, and deleted, which merges it back.
+    LoopDrawnAndDeleted,
+    /// Two pieces of a free separator of the box's own medium, a gap apart,
+    /// welded into one curve and the weld undone.
+    WeldedAndUndone,
+}
+
+/// The two pieces IV-13 welds: IV-08's free separator, of the box's own
+/// medium, parted near its middle with a gap between, which the weld
+/// closes.
+fn pieces(editor: &mut TopologyEditor) -> Result<[CurveId; 2], String> {
+    let material = editor
+        .document
+        .model
+        .accepted
+        .region(BACKGROUND_REGION)
+        .ok_or("the box has no background")?
+        .material;
+    let mut curves = Vec::new();
+    for controls in [
+        [
+            Point2::new(-0.5, -0.4),
+            Point2::new(-0.35, -0.37),
+            Point2::new(-0.2, -0.3),
+            Point2::new(-0.06, -0.12),
+        ],
+        [
+            Point2::new(0.0, -0.05),
+            Point2::new(0.12, 0.12),
+            Point2::new(0.3, 0.35),
+            Point2::new(0.45, 0.5),
+        ],
+    ] {
+        let spline =
+            OpenCubicSpline::uniform(controls.to_vec()).map_err(|error| format!("{error:?}"))?;
+        curves.push(
+            editor
+                .create_open_curve(
+                    spline,
+                    OpenCurvePurpose::SubdomainSeparator { material },
+                    None,
+                    None,
+                )?
+                .curve,
+        );
+        settle(editor);
+    }
+    match &editor.acceptance {
+        TopologyAcceptance::Valid => Ok([curves[0], curves[1]]),
+        other => Err(format!("with its pieces, the box is {other:?}")),
+    }
+}
+
+/// IV-13's box for `cycle` in the editor, as it stands before each cycle,
+/// and the curves the cycle edits.
+fn cycled_box(
+    physics: PhysicsModel,
+    cycle: Cycle,
+) -> Result<(TopologyEditor, Vec<CurveId>), String> {
+    let mut editor = separator_box(physics)?;
+    let curves = match cycle {
+        Cycle::DrawnAndDeleted | Cycle::LoopDrawnAndDeleted => Vec::new(),
+        Cycle::WeldedAndUndone => pieces(&mut editor)?.to_vec(),
+    };
+    Ok((editor, curves))
+}
+
+/// `cycle`'s first edit, `forth`, or its second, which undoes it, made as a
+/// user makes it.
+fn cycle_edit(
+    editor: &mut TopologyEditor,
+    cycle: Cycle,
+    curves: &mut Vec<CurveId>,
+    forth: bool,
+) -> Result<(), String> {
+    match (cycle, forth) {
+        (Cycle::DrawnAndDeleted, true) => {
+            curves.push(draw_separator(editor, Separator::Wall)?);
+            return Ok(());
+        }
+        (Cycle::LoopDrawnAndDeleted, true) => {
+            curves.push(draw_separator(editor, Separator::Loop)?);
+            return Ok(());
+        }
+        (Cycle::DrawnAndDeleted | Cycle::LoopDrawnAndDeleted, false) => {
+            let curve = curves.pop().ok_or("nothing to delete")?;
+            return delete_separator(editor, curve);
+        }
+        (Cycle::WeldedAndUndone, true) => {
+            let end = TopologyAttachment::LooseEnd {
+                curve: curves[0],
+                endpoint: 1,
+            };
+            match editor.weld_endpoint(curves[1], 0, end, None)? {
+                TopologyWeldOutcome::Welded(_) => {}
+                other => return Err(format!("the weld asked {other:?}")),
+            }
+        }
+        (Cycle::WeldedAndUndone, false) => {
+            if !editor.undo() {
+                return Err("nothing to undo".into());
+            }
+        }
+    }
+    settle(editor);
+    match &editor.acceptance {
+        TopologyAcceptance::Valid => Ok(()),
+        other => Err(format!("edited, the box is {other:?}")),
+    }
+}
+
+/// IV-13's `leg`: the box for `cycle` at `edge`, struck and stepped at
+/// `time_step`, a running leg for `steps` steps with its cycles spread
+/// evenly among them, a still leg after [`STEPS`] with its cycles back to
+/// back. Each edit is prepared by the runtime and the field handed over as
+/// IV-11's legs hand it.
+fn cycled_leg(
+    physics: PhysicsModel,
+    cycle: Cycle,
+    edge: f64,
+    leg: Leg,
+    (steps, time_step): (u64, f64),
+) -> Result<Read, String> {
+    let (mut editor, mut curves) = cycled_box(physics, cycle)?;
+    let domain = editor.document.model.accepted.geometry.domain;
+    let (_, mut runtime, mut active) = prepare_at(&editor.document, edge)?;
+    let mut run = Run::struck_by(&active, time_step, Pulse::off_centre(domain, 1.0))?;
+    let mut edit = |editor: &mut TopologyEditor,
+                    runtime: &mut TopologyRuntime,
+                    active: &mut Arc<PreparedTopology>,
+                    run: &mut Run,
+                    forth: bool|
+     -> Result<(), String> {
+        cycle_edit(editor, cycle, &mut curves, forth)?;
+        let (target, maps) = remeshed(editor, runtime, Some(edge))?;
+        *run = handed((active, run), &target, &maps, time_step)?;
+        *active = target;
+        Ok(())
+    };
+    match leg {
+        Leg::Running(cycles) => {
+            let handoffs = 2 * cycles;
+            let mut taken: u64 = 0;
+            for handoff in 1..=handoffs {
+                while taken < handoff * steps / (handoffs + 1) {
+                    run.step(&active)?;
+                    taken += 1;
+                }
+                let forth = handoff % 2 == 1;
+                edit(&mut editor, &mut runtime, &mut active, &mut run, forth)?;
+            }
+            for _ in taken..steps {
+                run.step(&active)?;
+            }
+            // One part, whose total an edit's handoff does not hold.
+            Ok(Read::Running {
+                drift: 0.0,
+                run,
+                prepared: active,
+            })
+        }
+        Leg::Still(cycles) => {
+            for _ in 0..STEPS {
+                run.step(&active)?;
+            }
+            let mut energy = complementary_energy(&active, &run);
+            let mut rise: f64 = f64::NEG_INFINITY;
+            for _ in 0..cycles {
+                for forth in [true, false] {
+                    edit(&mut editor, &mut runtime, &mut active, &mut run, forth)?;
+                }
+                let now = complementary_energy(&active, &run);
+                rise = rise.max(now / energy - 1.0);
+                energy = now;
+            }
+            Ok(Read::Still(rise))
+        }
+    }
+}
+
+/// IV-13's step, as a share of the smaller of the step the box recommends
+/// and the step it recommends with its cycle's first edit made, each meshed
+/// whole. The runtime repairs an edit's mesh about the mesh it ran on, so an
+/// undone edit does not give the old mesh back and the same document meshes
+/// otherwise each time a leg reaches it, while every generation takes the
+/// leg's one step: on 2026-11-03 the wall's generations recommended 0.97 to
+/// 0.99 of that step's base, and the weld's 0.73 to 1.07, with no trend
+/// over sixteen cycles.
+const CYCLED_STEP: f64 = 0.7;
+
+/// How far a box split and merged back K times may read from the same box
+/// run unedited, at the common points, as a fraction of that run's own move
+/// from the mesh twice as coarse: within what one halving of the mesh moves
+/// it, as IV-08 holds a separator drawn or deleted once. On 2026-11-03 the
+/// nightly's cases read 0.65 of that at worst, the loop's two cycles at half
+/// the edge, and none grew with K: one cycle reads 0.12 to 0.49.
+const CYCLED: f64 = 1.0;
+
+/// How far the energy of a box split and merged back K times may end above
+/// the same box's run unedited, relatively. The box's second-order outgoing
+/// walls gain it where the wall-to-wall separator meets them: each deletion,
+/// which takes its junctions out of the top and bottom sides' traces, raises
+/// the energy the walls' memory holds by up to 2.5e-4 of it, and the steps
+/// after a handoff add about twice as much again. On 2026-11-03 sixteen
+/// cycles of the wall at the default edge gained 3.2e-4 (TM) and eight
+/// 1.7e-4, the walls' memory holding up to 23% of the energy late in the
+/// run; at 0.9 of the step sixteen gained 1.1e-3. At half the edge the gain
+/// falls with K, from 3.2e-5 at one cycle, and with reflecting or
+/// first-order walls, or in the other cycles, no case moved more than 5.4e-5
+/// either way. A weak todo, invisible in the field: `docs/plan.md`, "Worth
+/// checking sometime".
+const CYCLED_ENERGY: f64 = 4.0e-4;
+
+/// What every leg of one IV-13 case shares: its edge, its step and how many
+/// it runs, the points it is read at, and the unedited box at twice the
+/// edge run alone, for what one halving of the mesh moves the field.
+struct Cycled {
+    edge: f64,
+    time_step: f64,
+    steps: u64,
+    points: Vec<Point2>,
+    coarser: (Arc<PreparedTopology>, Run),
+}
+
+/// IV-13's case for `cycle` in `physics` at `factor` times the box's edge.
+fn cycled_case(physics: PhysicsModel, cycle: Cycle, factor: f64) -> Result<Cycled, String> {
+    let (mut editor, mut curves) = cycled_box(physics, cycle)?;
+    let edge = editor.document.presentation.mesh_edge * factor;
+    let domain = editor.document.model.accepted.geometry.domain;
+    let (_, _, coarser) = prepare_at(&editor.document, 2.0 * edge)?;
+    let (_, _, base) = prepare_at(&editor.document, edge)?;
+    cycle_edit(&mut editor, cycle, &mut curves, true)?;
+    let (_, _, edited) = prepare_at(&editor.document, edge)?;
+    let time_step = CYCLED_STEP
+        * base
+            .recommended_time_step()
+            .min(edited.recommended_time_step());
+    let steps = (REMESHED_STEPS / factor).round() as u64;
+    let mut coarser_run = Run::struck_by(&coarser, time_step, Pulse::off_centre(domain, 1.0))?;
+    advance(&mut coarser_run, &coarser, steps)?;
+    Ok(Cycled {
+        edge,
+        time_step,
+        steps,
+        points: common_points(domain, &coarser.mesh, 2.0 * edge),
+        coarser: (coarser, coarser_run),
+    })
+}
+
+/// IV-13, split/merge reversal. The box of IV-08's medium, anisotropic in a
+/// turned frame and graded along it, is split and merged back through the
+/// editor K times while it runs, each edit prepared by the runtime and the
+/// field carried over as the app carries it, at one step throughout: its
+/// wall-to-wall separator drawn and deleted, its loop drawn and deleted, and
+/// two pieces of a free separator welded and the weld undone, each of the
+/// box's own material. At the end the field and the complementary field,
+/// read at the common points against the same box run unedited, must stand
+/// within that run's own move from the mesh twice as coarse, and the energy
+/// no more than 4e-4 above that run's. Struck, run, and then split and
+/// merged back with no step between, the complementary field's energy must
+/// never rise. The gate runs one and eight cycles and twelve still ones,
+/// each cycle in one skin, at the default edge; the nightly runs up to
+/// sixteen in every skin at the default edge and half it.
+#[test]
+fn repeated_splits_and_merges_keep_the_field_and_its_energy() {
+    let all = std::env::var_os("FUNFERN_INVARIANTS_ALL").is_some();
+    let skins = [
+        PhysicsModel::Mechanical,
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        },
+        PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        },
+    ];
+    let factors: &[f64] = if all { &[1.0, 0.5] } else { &[1.0] };
+    let legs = if all {
+        vec![
+            Leg::Running(0),
+            Leg::Running(1),
+            Leg::Running(2),
+            Leg::Running(4),
+            Leg::Running(8),
+            Leg::Running(16),
+            Leg::Still(24),
+        ]
+    } else {
+        vec![
+            Leg::Running(0),
+            Leg::Running(1),
+            Leg::Running(8),
+            Leg::Still(12),
+        ]
+    };
+    let mut cases = Vec::new();
+    for (row, cycle) in [
+        Cycle::DrawnAndDeleted,
+        Cycle::LoopDrawnAndDeleted,
+        Cycle::WeldedAndUndone,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (skin, physics) in skins.into_iter().enumerate() {
+            if all || skin == row {
+                for factor in factors {
+                    cases.push((physics, cycle, *factor));
+                }
+            }
+        }
+    }
+    let shared = in_parallel(&cases, |(physics, cycle, factor)| {
+        cycled_case(*physics, *cycle, *factor)
+    });
+    let runs = shared
+        .iter()
+        .enumerate()
+        .filter_map(|(case, shared)| {
+            let shared = shared.as_ref().ok()?;
+            Some((case, shared.edge, shared.steps, shared.time_step))
+        })
+        .flat_map(|(case, edge, steps, time_step)| {
+            legs.iter()
+                .map(move |leg| (case, edge, *leg, (steps, time_step)))
+        })
+        .collect::<Vec<_>>();
+    let mut outcomes = in_parallel(&runs, |(case, edge, leg, stepping)| {
+        let started = Instant::now();
+        let (physics, cycle, _) = cases[*case];
+        let outcome = cycled_leg(physics, cycle, *edge, *leg, *stepping);
+        (outcome, started.elapsed().as_secs_f64())
+    })
+    .into_iter();
+    let mut failures = Vec::new();
+    let mut worst: f64 = 0.0;
+    for ((physics, cycle, factor), shared) in cases.iter().zip(&shared) {
+        let label = format!("the box ({physics:?}), {cycle:?}, at {factor} of its edge");
+        let shared = match shared {
+            Ok(shared) => shared,
+            Err(error) => {
+                eprintln!("FAILED {label}: {error}");
+                failures.push(format!("{label}: {error}"));
+                continue;
+            }
+        };
+        let (coarser, coarser_run) = &shared.coarser;
+        let mut control = None;
+        for (leg, (outcome, seconds)) in legs.iter().zip(outcomes.by_ref()) {
+            let label = format!("{label}, {leg:?}");
+            let read = match outcome {
+                Ok(read) => read,
+                Err(error) => {
+                    eprintln!("FAILED {label}: {error}");
+                    failures.push(format!("{label}: {error}"));
+                    continue;
+                }
+            };
+            let (line, held) = match (leg, read) {
+                (Leg::Running(0), Read::Running { run, prepared, .. }) => {
+                    let energy = run.energy(&prepared);
+                    control = Some((run, prepared, energy));
+                    continue;
+                }
+                (Leg::Running(_), Read::Running { run, prepared, .. }) => {
+                    let Some((control, mesh, Ok(energy))) = &control else {
+                        failures.push(format!("{label}: no run to read it against"));
+                        continue;
+                    };
+                    let (u, b, _) =
+                        moved_apart((mesh, control), (&prepared, &run), STILL, &shared.points);
+                    let (own_u, own_b, _) = moved_apart(
+                        (coarser, coarser_run),
+                        (mesh, control),
+                        STILL,
+                        &shared.points,
+                    );
+                    let kept = match run.energy(&prepared) {
+                        Ok(end) => end / energy - 1.0,
+                        Err(error) => {
+                            failures.push(format!("{label}: {error}"));
+                            continue;
+                        }
+                    };
+                    let ratios = [u / own_u, b / own_b];
+                    worst = ratios.into_iter().fold(worst, f64::max);
+                    (
+                        format!(
+                            "{label}: u {:.2} and b {:.2} of a halving's move, energy {kept:.1e} ({seconds:.1} s)",
+                            ratios[0], ratios[1]
+                        ),
+                        ratios.iter().all(|ratio| *ratio <= CYCLED) && kept <= CYCLED_ENERGY,
+                    )
+                }
+                (Leg::Still(cycles), Read::Still(rise)) => (
+                    format!(
+                        "{label}: b's energy rose at most {rise:.1e} a cycle over {cycles} ({seconds:.1} s)"
+                    ),
+                    rise <= ROUNDOFF,
+                ),
+                _ => unreachable!("a leg reads as it ran"),
+            };
+            eprintln!("{line}");
+            if !held {
+                failures.push(line);
+            }
+        }
+    }
+    eprintln!(
+        "{} cases, the worst {worst:.2} of a halving's move",
+        cases.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

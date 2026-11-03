@@ -1337,7 +1337,10 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   solver is absolute. Its device half, the `similarity` fixture, followed
   on 2026-11-03: the device is as homogeneous in time, but for f32's
   floor, which a pulse that leaves nodes to the stencil reaches. IV-13,
-  split/merge reversal, follows.
+  split/merge reversal, followed the same day, which completes stage C5: a
+  box split and merged back sixteen times keeps its field, and its
+  second-order walls gain up to 3.2e-4 of its energy where the split meets
+  them (Worth checking sometime).
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the
@@ -1764,6 +1767,19 @@ is next touched.
   Since the chain cut stopped leaving a short atom at a tip, only authored
   geometry makes such a span (2026-10-30); grading it would take refinement
   after the slit is cut in.
+- A box split and merged back again and again gains energy at its
+  second-order outgoing walls where the split meets them. Sixteen cycles of
+  a wall-to-wall separator drawn and deleted at the default edge end 3.2e-4
+  above the run left unedited (TM), growing with the cycles; at half the
+  edge the gain falls with them, and reflecting or first-order walls show
+  none. Each deletion, which takes the separator's junctions out of the top
+  and bottom sides' traces, raises the energy the walls' memory holds by up
+  to 2.5e-4 of it, a third of the gain; the rest comes in the steps after
+  and is not pinned down. The memory crosses a handoff by interpolating the
+  walls' pole currents with the bulk transfer's quadratic weights, as `b`
+  crossed before IV-11's projection; a projection along the trace is the
+  candidate. IV-13 holds the energy within 4e-4 (found by IV-13 on
+  2026-11-03).
 
 ## Working practice
 

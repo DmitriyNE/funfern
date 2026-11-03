@@ -1515,6 +1515,18 @@ nightly. Its mutation is `point-profile-reaching-the-default-width`. Its
 device half is the `similarity` fixture, whose mutation
 `pulse-tail-dropped-below-a-fixed-size` drops a pulse's increments below a
 fixed size.
+IV-13, split/merge reversal: IV-08's box is split and merged back K times
+while it runs, through the editor and the runtime at one step, its
+wall-to-wall separator drawn and deleted, its loop drawn and deleted, or two
+pieces of a free separator welded and the weld undone. At the end its field
+and complementary field must read against the box run unedited within one
+halving's move, and its energy no more than 4e-4 above that run's; cycled
+with no step between, the complementary field's energy must never rise. The
+gate runs each cycle in one skin, one and eight cycles and twelve still
+ones, in about 4 s; the nightly runs up to sixteen in every skin at the
+default edge and half it. Its mutation is
+`complementary-projected-for-remeshes-only`, which the core's
+`a_rough_field_carried_back_and_forth_never_gains_energy` catches too.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

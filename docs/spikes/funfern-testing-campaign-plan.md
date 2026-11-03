@@ -1335,6 +1335,61 @@ root, as on the CPU.
   of Q apart. The `cavity` and `superposition` fixtures and the app's 55
   `canonical_gpu` tests pass with it.
 
+**IV-13 done on 2026-11-03**,
+`repeated_splits_and_merges_keep_the_field_and_its_energy` in the same
+file. The box of IV-08's medium is split and merged back through the editor
+K times while it runs, at one step, each edit prepared by the runtime and
+the field carried over as the app carries it.
+- **The cycles.** IV-08's wall-to-wall separator drawn and deleted, its
+  loop drawn and deleted, and two pieces of a free separator of the box's
+  own medium, a gap apart, welded and the weld undone. Two of the plan's
+  are out. Detached from the top side, the wall merges its two faces, but
+  `detach_endpoint` asks no merge choice: left touching the side, the tip
+  makes the draft invalid, and dragged off, the merged face is claimed
+  twice (`DuplicateFace`); the inspector's Detach button reaches the same
+  state. And two curves may not meet tip to tip with no junction between.
+- **Checks.** At the end, the field and the complementary field, read at
+  IV-04's common points against the box run unedited, within that run's own
+  move from the mesh twice as coarse, and the energy no more than 4e-4
+  above that run's. Struck, run, and then cycled with no step between, the
+  complementary field's energy must never rise. The plan's multiple of one
+  cycle's distance proved no scale: the cycles fall at other times of the
+  run, and the weld's two cycles read 2.5 times its one.
+- **The step.** 0.7 of the smaller of the steps the box and its first edit
+  recommend. The runtime repairs an edit's mesh about the mesh it ran on,
+  so an undone edit does not give the old mesh back, and the same document
+  meshes otherwise each time a leg reaches it: the weld's generations
+  recommended 0.73 to 1.07 of that step's base, with no trend over sixteen
+  cycles, the wall's 0.97 to 0.99.
+- **What it found: the walls' memory gains energy across a split.** With
+  the box's second-order outgoing walls, the wall's cycles end above the
+  unedited run, more with K; at half the edge the gain falls with K, and
+  reflecting or first-order walls show none. Only the wall-to-wall
+  separator's junctions change the walls' traces. Each deletion raises the
+  energy the walls' memory holds by up to 2.5e-4 of it, about a third of
+  the gain; the rest comes in the steps after the handoffs and is not
+  pinned down. Back to back at a frozen state, the walls holding 23% of
+  the energy, twelve cycles lose 1.0e-4. The memory crosses by
+  interpolating the walls' pole currents with the bulk transfer's quadratic
+  weights, then projecting onto the new walls' modes. The field shows
+  nothing, and the user chose to keep it as a weak todo: the bound sits
+  narrowly over it, and `docs/plan.md` lists it.
+- **Numbers.** The nightly's 18 cases, each cycle in each skin at the
+  default edge and half it, up to sixteen cycles, read within 0.65 of a
+  halving's move, one cycle within 0.12 to 0.49, and none grows with K.
+  Sixteen of the wall's cycles at the default edge gain 3.2e-4 (TM) and
+  2.5e-4 (Mechanical and TE), and at 0.9 of the step 1.1e-3; the loop's and
+  the weld's stay within 5.4e-5 either way. The still legs' `b` loses 2e-10
+  to 1e-8 of itself a cycle. The gate runs each cycle in one skin, one and
+  eight cycles and twelve still ones, at the default edge.
+- **Mutation** `complementary-projected-for-remeshes-only` keeps the
+  projection to handoffs within one geometry revision, an edit's new
+  samples each evaluated on the old element's quadratic: the still legs'
+  `b` gains 1.1e-2 (the wall), 2.4e-1 (the loop) and 2.5e-5 (the weld) a
+  cycle. IV-08 edited mid-run, IV-10 and IV-11 pass with it; the core's
+  `a_rough_field_carried_back_and_forth_never_gains_energy`, whose two
+  meshes carry different revisions, catches it too.
+
 ## 7. Infrastructure
 
 - **References.** `tests/physics/references/` holds the tables as JSON, the

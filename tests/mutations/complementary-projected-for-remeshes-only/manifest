@@ -1,0 +1,4 @@
+about: a handoff whose scene was edited carries each new complementary sample by evaluating the old element's quadratic at it, the projection kept for a remesh of the same scene, so that a box split and merged back again and again grows its b
+test: cargo test --release -p funfern-app --test invariants -- repeated_splits_and_merges_keep_the_field_and_its_energy
+expect: LoopDrawnAndDeleted, at 1 of its edge, Still\(12\): b's energy rose at most [0-9.]+e-[0-9]+ a cycle
+needs: cpu
