@@ -13,7 +13,7 @@ use funfern_core::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Below one percent of the run's meaningful amplitude, automatic exposure is
+/// Below one percent of the experiment's meaningful amplitude, automatic exposure is
 /// more likely to reveal the slowly decaying numerical tail than useful wave
 /// content. The saved-scene drain fixture plateaus at roughly 0.2--0.3% even
 /// with resident damping, so the former 0.1% floor still normalized that tail.
@@ -465,14 +465,23 @@ pub struct AdaptationController {
     pub pending: Option<MeshAdaptationState>,
     /// Estimates in a row that asked to coarsen.
     pub coarsen_streak: u8,
-    /// The most energy the run has held, which sets the floor under which
-    /// its error is no longer chased.
+    /// The most energy the field has held since the experiment began, which
+    /// sets the floor under which its error is no longer chased.
     pub energy_peak: f64,
 }
 
 impl AdaptationController {
-    /// Raises the run's energy peak to `energy`, a stored energy of the
-    /// field the solver accepted.
+    /// A new experiment: the user put energy in, by a pulse, a Switch or an
+    /// edit of a source, and the device has it. What the run held before is
+    /// another experiment's, and a weaker one after a loud one would sit
+    /// under its floor, neither refined nor painted; the peak starts again
+    /// from the field as it next reads, which holds whatever still rings.
+    pub fn mark_experiment(&mut self) {
+        self.energy_peak = 0.0;
+    }
+
+    /// Raises the experiment's energy peak to `energy`, a stored energy of
+    /// the field the solver accepted.
     pub fn observe_energy(&mut self, energy: f64) {
         if energy.is_finite() && energy > 0.0 {
             self.energy_peak = self.energy_peak.max(energy);

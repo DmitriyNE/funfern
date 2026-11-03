@@ -17,12 +17,16 @@ use super::*;
 /// and falls back over about a second, so a placed pulse fades out of the scale
 /// rather than darkening everything after it for the rest of the run — which is
 /// what the monotone run peak this replaces used to do. It never falls below a
-/// small fraction of the loudest level seen, and that is what keeps a field
+/// small fraction of the loudest level seen since the experiment began, and
+/// that is what keeps a field
 /// which has decayed into numerical noise from being magnified back into view.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct AutoExposure {
     reference: f64,
     peak: f64,
+    /// The loudest level restarts at the next one measured: a new
+    /// experiment began.
+    peak_restarts: bool,
 }
 
 impl AutoExposure {
@@ -53,7 +57,8 @@ impl AutoExposure {
     /// does; the cost is that a pulse holds the scale for some twenty seconds,
     /// which is honest, since the pulse really was that much brighter.
     pub(super) const RELEASE_PER_SECOND: f64 = 1.15;
-    /// How far under the loudest level seen the reference may go.
+    /// How far under the loudest level seen since the experiment began the
+    /// reference may go.
     pub(super) const QUIET_FLOOR: f64 = PRESENTATION_QUIET_AMPLITUDE_RATIO;
     /// The longest step the release is allowed to take at once, so a stalled
     /// frame cannot drop the scale by an unbounded factor in one go.
@@ -78,6 +83,16 @@ impl AutoExposure {
         *self = Self::default();
     }
 
+    /// A new experiment: the loudest level, and with it the quiet floor,
+    /// starts again from the next level measured, which holds the event the
+    /// mark waited for, so the dust of a zeroed field cannot set it. The scale
+    /// itself releases on as before: a weak pulse after a loud one paints dim
+    /// and brightens as the scale comes down, but it is no longer under a
+    /// floor set by the loud one.
+    pub(super) fn mark_experiment(&mut self) {
+        self.peak_restarts = true;
+    }
+
     pub(super) fn reference(self) -> Option<f64> {
         (self.reference > 0.0).then_some(self.reference)
     }
@@ -86,7 +101,12 @@ impl AutoExposure {
     /// previous one, and answers with the level to divide by.
     pub(super) fn update(&mut self, level: f64, elapsed: f32) -> Option<f64> {
         if level.is_finite() && level > 0.0 {
-            self.peak = self.peak.max(level);
+            self.peak = if self.peak_restarts {
+                level
+            } else {
+                self.peak.max(level)
+            };
+            self.peak_restarts = false;
             let elapsed = f64::from(elapsed.clamp(0.0, Self::MAX_STEP_SECONDS));
             // The maximum rises to meet a louder field at once, so nothing is
             // ever clipped, and the release only ever slows the way back down.
@@ -96,7 +116,7 @@ impl AutoExposure {
         self.reference()
     }
 
-    /// Smoothly turns off structure below the run-relative quiet floor. Merely
+    /// Smoothly turns off structure below the experiment's quiet floor. Merely
     /// flooring the denominator still paints late f32 residue at a few percent,
     /// which reads as a full-domain static pattern. Squaring the smoothstep
     /// makes that residue disappear without a visible threshold crossing.
@@ -332,6 +352,28 @@ mod tests {
         assert!((0.0..1.0e-3).contains(&tenth), "weak fade {tenth}");
         assert_eq!(exposure.visibility(0.0), 0.0);
         assert_eq!(exposure.visibility(f64::NAN), 0.0);
+    }
+
+    /// A weak experiment after a loud one lay under the loud one's floor and
+    /// was not painted at all. Marked, its own level sets the floor once it is
+    /// measured, and the scale releases on from where the loud one left it,
+    /// so it paints as dim as before, no longer hidden. A louder level after
+    /// raises the floor again.
+    #[test]
+    fn a_mark_lifts_the_floor_a_loud_experiment_left() {
+        let mut exposure = AutoExposure::default();
+        exposure.update(1.0, 0.0);
+        let weak = 1.0e-3;
+        let mut unmarked = exposure;
+        unmarked.update(weak, 0.5);
+        assert!(unmarked.visibility(weak) < 1.0e-3);
+        exposure.mark_experiment();
+        assert_eq!(exposure.visibility(weak), unmarked.visibility(weak));
+        exposure.update(weak, 0.5);
+        assert_eq!(exposure.visibility(weak), 1.0);
+        assert_eq!(exposure.reference(), unmarked.reference());
+        exposure.update(1.0, 0.0);
+        assert!(exposure.visibility(weak) < 1.0e-3);
     }
 
     #[test]

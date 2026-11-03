@@ -1,0 +1,4 @@
+about: a pulse, a Switch or a source edit marks a new experiment but adaptation keeps the run's energy peak, so a weak pulse after a loud one stays under the loud one's dormant floor and is never refined
+test: cargo test --release -p funfern-app --test adaptation -- a_weak_packet_after_a_loud_one_is_refined_once_its_experiment_begins
+expect: its own experiment: dormant true
+needs: cpu

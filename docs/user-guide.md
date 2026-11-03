@@ -390,10 +390,12 @@ names or with every expression evaluated at the material frame's origin. Each ro
   back slowly — slower than a field drains away, so a domain that has emptied goes
   dark instead of being renormalized back to full brightness. A placed pulse
   therefore holds the scale for some seconds before the view returns to normal. It
-  will not fall below a hundredth of the loudest level seen since the scene opened;
-  opening another scene, or switching between the field and the integrated field,
-  starts the scale from nothing, so a quiet scene is never floored by a loud one
-  before it. Below that floor the
+  will not fall below a hundredth of the loudest level seen since the experiment
+  began: a placed pulse, a Switch or a source edit begins one once the solver has
+  it, so a weak pulse after a loud one paints dim at first but is never hidden
+  under the loud one's floor. Opening another scene, or switching between the
+  field and the integrated field, starts the scale from nothing, so a quiet scene
+  is never floored by a loud one before it. Below that floor the
   drawing fades smoothly, so a field that has decayed into rounding noise is not
   magnified back into view; sparse arrow outliers cannot override that shared fade.
   Field
@@ -652,8 +654,10 @@ names or with every expression evaluated at the material frame's origin. Each ro
   is clamped, so anything it cannot satisfy - a boundary the field disagrees with,
   the grid-scale leftovers of a wave that has passed - otherwise shrinks by that
   same step every cycle until it reaches the smallest element allowed, whatever
-  the target says. Once the whole field has fallen below `10⁻⁴` of the run's
-  peak canonical energy, relative error is reported as dormant and stops driving
+  the target says. Once the whole field has fallen below `10⁻⁴` of its peak
+  canonical energy since the experiment began, a placed pulse, a Switch or a
+  source edit beginning one as for the exposure, relative error is reported as
+  dormant and stops driving
   refinement; this prevents numerical tail divided by vanishing field energy from
   looking increasingly inaccurate. Error concentrated in a small part of a field
   that is comfortably inside the target is the trade one number for the whole

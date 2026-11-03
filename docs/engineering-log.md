@@ -32245,3 +32245,36 @@ the device.
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs; the
   suite's handoff fixtures, 14 of 14, with commit 2's changes beside them.
+
+## 2026-11-03 — An experiment begins its own scale
+
+- **What was wrong.** Adaptation stops chasing a field's error below 1e-4
+  of the most energy the run had held, and the display stops painting
+  below 1% of the loudest level it had seen. Both kept that peak until
+  Reset or another scene, but the playground runs one experiment after
+  another in one run: a pulse placed at a hundredth of an earlier loud one's
+  amplitude lay under both floors, neither painted nor refined.
+- **Fix.** A pulse, a Switch or a source edit begins an experiment once a
+  readback holds its event: adaptation's peak and both exposures' loudest
+  levels start again from the field that readback holds. The exposures'
+  scale is left as it was, so a weak pulse after a loud one paints dim and
+  brightens as the scale comes down, as before, but is no longer hidden.
+  The mark waits for the readback, not the queue, so a pulse after Reset
+  cannot set the floor at the zeroed field's dust. Reset and a new scene
+  already began one. Weighed against a peak that falls slowly between
+  experiments: that keeps a time constant that only matters for fields
+  fading slower than it, and a leftover fading slower would get its own
+  scale back and be chased again; with the user, the experiments are
+  enough.
+- **Tests.**
+  - `a_weak_packet_after_a_loud_one_is_refined_once_its_experiment_begins`
+    (`tests/adaptation.rs`): a packet at a two-hundredth of the loud one's
+    amplitude is dormant under the loud one's peak; once its experiment
+    begins it reads 0.1496 against the 0.12 target and refines.
+    Mutation `experiment-keeps-the-runs-peak`, which leaves it dormant and
+    coarsening.
+  - `a_mark_lifts_the_floor_a_loud_experiment_left`.
+  - `an_experiment_begins_with_the_readback_that_holds_its_event`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and
+  threaded wasm checks, the browser shader compile and the protocol proofs.

@@ -1550,7 +1550,11 @@ its mutation is `flux-cleanup-adds-the-stationary-part`. The device's half is
 `canonical_gpu_live_events`' last paused event, which adds a stationary flux
 a tenth of the field's energy: the run must go on as the reference does, Q
 and b within 3e-5 (3.1e-7 and 6.6e-7 on the M1 Max), and the maintenance
-lane must book it within 1e-4 (1.5e-6).
+lane must book it within 1e-4 (1.5e-6). An experiment's floor:
+`a_weak_packet_after_a_loud_one_is_refined_once_its_experiment_begins` launches
+the packet at a two-hundredth of a loud one's amplitude, and requires it dormant
+under the loud one's peak and, once its own experiment begins, refined: it reads
+0.1496 against the 0.12 target. Its mutation is `experiment-keeps-the-runs-peak`.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

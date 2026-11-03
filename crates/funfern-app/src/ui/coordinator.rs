@@ -71,6 +71,9 @@ pub(super) struct Coordinator {
     /// otherwise read the old direction and send the same one again.
     pub(super) switch_targets: BTreeMap<MaterialId, bool>,
     pub(super) canonical_event_serial: u32,
+    /// The serial of the last event that began an experiment, a pulse, a
+    /// Switch or a source edit, until a readback holds it.
+    pub(super) experiment_mark: Option<u32>,
     pub(super) canonical_event_observed: u32,
     /// The device failure the run is paused on, if any. Run, Step or an edit
     /// resumes from the last accepted step; the failure itself never commits.
@@ -96,6 +99,7 @@ impl Default for Coordinator {
             uploaded_time_step: 0.0,
             switch_targets: BTreeMap::new(),
             canonical_event_serial: 0,
+            experiment_mark: None,
             canonical_event_observed: 0,
             solver_fault: None,
         }
@@ -142,6 +146,7 @@ impl Coordinator {
         self.uploaded_time_step = 0.0;
         self.canonical_event_serial = 0;
         self.canonical_event_observed = 0;
+        self.experiment_mark = None;
         self.solver_fault = None;
         self.pending_pulses.clear();
         self.pending_switches.clear();
@@ -161,6 +166,7 @@ impl Coordinator {
         self.uploaded_time_step = time_step;
         self.canonical_event_serial = 0;
         self.canonical_event_observed = 0;
+        self.experiment_mark = None;
         self.switch_targets.clear();
         self.pending_pulses.clear();
         self.pending_switches.clear();
@@ -179,6 +185,7 @@ impl Coordinator {
     pub(super) fn started_afresh(&mut self) {
         self.canonical_event_serial = 0;
         self.canonical_event_observed = 0;
+        self.experiment_mark = None;
         self.switch_targets.clear();
     }
 

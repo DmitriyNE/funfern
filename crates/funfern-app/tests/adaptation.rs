@@ -20,8 +20,8 @@ mod support;
 use support::*;
 
 use funfern_app::adaptation::{
-    AMR_ESTIMATE_SECONDS, AMR_ESTIMATE_STEPS, AdaptationController, AdaptationStep,
-    IndicatorSnapshots,
+    AMR_ESTIMATE_SECONDS, AMR_ESTIMATE_STEPS, AdaptationController, AdaptationStep, AmrDecision,
+    IndicatorSnapshots, adaptation_decision, target_accuracy,
 };
 use funfern_app::document::AdaptationSettings;
 use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
@@ -786,4 +786,63 @@ fn a_handoffs_stationary_flux_is_taken_away_and_moves_nothing() {
         assert!(apart < 2.0e-6, "{name}: the field moved {apart:e} apart");
         assert!(regrown < 1.0e-12, "{name}: {regrown:e} grew back");
     }
+}
+
+/// The packet on `prepared` at `scale` of its amplitude.
+fn packet_at(prepared: &PreparedTopology, time_step: f64, scale: f64) -> Result<Run, String> {
+    let operator = &prepared.canonical_operator;
+    let (field, potential): (Vec<f64>, Vec<f64>) = operator
+        .node_points()
+        .iter()
+        .map(|point| {
+            let (field, potential) = packet(*point);
+            (scale * field, scale * potential)
+        })
+        .unzip();
+    CanonicalWaveState::from_primary_and_potential(operator, time_step, &field, &potential)
+        .map(Run::Fixed)
+        .map_err(|error| error.to_string())
+}
+
+/// A packet a two-hundredth of a loud one's amplitude, launched after the
+/// loud one: against the loud one's peak it lies under the dormant floor, a
+/// four-hundredth of its energy below it, and its error is not chased. Once
+/// its own experiment begins, as a pulse, a Switch or a source edit begins
+/// one, the estimate reads its error as the loud one's and asks to refine.
+#[test]
+fn a_weak_packet_after_a_loud_one_is_refined_once_its_experiment_begins() {
+    let document = box_document(PhysicsModel::Mechanical).unwrap();
+    let settings = document.presentation.adaptation;
+    let (_, _, coarse) = prepare(&document).unwrap();
+    let time_step = 0.5 * coarse.recommended_time_step();
+    let loud = packet_at(&coarse, time_step, 1.0).unwrap();
+    let mut controller = AdaptationController::default();
+    controller.published(&coarse);
+    controller.observe_energy(loud.energy(&coarse).unwrap());
+    let mut weak = packet_at(&coarse, time_step, 1.0 / 200.0).unwrap();
+    let previous = weak.clone();
+    weak.step(&coarse).unwrap();
+    let target = target_accuracy(settings);
+    let decided = |controller: &mut AdaptationController| {
+        let result = estimated(controller, &coarse, &weak, &previous, settings).unwrap();
+        let decision = adaptation_decision(&result.report, target);
+        (result.report, decision)
+    };
+    let (report, decision) = decided(&mut controller);
+    assert!(
+        report.dormant && decision != AmrDecision::Refine,
+        "under the loud one's floor: dormant {}, {decision:?}",
+        report.dormant
+    );
+    controller.mark_experiment();
+    let (report, decision) = decided(&mut controller);
+    eprintln!(
+        "the weak packet's own experiment reads {:.4} against the target {target:.2}",
+        report.global_indicator,
+    );
+    assert!(
+        !report.dormant && decision == AmrDecision::Refine,
+        "its own experiment: dormant {}, {decision:?}",
+        report.dormant
+    );
 }

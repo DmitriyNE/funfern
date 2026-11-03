@@ -608,6 +608,7 @@ impl Playground {
                         {
                             Ok(()) => {
                                 self.coordinator.canonical_event_serial = serial;
+                                self.coordinator.experiment_mark = Some(serial);
                                 self.handoff_packed = self.handoff_ready;
                                 self.handoff_upload = Some(Instant::now());
                                 self.coordinator.source_commit =
@@ -1000,6 +1001,7 @@ impl Playground {
                 {
                     Ok(()) => {
                         self.coordinator.canonical_event_serial = serial;
+                        self.coordinator.experiment_mark = Some(serial);
                         self.coordinator.pending_pulses.pop_front();
                     }
                     Err(refusal) => {
@@ -1141,6 +1143,7 @@ impl Playground {
         self.gpu_status = request.stats().status();
         self.grid_filter_refused = request.grid_scale_filter_refused();
         self.gpu_dispatches = request.stats().dispatches();
+        self.land_experiment_mark(display);
         let processed_event = request.stats().processed_event();
         if processed_event != self.coordinator.canonical_event_observed {
             self.coordinator.canonical_event_observed = processed_event;
@@ -1316,6 +1319,26 @@ impl Playground {
     /// Sends one material's Switch towards whichever state it is not headed
     /// for, over the material's authored ramp. The device stamps the start;
     /// nothing is written to the document.
+    /// Begins a new experiment once a readback holds the event that began
+    /// it: adaptation's energy peak and both exposures' loudest levels start
+    /// again from the field it holds, so neither the floor under which error
+    /// is not chased nor the one under which nothing is painted belongs to a
+    /// louder experiment before it. Reset and a new scene begin one already.
+    pub(super) fn land_experiment_mark(&mut self, display: &CanonicalGpuDisplay) {
+        let Some(serial) = self.coordinator.experiment_mark else {
+            return;
+        };
+        if display
+            .clock
+            .is_some_and(|clock| clock.event_serial >= serial)
+        {
+            self.coordinator.experiment_mark = None;
+            self.amr.mark_experiment();
+            self.field_exposure.mark_experiment();
+            self.vector_overlay_exposure.mark_experiment();
+        }
+    }
+
     fn send_material_switch(
         &mut self,
         active: &PreparedTopology,
@@ -1374,6 +1397,7 @@ impl Playground {
         self.protocol_log.push(ProtocolNote::Switch(event.is_ok()));
         request.queue_live_event(assets, event.map_err(LiveEventRefusal::Refused)?)?;
         self.coordinator.canonical_event_serial = serial;
+        self.coordinator.experiment_mark = Some(serial);
         self.coordinator.switch_targets.insert(material, !heading);
         Ok(())
     }
@@ -2119,6 +2143,37 @@ mod tests {
             (250.0, 60.0, 30.0, 60.0),
             "the in-place commit rewrote the last handoff's record"
         );
+    }
+
+    /// A pulse, a Switch or a source edit begins an experiment once a readback
+    /// holds it, and not before: adaptation's energy peak and the exposures'
+    /// loudest levels start again then, from the field the readback holds.
+    #[test]
+    fn an_experiment_begins_with_the_readback_that_holds_its_event() {
+        let mut state = Playground::default();
+        state.amr.energy_peak = 5.0;
+        state.field_exposure.update(1.0, 0.0);
+        state.coordinator.experiment_mark = Some(7);
+        let mut display = CanonicalGpuDisplay::default();
+        display.clock = Some(crate::canonical_gpu::CanonicalGpuDisplayClock {
+            epoch: 0,
+            epoch_origin_seconds: 0.0,
+            absolute_seconds: 0.0,
+            step_in_epoch: 0,
+            accepted_steps: 0,
+            local_seconds: 0.0,
+            time_step: 0.01,
+            event_serial: 6,
+        });
+        state.land_experiment_mark(&display);
+        assert_eq!(state.amr.energy_peak, 5.0);
+        assert_eq!(state.coordinator.experiment_mark, Some(7));
+        display.clock.as_mut().unwrap().event_serial = 7;
+        state.land_experiment_mark(&display);
+        assert_eq!(state.amr.energy_peak, 0.0);
+        assert_eq!(state.coordinator.experiment_mark, None);
+        state.field_exposure.update(1.0e-3, 0.0);
+        assert_eq!(state.field_exposure.visibility(1.0e-3), 1.0);
     }
 
     /// A Reset zeroes the field on the GPU, but the outgoing field stays on

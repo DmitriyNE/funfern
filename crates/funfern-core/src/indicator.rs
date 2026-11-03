@@ -778,7 +778,7 @@ pub struct SolutionIndicatorReport {
     /// and is the quantity an accuracy target names.
     pub global_indicator: f64,
     /// Relative error is suppressed because the whole field has fallen below
-    /// the run-relative energy floor supplied by the controller.
+    /// the experiment-relative energy floor supplied by the controller.
     pub dormant: bool,
     /// The smallest element the wavelength rule asked for anywhere, or infinity
     /// where nothing is forced. Below the smallest element allowed it, rather
