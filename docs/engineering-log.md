@@ -32120,3 +32120,28 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-03 — Adaptation's decisions leave the UI
+
+- **What moved.** What the frame loop decided about adaptation, and the
+  history it kept for it, is `funfern_app::adaptation`. Its
+  `AdaptationController` holds what lasts from one estimate to the next,
+  the mesh's adaptation history, the one pending a handoff, the coarsening
+  streak and the run's energy peak, and answers each step: the estimate a
+  state is given, what its result decides and the transaction that runs,
+  what a finished transaction hands off, and what a published generation
+  keeps. The rule's constants, the decision, the size field a refinement
+  applies, the estimate job and the estimator's snapshots moved with it.
+  `ui/amr.rs` keeps the scheduling: the worker, the slices of work a frame
+  lends, the gap between estimates, the pause, an edit's priority and the
+  discarding of work a newer mesh has made stale.
+- **Why.** AMR-01 to AMR-04 (campaign plan, section 6l) drive the app's own
+  adaptation on a run stepped on the CPU, estimate by estimate; a copy of
+  the rule in a test could part from the app's.
+- **Behaviour.** Unchanged; the frame loop's tests pass as they stood. The
+  snapshots of a run on the CPU, `IndicatorSnapshots::of_fixed_run` and
+  `of_temporal_run`, are new, and the snapshot test holds them to the pair
+  it lays out itself, bit for bit, beside the readback's.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

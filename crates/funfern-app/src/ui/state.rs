@@ -346,7 +346,6 @@ pub struct Playground {
     /// The GPU generation the estimator last saw and the solver step it
     /// first showed, so a mesh is estimated only once it has stepped.
     pub(super) amr_generation_start: Option<(u64, u64)>,
-    pub(super) amr_coarsen_streak: u8,
     pub(super) amr_indicator_job: Option<AmrIndicatorJob>,
     pub(super) amr_indicator_completed: Option<Result<SolutionIndicatorResult, AmrIndicatorError>>,
     pub(super) amr_indicator_source: Option<AmrIndicatorSource>,
@@ -357,14 +356,13 @@ pub struct Playground {
     /// until the next estimate replaces it, rather than leaving the panel for
     /// the half second between them and shifting everything below.
     pub(super) amr_shown_report: Option<SolutionIndicatorReport>,
-    pub(super) amr_energy_peak: f64,
     pub(super) amr_adaptation_job: Option<MeshAdaptationJob>,
     pub(super) amr_adaptation_completed: Option<Result<MeshAdaptationResult, MeshAdaptationError>>,
     /// Revision of the active mesh the running adaptation started from. The
     /// job is dropped as soon as that mesh is no longer the active one.
     pub(super) amr_adaptation_source: Option<AdaptationSource>,
-    pub(super) amr_adaptation_state: Option<MeshAdaptationState>,
-    pub(super) amr_pending_state: Option<MeshAdaptationState>,
+    /// What adaptation keeps from one estimate to the next.
+    pub(super) amr: AdaptationController,
     pub(super) amr_report: Option<MeshAdaptationReport>,
     pub(super) gpu_status: &'static str,
     /// The grid filter is asked for but the running generation does not admit
@@ -579,18 +577,15 @@ impl Default for Playground {
             amr_last_started: None,
             amr_last_analyzed_step: None,
             amr_generation_start: None,
-            amr_coarsen_streak: 0,
             amr_indicator_job: None,
             amr_indicator_completed: None,
             amr_indicator_source: None,
             amr_indicator_result: None,
             amr_shown_report: None,
-            amr_energy_peak: 0.0,
             amr_adaptation_job: None,
             amr_adaptation_completed: None,
             amr_adaptation_source: None,
-            amr_adaptation_state: None,
-            amr_pending_state: None,
+            amr: AdaptationController::default(),
             amr_report: None,
             gpu_status: "loading",
             grid_filter_refused: false,

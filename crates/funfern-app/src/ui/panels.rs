@@ -565,10 +565,10 @@ impl Playground {
             self.amr_adaptation_job = None;
             self.amr_adaptation_completed = None;
             self.amr_adaptation_source = None;
-            self.amr_pending_state = None;
+            self.amr.pending = None;
             self.amr_last_analyzed_step = None;
             self.amr_last_started = None;
-            self.amr_coarsen_streak = 0;
+            self.amr.coarsen_streak = 0;
             self.amr_error = None;
         }
     }
@@ -658,12 +658,7 @@ impl Playground {
     /// The accuracy target as the estimate states it, rather than as the
     /// control shows it.
     pub(super) fn amr_target_accuracy(&self) -> f64 {
-        self.editor
-            .document
-            .presentation
-            .adaptation
-            .accuracy_percent
-            / 100.0
+        target_accuracy(self.editor.document.presentation.adaptation)
     }
 
     /// Everything an estimate is built from. A change to any of it drops the

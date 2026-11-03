@@ -10,6 +10,7 @@
     feature(alloc_error_hook)
 )]
 
+pub mod adaptation;
 pub mod canonical_gpu;
 mod capture;
 pub mod document;

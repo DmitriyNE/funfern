@@ -1,5 +1,12 @@
 #![allow(clippy::collapsible_if)]
 
+use crate::adaptation::{
+    AMR_ESTIMATE_SECONDS, AMR_ESTIMATE_STEPS, AdaptationController, AdaptationStep,
+    AmrIndicatorError, AmrIndicatorJob, IndicatorSnapshots, PRESENTATION_QUIET_AMPLITUDE_RATIO,
+    adaptation_decision, highest_forcing, size_rule_refines, target_accuracy,
+};
+#[cfg(test)]
+use crate::adaptation::{AmrDecision, DORMANT_ENERGY_RATIO, adaptation_field};
 use crate::canonical_gpu::{
     CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuTemporalManifest,
     CanonicalGpuTransferPlan,
@@ -152,15 +159,6 @@ fn browser_background_failure() -> Option<&'static str> {
 
 /// Seconds of progress the steps-per-second readout averages over.
 const STEP_RATE_WINDOW: f64 = 0.5;
-/// Below one percent of the run's meaningful amplitude, automatic exposure is
-/// more likely to reveal the slowly decaying numerical tail than useful wave
-/// content. The saved-scene drain fixture plateaus at roughly 0.2--0.3% even
-/// with resident damping, so the former 0.1% floor still normalized that tail.
-const PRESENTATION_QUIET_AMPLITUDE_RATIO: f64 = 1.0e-2;
-/// Energy is quadratic in amplitude. AMR's relative residual becomes dormant
-/// below the energy counterpart of the presentation floor.
-const DORMANT_ENERGY_RATIO: f64 =
-    PRESENTATION_QUIET_AMPLITUDE_RATIO * PRESENTATION_QUIET_AMPLITUDE_RATIO;
 /// Frames one line or boundary probe keeps. With the sampling presets' rates
 /// this is 17, 8.5, or 4.3 seconds of path history, and it bounds how far back
 /// the averaged flux row can look.
@@ -171,36 +169,6 @@ const GIZMO_PADDING: f32 = 18.0;
 /// way, because they answer the same question at either end of the loop: how
 /// much detail is this worth.
 const AMR_ACCURACY_PRESETS: [(f64, &str); 3] = [(24.0, "Coarse"), (12.0, "Medium"), (6.0, "Fine")];
-/// Coarsening starts only well below the requested global error. The interval
-/// between this threshold and the target is the controller's global deadband:
-/// an estimate wobbling near the target cannot alternate the mesh direction.
-const AMR_COARSEN_GLOBAL_RATIO: f64 = 0.65;
-/// An edge must be substantially shorter than its requested size before it may
-/// be collapsed. This is below half the 1.05 refinement threshold, so an edge
-/// split just above that threshold is not immediately eligible for reversal.
-const AMR_COARSEN_EDGE_RATIO: f64 = 0.45;
-/// A vertex changed by one transaction must survive the immediately following
-/// generation. Together with the size deadband this prevents split/collapse
-/// ping-pong when a moving wave nudges a target across a threshold.
-const AMR_TOPOLOGY_COOLDOWN_GENERATIONS: u64 = 2;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AmrDecision {
-    Hold,
-    Refine,
-    Coarsen,
-}
-
-impl AmrDecision {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Hold => "settled",
-            Self::Refine => "refining",
-            Self::Coarsen => "coarsening",
-        }
-    }
-}
-
 /// What to call the accuracy the adaptation is set to. The slider reaches
 /// everything between, so most values have no name.
 fn amr_accuracy_preset_name(percent: f64) -> &'static str {
@@ -2089,120 +2057,12 @@ fn paint_example_thumbnail(
     );
 }
 
-/// Chooses one topology direction for the next adaptation transaction.
-///
-/// A limit is a floor rather than a judgement: too few elements across a forced
-/// wavelength, or an element larger than the largest allowed, is wrong however
-/// small the error reads, so those refine on their own account. What the error
-/// estimate asks for answers to the accuracy target instead, and it answers to
-/// it for the field as a whole rather than element by element. Without that
-/// second clause anything the estimate cannot satisfy - a boundary the field
-/// disagrees with, the grid-scale leftovers of a wave that has passed - shrinks
-/// by the estimator's step every cycle until it reaches the smallest element
-/// allowed, and no accuracy setting reaches far enough to stop it: the step is
-/// clamped, so it is the same step whatever the target says.
-///
-/// The cost is that error concentrated in a small part of a domain the estimate
-/// is otherwise happy with stops being chased once the whole field is inside
-/// the target. That is the trade a single number for the whole field makes.
-///
-/// Refinement stops at the requested error, but coarsening does not begin until
-/// the estimate is substantially below it. That deadband, plus choosing only
-/// one direction per transaction, prevents a moving wave from making the same
-/// patch alternate between splitting and collapsing.
-fn adaptation_decision(report: &SolutionIndicatorReport, target_accuracy: f64) -> AmrDecision {
-    if report.limit_refine_candidates >= 4
-        || (report.error_refine_candidates >= 4 && report.global_indicator > target_accuracy)
-    {
-        AmrDecision::Refine
-    } else if report.coarsen_candidates >= 4
-        && report.global_indicator < target_accuracy * AMR_COARSEN_GLOBAL_RATIO
-    {
-        AmrDecision::Coarsen
-    } else {
-        AmrDecision::Hold
-    }
-}
-
 /// A resident filter flips the accepted state lane without advancing physical
 /// time. The other lane at this boundary is the pre-filter state, not the
 /// previous solver endpoint; derivative and residual consumers must not treat
 /// the pair as one ordinary `dt` step.
 fn resident_filter_boundary(enabled: bool, completed_steps: u64) -> bool {
     enabled && completed_steps > 0 && completed_steps.is_multiple_of(GRID_SCALE_FILTER_CADENCE)
-}
-
-/// Whether a refinement is the size rule's rather than the accuracy
-/// target's: elements past their wavelength floor, with the error itself
-/// under target or too sparse to refine for. The estimate line says so, or
-/// an error well under its target beside a mesh still refining reads as a
-/// contradiction.
-fn size_rule_refines(report: &SolutionIndicatorReport, target_accuracy: f64) -> bool {
-    adaptation_decision(report, target_accuracy) == AmrDecision::Refine
-        && !(report.error_refine_candidates >= 4 && report.global_indicator > target_accuracy)
-}
-
-/// The size field a refinement applies. One the size rule asks for alone
-/// applies the limits alone: handed the full field it also splits whatever
-/// the estimate would like finer, which the accuracy target has just said is
-/// not needed, and the parametric fiber climbed to 19,000 triangles at 2% of
-/// a 12% target before coarsening back what the floor never asked for.
-fn adaptation_field(
-    result: &SolutionIndicatorResult,
-    target_accuracy: f64,
-) -> Arc<AdaptiveSizeField> {
-    if size_rule_refines(&result.report, target_accuracy) {
-        result.limit_field.clone()
-    } else {
-        result.field.clone()
-    }
-}
-
-/// What each material's own drives demand of the mesh beyond the sources.
-///
-/// A travelling drive patterns the coefficients in space whether or not a
-/// wave is present, and only where its material is; the sidebands any drive
-/// mixes into the field are left to the error estimate. The scene is
-/// authored, so this holds for materials whose drives are not yet
-/// executable: it is the mesh rule, not the solver path.
-fn scene_resolution_demand(scene: &TopologyScene) -> BTreeMap<MaterialId, f64> {
-    CanonicalTemporalResolution::of_each_material(&scene.materials).unwrap_or_default()
-}
-
-/// The most `measure` gives of any signal the scene drives with: the point
-/// source, the driven walls and faces, and the region sources.
-fn highest_forcing(
-    scene: &TopologyScene,
-    source: PointSource,
-    measure: impl Fn(TimeSignal) -> f64,
-) -> f64 {
-    let mut frequency = if source.enabled {
-        measure(source.signal)
-    } else {
-        0.0
-    };
-    for condition in scene.outer_boundaries.sides {
-        if let Some(signal) = condition.signal() {
-            frequency = frequency.max(measure(signal));
-        }
-    }
-    for curve in &scene.geometry.curves {
-        for span in &curve.spans {
-            if let SpanBehavior::Separated { left, right, .. } = span.behavior {
-                for condition in [left, right] {
-                    if let Some(signal) = condition.signal() {
-                        frequency = frequency.max(measure(signal));
-                    }
-                }
-            }
-        }
-    }
-    for source in &scene.volume_sources {
-        if source.enabled {
-            frequency = frequency.max(measure(source.signal));
-        }
-    }
-    frequency
 }
 
 /// A world-anchored lattice whose projected spacing is at least the

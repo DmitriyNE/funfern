@@ -824,7 +824,7 @@ impl Playground {
                             self.restart_probe_traces();
                             self.wave_energy = None;
                             self.nonlinear_strength.clear();
-                            self.amr_energy_peak = 0.0;
+                            self.amr.energy_peak = 0.0;
                         } else if let Some(snapshot) = request.handed_over_at() {
                             // The recorders are set up for the target later
                             // this frame, so the upload still names the source.
@@ -832,15 +832,7 @@ impl Playground {
                             self.take_traces_back_to(source, self.simulated_time_at(snapshot));
                         }
                         self.restart_exposures_after_handoff(upload.fresh);
-                        self.amr_adaptation_state = if active.adapted {
-                            self.amr_pending_state
-                                .take()
-                                .filter(|state| state.mesh_revision == active.mesh.mesh_revision)
-                                .or_else(|| Some(MeshAdaptationState::from_mesh(&active.mesh)))
-                        } else {
-                            self.amr_pending_state = None;
-                            Some(MeshAdaptationState::from_mesh(&active.mesh))
-                        };
+                        self.amr.published(&active);
                         if let Some(worker) = &mut self.background_amr {
                             worker.cancel_kind(BackgroundAmrKind::Indicator);
                         }
@@ -849,11 +841,6 @@ impl Playground {
                         self.amr_indicator_source = None;
                         self.amr_indicator_result = None;
                         self.amr_last_analyzed_step = None;
-                        // A streak of estimates asking to coarsen was of the
-                        // old mesh: carried over, the new one was coarsened on
-                        // a single estimate taken right after its transfer
-                        // (MESH-4 of the 2026-10-20 review).
-                        self.amr_coarsen_streak = 0;
                         self.message = "Simulation topology committed".into();
                         self.record_handoff(&active);
                     }
@@ -918,7 +905,7 @@ impl Playground {
                         self.stop_adaptation_work();
                         self.amr_last_analyzed_step = None;
                         self.amr_last_started = None;
-                        self.amr_energy_peak = 0.0;
+                        self.amr.energy_peak = 0.0;
                         // A Reset runs the authored runtime from the start.
                         self.display_material_runtime = None;
                         self.restart_probe_traces();
@@ -1244,7 +1231,7 @@ impl Playground {
                     // AMR is currently enabled or not. Preserve that history
                     // so AMR enabled after a pulse does not establish its
                     // "run" peak from the numerical tail it is meant to ignore.
-                    self.amr_energy_peak = self.amr_energy_peak.max(energy);
+                    self.amr.observe_energy(energy);
                 }
                 self.wave_energy = energy;
                 if aligned {
@@ -1758,19 +1745,19 @@ mod tests {
 
         state.amr_last_analyzed_step = Some(50_000);
         state.amr_last_started = Some(Instant::now());
-        state.amr_energy_peak = 5.0;
-        state.amr_coarsen_streak = 2;
+        state.amr.energy_peak = 5.0;
+        state.amr.coarsen_streak = 2;
         let history = MeshAdaptationState::from_mesh(&active.mesh);
-        state.amr_adaptation_state = Some(history.clone());
+        state.amr.state = Some(history.clone());
         state.coordinator.reset_requested = true;
         frame(&mut state, &mut request);
         assert!(!state.coordinator.reset_requested && request.generation() > installed);
         assert_eq!(state.amr_last_analyzed_step, None);
         assert!(state.amr_last_started.is_none());
-        assert_eq!(state.amr_energy_peak, 0.0);
-        assert_eq!(state.amr_coarsen_streak, 0);
+        assert_eq!(state.amr.energy_peak, 0.0);
+        assert_eq!(state.amr.coarsen_streak, 0);
         assert_eq!(
-            state.amr_adaptation_state.map(|state| state.mesh_revision),
+            state.amr.state.map(|state| state.mesh_revision),
             Some(history.mesh_revision),
             "the mesh Reset kept keeps its history"
         );
@@ -2596,7 +2583,7 @@ mod tests {
         frame(&mut world, &mut state, &mut request, &display);
 
         // One estimate on the old mesh asked to coarsen; a finer mesh hands off.
-        state.amr_coarsen_streak = 1;
+        state.amr.coarsen_streak = 1;
         state.editor.document.presentation.mesh_edge *= 0.5;
         for _ in 0..100_000 {
             if state.coordinator.uploading.is_some() {
@@ -2618,7 +2605,7 @@ mod tests {
             state.coordinator.uploading.is_none(),
             "the mesh is committed"
         );
-        assert_eq!(state.amr_coarsen_streak, 0, "the old mesh's streak is gone");
+        assert_eq!(state.amr.coarsen_streak, 0, "the old mesh's streak is gone");
     }
 
     /// Reported: a rejected handoff kept the candidate's step. The upload took

@@ -6,7 +6,6 @@ use crate::wave_gpu::WaveDisplay;
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use funfern_core::*;
-use std::sync::Arc;
 
 use super::*;
 
@@ -82,22 +81,22 @@ impl Playground {
         self.amr_adaptation_job = None;
         self.amr_adaptation_completed = None;
         self.amr_adaptation_source = None;
-        self.amr_pending_state = None;
+        self.amr.pending = None;
         self.amr_indicator_result = None;
         self.amr_shown_report = None;
-        self.amr_coarsen_streak = 0;
+        self.amr.coarsen_streak = 0;
     }
 
     /// Adaptation as at launch, for a scene whose mesh has no history: its
     /// work stopped, and what it knew of the outgoing mesh forgotten too.
     pub(super) fn reset_adaptation(&mut self) {
         self.stop_adaptation_work();
-        self.amr_adaptation_state = None;
+        self.amr.state = None;
         self.amr_report = None;
         self.amr_error = None;
         self.amr_last_started = None;
         self.amr_last_analyzed_step = None;
-        self.amr_energy_peak = 0.0;
+        self.amr.energy_peak = 0.0;
         self.amr_status = "waiting for solution".into();
     }
 
@@ -206,7 +205,7 @@ impl Playground {
             self.amr_adaptation_job = None;
             self.amr_adaptation_completed = None;
             self.amr_adaptation_source = None;
-            self.amr_pending_state = None;
+            self.amr.pending = None;
             self.amr_status = "adaptation discarded: the mesh changed underneath it".into();
             return;
         }
@@ -249,29 +248,19 @@ impl Playground {
         if let Some(result) = self.amr_adaptation_completed.take() {
             self.amr_adaptation_source = None;
             match result {
-                Ok(mut result) => {
-                    if result.report.topology_changes == 0 {
-                        // A scan that cannot apply any requested change must
-                        // not manufacture a new mesh revision and force a GPU
-                        // handoff. Still advance the adaptation generation so
-                        // cooldown can expire on an otherwise unchanged mesh.
-                        if let Some(active) = self.runtime.active() {
-                            result.state.mesh_revision = active.mesh.mesh_revision;
-                            self.amr_adaptation_state = Some(result.state);
-                        }
-                        self.amr_report = Some(result.report);
-                        self.amr_pending_state = None;
-                        self.amr_coarsen_streak = 0;
+                Ok(result) => {
+                    let active = self.runtime.active().map(|active| &*active.mesh);
+                    let (report, mesh) = self.amr.adapted(result, active);
+                    self.amr_report = Some(report);
+                    let Some(mesh) = mesh else {
                         self.amr_status = "mesh unchanged; monitoring solution".into();
                         self.amr_error = None;
                         return;
-                    }
-                    self.amr_pending_state = Some(result.state);
-                    self.amr_report = Some(result.report);
+                    };
                     match self.runtime.request_adapted(
                         self.editor.revision,
                         &self.editor.document,
-                        result.mesh,
+                        mesh,
                     ) {
                         Ok(_) => {
                             self.amr_status = "preparing adaptive handoff".into();
@@ -279,7 +268,7 @@ impl Playground {
                             self.begin_handoff_timeline();
                         }
                         Err(error) => {
-                            self.amr_pending_state = None;
+                            self.amr.pending = None;
                             self.amr_status = "adaptation discarded".into();
                             self.amr_error = Some(error);
                         }
@@ -336,89 +325,29 @@ impl Playground {
                     return;
                 }
             };
-            if result.report.total_energy.is_finite() && result.report.total_energy > 0.0 {
-                self.amr_energy_peak = self.amr_energy_peak.max(result.report.total_energy);
-            }
-            let decision = adaptation_decision(&result.report, self.amr_target_accuracy());
-            self.amr_coarsen_streak = if decision == AmrDecision::Coarsen {
-                self.amr_coarsen_streak.saturating_add(1)
-            } else {
-                0
-            };
-            self.amr_shown_report = Some(result.report.clone());
-            self.amr_indicator_result = Some(result.clone());
-            if decision == AmrDecision::Hold {
-                self.amr_status = "mesh matches solution".into();
-                self.amr_error = None;
-                return;
-            }
-            if decision == AmrDecision::Coarsen && self.amr_coarsen_streak < 2 {
-                self.amr_status = "confirming coarsening".into();
-                return;
-            }
-            let Some(state) = self
-                .amr_adaptation_state
-                .clone()
-                .filter(|state| state.mesh_revision == active.mesh.mesh_revision)
-            else {
-                self.amr_adaptation_state = Some(MeshAdaptationState::from_mesh(&active.mesh));
-                self.amr_status = "initializing adaptation".into();
-                return;
-            };
-            let target_revision = self.runtime.reserve_mesh_revision();
-            let options = MeshAdaptationOptions {
-                meshing: MeshingOptions {
-                    curve_tolerance: (self.editor.document.presentation.adaptation.minimum_edge
-                        * 0.02)
-                        .min(1.5e-3),
-                    target_edge_length: self.editor.document.presentation.adaptation.maximum_edge
-                        / 1.05,
-                    minimum_angle_degrees: 12.0,
-                    max_vertices: 50_000,
-                    max_triangles: 100_000,
-                    max_refinement_steps: 50_000,
-                },
-                minimum_target_edge_length: self
-                    .editor
-                    .document
-                    .presentation
-                    .adaptation
-                    .minimum_edge,
-                maximum_target_edge_length: self
-                    .editor
-                    .document
-                    .presentation
-                    .adaptation
-                    .maximum_edge,
-                collapse_ratio: AMR_COARSEN_EDGE_RATIO,
-                max_topology_changes: 512,
-                max_refinement_changes: if decision == AmrDecision::Refine {
-                    usize::MAX
-                } else {
-                    0
-                },
-                max_coarsening_changes: if decision == AmrDecision::Coarsen {
-                    256
-                } else {
-                    0
-                },
-                max_work_units: 5_000_000,
-                cooldown_generations: AMR_TOPOLOGY_COOLDOWN_GENERATIONS,
-                ..Default::default()
-            };
-            let field: Arc<dyn MeshSizeField> =
-                adaptation_field(&result, self.amr_target_accuracy());
-            let job = MeshAdaptationJob::new_topology(
-                active.mesh.clone(),
-                &active.bundle.plan,
-                state,
-                target_revision,
-                field,
-                options,
+            let step = self.amr.decide(
+                &result,
+                &active,
+                self.editor.document.presentation.adaptation,
+                &mut self.runtime,
             );
-            self.amr_adaptation_source = Some(AdaptationSource::of(&active.mesh));
-            self.start_adaptation_job(job);
-            self.amr_status = "adapting mesh".into();
+            self.amr_shown_report = Some(result.report.clone());
+            self.amr_indicator_result = Some(result);
+            match step {
+                AdaptationStep::Hold => {
+                    self.amr_status = "mesh matches solution".into();
+                    self.amr_error = None;
+                }
+                AdaptationStep::Confirming => self.amr_status = "confirming coarsening".into(),
+                AdaptationStep::Initialized => {
+                    self.amr_status = "initializing adaptation".into();
+                }
+                AdaptationStep::Adapt(job) => {
+                    self.amr_adaptation_source = Some(AdaptationSource::of(&active.mesh));
+                    self.start_adaptation_job(*job);
+                    self.amr_status = "adapting mesh".into();
+                }
+            }
             return;
         }
         if self.background_amr_kind() == Some(BackgroundAmrKind::Indicator) {
@@ -466,10 +395,10 @@ impl Playground {
         }
         if self
             .amr_last_analyzed_step
-            .is_some_and(|previous| step < previous.saturating_add(8))
+            .is_some_and(|previous| step < previous.saturating_add(AMR_ESTIMATE_STEPS))
             || self
                 .amr_last_started
-                .is_some_and(|started| started.elapsed().as_secs_f64() < 0.75)
+                .is_some_and(|started| started.elapsed().as_secs_f64() < AMR_ESTIMATE_SECONDS)
         {
             self.amr_status = "monitoring solution".into();
             return;
@@ -493,55 +422,10 @@ impl Playground {
                 return;
             }
         };
-        let IndicatorSnapshots {
-            scalar: snapshot,
-            canonical: canonical_snapshot,
-            temporal,
-        } = snapshots;
-        let patterns = scene_resolution_demand(&active.bundle.authored);
-        let job = SolutionIndicatorJob::new_topology(
-            active.mesh.clone(),
-            active.operator.clone(),
-            &active.bundle.plan,
-            active.bundle.model(),
-            snapshot,
-            SolutionIndicatorOptions {
-                minimum_edge_length: self.editor.document.presentation.adaptation.minimum_edge,
-                maximum_edge_length: self.editor.document.presentation.adaptation.maximum_edge,
-                relative_tolerance: self.amr_target_accuracy(),
-                elements_per_wavelength: self
-                    .editor
-                    .document
-                    .presentation
-                    .adaptation
-                    .elements_per_wavelength,
-                // What the field oscillates at: the estimator's spectral
-                // scale, and a frequency the size rule resolves.
-                forcing_frequency_hz: highest_forcing(
-                    &active.bundle.authored,
-                    active.point_source,
-                    TimeSignal::carrier_frequency_hz,
-                ),
-                // How far a pulse's envelope widens that band, which the size
-                // rule resolves too.
-                band_edge_hz: highest_forcing(
-                    &active.bundle.authored,
-                    active.point_source,
-                    TimeSignal::frequency_ceiling_hz,
-                ),
-                coarsen_ratio: AMR_COARSEN_EDGE_RATIO,
-                dormant_below_energy: self.amr_energy_peak * DORMANT_ENERGY_RATIO,
-                ..Default::default()
-            },
-        )
-        .with_coefficient_patterns(patterns);
-        let job = AmrIndicatorJob::with_canonical(
-            job,
-            active.mesh.clone(),
-            active.canonical_operator.clone(),
-            temporal,
-            active.canonical_forcing.clone(),
-            canonical_snapshot,
+        let job = self.amr.estimate(
+            active,
+            snapshots,
+            self.editor.document.presentation.adaptation,
         );
         self.amr_indicator_source = Some(AmrIndicatorSource {
             topology: active.bundle.token,
@@ -552,17 +436,6 @@ impl Playground {
         self.amr_last_started = Some(Instant::now());
         self.amr_status = "preparing estimate".into();
     }
-}
-
-/// The estimator's two snapshots of the generation's latest full readback,
-/// and the runtime a driven one was stepped under.
-pub(super) struct IndicatorSnapshots {
-    pub(super) scalar: QuadraticSolutionSnapshot,
-    pub(super) canonical: CanonicalIndicatorSnapshot,
-    pub(super) temporal: Option<(
-        Arc<CanonicalTemporalWaveOperator>,
-        CanonicalMaterialRuntimeState,
-    )>,
 }
 
 /// Builds the estimator's snapshots from what the displays hold of the latest
@@ -580,7 +453,6 @@ pub(super) fn indicator_snapshots(
     time_step: f64,
     simulated_time: f64,
 ) -> Result<Option<IndicatorSnapshots>, WaveError> {
-    let dofs = active.operator.degrees_of_freedom();
     // A driven estimate is taken under the runtime the solver stepped the
     // field with, decoded from the same snapshot. Until a snapshot and a
     // clock agree on its epoch there is nothing safe to decode it against.
@@ -651,41 +523,7 @@ pub(super) fn indicator_snapshots(
         .iter()
         .map(|value| f64::from(*value))
         .collect::<Vec<_>>();
-    // A driven generation's rate is its own: the fixed operator's reads
-    // the authored mass and force, and knows no loss law or restoring
-    // force, which is not the field the solver stepped.
-    let velocity = match &temporal {
-        Some((operator, runtime)) => canonical_temporal_primary_rate(
-            operator,
-            &active.canonical_forcing,
-            &canonical_snapshot,
-            runtime,
-        ),
-        None => canonical_primary_rate(
-            &active.canonical_operator,
-            &active.canonical_forcing,
-            &canonical_snapshot,
-        ),
-    }?;
-    // The canonical estimator deliberately excludes the scalar strong cell
-    // residual: applying the semidiscrete stiffness and feeding it back as
-    // a pointwise acceleration produced a nonconvergent residual floor.
-    // Keep shape-valid placeholders for the shared resumable job instead
-    // of paying for an unused sparse multiply at every estimate.
-    let scalar = QuadraticSolutionSnapshot {
-        mesh_revision: active.mesh.mesh_revision,
-        displacement,
-        velocity,
-        acceleration: vec![0.0; dofs],
-        volume_acceleration: vec![0.0; dofs],
-        time,
-        time_step: dt,
-    };
-    Ok(Some(IndicatorSnapshots {
-        scalar,
-        canonical: canonical_snapshot,
-        temporal,
-    }))
+    IndicatorSnapshots::new(active, canonical_snapshot, displacement, temporal).map(Some)
 }
 
 /// Whether `generation` has taken a step since the estimator first saw it at
@@ -942,7 +780,7 @@ mod tests {
         );
         assert_eq!(state.amr_report.as_ref().unwrap().topology_changes, 0);
         assert_eq!(
-            state.amr_adaptation_state.as_ref().unwrap().mesh_revision,
+            state.amr.state.as_ref().unwrap().mesh_revision,
             active.mesh.mesh_revision
         );
         assert_eq!(state.amr_error, None);
@@ -1242,12 +1080,13 @@ mod tests {
             // gap and wall histories, then the reference's field, its time
             // and, for a driven generation, its runtime.
             type Lanes = (Vec<f64>, Vec<Point2>, Vec<f64>);
-            let (current, previous, field, time, runtime): (
+            let (current, previous, field, time, runtime, cpu): (
                 Lanes,
                 Lanes,
                 Vec<f64>,
                 f64,
                 Option<CanonicalMaterialRuntimeState>,
+                IndicatorSnapshots,
             ) = match &active.canonical_temporal_operator {
                 None => {
                     let operator = &active.canonical_operator;
@@ -1280,6 +1119,7 @@ mod tests {
                         state.primary_field(operator).unwrap(),
                         state.time(),
                         None,
+                        IndicatorSnapshots::of_fixed_run(&active, &state, &previous).unwrap(),
                     )
                 }
                 Some(temporal) => {
@@ -1312,6 +1152,8 @@ mod tests {
                             .unwrap(),
                         state.time(),
                         Some(state.runtime().clone()),
+                        IndicatorSnapshots::of_temporal_run(&active, temporal, &state, &previous)
+                            .unwrap(),
                     )
                 }
             };
@@ -1441,6 +1283,14 @@ mod tests {
                 _ => canonical_primary_rate(&active.canonical_operator, forcing, &reference),
             }
             .unwrap();
+            // A run on the CPU gives its own pair the same way.
+            assert_eq!(cpu.canonical, reference);
+            assert_eq!(cpu.scalar.displacement, field);
+            assert_eq!(cpu.scalar.velocity, rate);
+            assert_eq!(
+                cpu.temporal.as_ref().map(|(_, runtime)| runtime),
+                runtime.as_ref()
+            );
             let relative = |read: &[f64], expected: &[f64]| {
                 let scale = expected
                     .iter()

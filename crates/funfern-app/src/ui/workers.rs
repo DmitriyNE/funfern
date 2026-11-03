@@ -4,6 +4,7 @@
 #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
 use super::BROWSER_BACKGROUND_POOL_READY;
 use super::PreparedGpuUpload;
+use crate::adaptation::{AmrIndicatorError, AmrIndicatorJob};
 use crate::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuGenerationLayout, CanonicalGpuPlan, CanonicalGpuRuntimeTransfer,
     CanonicalGpuTransferPlan,
@@ -224,131 +225,6 @@ pub(super) fn spawn_preparation_worker(
 pub(super) enum BackgroundAmrKind {
     Indicator,
     Adaptation,
-}
-
-pub(super) struct CanonicalAmrPreparation {
-    pub(super) mesh: Arc<TriMesh>,
-    pub(super) operator: Arc<CanonicalWaveOperator>,
-    /// Present when the generation is driven, in which case the estimate is
-    /// built from it instead: the fixed supplement's residual, energy and
-    /// recovery all read authored coefficients, and on a driven medium that
-    /// charges the estimator for the medium's own modulation.
-    ///
-    /// It travels with the runtime the accepted state was stepped under -
-    /// carrier phases and Switch trajectories as the solver holds them - not
-    /// the operator's authored one. A handoff carries a live carrier's phase
-    /// into the new generation and re-anchors it, so after a drive edit the
-    /// authored anchors describe a coefficient the field never saw.
-    pub(super) temporal: Option<(
-        Arc<CanonicalTemporalWaveOperator>,
-        CanonicalMaterialRuntimeState,
-    )>,
-    pub(super) forcing: Arc<CanonicalForcing>,
-    pub(super) snapshot: CanonicalIndicatorSnapshot,
-}
-
-pub(super) struct AmrIndicatorJob {
-    pub(super) job: Option<SolutionIndicatorJob>,
-    pub(super) canonical: Option<CanonicalAmrPreparation>,
-}
-
-impl AmrIndicatorJob {
-    pub(super) fn with_canonical(
-        job: SolutionIndicatorJob,
-        mesh: Arc<TriMesh>,
-        operator: Arc<CanonicalWaveOperator>,
-        temporal: Option<(
-            Arc<CanonicalTemporalWaveOperator>,
-            CanonicalMaterialRuntimeState,
-        )>,
-        forcing: Arc<CanonicalForcing>,
-        snapshot: CanonicalIndicatorSnapshot,
-    ) -> Self {
-        Self {
-            job: Some(job),
-            canonical: Some(CanonicalAmrPreparation {
-                mesh,
-                operator,
-                temporal,
-                forcing,
-                snapshot,
-            }),
-        }
-    }
-
-    pub(super) fn phase(&self) -> &'static str {
-        if self.canonical.is_some() {
-            "Preparing canonical AMR estimate"
-        } else {
-            self.job
-                .as_ref()
-                .map_or("AMR estimate ready", SolutionIndicatorJob::phase)
-        }
-    }
-
-    pub(super) fn advance(
-        &mut self,
-        budget: usize,
-    ) -> Option<Result<SolutionIndicatorResult, AmrIndicatorError>> {
-        if let Some(canonical) = self.canonical.take() {
-            let runtime = canonical
-                .temporal
-                .as_ref()
-                .map(|(_, runtime)| runtime.clone());
-            let supplement = match (&canonical.temporal, &runtime) {
-                (Some((temporal, _)), Some(runtime)) => canonical_temporal_indicator_supplement(
-                    &canonical.mesh,
-                    temporal,
-                    &canonical.forcing,
-                    &canonical.snapshot,
-                    runtime,
-                    // The spectral scale the supplement's own recovery uses.
-                    // Zero is what the calibration sweep validated; the size
-                    // rule's frequency is a separate option on the job.
-                    0.0,
-                ),
-                _ => canonical_indicator_supplement(
-                    &canonical.mesh,
-                    &canonical.operator,
-                    &canonical.forcing,
-                    &canonical.snapshot,
-                ),
-            };
-            let supplement = match supplement {
-                Ok(supplement) => supplement,
-                Err(error) => {
-                    self.job = None;
-                    return Some(Err(AmrIndicatorError::Canonical(error)));
-                }
-            };
-            self.job = self.job.take().map(|job| {
-                let job = job.with_canonical_supplement(supplement);
-                match runtime {
-                    Some(runtime) => job.with_instantaneous_materials(runtime),
-                    None => job,
-                }
-            });
-        }
-        self.job
-            .as_mut()
-            .and_then(|job| job.advance(budget))
-            .map(|result| result.map_err(AmrIndicatorError::Indicator))
-    }
-}
-
-#[derive(Debug)]
-pub(super) enum AmrIndicatorError {
-    Canonical(WaveError),
-    Indicator(SolutionIndicatorError),
-}
-
-impl std::fmt::Display for AmrIndicatorError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Canonical(error) => write!(formatter, "Canonical AMR estimate failed: {error}"),
-            Self::Indicator(error) => error.fmt(formatter),
-        }
-    }
 }
 
 pub(super) enum BackgroundAmrJob {
