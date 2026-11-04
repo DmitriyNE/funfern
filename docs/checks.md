@@ -1556,18 +1556,20 @@ the packet at a two-hundredth of a loud one's amplitude, and requires it dormant
 under the loud one's peak and, once its own experiment begins, refined: it reads
 0.1496 against the 0.12 target. Its mutation is `experiment-keeps-the-runs-peak`. The
 field's reach: `a_slow_packet_never_meets_a_mesh_coarsened_ahead_of_it` adapts
-the packet at a quarter of the speed ceiling for 1.6 s, which coarsens its
-first patch behind it. At every estimate no element of the mesh it steps on
-may be coarser than 1.25 of the authored edge within the distance the fine
-reference's field, where denser than 1% of its peak spread over the box,
-travels before the next transaction; while the packet is inside, the adapted
-run's error against the reference must not exceed the coarse run's (0.152
-against 0.167 at 1.5 s the closest; before the reach, 0.234 against 0.167).
-Its mutation is `coarsening-ignores-the-field-reach`. In the core, the reach's
-distance is held against brute force on random triangles, never above the true
-distance and within two cell diagonals of it, and its targets within the reach,
-past twice it and with the authored size at the largest allowed;
-`reach-ignores-the-speed-ceiling` fails the controller's horizon tests.
+the packet at a tenth of the speed ceiling for 1.6 s, whose first patch
+coarsens behind it and grows the region ahead past the authored size; the
+reach refines it back as the packet comes. At every estimate no element of the
+mesh it steps on may be coarser than 1.25 of the authored edge within the
+distance the fine reference's field, where denser than 1% of its peak spread
+over the box, travels before the next transaction; while the packet is inside,
+the adapted run's error against the reference must not exceed the coarse run's
+(0.145 against 0.149 at 1.36 s the closest; before the reach, 0.150 against
+0.146 at 1.28). Its mutation is `coarsening-ignores-the-field-reach`. In the
+core, the reach's distance is held against brute force on random triangles,
+never above the true distance and within two cell diagonals of it, and its
+targets within the reach, past twice it and with the authored size at the
+largest allowed; `reach-ignores-the-speed-ceiling` fails the controller's
+horizon tests.
 
 AMR-01, the closed loop, is six tests of `tests/adaptation.rs`, a ring and a
 packet each at full speed, a quarter and a tenth of it
@@ -1575,21 +1577,46 @@ packet each at full speed, a quarter and a tenth of it
 together on ten cores). Each runs 8 s in the default box as the app adapts
 it, the fine and the coarse run beside it until 2.5 s, when the field has
 left. While the reference's norm is above nine tenths of its largest, the
-adapted run's error must not exceed the coarse run's, and the packet's, which
-refines while inside, must be 5% under it after the first estimate (at a
-tenth of the speed it is 10% under the closest). At every estimate no element
-past 1.25 of the authored edge may lie where the field gets before the next
-transaction. The mesh must stay under a third of the fine mesh's triangles
-(12,902 of 45,203 the most), go dormant and refine nothing after, end at most
-nine tenths of its peak (0.82 at full speed, 0.35 and less slower) and,
-below full speed, hold elements past the authored size. A handoff while the
-field lives must change its energy by between -1% and +1e-4 (-0.7% and
-+4.6e-6 measured). Its mutation is
+adapted run's error must not exceed the coarse run's. The coarse mesh holds
+both starts inside the 0.12 target but for the packet's first estimate, which
+reads 0.158 and refines for its error, and the estimate after it must read at
+least 5% under the coarse run (14% to 23% measured). At every estimate no
+element past 1.25 of the authored edge may lie where the field gets before the
+next transaction. The mesh must stay under a quarter of the fine mesh's
+triangles (9,344 of 45,203 the most), go dormant and refine nothing for its
+error after (the reach may still restore an element where a leftover
+gathers), end at most four fifths of its peak (0.72 at full speed, 0.28 and
+less slower) and, below full speed, hold elements past the authored size. A
+handoff while the field holds at least 1% of its peak must change its energy
+by between -1% and +1e-6 (-0.74% and +3e-13 measured). Its mutation is
 `error-refinement-applies-the-limits-alone`, under which the packet at full
-speed reads 0.1063 against the coarse run's 0.1063. The one planned,
-refining whatever the error reads against the target, is equivalent in the
-loop: the transaction it starts applies the limits' field, which asks for
-nothing, and the mesh does not change.
+speed is never refined for its error. The one planned, refining whatever the
+error reads against the target, is equivalent in the loop: the transaction it
+starts applies the limits' field, which asks for nothing, and the mesh does
+not change. `dormant-carry-keeps-its-totals` has the slow ring's dormant
+coarsening restore its leftover's totals, and the handoff that refuses it
+fails the ring at a tenth of the speed.
+
+AMR-02, the estimator's calibration, has its study
+(`study_the_estimators_calibration`, ignored): the broad pulse, the ring and
+the packet on uniform meshes at 0.08, 0.057 and 0.04, against the box at 0.014,
+read against two truths, the mesh's own run from the start and the reference's
+state carried onto it now. Against the carried state the index is steady in
+time and rises under refinement, 1.9, 2.6 and 3.9 for the ring and 2.2, 3.2 and
+5.2 for the packet, the estimate falling as h^2.2 and the error as h^3.2;
+against the run's own, it falls in time as phase error gathers, which the
+estimate of a present state does not see. Where it points:
+`an_estimate_ranks_first_the_elements_holding_the_error` carries the packet's
+and the ring's reference state onto the authored mesh every tenth of a second
+to 0.5 s and requires the tenth of the box the indicators rank first to hold
+80% of the error the best tenth holds (0.93 to 1.00 measured); weighed against
+each element's own energy they held under 4%. Its mutation is
+`element-weighed-against-its-own-energy`. The core's
+`a_field_under_its_error_floor_is_measured_against_the_floor` holds the floor
+a fading field is measured against, mutation
+`fading-field-against-its-own-energy`, and the app's
+`a_dormant_adaptation_carries_without_its_totals` the handoff of an adaptation
+a dormant estimate asked for.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

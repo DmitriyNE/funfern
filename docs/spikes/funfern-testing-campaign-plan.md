@@ -1435,7 +1435,12 @@ mutation, in this order:
   enter past the authored size, which the packet scattered off, leaving the
   adapted run less accurate than the coarse one (2026-11-04, the authored
   size held within the field's reach). AMR-01 then landed (2026-11-04): six
-  cases, a ring and a packet at three speeds, in the workspace tests.
+  cases, a ring and a packet at three speeds, in the workspace tests. AMR-02's study (2026-11-05)
+  found the estimate ranking elements where the field is weakest, fixed
+  with the user by weighing each against its share of the field and
+  measuring a fading field against 1% of its experiment's peak; the index
+  rising under refinement waits on a decision, and the accumulated phase
+  error it does not see is left to the definition, with the user.
 - **PH-19**, after C6.
 - **C7, the runtime on the device:** RT-03 on the host first, then RT-02,
   RT-04, RT-05, the adaptive loop's device half, held to statistics rather

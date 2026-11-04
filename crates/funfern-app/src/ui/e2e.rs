@@ -3588,7 +3588,7 @@ fn hand_off(
         runtime_serials,
     )
     .map_err(|error| format!("{error:?}"))?;
-    let runtime = if target.mesh.geometry_revision == source.mesh.geometry_revision {
+    let runtime = if crate::topology_runtime::corrects_component_totals(&target, source) {
         runtime
     } else {
         runtime.without_total_correction()

@@ -264,10 +264,11 @@ impl Playground {
                         self.amr_error = None;
                         return;
                     };
-                    match self.runtime.request_adapted(
+                    match self.runtime.request_adapted_carrying(
                         self.editor.revision,
                         &self.editor.document,
                         mesh,
+                        !self.amr.dormant_transaction,
                     ) {
                         Ok(_) => {
                             self.amr_status = "preparing adaptive handoff".into();

@@ -250,6 +250,14 @@ pub struct PreparedTopology {
     pub mesh_action: TopologyMeshUpdateAction,
     pub operator_reused: bool,
     pub adapted: bool,
+    /// Whether a handoff onto this generation may restore each component's
+    /// flux total ([`corrects_component_totals`]). An adaptation a dormant
+    /// estimate asked for carries a leftover, whose totals are not worth
+    /// keeping: the interpolation loses its grid-scale content, and the total
+    /// that content held came back as a uniform field over the domain, which
+    /// added up to 131% to what was left and, past the correction's limit,
+    /// had the handoff refused (AMR-02, 2026-11-05).
+    pub carries_totals: bool,
     /// What a repair kept, removed and inserted, when the mesh was carved.
     pub carve: Option<CarveReport>,
     /// Why a repair was abandoned for a full rebuild, when it was.
@@ -276,12 +284,13 @@ pub enum PreparedSolverUpdate {
 /// Whether a handoff restores each component's flux total. A remesh of the same
 /// geometry does, so repeated adaptation cannot drift the constant part of the
 /// field; an edit to the geometry has no total to restore and takes what the
-/// interpolation carries.
+/// interpolation carries, and so does an adaptation for a dormant field
+/// ([`PreparedTopology::carries_totals`]).
 pub(crate) fn corrects_component_totals(
     candidate: &PreparedTopology,
     active: &PreparedTopology,
 ) -> bool {
-    candidate.mesh.geometry_revision == active.mesh.geometry_revision
+    candidate.carries_totals && candidate.mesh.geometry_revision == active.mesh.geometry_revision
 }
 
 #[derive(Clone, Debug)]
@@ -415,6 +424,7 @@ pub struct TopologyPreparationJob {
     operator_reused: bool,
     require_solver_handoff: bool,
     adapted: bool,
+    carries_totals: bool,
     done: bool,
     timing: TopologyPreparationTiming,
     meshing: MeshingOptions,
@@ -703,6 +713,7 @@ impl TopologyPreparationJob {
             operator_reused,
             require_solver_handoff,
             adapted: false,
+            carries_totals: true,
             done: false,
             timing: TopologyPreparationTiming::default(),
             meshing: options,
@@ -714,6 +725,7 @@ impl TopologyPreparationJob {
         document: &TopologyDocument,
         previous: Arc<PreparedTopology>,
         mesh: TriMesh,
+        carries_totals: bool,
     ) -> Result<Self, String> {
         if document.model.accepted != *previous.bundle.authored
             || mesh.geometry_revision != previous.bundle.plan.geometry_revision
@@ -775,6 +787,7 @@ impl TopologyPreparationJob {
             operator_reused: false,
             require_solver_handoff: true,
             adapted: true,
+            carries_totals,
             done: false,
             timing: TopologyPreparationTiming::default(),
         })
@@ -1320,6 +1333,7 @@ impl TopologyPreparationJob {
             mesh_action: self.mesh_action,
             operator_reused: self.operator_reused,
             adapted: self.adapted,
+            carries_totals: self.carries_totals,
             carve: self.carve,
             repair_fallback: self.repair_fallback.take(),
             full_build_worst_angle: self.full_build_worst_angle,
@@ -1602,11 +1616,29 @@ impl TopologyRuntime {
         document: &TopologyDocument,
         mesh: TriMesh,
     ) -> Result<TopologyToken, String> {
+        self.request_adapted_carrying(document_revision, document, mesh, true)
+    }
+
+    /// [`Self::request_adapted`], its handoff restoring each component's
+    /// flux total where `carries_totals` and the geometry allow it.
+    pub fn request_adapted_carrying(
+        &mut self,
+        document_revision: u64,
+        document: &TopologyDocument,
+        mesh: TriMesh,
+        carries_totals: bool,
+    ) -> Result<TopologyToken, String> {
         let previous = self
             .active
             .clone()
             .ok_or_else(|| "Cannot adapt before a topology is active".to_owned())?;
-        let job = TopologyPreparationJob::new_adapted(document_revision, document, previous, mesh)?;
+        let job = TopologyPreparationJob::new_adapted(
+            document_revision,
+            document,
+            previous,
+            mesh,
+            carries_totals,
+        )?;
         let token = job.token();
         self.preparing = Some(job);
         self.ready = None;

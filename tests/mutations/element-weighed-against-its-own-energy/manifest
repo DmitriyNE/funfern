@@ -1,0 +1,4 @@
+about: each element's error is weighed against its own energy rather than its share of the whole field's, so nearly empty elements read their leftovers over themselves and rank first, and refinement goes where there is no field
+test: cargo test --release -p funfern-app --test adaptation -- an_estimate_ranks_first_the_elements_holding_the_error
+expect: the tenth ranked first holds
+needs: cpu

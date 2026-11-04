@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-app/src/adaptation.rs b/crates/funfern-app/src/adaptation.rs
+--- a/crates/funfern-app/src/adaptation.rs
++++ b/crates/funfern-app/src/adaptation.rs
+@@ -672,7 +672,7 @@
+             ..Default::default()
+         };
+         let field: Arc<dyn MeshSizeField> = adaptation_field(result, target);
+-        self.dormant_transaction = result.report.dormant;
++        self.dormant_transaction = result.report.dormant && false;
+         AdaptationStep::Adapt(Box::new(MeshAdaptationJob::new_topology(
+             active.mesh.clone(),
+             &active.bundle.plan,

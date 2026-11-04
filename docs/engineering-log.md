@@ -32386,3 +32386,78 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-05 — The estimate weighs an element against its share of the field
+
+- **What AMR-02's study found** (`study_the_estimators_calibration`, the
+  broad pulse, the ring and the packet on uniform meshes at 0.08, 0.057 and
+  0.04 against the box at 0.014, read against the mesh's own run from the
+  start and against the reference's state carried onto it now):
+  - The ring is not under-refined by the estimate's own measure: on the
+    authored mesh it reads 0.10 while its error now is 0.053. What grows is
+    the phase error it gathers, 0.065 at t = 0.1 to 0.30 at 1.4, which an
+    estimate of the present state does not see. With the user, the target
+    stays a measure of the present state.
+  - Against the carried state the index rises under refinement, 1.9, 2.6 and
+    3.9 for the ring and 2.2, 3.2 and 5.2 for the packet: the estimate falls
+    as h^2.2, the error as h^3.2. Waiting on a decision, with the user, now
+    the targets have changed.
+  - Where it points: the tenth of the box the per-element indicators ranked
+    first held under 4% of the error the best tenth holds, where the same
+    estimate's contributions ranked held 93-99%. Each element's indicator
+    was its residual over its own energy, so nearly empty elements read their
+    leftovers over themselves and came first, and a refinement spent its
+    splits where there was no field.
+- **Fix, with the user.** Each element's error is weighed against its share
+  of the whole field's energy at the field's mean density, the sum the global
+  estimate takes; the unused `amplitude_floor` is gone. The tenth ranked
+  first now holds 0.91-0.99 of the best for the ring and the packet. That
+  alone made AMR-01's drain worse: refining where a draining field's leftover
+  is densest does not lower its error against an energy that keeps falling,
+  and the ring at a tenth of the speed read 0.27 at the end and peaked at
+  21,186 triangles. So a field holding less than 1% of its experiment's peak
+  is measured against that 1% (`error_energy_floor`,
+  `AMR_ERROR_FLOOR_RATIO`), as the user had weighed earlier and deferred.
+- **What the floor uncovered.** With the drain chase gone, the slow ring went
+  dormant on a mesh of 4,418 triangles rather than 12,902 and its dormant
+  coarsening reached meshes where a handoff is refused: the component-total
+  correction restores a grid-scale leftover's total as a uniform field, and
+  past 0.05 of what the interpolation carried both host and device refuse
+  the carry, a rejected handoff in the app retried at every estimate. With
+  the user, an adaptation a dormant estimate asked for hands over without the
+  correction (`PreparedTopology::carries_totals`,
+  `AdaptationController::dormant_transaction`). The dormant coarsenings still
+  add to what is left, 131% and 144% at 3e-5 to 8e-5 of the peak, the same
+  without the correction: the primary's interpolation, presumably (plan.md,
+  Worth checking sometime).
+- **Measured** (AMR-01's study, the six cases). Peaks of 4,399 to 9,344
+  triangles, against 5,787 to 12,902 before; meshes end at 0.72 of their peak
+  at full speed and 0.19 to 0.28 slower, below full speed with 679 to 774
+  elements past the authored size. While inside the adapted run is never
+  the less accurate. The packet is refined once, as its first estimate reads
+  0.158, and is then 14-23% more accurate than the coarse run; the coarse mesh
+  holds it inside the target after that, so where the misdirected refinement
+  had spread over a wide patch and run 10-33% ahead, it now does what the
+  target asks. Every handoff while the field holds 1% of its peak takes 0.2%
+  to 0.74% of its energy or keeps it to 3e-13.
+- **Tests.**
+  - `an_estimate_ranks_first_the_elements_holding_the_error`
+    (`tests/adaptation.rs`), 30 s: 0.93-1.00 measured, 0.8 required.
+    Mutation `element-weighed-against-its-own-energy`, which reads 0.06.
+  - `a_field_under_its_error_floor_is_measured_against_the_floor` (core).
+    Mutation `fading-field-against-its-own-energy`.
+  - `a_dormant_adaptation_carries_without_its_totals` (app). Mutation
+    `dormant-carry-keeps-its-totals`, under which the slow ring's carry is
+    refused.
+  - AMR-01's bounds: the packet's "5% more accurate while inside" encoded
+    the misdirected refinement and is now "5% more accurate at the estimate
+    after its error refinement"; the peak is held to a quarter of the fine
+    mesh, the end to four fifths of the peak; refinement after dormancy may
+    be the size rule's alone; the handoff bound holds while the field holds
+    1% of its peak, at -1% to +1e-6. `a_slow_packet_never_meets_a_mesh_coarsened_ahead_of_it`
+    runs at a tenth of the speed, where the coarsening ahead still happens.
+  - The reach's and the limits' mutations regenerated; all six detected.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs; the
+  device suite's handoff fixtures, 26 of 26.

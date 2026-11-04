@@ -1,0 +1,4 @@
+about: an adaptation a dormant estimate asked for restores each component's total at its handoff, so a leftover's grid-scale total comes back as a uniform field and, past the correction's limit, the handoff is refused
+test: cargo test --release -p funfern-app --test adaptation -- a_ring_at_a_tenth_of_the_speed_closes_the_loop
+expect: the carry at step [0-9]+
+needs: cpu

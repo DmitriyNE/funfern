@@ -872,6 +872,58 @@ mod tests {
         assert!(!corrects_component_totals(&refilled, &refined));
     }
 
+    /// An adaptation a dormant estimate asked for carries a leftover and
+    /// keeps no totals; one a live estimate asked for keeps them, as any
+    /// remesh of the same geometry does.
+    #[test]
+    fn a_dormant_adaptation_carries_without_its_totals() {
+        let mut state = Playground {
+            editor: crate::topology_editor::TopologyEditor::default(),
+            ..Playground::default()
+        };
+        test_support::settle(&mut state.editor);
+        let token = state
+            .runtime
+            .request(
+                state.editor.revision,
+                &state.editor.document,
+                state.editor.compiled_accepted.clone(),
+                MeshingOptions {
+                    target_edge_length: 0.18,
+                    ..MeshingOptions::default()
+                },
+                true,
+            )
+            .unwrap();
+        let finish = |state: &mut Playground| {
+            for _ in 0..1_000_000 {
+                if let Some(result) = state.runtime.advance(4096) {
+                    return result.unwrap();
+                }
+            }
+            panic!("topology preparation did not finish");
+        };
+        assert_eq!(finish(&mut state), token);
+        let plain = state.runtime.commit_ready(token).unwrap();
+        for carries in [true, false] {
+            let mut mesh = (*plain.mesh).clone();
+            mesh.mesh_revision = state.runtime.reserve_mesh_revision();
+            state
+                .runtime
+                .request_adapted_carrying(
+                    state.editor.revision,
+                    &state.editor.document,
+                    mesh,
+                    carries,
+                )
+                .unwrap();
+            finish(&mut state);
+            let adapted = state.runtime.ready().unwrap();
+            assert!(adapted.adapted);
+            assert_eq!(corrects_component_totals(adapted, &plain), carries);
+        }
+    }
+
     /// Reported: a drive took over the runtime of whichever drive had its
     /// position. Boundaries compile ahead of the point source, so a driven
     /// side added before it took the point source's phase and integrated-rate

@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/indicator.rs b/crates/funfern-core/src/indicator.rs
+--- a/crates/funfern-core/src/indicator.rs
++++ b/crates/funfern-core/src/indicator.rs
+@@ -2315,7 +2315,7 @@
+     /// The energy the field's error is measured against: its own, or the
+     /// floor where it holds less.
+     fn measured_energy(&self) -> f64 {
+-        self.total_energy.max(self.options.error_energy_floor)
++        self.total_energy.max(0.0 * self.options.error_energy_floor)
+     }
+ 
+     /// The largest element allowed at element `index`: the authored size

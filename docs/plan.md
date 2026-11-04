@@ -1790,12 +1790,17 @@ is next touched.
   are the place to read it, from a readback through
   `CanonicalStationaryFluxJob`.
 - A coarsening of a dormant field can raise its energy: in AMR-01's study
-  the ring at a tenth of the speed, once its residue was 7e-6 of its peak,
-  met handoffs that added 13% and 30% of what was left, and the packet 8%
-  and 5%, where every handoff while the field lived took energy away or
-  added under 5e-6. A lossless carry should not add any; at that level
-  nothing shows it, and dormancy has stopped the estimate reading it
-  (2026-11-04).
+  of 2026-11-05 the rings' dormant coarsenings added up to 131% and 144% of
+  what was left, at 3e-5 to 8e-5 of their peaks, and the slow packet's 42%,
+  where every handoff while the field held 1% of its peak took energy away
+  or kept it to 3e-13. Not the total correction, which a dormant
+  adaptation's handoff no longer makes (it had a coarsening refused past its
+  limit): the quarter-speed ring's 131% is the same without it. Presumably
+  the primary field's carry, which interpolates nodal values where the flux
+  is projected, sampling a grid-scale leftover at coarser nodes. At that
+  level nothing shows it and dormancy has stopped the estimate reading it,
+  but a gain can lift the field back over the dormant floor for a while, or
+  gather enough that the reach restores an element (2026-11-04, 2026-11-05).
 
 ## Working practice
 

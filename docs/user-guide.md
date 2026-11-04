@@ -654,11 +654,14 @@ names or with every expression evaluated at the material frame's origin. Each ro
   is clamped, so anything it cannot satisfy - a boundary the field disagrees with,
   the grid-scale leftovers of a wave that has passed - otherwise shrinks by that
   same step every cycle until it reaches the smallest element allowed, whatever
-  the target says. Once the whole field has fallen below `10⁻⁴` of its peak
+  the target says. The estimate puts each element's error against its share
+  of the whole field's energy, so refinement goes where the error is, not
+  where the field is weakest. Once the field holds less than 1% of its peak
   canonical energy since the experiment began, a placed pulse, a Switch or a
-  source edit beginning one as for the exposure, relative error is reported as
-  dormant and stops driving
-  refinement; this prevents numerical tail divided by vanishing field energy from
+  source edit beginning one as for the exposure, its error is measured
+  against that 1% rather than its own fading energy, and below `10⁻⁴` of the
+  peak relative error is reported as dormant and stops driving refinement;
+  together they keep numerical tail divided by vanishing field energy from
   looking increasingly inaccurate. Error concentrated in a small part of a field
   that is comfortably inside the target is the trade one number for the whole
   field makes.

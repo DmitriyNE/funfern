@@ -1,7 +1,7 @@
 diff --git a/crates/funfern-app/src/adaptation.rs b/crates/funfern-app/src/adaptation.rs
 --- a/crates/funfern-app/src/adaptation.rs
 +++ b/crates/funfern-app/src/adaptation.rs
-@@ -519,7 +519,7 @@
+@@ -531,7 +531,7 @@
              .map(|last| time - last)
              .filter(|cycle| cycle.is_finite() && *cycle > 0.0)
              .unwrap_or(0.0);

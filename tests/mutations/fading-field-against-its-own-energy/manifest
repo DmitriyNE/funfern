@@ -1,0 +1,4 @@
+about: a field fading below the error floor is measured against its own vanishing energy, so what it leaves reads ever larger and drives refinement until it goes dormant
+test: cargo test --release -p funfern-core --lib -- a_field_under_its_error_floor_is_measured_against_the_floor
+expect: assertion failed
+needs: cpu

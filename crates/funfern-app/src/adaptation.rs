@@ -22,6 +22,14 @@ pub const PRESENTATION_QUIET_AMPLITUDE_RATIO: f64 = 1.0e-2;
 /// below the energy counterpart of the presentation floor.
 pub const DORMANT_ENERGY_RATIO: f64 =
     PRESENTATION_QUIET_AMPLITUDE_RATIO * PRESENTATION_QUIET_AMPLITUDE_RATIO;
+/// The share of the experiment's peak energy a field's error is measured
+/// against once it holds less. Below it the error a target allows stops
+/// shrinking with the field: what a draining field leaves, divided by its
+/// vanishing energy, read up to 0.27 against the 0.12 target as the ring at
+/// a tenth of the speed faded from 1e-3 to 1e-4 of its peak, and refined 512
+/// splits at every estimate until the field went dormant (AMR-02,
+/// 2026-11-05).
+pub const AMR_ERROR_FLOOR_RATIO: f64 = 1.0e-2;
 /// Coarsening starts only well below the requested global error. The interval
 /// between this threshold and the target is the controller's global deadband:
 /// an estimate wobbling near the target cannot alternate the mesh direction.
@@ -486,6 +494,10 @@ pub struct AdaptationController {
     /// The simulated time of the last estimate's snapshot: the next one's,
     /// less it, is how long adaptation last took to come round.
     pub last_estimate_time: Option<f64>,
+    /// Whether the transaction [`Self::decide`] last started was asked for by
+    /// a dormant estimate, whose handoff carries a leftover and keeps no
+    /// totals ([`crate::topology_runtime::PreparedTopology::carries_totals`]).
+    pub dormant_transaction: bool,
 }
 
 impl AdaptationController {
@@ -579,6 +591,7 @@ impl AdaptationController {
                 ),
                 coarsen_ratio: AMR_COARSEN_EDGE_RATIO,
                 dormant_below_energy: self.energy_peak * DORMANT_ENERGY_RATIO,
+                error_energy_floor: self.energy_peak * AMR_ERROR_FLOOR_RATIO,
                 field_reach: Some(FieldReach {
                     horizon,
                     speed_factor,
@@ -659,6 +672,7 @@ impl AdaptationController {
             ..Default::default()
         };
         let field: Arc<dyn MeshSizeField> = adaptation_field(result, target);
+        self.dormant_transaction = result.report.dormant;
         AdaptationStep::Adapt(Box::new(MeshAdaptationJob::new_topology(
             active.mesh.clone(),
             &active.bundle.plan,

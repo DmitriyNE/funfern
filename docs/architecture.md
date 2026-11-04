@@ -1785,7 +1785,14 @@ strong ownership already enforces it. Recovery never averages across a material
 region or duplicated baffle/wall trace. Time-driven and nonlinear generations do
 not use this adapter until their residual/work contracts are derived.
 
-The relative indicator maps error to local edge length, caps that length by the
+The indicator weighs each element's error against its share of the whole field's
+energy at the field's mean density, the same sum the global estimate takes, so an
+element at the target's share holds the target and a nearly empty element's
+leftovers count for as little as they are; a field holding less than 1% of its
+experiment's peak energy is measured against that 1% (`error_energy_floor`), and
+an adaptation a dormant estimate asked for hands its leftover over without the
+component-total correction (`PreparedTopology::carries_totals`). It
+maps error to local edge length, caps that length by the
 shortest wavelength of every active time-varying point, volume, or boundary drive, and grades
 neighboring targets. Quiet-element growth factors and collapse thresholds are paired
 so a low-error mesh can actually coarsen. Graded targets stay local to each source

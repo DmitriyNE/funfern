@@ -1,0 +1,15 @@
+diff --git a/crates/funfern-core/src/indicator.rs b/crates/funfern-core/src/indicator.rs
+--- a/crates/funfern-core/src/indicator.rs
++++ b/crates/funfern-core/src/indicator.rs
+@@ -2363,8 +2363,9 @@
+         // highest held under 4% of the error the best tenth held, where its
+         // contributions ranked held 93-99% (AMR-02, 2026-11-04), and a
+         // refinement spent its splits where there was no field.
+-        let share = self.measured_energy().max(f64::MIN_POSITIVE) * estimate.area
+-            / self.total_area.max(f64::MIN_POSITIVE);
++        let share = estimate.energy
++            + 1.0e-8 * self.measured_energy().max(f64::MIN_POSITIVE) * estimate.area
++                / self.total_area.max(f64::MIN_POSITIVE);
+         let residual = estimate.recovery
+             + estimate.cell_residual
+             + estimate.interior_jump

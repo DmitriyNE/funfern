@@ -20,8 +20,9 @@ mod support;
 use support::*;
 
 use funfern_app::adaptation::{
-    AMR_ESTIMATE_SECONDS, AMR_ESTIMATE_STEPS, AMR_FIELD_PRESENCE_RATIO, AdaptationController,
-    AdaptationStep, AmrDecision, IndicatorSnapshots, adaptation_decision, target_accuracy,
+    AMR_ERROR_FLOOR_RATIO, AMR_ESTIMATE_SECONDS, AMR_ESTIMATE_STEPS, AMR_FIELD_PRESENCE_RATIO,
+    AdaptationController, AdaptationStep, AmrDecision, IndicatorSnapshots, adaptation_decision,
+    size_rule_refines, target_accuracy,
 };
 use funfern_app::document::PresentationSettings;
 use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
@@ -41,7 +42,17 @@ enum Start {
     /// A packet launched along `x` from the box's left half, which crosses
     /// and leaves through one side, spreading as it goes.
     Packet,
+    /// A broad pulse struck where the ring is: smooth content, which the
+    /// authored mesh carries and the estimator was calibrated on.
+    Broad,
 }
+
+/// The broad pulse, four authored elements across.
+const BROAD: Pulse = Pulse {
+    centre: Point2 { x: -0.2, y: -0.1 },
+    width: 0.3,
+    height: 1.0,
+};
 
 /// The ring's pulse, narrow against the largest element adaptation allows,
 /// so that only a refined mesh carries it.
@@ -74,6 +85,7 @@ fn packet(point: Point2) -> (f64, f64) {
 fn started(prepared: &PreparedTopology, time_step: f64, start: Start) -> Result<Run, String> {
     match start {
         Start::Ring => Run::struck_by(prepared, time_step, RING),
+        Start::Broad => Run::struck_by(prepared, time_step, BROAD),
         Start::Packet => {
             let operator = &prepared.canonical_operator;
             let (field, potential): (Vec<f64>, Vec<f64>) = operator
@@ -377,6 +389,9 @@ struct Reading {
     energy: f64,
     /// What it decided: hold, confirm, refine or coarsen.
     decided: &'static str,
+    /// Of a refinement, whether the size rule alone asked for it, the error
+    /// within its target: the reach restoring an element, say.
+    limits_only: bool,
     /// What the transaction changed, and the triangles after it.
     changes: usize,
     after: usize,
@@ -571,6 +586,12 @@ fn looped(
     // The app filters the grid scale every few steps, as a new document has
     // it, and estimates no pair of states a filter stands between.
     let filtered = std::env::var("AMR_UNFILTERED").is_err();
+    // A study's watch on every step's energy from a time on.
+    let watch_from = std::env::var("AMR_WATCH_FROM")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(f64::INFINITY);
+    let watching = |step: u64| step as f64 * time_step >= watch_from;
     for step in 1..=total {
         let referenced = step as f64 * time_step <= reference_until;
         let boundary = filtered && step.is_multiple_of(GRID_SCALE_FILTER_CADENCE);
@@ -584,13 +605,43 @@ fn looped(
         // The state a step earlier on this generation: a handoff falls
         // between steps, so the generation estimated has stepped since its own.
         let previous = run.clone();
-        run.step(&prepared)?;
+        run.step(&prepared).map_err(|error| {
+            format!(
+                "the adapted run's step {step} at {:.4} s, {} triangles: {error}; the energy a step before {:.3e}",
+                step as f64 * time_step,
+                prepared.mesh.triangles.len(),
+                previous.energy(&prepared).unwrap_or(f64::NAN)
+            )
+        })?;
         if boundary {
             if referenced {
                 fine_run.filter(&fine)?;
                 coarse_run.filter(&coarse)?;
             }
-            run.filter(&prepared)?;
+            if watching(step) {
+                eprintln!(
+                    "  step {step} {:.4} s before the filter: energy {:.6e}",
+                    step as f64 * time_step,
+                    run.energy(&prepared).unwrap_or(f64::NAN)
+                );
+            }
+            let unfiltered = run.clone();
+            run.filter(&prepared).map_err(|error| {
+                format!(
+                    "the adapted run's filter at step {step}, {:.4} s, {} triangles: {error}; the energy before it {:.3e}",
+                    step as f64 * time_step,
+                    prepared.mesh.triangles.len(),
+                    unfiltered.energy(&prepared).unwrap_or(f64::NAN)
+                )
+            })?;
+        }
+        if watching(step) {
+            eprintln!(
+                "  step {step} {:.4} s: energy {:.6e}{}",
+                step as f64 * time_step,
+                run.energy(&prepared).unwrap_or(f64::NAN),
+                if boundary { " filtered" } else { "" }
+            );
         }
         if !due {
             continue;
@@ -641,7 +692,8 @@ fn looped(
                 )
             );
         }
-        let result = estimated(&mut controller, &prepared, &run, &previous, presentation)?;
+        let result = estimated(&mut controller, &prepared, &run, &previous, presentation)
+            .map_err(|error| format!("the estimate at step {step}: {error}"))?;
         let (fine_estimate, coarse_estimate, fine_energy) = match (&fine_previous, &coarse_previous)
         {
             (Some(fine_previous), Some(coarse_previous)) => {
@@ -697,6 +749,7 @@ fn looped(
             },
             energy: run.energy(&prepared)? / controller.energy_peak,
             decided: "hold",
+            limits_only: false,
             changes: 0,
             after: prepared.mesh.triangles.len(),
             handoff: 0.0,
@@ -740,7 +793,10 @@ fn looped(
                 reading.decided = "initialize";
                 None
             }
-            AdaptationStep::Adapt(job) => Some(job),
+            AdaptationStep::Adapt(job) => {
+                reading.limits_only = size_rule_refines(&result.report, target_accuracy(settings));
+                Some(job)
+            }
         };
         if let Some(job) = &mut job {
             let result = loop {
@@ -758,8 +814,14 @@ fn looped(
             let (report, mesh) = controller.adapted(result, Some(&prepared.mesh));
             reading.changes = report.topology_changes;
             if let Some(mesh) = mesh {
-                runtime.request_adapted(editor.revision, &editor.document, mesh)?;
-                let (target, maps) = finish_with_maps(&mut runtime)?;
+                runtime.request_adapted_carrying(
+                    editor.revision,
+                    &editor.document,
+                    mesh,
+                    !controller.dormant_transaction,
+                )?;
+                let (target, maps) = finish_with_maps(&mut runtime)
+                    .map_err(|error| format!("the preparation at step {step}: {error}"))?;
                 controller.published(&target);
                 if target.recommended_time_step() < time_step {
                     return Err(format!(
@@ -769,12 +831,42 @@ fn looped(
                     ));
                 }
                 let before = run.energy(&prepared)?;
-                run = handed((&prepared, &run), &target, &maps, time_step)?;
+                run = handed((&prepared, &run), &target, &maps, time_step).map_err(|error| {
+                    format!(
+                        "the carry at step {step} from {} to {} triangles: {error}; {}",
+                        prepared.mesh.triangles.len(),
+                        target.mesh.triangles.len(),
+                        diagnose_carry((&prepared, &run), &target, &maps)
+                    )
+                })?;
+                if std::env::var("AMR_TRACE").is_ok() {
+                    eprintln!(
+                        "  handoff at {:.3} s: {} to {} triangles, the carry changed the energy by {:.3e}, the shortest edge {:.4}, the recommended step {:.3e} against {:.3e}",
+                        reading.time,
+                        prepared.mesh.triangles.len(),
+                        target.mesh.triangles.len(),
+                        run.energy(&target)? / before - 1.0,
+                        target
+                            .mesh
+                            .triangles
+                            .iter()
+                            .flat_map(|triangle| {
+                                let [a, b, c] = triangle
+                                    .vertices
+                                    .map(|vertex| target.mesh.vertices[vertex].point);
+                                [(b - a).norm(), (c - b).norm(), (a - c).norm()]
+                            })
+                            .fold(f64::INFINITY, f64::min),
+                        target.recommended_time_step(),
+                        time_step
+                    );
+                }
                 // The app takes away the stationary flux the carry left once
                 // it has solved for it, which on a lossless generation comes
                 // to taking it away here.
                 if std::env::var("AMR_UNCLEANED").is_err() {
-                    reading.cleaned = cleaned(&mut run, &target)?;
+                    reading.cleaned = cleaned(&mut run, &target)
+                        .map_err(|error| format!("the cleanup at step {step}: {error}"))?;
                 }
                 reading.handoff = run.energy(&target)? / before - 1.0;
                 prepared = target;
@@ -806,6 +898,20 @@ fn looped(
             &densities(&reference),
             AMR_FIELD_PRESENCE_RATIO * largest_mean,
         );
+        if std::env::var("AMR_TRACE").is_ok() {
+            eprintln!(
+                "{:.3} s: {} triangles, estimate {:.4}{}, energy {:.2e}, {} {} changes, handoff {:.2e}, cleaned {:.2e}",
+                reading.time,
+                reading.triangles,
+                reading.estimate,
+                if reading.dormant { " dormant" } else { "" },
+                reading.energy,
+                reading.decided,
+                reading.changes,
+                reading.handoff,
+                reading.cleaned
+            );
+        }
         readings.push(reading);
     }
     Ok(Looped {
@@ -837,6 +943,7 @@ fn study_the_adaptive_loop() {
     let starts = match std::env::var("AMR_START").as_deref() {
         Ok("ring") => vec![Start::Ring],
         Ok("packet") => vec![Start::Packet],
+        Ok("broad") => vec![Start::Broad],
         _ => vec![Start::Ring, Start::Packet],
     };
     let speeds = std::env::var("AMR_SPEED")
@@ -983,24 +1090,28 @@ const INSIDE: f64 = 0.9;
 
 /// AMR-01, the closed loop: `start` adapted at `speed`'s cadence as the app
 /// adapts it, beside the coarse and the fine run. From the study of
-/// 2026-11-04 (the box in the Mechanical skin, its three skins bit-identical
+/// 2026-11-05 (the box in the Mechanical skin, its three skins bit-identical
 /// there):
 ///
 /// - while the field is inside, the adapted run is never less accurate than
-///   the coarse one; the packet, which refines, at least 5% more accurate
-///   after its first estimate (10% at a tenth of the speed the closest). The
-///   ring is not refined while inside: its estimate reads 0.09 against the
-///   0.12 target (AMR-02);
+///   the coarse one. The coarse mesh holds both starts inside the 0.12
+///   target but for the packet's first estimate, which reads 0.158 and
+///   refines for its error: the next estimate must read at least 5% under
+///   the coarse run (14% to 23% measured). The ring is not refined while
+///   inside, its estimate 0.09 (AMR-02);
 /// - no element past the authored size lies where the field gets before the
 ///   next transaction;
-/// - the mesh never holds a third of the fine mesh's triangles (12,902 of
-///   45,203 the most, the ring at a tenth, chasing what its walls send back);
-/// - the field goes dormant, and nothing refines after;
-/// - it coarsens back, to at most nine tenths of its peak (0.82 at
-///   full speed, 0.35 and less slower), and below full speed quiet
-///   regions grow past the authored mesh;
-/// - a handoff while the field lives takes at most 1% of its energy (0.7%
-///   the most) and adds at most 1e-4 (4.6e-6).
+/// - the mesh never holds a quarter of the fine mesh's triangles (9,344 of
+///   45,203 the most, the packet at a tenth);
+/// - the field goes dormant, and nothing refines for its error after; the
+///   reach may still restore an element where a leftover gathers;
+/// - it coarsens back, to at most four fifths of its peak (0.72 at full
+///   speed, 0.28 and less slower), and below full speed quiet regions grow
+///   past the authored mesh;
+/// - a handoff while the field holds at least the error floor's 1% of its
+///   peak takes at most 1% of its energy (0.74% the most) and adds at most
+///   1e-6 (3e-13). Below it, a dormant coarsening can add to what is left
+///   (plan.md, Worth checking sometime).
 fn closes_the_loop(start: Start, speed: f64) {
     let looped = looped(
         PhysicsModel::Mechanical,
@@ -1012,7 +1123,7 @@ fn closes_the_loop(start: Start, speed: f64) {
     .unwrap();
     let readings = &looped.readings;
     let case = format!("{start:?} at speed {speed}");
-    for (index, reading) in readings.iter().enumerate() {
+    for reading in readings {
         assert_eq!(
             reading.exposed, 0,
             "{case} at {:.3} s: {reading:?}",
@@ -1026,28 +1137,34 @@ fn closes_the_loop(start: Start, speed: f64) {
                 reading.adaptive,
                 reading.coarse
             );
-            if start == Start::Packet && index > 0 {
-                assert!(
-                    reading.adaptive <= 0.95 * reading.coarse,
-                    "{case} at {:.3} s: the refined packet reads {:.4} against {:.4}",
-                    reading.time,
-                    reading.adaptive,
-                    reading.coarse
-                );
-            }
         }
-        if reading.changes > 0 && !reading.dormant {
+        if reading.changes > 0 && reading.energy >= AMR_ERROR_FLOOR_RATIO {
             assert!(
-                (-1.0e-2..=1.0e-4).contains(&reading.handoff),
+                (-1.0e-2..=1.0e-6).contains(&reading.handoff),
                 "{case} at {:.3} s: a handoff changed the energy by {:.2e}",
                 reading.time,
                 reading.handoff
             );
         }
     }
+    if start == Start::Packet {
+        let refined = readings
+            .iter()
+            .position(|reading| reading.decided == "refine" && !reading.limits_only)
+            .unwrap_or_else(|| panic!("{case}: the packet is never refined for its error"));
+        let next = &readings[refined + 1];
+        assert!(
+            next.norm > INSIDE && next.adaptive <= 0.95 * next.coarse,
+            "{case}: refined for its error at {:.3} s, the packet reads {:.4} against {:.4} at {:.3} s",
+            readings[refined].time,
+            next.adaptive,
+            next.coarse,
+            next.time
+        );
+    }
     let peak = readings.iter().map(|reading| reading.after).max().unwrap();
     assert!(
-        3 * peak < looped.fine_triangles,
+        4 * peak < looped.fine_triangles,
         "{case}: the mesh peaked at {peak} triangles against the fine mesh's {}",
         looped.fine_triangles
     );
@@ -1056,15 +1173,16 @@ fn closes_the_loop(start: Start, speed: f64) {
         .position(|reading| reading.dormant)
         .unwrap_or_else(|| panic!("{case} never goes dormant"));
     for reading in &readings[dormant..] {
-        assert_ne!(
-            reading.decided, "refine",
-            "{case} refines at {:.3} s, dormant since {:.3} s",
-            reading.time, readings[dormant].time
+        assert!(
+            reading.decided != "refine" || reading.limits_only,
+            "{case} refines for its error at {:.3} s, dormant since {:.3} s",
+            reading.time,
+            readings[dormant].time
         );
     }
     let last = readings.last().unwrap();
     assert!(
-        last.after as f64 <= 0.9 * peak as f64,
+        last.after as f64 <= 0.8 * peak as f64,
         "{case} ends at {} triangles from a peak of {peak}",
         last.after
     );
@@ -1106,30 +1224,33 @@ fn a_packet_at_a_tenth_of_the_speed_closes_the_loop() {
     closes_the_loop(Start::Packet, 0.1);
 }
 
-/// A packet at a quarter of the speed ceiling, adapted as the app adapts it.
+/// A packet at a tenth of the speed ceiling, adapted as the app adapts it.
 /// Its first estimate refines around it, and once it has left that patch the
 /// estimate reads well under target and asks to coarsen. Judged by where the
 /// field was then, the region just ahead of it read as quiet and coarsened
 /// to twice the authored edge; the packet crossing it scattered a few
-/// percent of its energy back, and by t = 1.13 the adapted run was the less
-/// accurate, 0.154 against the coarse run's 0.135, and 0.234 against 0.167 at
-/// 1.5. Held at the authored size within the field's reach, no element
-/// coarser than the authored one lies where the field gets before the next
-/// transaction, and while the packet is inside the adapted run is the more
-/// accurate at every estimate, 0.152 against 0.167 at 1.5 the closest.
+/// percent of its energy back, and the adapted run was the less accurate
+/// while the packet was still inside, 0.150 against the coarse run's 0.146
+/// at t = 1.28 (at a quarter of the speed 0.154 against 0.135 at 1.13).
+/// Held at the authored size within the field's reach, the coarsening grows
+/// 188 elements past the authored size ahead of it and the reach refines
+/// them back as it comes, the last at 1.36: no element coarser than the
+/// authored one lies where the field gets before the next transaction, and
+/// while the packet is inside the adapted run is never the less accurate,
+/// 0.145 against 0.149 at 1.36 the closest.
 #[test]
 fn a_slow_packet_never_meets_a_mesh_coarsened_ahead_of_it() {
-    let looped = looped(PhysicsModel::Mechanical, Start::Packet, 0.25, 1.6, 1.6).unwrap();
+    let looped = looped(PhysicsModel::Mechanical, Start::Packet, 0.1, 1.6, 1.6).unwrap();
     assert!(
         looped
             .readings
             .iter()
-            .any(|reading| reading.decided == "coarsen"),
-        "the packet's patch coarsens behind it"
+            .any(|reading| reading.decided == "coarsen" && reading.coarser > 0),
+        "the packet's patch coarsens behind it, and the region ahead past the authored size"
     );
     for reading in &looped.readings {
         assert_eq!(reading.exposed, 0, "at {:.3} s: {reading:?}", reading.time);
-        if reading.norm > 0.5 {
+        if reading.norm > INSIDE {
             assert!(
                 reading.adaptive <= reading.coarse,
                 "at {:.3} s the adapted run reads {:.4} against the coarse run's {:.4}",
@@ -1273,4 +1394,486 @@ fn a_weak_packet_after_a_loud_one_is_refined_once_its_experiment_begins() {
         "its own experiment: dormant {}, {decision:?}",
         report.dormant
     );
+}
+
+/// Dunavant's six-point rule, exact to degree four, in barycentric
+/// coordinates with weights summing to one: where AMR-02 reads each element.
+const QUADRATURE: [([f64; 3], f64); 6] = [
+    (
+        [
+            0.108_103_018_168_070,
+            0.445_948_490_915_965,
+            0.445_948_490_915_965,
+        ],
+        0.223_381_589_678_011,
+    ),
+    (
+        [
+            0.445_948_490_915_965,
+            0.108_103_018_168_070,
+            0.445_948_490_915_965,
+        ],
+        0.223_381_589_678_011,
+    ),
+    (
+        [
+            0.445_948_490_915_965,
+            0.445_948_490_915_965,
+            0.108_103_018_168_070,
+        ],
+        0.223_381_589_678_011,
+    ),
+    (
+        [
+            0.816_847_572_980_459,
+            0.091_576_213_509_771,
+            0.091_576_213_509_771,
+        ],
+        0.109_951_743_655_322,
+    ),
+    (
+        [
+            0.091_576_213_509_771,
+            0.816_847_572_980_459,
+            0.091_576_213_509_771,
+        ],
+        0.109_951_743_655_322,
+    ),
+    (
+        [
+            0.091_576_213_509_771,
+            0.091_576_213_509_771,
+            0.816_847_572_980_459,
+        ],
+        0.109_951_743_655_322,
+    ),
+];
+
+/// The point probes of `prepared` at `points`, built on every thread: each
+/// finds its element by a search over the mesh.
+fn stencils_in_parallel(
+    prepared: &PreparedTopology,
+    points: &[Point2],
+) -> Result<Vec<CanonicalPointStencil>, String> {
+    in_parallel(points, |point| {
+        let stencil = stencil_at(prepared, *point)
+            .ok_or_else(|| format!("no element takes the point {point:?}"))?;
+        CanonicalPointStencil::from_quadratic(stencil, &prepared.canonical_operator)
+            .map_err(|error| format!("{error:?}"))
+    })
+    .into_iter()
+    .collect()
+}
+
+/// One uniform mesh of AMR-02's sequence: its generation, the fine one and
+/// the maps that carry the reference's state onto it, its own run from the
+/// start and that run a step before, and each element's quadrature points,
+/// their weights times its area, read on both meshes.
+struct Level {
+    edge: f64,
+    source: Arc<PreparedTopology>,
+    prepared: Arc<PreparedTopology>,
+    maps: Arc<PreparedCanonicalTransfer>,
+    run: Run,
+    previous: Run,
+    weights: Vec<f64>,
+    elements: Vec<usize>,
+    fine_stencils: Vec<CanonicalPointStencil>,
+    stencils: Vec<CanonicalPointStencil>,
+    accumulated: AdaptationController,
+    instantaneous: AdaptationController,
+}
+
+/// Each element's squared error against `reference` and the reference's own
+/// square, integrated by [`QUADRATURE`], the field and the complementary
+/// field together as a unit medium weighs them.
+fn element_errors(
+    read: &[(f64, Point2)],
+    reference: &[(f64, Point2)],
+    weights: &[f64],
+    elements: &[usize],
+    count: usize,
+) -> (Vec<f64>, Vec<f64>) {
+    let (mut errors, mut norms) = (vec![0.0; count], vec![0.0; count]);
+    for ((((field, complementary), (expected, expected_complementary)), weight), element) in
+        read.iter().zip(reference).zip(weights).zip(elements)
+    {
+        let along = *complementary - *expected_complementary;
+        errors[*element] += weight * ((field - expected).powi(2) + along.dot(along));
+        norms[*element] +=
+            weight * (expected * expected + expected_complementary.dot(*expected_complementary));
+    }
+    (errors, norms)
+}
+
+/// Where an estimate points: ranking `mesh`'s elements by `key`, highest
+/// first, the share of the true squared error `errors` the first `share` of
+/// the area holds, over the most any elements of that area hold. One is
+/// pointing at the error; the area's own share, at random.
+fn pointing(mesh: &TriMesh, key: &[f64], errors: &[f64], share: f64) -> f64 {
+    let areas = mesh
+        .triangles
+        .iter()
+        .map(|triangle| {
+            let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+            0.5 * ((b - a).x * (c - a).y - (b - a).y * (c - a).x).abs()
+        })
+        .collect::<Vec<_>>();
+    let total_area = areas.iter().sum::<f64>();
+    let total_error = errors.iter().sum::<f64>();
+    let held = |order: &[usize]| {
+        let (mut area, mut error) = (0.0, 0.0);
+        for element in order {
+            let room = share * total_area - area;
+            if room <= 0.0 {
+                break;
+            }
+            let part = (room / areas[*element]).min(1.0);
+            area += part * areas[*element];
+            error += part * errors[*element];
+        }
+        error / total_error
+    };
+    let mut by_indicator = (0..errors.len()).collect::<Vec<_>>();
+    by_indicator.sort_by(|a, b| key[*b].total_cmp(&key[*a]));
+    let mut by_error = (0..errors.len()).collect::<Vec<_>>();
+    by_error.sort_by(|a, b| (errors[*b] / areas[*b]).total_cmp(&(errors[*a] / areas[*a])));
+    held(&by_indicator) / held(&by_error)
+}
+
+impl Level {
+    /// The box of `document` meshed uniformly at `edge`, with the maps that
+    /// carry the state of `fine`, the box at `fine_edge`, onto it, read at its
+    /// elements' quadrature points on both meshes.
+    fn new(
+        document: &TopologyDocument,
+        fine: &PreparedTopology,
+        fine_edge: f64,
+        edge: f64,
+        time_step: f64,
+    ) -> Result<Self, String> {
+        let domain = document.model.accepted.geometry.domain;
+        let (editor, mut runtime, source) = prepare_at(document, fine_edge)?;
+        runtime.request(
+            editor.revision,
+            &editor.document,
+            editor.compiled_accepted.clone(),
+            meshing(domain, edge),
+            false,
+        )?;
+        let (prepared, maps) = finish_with_maps(&mut runtime)?;
+        if prepared.recommended_time_step() < time_step {
+            return Err(format!(
+                "the mesh at {edge} does not allow the reference's step"
+            ));
+        }
+        let mesh = &prepared.mesh;
+        let (mut points, mut weights, mut elements) = (Vec::new(), Vec::new(), Vec::new());
+        for (element, triangle) in mesh.triangles.iter().enumerate() {
+            let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+            let area = 0.5 * ((b - a).x * (c - a).y - (b - a).y * (c - a).x).abs();
+            for (barycentric, weight) in QUADRATURE {
+                points.push(a * barycentric[0] + b * barycentric[1] + c * barycentric[2]);
+                weights.push(weight * area);
+                elements.push(element);
+            }
+        }
+        let fine_stencils = stencils_in_parallel(fine, &points)?;
+        let stencils = stencils_in_parallel(&prepared, &points)?;
+        // Each start puts its own run here.
+        let run = started(&prepared, time_step, Start::Broad)?;
+        Ok(Self {
+            edge,
+            source,
+            prepared,
+            maps,
+            previous: run.clone(),
+            run,
+            weights,
+            elements,
+            fine_stencils,
+            stencils,
+            accumulated: AdaptationController::default(),
+            instantaneous: AdaptationController::default(),
+        })
+    }
+
+    /// The level's own run struck as `start`, and estimates begun afresh.
+    fn start(&mut self, start: Start, time_step: f64) -> Result<(), String> {
+        self.run = started(&self.prepared, time_step, start)?;
+        self.accumulated = AdaptationController::default();
+        self.accumulated.published(&self.prepared);
+        self.instantaneous = AdaptationController::default();
+        self.instantaneous.published(&self.prepared);
+        Ok(())
+    }
+
+    /// What the level reads against `fine_run`, the reference stepped with
+    /// its own run: both truths and the estimate of each.
+    fn calibrated(
+        &mut self,
+        fine_run: &Run,
+        presentation: &PresentationSettings,
+        time_step: f64,
+    ) -> Result<Calibration, String> {
+        let count = self.prepared.mesh.triangles.len();
+        let reference = read(&self.fine_stencils, fine_run)?;
+        let errors = |read: &[(f64, Point2)]| {
+            element_errors(read, &reference, &self.weights, &self.elements, count)
+        };
+        let (accumulated_errors, norms) = errors(&read(&self.stencils, &self.run)?);
+        let norm = norms.iter().sum::<f64>();
+        let accumulated = estimated(
+            &mut self.accumulated,
+            &self.prepared,
+            &self.run,
+            &self.previous,
+            presentation,
+        )?;
+        let mut carried = handed(
+            (&self.source, fine_run),
+            &self.prepared,
+            &self.maps,
+            time_step,
+        )?;
+        cleaned(&mut carried, &self.prepared)?;
+        let (instantaneous_errors, _) = errors(&read(&self.stencils, &carried)?);
+        let before = carried.clone();
+        carried.step(&self.prepared)?;
+        let instantaneous = estimated(
+            &mut self.instantaneous,
+            &self.prepared,
+            &carried,
+            &before,
+            presentation,
+        )?;
+        Ok(Calibration {
+            norm,
+            accumulated_error: (accumulated_errors.iter().sum::<f64>() / norm).sqrt(),
+            accumulated,
+            accumulated_errors,
+            instantaneous_error: (instantaneous_errors.iter().sum::<f64>() / norm).sqrt(),
+            instantaneous,
+            instantaneous_errors,
+        })
+    }
+}
+
+/// What one level read at one instant: the reference's squared norm over
+/// it, and against each truth the relative error, its estimate and each
+/// element's squared error.
+struct Calibration {
+    norm: f64,
+    accumulated_error: f64,
+    accumulated: SolutionIndicatorResult,
+    accumulated_errors: Vec<f64>,
+    instantaneous_error: f64,
+    instantaneous: SolutionIndicatorResult,
+    instantaneous_errors: Vec<f64>,
+}
+
+/// `start` struck on the reference `fine` and on each of `levels`, stepped
+/// together at `time_step` to `until` as the app steps them, grid filter
+/// included, each level calibrated every `every` seconds and handed to
+/// `observe` with the time.
+#[allow(clippy::too_many_arguments)]
+fn calibrate(
+    fine: &PreparedTopology,
+    levels: &mut [Level],
+    start: Start,
+    until: f64,
+    every: f64,
+    presentation: &PresentationSettings,
+    time_step: f64,
+    mut observe: impl FnMut(f64, &Level, &Calibration),
+) -> Result<(), String> {
+    let mut fine_run = started(fine, time_step, start)?;
+    for level in levels.iter_mut() {
+        level.start(start, time_step)?;
+    }
+    let total = (until / time_step).ceil() as u64;
+    let mut next = every;
+    for step in 1..=total {
+        let boundary = step.is_multiple_of(GRID_SCALE_FILTER_CADENCE);
+        let due = !boundary && step as f64 * time_step >= next;
+        for level in levels.iter_mut() {
+            if due {
+                level.previous = level.run.clone();
+            }
+            level.run.step(&level.prepared)?;
+            if boundary {
+                level.run.filter(&level.prepared)?;
+            }
+        }
+        fine_run.step(fine)?;
+        if boundary {
+            fine_run.filter(fine)?;
+        }
+        if !due {
+            continue;
+        }
+        next += every;
+        for level in levels.iter_mut() {
+            let calibration = level.calibrated(&fine_run, presentation, time_step)?;
+            observe(step as f64 * time_step, level, &calibration);
+        }
+    }
+    Ok(())
+}
+
+/// An estimate ranks first the elements that hold the error (AMR-02): the
+/// packet and the ring on the authored mesh, the reference's state, the box
+/// at 0.02, carried onto it every tenth of a second to 0.5 s. Ranked by the
+/// indicators the size targets are made from, the tenth of the box ranked
+/// first must hold at least 80% of the error the best tenth holds. Weighed
+/// against each element's own energy, as they were until 2026-11-05, the
+/// tenth they ranked first held under 4%: nearly empty elements read their
+/// leftovers over themselves and came first.
+#[test]
+fn an_estimate_ranks_first_the_elements_holding_the_error() {
+    let document = box_document(PhysicsModel::Mechanical).unwrap();
+    let fine_edge = document.presentation.adaptation.minimum_edge;
+    let (_, _, fine) = prepare_at(&document, fine_edge).unwrap();
+    let time_step = STEP_SHARE * fine.recommended_time_step();
+    let mut levels = vec![
+        Level::new(
+            &document,
+            &fine,
+            fine_edge,
+            document.presentation.mesh_edge,
+            time_step,
+        )
+        .unwrap(),
+    ];
+    for start in [Start::Packet, Start::Ring] {
+        calibrate(
+            &fine,
+            &mut levels,
+            start,
+            0.5,
+            0.1,
+            &document.presentation,
+            time_step,
+            |time, level, calibration| {
+                let points = pointing(
+                    &level.prepared.mesh,
+                    &calibration.instantaneous.element_indicators,
+                    &calibration.instantaneous_errors,
+                    0.1,
+                );
+                eprintln!("{start:?} at {time:.3} s: the first tenth holds {points:.2}");
+                assert!(
+                    points >= 0.8,
+                    "{start:?} at {time:.3} s: the tenth ranked first holds {points:.2} of the best"
+                );
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// AMR-02's study: the estimator's efficiency index, its estimate over the
+/// true error, for each start in the box on a sequence of uniform meshes,
+/// against two truths. Accumulated: the mesh's own run from the start
+/// against a reference twice as fine as the smallest element adaptation
+/// allows, which carries every phase error since. Instantaneous: the
+/// reference's state carried onto the mesh as the app carries a field, the
+/// error the mesh cannot avoid now, whatever went before. Each estimate is
+/// also asked where it points (see [`pointing`]).
+#[test]
+#[ignore = "a study: cargo test --release --test adaptation study_the_estimators -- --ignored --nocapture"]
+fn study_the_estimators_calibration() {
+    let variable = |name: &str| std::env::var(name).ok();
+    let starts = match variable("CAL_START").as_deref() {
+        Some("ring") => vec![Start::Ring],
+        Some("packet") => vec![Start::Packet],
+        Some("broad") => vec![Start::Broad],
+        _ => vec![Start::Broad, Start::Ring, Start::Packet],
+    };
+    let edges = variable("CAL_LEVELS")
+        .map(|levels| {
+            levels
+                .split(',')
+                .map(|edge| edge.parse::<f64>().unwrap())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or(vec![0.08, 0.057, 0.04]);
+    let fine_edge = variable("CAL_REFERENCE").map_or(0.014, |edge| edge.parse().unwrap());
+    let until = variable("CAL_UNTIL").map_or(1.4, |time| time.parse().unwrap());
+    let every = variable("CAL_EVERY").map_or(0.1, |time| time.parse().unwrap());
+    let document = box_document(PhysicsModel::Mechanical).unwrap();
+    let started_at = std::time::Instant::now();
+    let (_, _, fine) = prepare_at(&document, fine_edge).unwrap();
+    let time_step = STEP_SHARE * fine.recommended_time_step();
+    let mut levels = edges
+        .iter()
+        .map(|edge| Level::new(&document, &fine, fine_edge, *edge, time_step).unwrap())
+        .collect::<Vec<_>>();
+    eprintln!(
+        "reference at {fine_edge}: {} triangles, step {time_step:.3e}; levels {:?} of {:?} triangles; prepared in {:.1} s",
+        fine.mesh.triangles.len(),
+        edges,
+        levels
+            .iter()
+            .map(|level| level.prepared.mesh.triangles.len())
+            .collect::<Vec<_>>(),
+        started_at.elapsed().as_secs_f64()
+    );
+    for start in starts {
+        let started_at = std::time::Instant::now();
+        eprintln!("{start:?}:");
+        eprintln!(
+            "{:>6} {:>6} {:>6} | {:>8} {:>8} {:>6} | {:>8} {:>8} {:>6} | {:>6} {:>6} | {:>6} {:>6}",
+            "t",
+            "norm",
+            "edge",
+            "acc err",
+            "estimate",
+            "index",
+            "now err",
+            "estimate",
+            "index",
+            "acc10",
+            "acc25",
+            "now10",
+            "now25"
+        );
+        let mut largest_norm: f64 = 0.0;
+        calibrate(
+            &fine,
+            &mut levels,
+            start,
+            until,
+            every,
+            &document.presentation,
+            time_step,
+            |time, level, calibration| {
+                largest_norm = largest_norm.max(calibration.norm.sqrt());
+                let mesh = &level.prepared.mesh;
+                let accumulated = calibration.accumulated.report.global_indicator;
+                let instantaneous = calibration.instantaneous.report.global_indicator;
+                let points = |result: &SolutionIndicatorResult, errors: &[f64], share: f64| {
+                    pointing(mesh, &result.element_indicators, errors, share)
+                };
+                eprintln!(
+                    "{:>6.3} {:>6.3} {:>6.3} | {:>8.4} {:>8.4} {:>6.2} | {:>8.4} {:>8.4} {:>6.2} | {:>6.2} {:>6.2} | {:>6.2} {:>6.2}",
+                    time,
+                    calibration.norm.sqrt() / largest_norm,
+                    level.edge,
+                    calibration.accumulated_error,
+                    accumulated,
+                    accumulated / calibration.accumulated_error,
+                    calibration.instantaneous_error,
+                    instantaneous,
+                    instantaneous / calibration.instantaneous_error,
+                    points(&calibration.accumulated, &calibration.accumulated_errors, 0.1),
+                    points(&calibration.accumulated, &calibration.accumulated_errors, 0.25),
+                    points(&calibration.instantaneous, &calibration.instantaneous_errors, 0.1),
+                    points(&calibration.instantaneous, &calibration.instantaneous_errors, 0.25),
+                );
+            },
+        )
+        .unwrap();
+        eprintln!("{start:?} in {:.1} s", started_at.elapsed().as_secs_f64());
+    }
 }

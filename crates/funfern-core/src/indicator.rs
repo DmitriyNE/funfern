@@ -706,12 +706,18 @@ pub struct SolutionIndicatorOptions {
     pub minimum_scale: f64,
     pub maximum_scale: f64,
     pub coarsen_ratio: f64,
-    pub amplitude_floor: f64,
     /// Absolute whole-field energy below which relative error has no useful
     /// meaning. Error-driven targets become quiet/coarsening targets there;
     /// wavelength and configured-size limits remain authoritative. Zero keeps
     /// the scale-free standalone estimator behavior.
     pub dormant_below_energy: f64,
+    /// The least energy the field's error is measured against: a field
+    /// holding less is held to the error this energy would allow, its own
+    /// and each element's share alike, so that what a fading field leaves
+    /// stops driving refinement as it fades rather than reading larger
+    /// against its vanishing self. Zero measures against the field's own
+    /// energy, the standalone estimator's behaviour.
+    pub error_energy_floor: f64,
     /// Holds the mesh at its authored size wherever the field can get before
     /// adaptation next acts; `None` lets every quiet element grow to the
     /// largest allowed, as the standalone estimator does.
@@ -775,8 +781,8 @@ impl Default for SolutionIndicatorOptions {
             minimum_scale: 0.6,
             maximum_scale: 2.2,
             coarsen_ratio: 0.65,
-            amplitude_floor: 1.0e-8,
             dormant_below_energy: 0.0,
+            error_energy_floor: 0.0,
             field_reach: None,
             max_work_units: 5_000_000,
         }
@@ -1431,10 +1437,10 @@ impl SolutionIndicatorJob {
             || !options.coarsen_ratio.is_finite()
             || options.coarsen_ratio <= 0.0
             || options.coarsen_ratio >= 1.0
-            || !options.amplitude_floor.is_finite()
-            || options.amplitude_floor <= 0.0
             || !options.dormant_below_energy.is_finite()
             || options.dormant_below_energy < 0.0
+            || !options.error_energy_floor.is_finite()
+            || options.error_energy_floor < 0.0
             || options.field_reach.is_some_and(|reach| !reach.valid())
             || options.max_work_units == 0
         {
@@ -2306,6 +2312,12 @@ impl SolutionIndicatorJob {
         self.phase = IndicatorPhase::ReachRead(index + 1);
     }
 
+    /// The energy the field's error is measured against: its own, or the
+    /// floor where it holds less.
+    fn measured_energy(&self) -> f64 {
+        self.total_energy.max(self.options.error_energy_floor)
+    }
+
     /// The largest element allowed at element `index`: the authored size
     /// within the field's reach, growing linearly to the largest allowed at
     /// twice it, and the largest allowed everywhere without a reach.
@@ -2341,9 +2353,18 @@ impl SolutionIndicatorJob {
             return Ok(());
         }
         let estimate = self.estimates[index];
-        let floor =
-            self.options.amplitude_floor * self.total_energy.max(f64::MIN_POSITIVE) * estimate.area
-                / self.total_area.max(f64::MIN_POSITIVE);
+        // An element's error is weighed against its share of the whole
+        // field's energy, at the field's mean density over the domain, not
+        // against its own: the global estimate is the same sum, so an element
+        // at the target's share holds the target exactly, and where the field
+        // is weak its error is as small as it is. Against its own energy a
+        // nearly empty element read its leftovers over themselves and ranked
+        // first: the tenth of the box an estimate of a ring or a packet ranked
+        // highest held under 4% of the error the best tenth held, where its
+        // contributions ranked held 93-99% (AMR-02, 2026-11-04), and a
+        // refinement spent its splits where there was no field.
+        let share = self.measured_energy().max(f64::MIN_POSITIVE) * estimate.area
+            / self.total_area.max(f64::MIN_POSITIVE);
         let residual = estimate.recovery
             + estimate.cell_residual
             + estimate.interior_jump
@@ -2353,7 +2374,7 @@ impl SolutionIndicatorJob {
         let indicator = if dormant {
             0.0
         } else {
-            self.indicator_calibration() * (residual / (estimate.energy + floor)).sqrt()
+            self.indicator_calibration() * (residual / share).sqrt()
         };
         let scale = if indicator <= f64::MIN_POSITIVE {
             self.options.maximum_scale
@@ -2471,7 +2492,8 @@ impl SolutionIndicatorJob {
         // A field with no meaningful energy has no relative error to speak of,
         // whatever the residuals of its numerical dust add up to.
         self.report.global_indicator = if self.total_energy > 0.0 && !self.report.dormant {
-            self.indicator_calibration() * (self.report.total_residual / self.total_energy).sqrt()
+            self.indicator_calibration()
+                * (self.report.total_residual / self.measured_energy()).sqrt()
         } else {
             0.0
         };
@@ -4239,6 +4261,62 @@ mod tests {
         );
         assert!((fast.report.field_reach - 2.0 * slow.report.field_reach).abs() < 1e-12);
         assert!(fast.report.reach_held_elements > slow.report.reach_held_elements);
+    }
+
+    fn estimate_floored(
+        setup: &(
+            Arc<Meshed>,
+            Arc<QuadraticWaveOperator>,
+            TopologyScene,
+            QuadraticSolutionSnapshot,
+            SolutionIndicatorOptions,
+            Point2,
+        ),
+        floor: f64,
+    ) -> SolutionIndicatorResult {
+        let (mesh, operator, scene, state, options, _) = setup;
+        run(
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
+                operator.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(scene),
+                state.clone(),
+                SolutionIndicatorOptions {
+                    error_energy_floor: floor,
+                    ..*options
+                },
+            ),
+            1_000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_field_under_its_error_floor_is_measured_against_the_floor() {
+        let setup = bump_setup();
+        let free = estimate_with(&setup, None);
+        let energy = free.report.total_energy;
+        // Under the field's own energy the floor is not there.
+        let above = estimate_floored(&setup, 0.5 * energy);
+        assert_eq!(above.report.global_indicator, free.report.global_indicator);
+        assert_eq!(above.element_indicators, free.element_indicators);
+        // A field a tenth of its floor is held to the floor's error: the
+        // whole field and every element read √0.1 of what they did.
+        let below = estimate_floored(&setup, 10.0 * energy);
+        let factor = 0.1_f64.sqrt();
+        assert!(
+            (below.report.global_indicator - factor * free.report.global_indicator).abs()
+                <= 1e-12 * free.report.global_indicator
+        );
+        for (floored, own) in below
+            .element_indicators
+            .iter()
+            .zip(&free.element_indicators)
+        {
+            assert!((floored - factor * own).abs() <= 1e-12 * own.max(f64::MIN_POSITIVE));
+        }
+        assert_eq!(below.report.total_energy, energy);
     }
 
     #[test]

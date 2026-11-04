@@ -339,7 +339,10 @@ pub fn handed(
         [0; 4],
     )
     .map_err(|error| format!("{error:?}"))?;
-    let runtime = if target.mesh.geometry_revision == source.mesh.geometry_revision {
+    // The app's `corrects_component_totals`.
+    let runtime = if target.carries_totals
+        && target.mesh.geometry_revision == source.mesh.geometry_revision
+    {
         runtime
     } else {
         runtime.without_total_correction()
@@ -373,6 +376,59 @@ pub fn handed(
         _ => return Err("the run and the generations disagree on a drive".into()),
     }
     .map_err(|error| error.to_string())
+}
+
+/// A study's look at a carry that failed: each piece of [`handed`] applied
+/// on its own, and what each answers.
+pub fn diagnose_carry(
+    (source, run): (&PreparedTopology, &Run),
+    target: &PreparedTopology,
+    maps: &PreparedCanonicalTransfer,
+) -> String {
+    let Run::Fixed(state) = run else {
+        return "a driven run".into();
+    };
+    let finite = |values: &[f64]| values.iter().all(|value| value.is_finite());
+    let mut report = Vec::new();
+    let runtime = match CanonicalGpuRuntimeTransfer::from_primary_transfer(
+        &source.canonical_operator,
+        &target.canonical_operator,
+        &source.canonical_forcing,
+        &target.canonical_forcing,
+        &maps.primary,
+        [0; 4],
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => return format!("the runtime transfer: {error:?}"),
+    };
+    let desired = runtime.desired_totals(&source.canonical_operator, run.primary());
+    report.push(format!("desired totals {desired:?}"));
+    let prescribed = vec![false; target.canonical_operator.degrees_of_freedom()];
+    for (name, totals) in [
+        ("with totals", desired.clone()),
+        ("without", vec![None; desired.len()]),
+    ] {
+        match maps.primary.transfer(run.primary(), &totals, &prescribed) {
+            Ok((flux, _)) => report.push(format!(
+                "primary {name}: finite {}, largest {:.3e}",
+                finite(&flux),
+                flux.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+            )),
+            Err(error) => report.push(format!("primary {name}: {error}")),
+        }
+    }
+    match maps.complementary.transfer(run.complementary()) {
+        Ok((flux, _)) => report.push(format!(
+            "complementary: finite {}",
+            flux.iter()
+                .all(|value| value.x.is_finite() && value.y.is_finite())
+        )),
+        Err(error) => report.push(format!("complementary: {error}")),
+    }
+    // The walls' memory is the state's own; what is left of the carry
+    // after these is its map and the target's assembly of the fields.
+    let _ = state;
+    report.join("; ")
 }
 
 /// Takes away the stationary flux a handoff left on `run`, as the app does
