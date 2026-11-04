@@ -435,11 +435,9 @@ impl Playground {
                 return;
             }
         };
-        let job = self.amr.estimate(
-            active,
-            snapshots,
-            self.editor.document.presentation.adaptation,
-        );
+        let job = self
+            .amr
+            .estimate(active, snapshots, &self.editor.document.presentation);
         self.amr_indicator_source = Some(AmrIndicatorSource {
             topology: active.bundle.token,
             gpu_generation: request.generation(),

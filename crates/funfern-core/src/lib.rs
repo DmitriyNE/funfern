@@ -5,6 +5,7 @@ mod canonical_stationary;
 mod canonical_temporal;
 mod canonical_transfer;
 mod canonical_wave;
+mod field_reach;
 mod geometry;
 mod indicator;
 mod law_presets;

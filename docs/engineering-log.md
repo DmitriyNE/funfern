@@ -32278,3 +32278,74 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and
   threaded wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-04 — Coarsening past the authored mesh waits for the field to be out of reach
+
+- **What was wrong.** AMR-01's study adapted a packet at a quarter of the
+  speed ceiling. Its first estimate refined around it, and once it had left
+  that patch the estimate read well under target and asked to coarsen.
+  Coarsening judged quiet by where the field was then, and the region just
+  ahead of the packet, still empty, grew to the largest element allowed,
+  0.16, twice the authored 0.08 and too coarse for its 0.25 wavelength. The
+  packet scattered off it, a few percent of its energy running back: frozen
+  after that coarsening the run kept 2.9% of its peak energy at t = 2.25
+  against the reference's 0.03%, frozen before it the coarse run's share.
+  The estimator then spent every refinement on what came back, in the half
+  the packet had left, and adapting left the run less accurate than never
+  adapting: 0.154 against the coarse run's 0.135 at t = 1.13, 0.234 against
+  0.167 at 1.5, on a mesh of 2.3 times as many triangles. At a tenth of the
+  speed the same; the ring and anything at speed one do not coarsen while
+  the field is inside. With the user, quiet regions stay allowed to grow
+  past the authored mesh, as `architecture.md` has it, but only where the
+  field cannot get before adaptation could shrink them back; holding the
+  authored size everywhere while a field lives would all but never coarsen.
+- **Fix.** `FieldReach`, a new estimate option. The reach is the fastest wave
+  speed the generation can reach - the fastest authored sample's, times
+  `1/√(primary_floor · complementary_floor)` of a driven or nonlinear
+  generation's step bound, which covers every drive phase, Switch state and
+  admitted amplitude - over twice the longer of the last cycle, snapshot to
+  snapshot, and the cadence at the speed ceiling. The field is where an
+  element's energy density exceeds 1% of the experiment's peak energy spread
+  over the domain, tied to the peak as dormancy is. The distance comes from an
+  exact Euclidean distance transform of a raster 256 cells across, never above
+  the true distance between two triangles nor two cell diagonals below it;
+  walls are not seen, which errs towards holding. Within the reach the largest
+  element allowed is the authored edge times 1.05, which no edge the mesher
+  makes exceeds, growing linearly to the largest allowed at twice the reach.
+  It is a limit, so an element coarsened past it while the field was far
+  refines back on its own account as the field draws near.
+- **Measured** (the study, the box in the Mechanical skin, its three skins
+  bit-identical there). No element past 1.25 of the authored edge lies where
+  the reference's field gets before the next transaction at any estimate of
+  the six cases. The packet at a quarter of the speed coarsens 53 elements
+  past the authored size ahead of itself and refines them back by t = 0.94;
+  at a tenth, 182, back by 1.36. While inside it is the more accurate at every
+  estimate: 0.105 against 0.135 at 1.13 and 0.152 against 0.167 at 1.5. As it
+  leaves, coarsening and refining back costs a little the authored mesh does
+  not: 0.323 against the coarse run's 0.283 at 1.69 with half of it out,
+  where frozen after its first refinement it reads 0.280, about 0.3% of the
+  peak energy; at a tenth, 0.189 against 0.184 at norm 0.57. Past the field,
+  quiet regions coarsen past the authored mesh as before: the slow packet
+  ends at 1915 triangles against the authored 2772, where the scattered field
+  had held it at 7095.
+- **Tests.**
+  - `a_slow_packet_never_meets_a_mesh_coarsened_ahead_of_it`
+    (`tests/adaptation.rs`), 48 s: the packet at a quarter of the speed for
+    1.6 s; no exposed element at any estimate, and the adapted run no less
+    accurate than the coarse one while the packet is inside. Mutation
+    `coarsening-ignores-the-field-reach`, caught at 0.56 s.
+  - The core's `field_reach` tests: the line transform against brute force,
+    and the distance against brute force on random triangles.
+  - The estimator's: the reach held at the authored size and the far side at
+    the largest allowed, an authored size at the largest changing nothing,
+    a coarser element within reach refining as a limit, a drive widening the
+    reach, and a malformed reach refused.
+  - The controller's horizon: a first estimate, a slow cycle, a raised
+    ceiling and a clock gone back. Mutation `reach-ignores-the-speed-ceiling`.
+- **Not done.** A decision refines for limits once four elements ask, so one
+  to three elements past the authored size within reach would not refine
+  back; the study met none. Refinement still lands behind a fast wave rather
+  than ahead of it (AMR-02/03).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

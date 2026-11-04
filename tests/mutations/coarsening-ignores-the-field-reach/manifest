@@ -1,0 +1,4 @@
+about: adaptation's estimates leave the field's reach out, so a coarsening judged by where the field is now grows the region a slow packet is about to enter past the authored size, and the packet scatters off it
+test: cargo test --release -p funfern-app --test adaptation -- a_slow_packet_never_meets_a_mesh_coarsened_ahead_of_it
+expect: at [0-9.]+ s(: Reading| the adapted run reads)
+needs: cpu

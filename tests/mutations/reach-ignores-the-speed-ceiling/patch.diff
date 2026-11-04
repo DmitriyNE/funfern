@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-app/src/adaptation.rs b/crates/funfern-app/src/adaptation.rs
+--- a/crates/funfern-app/src/adaptation.rs
++++ b/crates/funfern-app/src/adaptation.rs
+@@ -519,7 +519,7 @@
+             .map(|last| time - last)
+             .filter(|cycle| cycle.is_finite() && *cycle > 0.0)
+             .unwrap_or(0.0);
+-        AMR_REACH_MARGIN * cycle.max(cadence)
++        AMR_REACH_MARGIN * cycle.max(0.0 * cadence)
+     }
+ 
+     /// The estimate of `snapshots`, a state of `active`, under `presentation`'s

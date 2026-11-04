@@ -20,10 +20,10 @@ mod support;
 use support::*;
 
 use funfern_app::adaptation::{
-    AMR_ESTIMATE_SECONDS, AMR_ESTIMATE_STEPS, AdaptationController, AdaptationStep, AmrDecision,
-    IndicatorSnapshots, adaptation_decision, target_accuracy,
+    AMR_ESTIMATE_SECONDS, AMR_ESTIMATE_STEPS, AMR_FIELD_PRESENCE_RATIO, AdaptationController,
+    AdaptationStep, AmrDecision, IndicatorSnapshots, adaptation_decision, target_accuracy,
 };
-use funfern_app::document::AdaptationSettings;
+use funfern_app::document::PresentationSettings;
 use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
 use funfern_app::topology_runtime::{PreparedCanonicalTransfer, PreparedTopology};
 use funfern_core::{
@@ -243,6 +243,119 @@ fn refined_map(mesh: &TriMesh, refined: f64, domain: DomainRect, density: &[f64]
     map
 }
 
+/// A study's map at each estimate, a character per two lattice cells: the
+/// adaptive mesh's longest edge there, `O` past `coarser`, `#` under
+/// `refined`, `-` between; and beside it the adaptive run's energy density,
+/// `@` at four times the reference's and at least `1e-4` of its largest,
+/// `.` the reference's band.
+fn excess_map(
+    mesh: &TriMesh,
+    refined: f64,
+    coarser: f64,
+    domain: DomainRect,
+    density: &[f64],
+    expected: &[f64],
+) -> String {
+    let most = expected.iter().copied().fold(0.0, f64::max);
+    let half = LATTICE / 2;
+    let mut longest = vec![0.0f64; half * half];
+    let mut shortest = vec![f64::INFINITY; half * half];
+    for (triangle, edge) in mesh.triangles.iter().zip(longest_edges(mesh)) {
+        let [a, b, c] = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+        let centre = (a + b + c) / 3.0;
+        let column = (((centre.x - domain.min_x) / domain.width()) * half as f64)
+            .clamp(0.0, half as f64 - 1.0) as usize;
+        let row = (((centre.y - domain.min_y) / domain.height()) * half as f64)
+            .clamp(0.0, half as f64 - 1.0) as usize;
+        longest[row * half + column] = longest[row * half + column].max(edge);
+        shortest[row * half + column] = shortest[row * half + column].min(edge);
+    }
+    let mut map = String::new();
+    for row in (0..half).rev() {
+        for column in 0..half {
+            let cell = row * half + column;
+            map.push(if longest[cell] > coarser {
+                'O'
+            } else if shortest[cell] < refined {
+                '#'
+            } else if longest[cell] > 0.0 {
+                '-'
+            } else {
+                ' '
+            });
+        }
+        map.push_str("  ");
+        for column in 0..half {
+            let cells = (0..2)
+                .flat_map(|dy| (0..2).map(move |dx| (2 * row + dy) * LATTICE + 2 * column + dx));
+            let (mut excess, mut band) = (false, false);
+            for index in cells {
+                excess |= density[index] > 4.0 * expected[index] && density[index] > 1.0e-4 * most;
+                band |= expected[index] >= BAND * most;
+            }
+            map.push(if excess {
+                '@'
+            } else if band {
+                '.'
+            } else {
+                ' '
+            });
+        }
+        map.push('\n');
+    }
+    map
+}
+
+/// The distance from `point` to the triangle `[a, b, c]`, zero inside it.
+fn point_triangle_distance(point: Point2, [a, b, c]: [Point2; 3]) -> f64 {
+    let side = |from: Point2, to: Point2| {
+        let edge = to - from;
+        let offset = point - from;
+        edge.x * offset.y - edge.y * offset.x
+    };
+    let signs = [side(a, b), side(b, c), side(c, a)];
+    if signs.iter().all(|sign| *sign >= 0.0) || signs.iter().all(|sign| *sign <= 0.0) {
+        return 0.0;
+    }
+    let segment = |from: Point2, to: Point2| {
+        let edge = to - from;
+        let along = ((point - from).dot(edge) / edge.dot(edge)).clamp(0.0, 1.0);
+        (point - from - edge * along).norm()
+    };
+    segment(a, b).min(segment(b, c)).min(segment(c, a))
+}
+
+/// The triangles of `mesh` longer than `coarser` along their longest edge
+/// that lie within `reach` of a lattice point where `density` exceeds
+/// `floor`: where the field can get before the next transaction, on
+/// elements past the authored size.
+fn exposed(
+    mesh: &TriMesh,
+    coarser: f64,
+    reach: f64,
+    points: &[Point2],
+    density: &[f64],
+    floor: f64,
+) -> usize {
+    let held = points
+        .iter()
+        .zip(density)
+        .filter(|(_, density)| **density > floor)
+        .map(|(point, _)| *point)
+        .collect::<Vec<_>>();
+    mesh.triangles
+        .iter()
+        .zip(longest_edges(mesh))
+        .filter(|(triangle, edge)| {
+            *edge > coarser && {
+                let corners = triangle.vertices.map(|vertex| mesh.vertices[vertex].point);
+                held.iter()
+                    .any(|point| point_triangle_distance(*point, corners) <= reach)
+            }
+        })
+        .count()
+}
+
 /// Where the field is, for [`refined_in_band`]: an energy density at least
 /// this share of its largest.
 const BAND: f64 = 1.0e-3;
@@ -272,6 +385,13 @@ struct Reading {
     /// Of the area refined after the transaction, the share in the field's
     /// band.
     in_band: f64,
+    /// How far the estimate put the field's reach, and the elements of the
+    /// mesh after the transaction coarser than the authored one that the
+    /// reference's field can get to before the next transaction.
+    reach: f64,
+    exposed: usize,
+    /// The elements of that mesh coarser than the authored one anywhere.
+    coarser: usize,
     /// The share of the energy the cleanup took after the handoff, the
     /// stationary flux the carry left.
     cleaned: f64,
@@ -290,6 +410,32 @@ struct Reading {
     /// stationary part of their complementary flux, which neither moves nor
     /// leaves.
     stationary: [f64; 2],
+    /// Outside the field's band: the share of the adaptive and the coarse
+    /// run's error, then of the adaptive, the coarse and the fine run's
+    /// energy density.
+    outside: [f64; 5],
+}
+
+/// Of `read` against `reference` on the lattice, the share of the error and
+/// of `read`'s energy density at points outside the reference's band.
+fn outside_band(read: &[(f64, Point2)], reference: &[(f64, Point2)]) -> (f64, f64) {
+    let expected = densities(reference);
+    let most = expected.iter().copied().fold(0.0, f64::max);
+    let held = densities(read);
+    let (mut error, mut error_outside, mut energy, mut energy_outside) = (0.0, 0.0, 0.0, 0.0);
+    for (index, ((field, complementary), (field_expected, complementary_expected))) in
+        read.iter().zip(reference).enumerate()
+    {
+        let along = *complementary - *complementary_expected;
+        let difference = (field - field_expected).powi(2) + along.dot(along);
+        error += difference;
+        energy += held[index];
+        if expected[index] < BAND * most {
+            error_outside += difference;
+            energy_outside += held[index];
+        }
+    }
+    (error_outside / error, energy_outside / energy)
 }
 
 /// The share of `run`'s energy on `prepared` that the stationary part of its
@@ -323,7 +469,7 @@ fn estimated(
     prepared: &PreparedTopology,
     run: &Run,
     previous: &Run,
-    settings: AdaptationSettings,
+    presentation: &PresentationSettings,
 ) -> Result<SolutionIndicatorResult, String> {
     let snapshots = match (run, previous) {
         (Run::Fixed(state), Run::Fixed(before)) => {
@@ -340,7 +486,7 @@ fn estimated(
     }
     .map_err(|error| error.to_string())?;
     controller.observe_energy(run.energy(prepared)?);
-    let mut estimate = controller.estimate(prepared, snapshots, settings);
+    let mut estimate = controller.estimate(prepared, snapshots, presentation);
     loop {
         if let Some(result) = estimate.advance(1 << 16) {
             break result.map_err(|error| error.to_string());
@@ -354,6 +500,10 @@ struct Looped {
     fine_triangles: usize,
     coarse_triangles: usize,
 }
+
+/// An element past this of the authored edge is coarser than the authored
+/// mesh, whose longest edges reach 1.05 of it.
+const EXPOSED_EDGE: f64 = 1.25;
 
 /// How much of the fine mesh's own step the three runs take: the adaptive
 /// run's generations must each allow it. A refinement's bisections leave
@@ -369,8 +519,12 @@ fn looped(
     speed: f64,
     duration: f64,
 ) -> Result<Looped, String> {
-    let document = box_document(physics)?;
-    let settings = document.presentation.adaptation;
+    let mut document = box_document(physics)?;
+    // The speed ceiling the app runs this run's speed under, which bounds
+    // how far the field gets between estimates.
+    document.presentation.simulation_speed = speed;
+    let presentation = &document.presentation;
+    let settings = presentation.adaptation;
     let domain = document.model.accepted.geometry.domain;
     let (_, _, fine) = prepare_at(&document, settings.minimum_edge)?;
     let (editor, mut runtime, coarse) = prepare(&document)?;
@@ -406,6 +560,9 @@ fn looped(
     let total = (duration / time_step).ceil() as u64;
     let mut last = None;
     let mut largest_norm: f64 = 0.0;
+    // The lattice's mean density at its largest, the reference's peak energy
+    // spread evenly over the box, in the lattice's units.
+    let mut largest_mean: f64 = 0.0;
     let mut readings = Vec::new();
     // The app filters the grid scale every few steps, as a new document has
     // it, and estimates no pair of states a filter stands between.
@@ -433,6 +590,7 @@ fn looped(
         let reference = read(&fine_stencils, &fine_run)?;
         let norm = densities(&reference).iter().sum::<f64>().sqrt();
         largest_norm = largest_norm.max(norm);
+        largest_mean = largest_mean.max(norm * norm / points.len() as f64);
         let adaptive_readings = read(&adaptive_stencils, &run)?;
         let coarse_readings = read(&coarse_stencils, &coarse_run)?;
         let adaptive = relative_error(&adaptive_readings, &reference);
@@ -443,7 +601,24 @@ fn looped(
             primary_share(&reference),
         ];
 
-        let result = estimated(&mut controller, &prepared, &run, &previous, settings)?;
+        if std::env::var("AMR_EXCESS").is_ok() {
+            eprintln!(
+                "at {:.3} s, the mesh and the excess energy:",
+                step as f64 * time_step
+            );
+            eprint!(
+                "{}",
+                excess_map(
+                    &prepared.mesh,
+                    refined,
+                    1.25 * document.presentation.mesh_edge,
+                    domain,
+                    &densities(&adaptive_readings),
+                    &densities(&reference),
+                )
+            );
+        }
+        let result = estimated(&mut controller, &prepared, &run, &previous, presentation)?;
         let (fine_estimate, coarse_estimate, fine_energy) = match (&fine_previous, &coarse_previous)
         {
             (Some(fine_previous), Some(coarse_previous)) => {
@@ -452,14 +627,14 @@ fn looped(
                     &fine,
                     &fine_run,
                     fine_previous,
-                    settings,
+                    presentation,
                 )?;
                 let coarse_result = estimated(
                     &mut coarse_controller,
                     &coarse,
                     &coarse_run,
                     coarse_previous,
-                    settings,
+                    presentation,
                 )?;
                 (
                     fine_result.report.global_indicator,
@@ -499,6 +674,9 @@ fn looped(
             after: prepared.mesh.triangles.len(),
             handoff: 0.0,
             in_band: f64::NAN,
+            reach: result.report.field_reach,
+            exposed: 0,
+            coarser: 0,
             cleaned: 0.0,
             fine_estimate,
             coarse_estimate,
@@ -506,6 +684,19 @@ fn looped(
             shares,
             primary,
             stationary,
+            outside: {
+                let (adaptive_error, adaptive_energy) =
+                    outside_band(&adaptive_readings, &reference);
+                let (coarse_error, coarse_energy) = outside_band(&coarse_readings, &reference);
+                let (_, fine_energy) = outside_band(&reference, &reference);
+                [
+                    adaptive_error,
+                    coarse_error,
+                    adaptive_energy,
+                    coarse_energy,
+                    fine_energy,
+                ]
+            },
         };
         let decided = if reading.time < freeze {
             controller.decide(&result, &prepared, settings, &mut runtime)
@@ -573,6 +764,21 @@ fn looped(
                 }
             }
         }
+        // The mesh the run steps on until the next estimate's transaction,
+        // `gap` steps on, whether or not this one changed it; the box's medium
+        // runs its waves at one.
+        reading.coarser = longest_edges(&prepared.mesh)
+            .iter()
+            .filter(|edge| **edge > EXPOSED_EDGE * presentation.mesh_edge)
+            .count();
+        reading.exposed = exposed(
+            &prepared.mesh,
+            EXPOSED_EDGE * presentation.mesh_edge,
+            gap as f64 * time_step,
+            &points,
+            &densities(&reference),
+            AMR_FIELD_PRESENCE_RATIO * largest_mean,
+        );
         readings.push(reading);
     }
     Ok(Looped {
@@ -627,7 +833,7 @@ fn study_the_adaptive_loop() {
                 started.elapsed().as_secs_f64()
             );
             eprintln!(
-                "{:>6} {:>6} {:>8} {:>8} {:>8} {:>6} {:>8} {:>10} {:>6} {:>6} {:>9} {:>6}",
+                "{:>6} {:>6} {:>8} {:>8} {:>8} {:>6} {:>8} {:>10} {:>6} {:>6} {:>9} {:>6} {:>6} {:>7} {:>7}",
                 "t",
                 "tris",
                 "estimate",
@@ -639,11 +845,14 @@ fn study_the_adaptive_loop() {
                 "changes",
                 "after",
                 "handoff",
-                "band"
+                "band",
+                "reach",
+                "exposed",
+                "coarser"
             );
             for reading in &looped.readings {
                 eprintln!(
-                    "{:>6.3} {:>6} {:>8.4}{} {:>8.4} {:>8.4} {:>6.3} {:>8.1e} {:>10} {:>6} {:>6} {:>9.2e} {:>6.2}",
+                    "{:>6.3} {:>6} {:>8.4}{} {:>8.4} {:>8.4} {:>6.3} {:>8.1e} {:>10} {:>6} {:>6} {:>9.2e} {:>6.2} {:>6.3} {:>7} {:>7}",
                     reading.time,
                     reading.triangles,
                     reading.estimate,
@@ -656,11 +865,14 @@ fn study_the_adaptive_loop() {
                     reading.changes,
                     reading.after,
                     reading.handoff,
-                    reading.in_band
+                    reading.in_band,
+                    reading.reach,
+                    reading.exposed,
+                    reading.coarser
                 );
                 if std::env::var("AMR_DIAGNOSE").is_ok() {
                     eprintln!(
-                        "        fine estimate {:.4} energy {:.1e}, coarse estimate {:.4}; shares {:.2} {:.2} {:.2} {:.2}; field share {:.2} {:.2} {:.2}; stationary {:.1e} {:.1e}, cleaned {:.1e}",
+                        "        fine estimate {:.4} energy {:.1e}, coarse estimate {:.4}; shares {:.2} {:.2} {:.2} {:.2}; field share {:.2} {:.2} {:.2}; stationary {:.1e} {:.1e}, cleaned {:.1e}; outside the band error {:.2} {:.2}, energy {:.1e} {:.1e} {:.1e}",
                         reading.fine_estimate,
                         reading.fine_energy,
                         reading.coarse_estimate,
@@ -673,7 +885,12 @@ fn study_the_adaptive_loop() {
                         reading.primary[2],
                         reading.stationary[0],
                         reading.stationary[1],
-                        reading.cleaned
+                        reading.cleaned,
+                        reading.outside[0],
+                        reading.outside[1],
+                        reading.outside[2],
+                        reading.outside[3],
+                        reading.outside[4]
                     );
                 }
             }
@@ -699,7 +916,13 @@ fn first_refinement(document: &TopologyDocument, time_step: f64) -> Result<Refin
     run.step(&coarse)?;
     let mut controller = AdaptationController::default();
     controller.published(&coarse);
-    let result = estimated(&mut controller, &coarse, &run, &previous, settings)?;
+    let result = estimated(
+        &mut controller,
+        &coarse,
+        &run,
+        &previous,
+        &document.presentation,
+    )?;
     let AdaptationStep::Adapt(mut job) =
         controller.decide(&result, &coarse, settings, &mut runtime)
     else {
@@ -718,6 +941,41 @@ fn first_refinement(document: &TopologyDocument, time_step: f64) -> Result<Refin
     )?;
     let (refined, maps) = finish_with_maps(&mut runtime)?;
     Ok((coarse, refined, maps))
+}
+
+/// A packet at a quarter of the speed ceiling, adapted as the app adapts it.
+/// Its first estimate refines around it, and once it has left that patch the
+/// estimate reads well under target and asks to coarsen. Judged by where the
+/// field was then, the region just ahead of it read as quiet and coarsened
+/// to twice the authored edge; the packet crossing it scattered a few
+/// percent of its energy back, and by t = 1.13 the adapted run was the less
+/// accurate, 0.154 against the coarse run's 0.135, and 0.234 against 0.167 at
+/// 1.5. Held at the authored size within the field's reach, no element
+/// coarser than the authored one lies where the field gets before the next
+/// transaction, and while the packet is inside the adapted run is the more
+/// accurate at every estimate, 0.152 against 0.167 at 1.5 the closest.
+#[test]
+fn a_slow_packet_never_meets_a_mesh_coarsened_ahead_of_it() {
+    let looped = looped(PhysicsModel::Mechanical, Start::Packet, 0.25, 1.6).unwrap();
+    assert!(
+        looped
+            .readings
+            .iter()
+            .any(|reading| reading.decided == "coarsen"),
+        "the packet's patch coarsens behind it"
+    );
+    for reading in &looped.readings {
+        assert_eq!(reading.exposed, 0, "at {:.3} s: {reading:?}", reading.time);
+        if reading.norm > 0.5 {
+            assert!(
+                reading.adaptive <= reading.coarse,
+                "at {:.3} s the adapted run reads {:.4} against the coarse run's {:.4}",
+                reading.time,
+                reading.adaptive,
+                reading.coarse
+            );
+        }
+    }
 }
 
 /// The handoff's carry leaves part of the flux stationary, and the app takes
@@ -824,7 +1082,14 @@ fn a_weak_packet_after_a_loud_one_is_refined_once_its_experiment_begins() {
     weak.step(&coarse).unwrap();
     let target = target_accuracy(settings);
     let decided = |controller: &mut AdaptationController| {
-        let result = estimated(controller, &coarse, &weak, &previous, settings).unwrap();
+        let result = estimated(
+            controller,
+            &coarse,
+            &weak,
+            &previous,
+            &document.presentation,
+        )
+        .unwrap();
         let decision = adaptation_decision(&result.report, target);
         (result.report, decision)
     };

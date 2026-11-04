@@ -676,7 +676,12 @@ names or with every expression evaluated at the material frame's origin. Each ro
   settings holds elements per wavelength, at six - twelve nodes, quadratically -
   and the smallest and largest element, and the panel says when a forced
   wavelength wants elements under the smallest allowed, which holds the mesh at
-  its floor on its own. Refinement reacts immediately, while coarsening requires
+  its floor on its own. The largest element applies only where the field cannot
+  get before adaptation next comes round: within twice the distance its fastest
+  wave runs in one round, elements stay at the scene's own mesh size, and a
+  region coarsened past it while the field was far is refined back as the
+  field draws near, so a wave never runs onto a mesh coarser than the scene's.
+  Refinement reacts immediately, while coarsening requires
   two quiet estimates and has its own transaction quota. View's Overlay list carries the current target
   field alongside the material overlays, blue where the estimate wants the finest
   elements and orange where it wants the coarsest, and says which of adaptation

@@ -1793,7 +1793,13 @@ triangle instead of taking the minimum over an entire vertex star; evaluation st
 chooses the conservative side on a shared edge. Fast, Balanced, and Detailed presets
 select tolerance, elements per wavelength, topology budget, and maximum coarsening
 step. Advanced minimum/maximum limits keep capacity explicit and allow quiet regions
-to become coarser than the initial mesh.
+to become coarser than the initial mesh, but only beyond the field's reach
+(`FieldReach`): the distance its fastest wave, drives and field laws included,
+covers in twice the time until adaptation next acts, measured from the elements
+denser than 1% of the experiment's peak energy spread over the domain, on an
+exact distance transform of a raster over the mesh. Within it the largest element is
+the authored mesh's, a limit that refines a coarsened element back as the field
+approaches, and it grows linearly to the Advanced maximum at twice the reach.
 
 The app advances coefficient sampling, indicator, and adaptation jobs in soft 2 ms
 slices, rejects stale mesh/GPU/settings generations, and waits between estimates.

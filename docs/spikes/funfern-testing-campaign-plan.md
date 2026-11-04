@@ -1424,12 +1424,17 @@ mutation, in this order:
   and handoff by units of work, stepping on the CPU. The decision rule,
   `adaptation_decision` and `adaptation_field`, leaves `ui` for a module
   the harness calls, its behaviour unchanged; the UI keeps its wall-clock
-  pacing. AMR-01's study found two defects before its bounds could be set,
-  and each is fixed first, with the user: a handoff's carry left part of
-  the flux stationary, which never left and held the mesh refined
-  (2026-11-03, taken away after each handoff), and the floor that ends
+  pacing. AMR-01's study found three defects before its bounds could be
+  set, and each is fixed first, with the user: a handoff's carry left part
+  of the flux stationary, which never left and held the mesh refined
+  (2026-11-03, taken away after each handoff); the floor that ends
   adaptation's chase of a draining field, with the display's quiet floor,
-  is measured against the run's loudest moment, not the experiment's.
+  was measured against the run's loudest moment, not the experiment's
+  (2026-11-03, each experiment begins its own); and a coarsening judged by
+  where the field was coarsened the region a slow packet was about to
+  enter past the authored size, which the packet scattered off, leaving the
+  adapted run less accurate than the coarse one (2026-11-04, the authored
+  size held within the field's reach).
 - **PH-19**, after C6.
 - **C7, the runtime on the device:** RT-03 on the host first, then RT-02,
   RT-04, RT-05, the adaptive loop's device half, held to statistics rather

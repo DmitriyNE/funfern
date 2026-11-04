@@ -1,0 +1,18 @@
+diff --git a/crates/funfern-app/src/adaptation.rs b/crates/funfern-app/src/adaptation.rs
+--- a/crates/funfern-app/src/adaptation.rs
++++ b/crates/funfern-app/src/adaptation.rs
+@@ -579,12 +579,12 @@
+                 ),
+                 coarsen_ratio: AMR_COARSEN_EDGE_RATIO,
+                 dormant_below_energy: self.energy_peak * DORMANT_ENERGY_RATIO,
+-                field_reach: Some(FieldReach {
++                field_reach: None::<()>.and(Some(FieldReach {
+                     horizon,
+                     speed_factor,
+                     authored_edge: AMR_AUTHORED_EDGE_SLACK * presentation.mesh_edge,
+                     holding_energy: self.energy_peak * AMR_FIELD_PRESENCE_RATIO,
+-                }),
++                })),
+                 ..Default::default()
+             },
+         )

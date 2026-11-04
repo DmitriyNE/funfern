@@ -2,6 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::SymmetricTensor2;
 use crate::canonical_consumer::complementary_interpolation_weights;
+use crate::field_reach::FieldReachRaster;
 use crate::wave::TimedDirectionalWaveCoefficients;
 use crate::{
     BoundaryLabel, CanonicalForcing, CanonicalMaterialRuntimeState, CanonicalRateDrive,
@@ -711,7 +712,54 @@ pub struct SolutionIndicatorOptions {
     /// wavelength and configured-size limits remain authoritative. Zero keeps
     /// the scale-free standalone estimator behavior.
     pub dormant_below_energy: f64,
+    /// Holds the mesh at its authored size wherever the field can get before
+    /// adaptation next acts; `None` lets every quiet element grow to the
+    /// largest allowed, as the standalone estimator does.
+    pub field_reach: Option<FieldReach>,
     pub max_work_units: usize,
+}
+
+/// Where a mesh may grow past its authored size: only where the field cannot
+/// get before a later transaction could shrink it back.
+///
+/// Judged by where the field is now, a region a wave is about to enter reads
+/// as quiet, and coarsened, the wave scatters off it. A packet at a quarter
+/// of the speed ceiling crossed elements twice the authored edge that a
+/// coarsening had made just ahead of it, sent a few percent of its energy
+/// back, and the refinements that followed chased what it sent: adapting
+/// left that run less accurate than never adapting.
+///
+/// The reach is the fastest wave speed the generation can reach, the
+/// authored one times `speed_factor`, over `horizon`. Within it the largest
+/// element allowed is `authored_edge`, a limit rather than a judgement, so
+/// an element coarsened past it refines back on its own account once the
+/// field draws near; from there it grows linearly to the largest allowed at
+/// twice the reach.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldReach {
+    /// Simulated seconds until a later transaction could land.
+    pub horizon: f64,
+    /// How much faster than its authored media a generation's drives and
+    /// field laws can make its waves; one for a fixed linear generation.
+    pub speed_factor: f64,
+    /// The largest element allowed within reach: the authored mesh's own.
+    pub authored_edge: f64,
+    /// The energy which, spread evenly over the domain, is the density an
+    /// element must exceed to hold the field.
+    pub holding_energy: f64,
+}
+
+impl FieldReach {
+    fn valid(self) -> bool {
+        self.horizon.is_finite()
+            && self.horizon > 0.0
+            && self.speed_factor.is_finite()
+            && self.speed_factor > 0.0
+            && self.authored_edge.is_finite()
+            && self.authored_edge > 0.0
+            && self.holding_energy.is_finite()
+            && self.holding_energy >= 0.0
+    }
 }
 
 impl Default for SolutionIndicatorOptions {
@@ -729,6 +777,7 @@ impl Default for SolutionIndicatorOptions {
             coarsen_ratio: 0.65,
             amplitude_floor: 1.0e-8,
             dormant_below_energy: 0.0,
+            field_reach: None,
             max_work_units: 5_000_000,
         }
     }
@@ -791,6 +840,11 @@ pub struct SolutionIndicatorReport {
     /// size rule to resolve: one for the third, two for the fifth, zero
     /// where none did.
     pub field_law_harmonics: u32,
+    /// How far the field can get before a later transaction could land, zero
+    /// without a [`FieldReach`].
+    pub field_reach: f64,
+    /// The elements the reach held under the largest element allowed.
+    pub reach_held_elements: usize,
 }
 
 impl Default for SolutionIndicatorReport {
@@ -825,6 +879,8 @@ impl Default for SolutionIndicatorReport {
             smallest_wavelength_target: f64::INFINITY,
             largest_field_tangent: 1.0,
             field_law_harmonics: 0,
+            field_reach: 0.0,
+            reach_held_elements: 0,
         }
     }
 }
@@ -1093,6 +1149,9 @@ enum IndicatorPhase {
     Estimate(usize),
     Jump(usize),
     Boundary(usize),
+    ReachMark(usize),
+    ReachTransform(usize),
+    ReachRead(usize),
     Target(usize),
     Grade { pass: usize, edge: usize },
     Finish,
@@ -1124,6 +1183,12 @@ pub struct SolutionIndicatorJob {
     limit_targets: Vec<f64>,
     total_energy: f64,
     total_area: f64,
+    /// The fastest authored wave speed of any material sample.
+    fastest_wave_speed: f64,
+    /// The field's raster while the reach is measured, and each element's
+    /// distance from the field once it has been; see [`FieldReach`].
+    reach_raster: Option<FieldReachRaster>,
+    reach_distances: Vec<f64>,
     report: SolutionIndicatorReport,
     canonical: Option<CanonicalIndicatorSupplement>,
     runtime: Option<CanonicalMaterialRuntimeState>,
@@ -1189,6 +1254,9 @@ impl SolutionIndicatorJob {
             limit_targets: vec![0.0; count],
             total_energy: 0.0,
             total_area: 0.0,
+            fastest_wave_speed: 0.0,
+            reach_raster: None,
+            reach_distances: Vec::new(),
             report: SolutionIndicatorReport::default(),
             canonical: None,
             runtime: None,
@@ -1258,6 +1326,9 @@ impl SolutionIndicatorJob {
             IndicatorPhase::Estimate(_) | IndicatorPhase::Jump(_) | IndicatorPhase::Boundary(_) => {
                 "Estimating wave error"
             }
+            IndicatorPhase::ReachMark(_)
+            | IndicatorPhase::ReachTransform(_)
+            | IndicatorPhase::ReachRead(_) => "Measuring the field's reach",
             IndicatorPhase::Target(_) | IndicatorPhase::Grade { .. } => "Grading AMR target",
             IndicatorPhase::Finish | IndicatorPhase::Done => "AMR estimate ready",
         }
@@ -1324,6 +1395,9 @@ impl SolutionIndicatorJob {
             IndicatorPhase::Estimate(index) => self.estimate(index)?,
             IndicatorPhase::Jump(index) => self.jump(index)?,
             IndicatorPhase::Boundary(index) => self.boundary(index)?,
+            IndicatorPhase::ReachMark(index) => self.reach_mark(index),
+            IndicatorPhase::ReachTransform(line) => self.reach_transform(line),
+            IndicatorPhase::ReachRead(index) => self.reach_read(index),
             IndicatorPhase::Target(index) => self.target(index)?,
             IndicatorPhase::Grade { pass, edge } => self.grade(pass, edge),
             IndicatorPhase::Finish => return Ok(Some(self.finish())),
@@ -1361,6 +1435,7 @@ impl SolutionIndicatorJob {
             || options.amplitude_floor <= 0.0
             || !options.dormant_below_energy.is_finite()
             || options.dormant_below_energy < 0.0
+            || options.field_reach.is_some_and(|reach| !reach.valid())
             || options.max_work_units == 0
         {
             return Err(SolutionIndicatorError::InvalidOptions);
@@ -1601,6 +1676,9 @@ impl SolutionIndicatorJob {
             let material = self.timed_material_at(triangle.region, point)?;
             vertex_stiffness[local] = material.instantaneous.stiffness;
             minimum_wave_speed = minimum_wave_speed.min(material.authored.minimum_wave_speed());
+            self.fastest_wave_speed = self
+                .fastest_wave_speed
+                .max(material.authored.maximum_wave_speed());
         }
         let mut samples = [None; 6];
         for (sample, (barycentric, _)) in samples.iter_mut().zip(quadrature()) {
@@ -1609,6 +1687,9 @@ impl SolutionIndicatorJob {
                 barycentric_point(geometry.points, barycentric),
             )?;
             minimum_wave_speed = minimum_wave_speed.min(material.authored.minimum_wave_speed());
+            self.fastest_wave_speed = self
+                .fastest_wave_speed
+                .max(material.authored.maximum_wave_speed());
             *sample = Some(material.instantaneous);
         }
         let [Some(a), Some(b), Some(c), Some(d), Some(e), Some(f)] = samples else {
@@ -2001,7 +2082,11 @@ impl SolutionIndicatorJob {
 
     fn boundary(&mut self, index: usize) -> Result<(), SolutionIndicatorError> {
         if index == self.boundary_records.len() {
-            self.phase = IndicatorPhase::Target(0);
+            self.phase = if self.options.field_reach.is_some() {
+                IndicatorPhase::ReachMark(0)
+            } else {
+                IndicatorPhase::Target(0)
+            };
             return Ok(());
         }
         let record = self.boundary_records[index];
@@ -2153,6 +2238,103 @@ impl SolutionIndicatorJob {
         Ok(())
     }
 
+    /// Marks where the field is: the elements whose energy density exceeds
+    /// the reach's holding energy spread over the domain.
+    fn reach_mark(&mut self, index: usize) {
+        let Some(reach) = self.options.field_reach else {
+            self.phase = IndicatorPhase::Target(0);
+            return;
+        };
+        if index == 0 {
+            let (low, high) = self.mesh.vertices.iter().fold(
+                (
+                    Point2::new(f64::INFINITY, f64::INFINITY),
+                    Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
+                ),
+                |(low, high), vertex| {
+                    (
+                        Point2::new(low.x.min(vertex.point.x), low.y.min(vertex.point.y)),
+                        Point2::new(high.x.max(vertex.point.x), high.y.max(vertex.point.y)),
+                    )
+                },
+            );
+            self.reach_raster = Some(FieldReachRaster::new(low, high));
+            self.report.field_reach = reach.horizon * reach.speed_factor * self.fastest_wave_speed;
+        }
+        if index == self.mesh.triangles.len() {
+            self.phase = IndicatorPhase::ReachTransform(0);
+            return;
+        }
+        let estimate = self.estimates[index];
+        if estimate.energy * self.total_area > reach.holding_energy * estimate.area {
+            let points = self.mesh.triangles[index]
+                .vertices
+                .map(|vertex| self.mesh.vertices[vertex].point);
+            if let Some(raster) = &mut self.reach_raster {
+                raster.mark(points);
+            }
+        }
+        self.phase = IndicatorPhase::ReachMark(index + 1);
+    }
+
+    fn reach_transform(&mut self, line: usize) {
+        let Some(raster) = &mut self.reach_raster else {
+            self.phase = IndicatorPhase::Target(0);
+            return;
+        };
+        if line == raster.lines() {
+            self.reach_distances = vec![f64::INFINITY; self.mesh.triangles.len()];
+            self.phase = IndicatorPhase::ReachRead(0);
+            return;
+        }
+        raster.transform_line(line);
+        self.phase = IndicatorPhase::ReachTransform(line + 1);
+    }
+
+    fn reach_read(&mut self, index: usize) {
+        if index == self.mesh.triangles.len() {
+            self.reach_raster = None;
+            self.phase = IndicatorPhase::Target(0);
+            return;
+        }
+        if let Some(raster) = &self.reach_raster {
+            let points = self.mesh.triangles[index]
+                .vertices
+                .map(|vertex| self.mesh.vertices[vertex].point);
+            self.reach_distances[index] = raster.distance(points);
+        }
+        self.phase = IndicatorPhase::ReachRead(index + 1);
+    }
+
+    /// The largest element allowed at element `index`: the authored size
+    /// within the field's reach, growing linearly to the largest allowed at
+    /// twice it, and the largest allowed everywhere without a reach.
+    fn largest_allowed(&mut self, index: usize) -> f64 {
+        let (minimum, maximum) = (
+            self.options.minimum_edge_length,
+            self.options.maximum_edge_length,
+        );
+        let (Some(reach), Some(distance)) =
+            (self.options.field_reach, self.reach_distances.get(index))
+        else {
+            return maximum;
+        };
+        let authored = reach.authored_edge.clamp(minimum, maximum);
+        let extent = self.report.field_reach;
+        let share = if extent > 0.0 {
+            ((distance - extent) / extent).clamp(0.0, 1.0)
+        } else if *distance > 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+        let largest = authored + (maximum - authored) * share;
+        if largest < maximum {
+            self.report.reach_held_elements += 1;
+        }
+        largest
+    }
+
     fn target(&mut self, index: usize) -> Result<(), SolutionIndicatorError> {
         if index == self.mesh.triangles.len() {
             self.phase = IndicatorPhase::Grade { pass: 0, edge: 0 };
@@ -2213,12 +2395,10 @@ impl SolutionIndicatorJob {
             self.options.minimum_edge_length,
             self.options.maximum_edge_length,
         );
+        let largest = self.largest_allowed(index);
         let limit_target = wavelength_target
-            .unwrap_or(self.options.maximum_edge_length)
-            .clamp(
-                self.options.minimum_edge_length,
-                self.options.maximum_edge_length,
-            );
+            .unwrap_or(largest)
+            .clamp(self.options.minimum_edge_length, largest);
         self.limit_bound[index] = estimate.edge > 1.05 * limit_target;
         let target = error_target.min(limit_target);
         self.indicators[index] = indicator;
@@ -3852,6 +4032,264 @@ mod tests {
         assert_eq!(result.report.refine_candidates, 2);
         assert_eq!(result.report.limit_refine_candidates, 2);
         assert_eq!(result.report.error_refine_candidates, 0);
+    }
+
+    /// A box meshed at 0.12 with a narrow bump near its left side, the
+    /// options of an estimate of it and the bump's centre.
+    fn bump_setup() -> (
+        Arc<Meshed>,
+        Arc<QuadraticWaveOperator>,
+        TopologyScene,
+        QuadraticSolutionSnapshot,
+        SolutionIndicatorOptions,
+        Point2,
+    ) {
+        let scene = TopologyScene::default();
+        let mesh = Arc::new(
+            meshed(
+                &scene,
+                10,
+                MeshingOptions {
+                    curve_tolerance: 1.0e-3,
+                    target_edge_length: 0.12,
+                    minimum_angle_degrees: 12.0,
+                    max_vertices: 20_000,
+                    max_triangles: 40_000,
+                    max_refinement_steps: 20_000,
+                },
+            )
+            .unwrap(),
+        );
+        let operator = Arc::new(assembled_with(&mesh, &scene, scene.outer_boundaries).unwrap());
+        let (low, high) = mesh.vertices.iter().fold(
+            (
+                Point2::new(f64::INFINITY, f64::INFINITY),
+                Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY),
+            ),
+            |(low, high), vertex| {
+                (
+                    Point2::new(low.x.min(vertex.point.x), low.y.min(vertex.point.y)),
+                    Point2::new(high.x.max(vertex.point.x), high.y.max(vertex.point.y)),
+                )
+            },
+        );
+        let centre = Point2::new(low.x + 0.2 * (high.x - low.x), 0.5 * (low.y + high.y));
+        let state = snapshot(&mesh, &operator, |point| {
+            (-(point - centre).dot(point - centre) / 0.01).exp()
+        });
+        let options = SolutionIndicatorOptions {
+            minimum_edge_length: 0.02,
+            maximum_edge_length: 0.5,
+            ..Default::default()
+        };
+        (mesh, operator, scene, state, options, centre)
+    }
+
+    fn estimate_with(
+        setup: &(
+            Arc<Meshed>,
+            Arc<QuadraticWaveOperator>,
+            TopologyScene,
+            QuadraticSolutionSnapshot,
+            SolutionIndicatorOptions,
+            Point2,
+        ),
+        reach: Option<FieldReach>,
+    ) -> SolutionIndicatorResult {
+        let (mesh, operator, scene, state, options, _) = setup;
+        run(
+            SolutionIndicatorJob::new_topology(
+                std::sync::Arc::new(mesh.mesh.clone()),
+                operator.clone(),
+                &mesh.plan,
+                TopologyWaveModel::from_topology_scene(scene),
+                state.clone(),
+                SolutionIndicatorOptions {
+                    field_reach: reach,
+                    ..*options
+                },
+            ),
+            1_000,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_field_holds_its_reach_at_the_authored_size_and_lets_the_rest_grow() {
+        let setup = bump_setup();
+        let free = estimate_with(&setup, None);
+        let reach = FieldReach {
+            horizon: 0.3,
+            speed_factor: 1.0,
+            authored_edge: 0.12,
+            holding_energy: 1.0e-2 * free.report.total_energy,
+        };
+        let held = estimate_with(&setup, Some(reach));
+        // The default medium's waves run at one.
+        assert!(
+            (held.report.field_reach - 0.3).abs() < 1e-12,
+            "{:?}",
+            held.report
+        );
+        let mesh = &setup.0;
+        let centre = setup.5;
+        let distance = |index: usize| {
+            let points = mesh.triangles[index]
+                .vertices
+                .map(|vertex| mesh.vertices[vertex].point);
+            crate::field_reach::point_triangle_distance(centre, points)
+        };
+        let (mut near, mut far) = (0, 0);
+        for index in 0..mesh.triangles.len() {
+            let limit = held.limit_field.element_target(index).unwrap();
+            // The bump's middle holds the field, so what lies within the reach
+            // of it is held to the authored size.
+            if distance(index) <= 0.3 {
+                assert!(limit <= 0.12 + 1e-12, "{index}: {limit} near the field");
+                near += 1;
+            }
+            // Past the bump's tail, twice the reach and the grading out of it,
+            // the largest element allowed is the configured one, as without a
+            // reach.
+            if distance(index) >= 1.4 {
+                assert_eq!(limit, free.limit_field.element_target(index).unwrap());
+                assert_eq!(limit, 0.5);
+                far += 1;
+            }
+        }
+        assert!(near > 0 && far > 0, "{near} near, {far} far");
+        assert!(held.report.reach_held_elements > 0);
+        assert!(held.report.reach_held_elements < mesh.triangles.len());
+        // Elements at the authored size already satisfy it: nothing refines
+        // for the reach alone.
+        assert_eq!(
+            held.report.limit_refine_candidates,
+            free.report.limit_refine_candidates
+        );
+    }
+
+    #[test]
+    fn an_authored_size_at_the_largest_allowed_changes_nothing() {
+        let setup = bump_setup();
+        let free = estimate_with(&setup, None);
+        let held = estimate_with(
+            &setup,
+            Some(FieldReach {
+                horizon: 0.3,
+                speed_factor: 1.0,
+                authored_edge: 0.5,
+                holding_energy: 0.0,
+            }),
+        );
+        assert_eq!(held.element_targets, free.element_targets);
+        assert_eq!(held.element_indicators, free.element_indicators);
+        for index in 0..setup.0.triangles.len() {
+            assert_eq!(
+                held.limit_field.element_target(index),
+                free.limit_field.element_target(index)
+            );
+        }
+        assert_eq!(held.report.refine_candidates, free.report.refine_candidates);
+        assert_eq!(
+            held.report.coarsen_candidates,
+            free.report.coarsen_candidates
+        );
+    }
+
+    #[test]
+    fn an_element_coarser_than_authored_within_reach_refines_as_a_limit() {
+        let setup = bump_setup();
+        let free = estimate_with(&setup, None);
+        // Authored at half the mesh's own edge: every element the field can
+        // reach is too coarse for it, as one coarsened past the authored size
+        // is once the field draws near.
+        let held = estimate_with(
+            &setup,
+            Some(FieldReach {
+                horizon: 0.3,
+                speed_factor: 1.0,
+                authored_edge: 0.06,
+                holding_energy: 1.0e-2 * free.report.total_energy,
+            }),
+        );
+        assert_eq!(free.report.limit_refine_candidates, 0);
+        assert!(held.report.limit_refine_candidates > 0, "{:?}", held.report);
+        // A refinement the limits alone ask for splits only what the reach
+        // holds: its field leaves the far side at the largest allowed.
+        assert!(held.report.limit_refine_candidates < setup.0.triangles.len());
+    }
+
+    #[test]
+    fn a_drive_that_speeds_the_waves_widens_the_reach() {
+        let setup = bump_setup();
+        let free = estimate_with(&setup, None);
+        let reach = FieldReach {
+            horizon: 0.3,
+            speed_factor: 1.0,
+            authored_edge: 0.12,
+            holding_energy: 1.0e-2 * free.report.total_energy,
+        };
+        let slow = estimate_with(&setup, Some(reach));
+        let fast = estimate_with(
+            &setup,
+            Some(FieldReach {
+                speed_factor: 2.0,
+                ..reach
+            }),
+        );
+        assert!((fast.report.field_reach - 2.0 * slow.report.field_reach).abs() < 1e-12);
+        assert!(fast.report.reach_held_elements > slow.report.reach_held_elements);
+    }
+
+    #[test]
+    fn a_malformed_reach_is_refused() {
+        let setup = bump_setup();
+        for reach in [
+            FieldReach {
+                horizon: 0.0,
+                speed_factor: 1.0,
+                authored_edge: 0.12,
+                holding_energy: 0.0,
+            },
+            FieldReach {
+                horizon: 0.3,
+                speed_factor: f64::NAN,
+                authored_edge: 0.12,
+                holding_energy: 0.0,
+            },
+            FieldReach {
+                horizon: 0.3,
+                speed_factor: 1.0,
+                authored_edge: -1.0,
+                holding_energy: 0.0,
+            },
+            FieldReach {
+                horizon: 0.3,
+                speed_factor: 1.0,
+                authored_edge: 0.12,
+                holding_energy: -1.0,
+            },
+        ] {
+            let (mesh, operator, scene, state, options, _) = &setup;
+            let refused = run(
+                SolutionIndicatorJob::new_topology(
+                    std::sync::Arc::new(mesh.mesh.clone()),
+                    operator.clone(),
+                    &mesh.plan,
+                    TopologyWaveModel::from_topology_scene(scene),
+                    state.clone(),
+                    SolutionIndicatorOptions {
+                        field_reach: Some(reach),
+                        ..*options
+                    },
+                ),
+                1_000,
+            );
+            assert!(
+                matches!(refused, Err(SolutionIndicatorError::InvalidOptions)),
+                "{reach:?}"
+            );
+        }
     }
 
     #[test]

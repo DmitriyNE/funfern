@@ -1554,7 +1554,20 @@ lane must book it within 1e-4 (1.5e-6). An experiment's floor:
 `a_weak_packet_after_a_loud_one_is_refined_once_its_experiment_begins` launches
 the packet at a two-hundredth of a loud one's amplitude, and requires it dormant
 under the loud one's peak and, once its own experiment begins, refined: it reads
-0.1496 against the 0.12 target. Its mutation is `experiment-keeps-the-runs-peak`.
+0.1496 against the 0.12 target. Its mutation is `experiment-keeps-the-runs-peak`. The
+field's reach: `a_slow_packet_never_meets_a_mesh_coarsened_ahead_of_it` adapts
+the packet at a quarter of the speed ceiling for 1.6 s, which coarsens its
+first patch behind it. At every estimate no element of the mesh it steps on
+may be coarser than 1.25 of the authored edge within the distance the fine
+reference's field, where denser than 1% of its peak spread over the box,
+travels before the next transaction; while the packet is inside, the adapted
+run's error against the reference must not exceed the coarse run's (0.152
+against 0.167 at 1.5 s the closest; before the reach, 0.234 against 0.167).
+Its mutation is `coarsening-ignores-the-field-reach`. In the core, the reach's
+distance is held against brute force on random triangles, never above the true
+distance and within two cell diagonals of it, and its targets within the reach,
+past twice it and with the authored size at the largest allowed;
+`reach-ignores-the-speed-ceiling` fails the controller's horizon tests.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

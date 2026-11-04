@@ -1,0 +1,4 @@
+about: the field's reach forgets the speed ceiling, so a first estimate, one after Reset and one after the ceiling is raised reach no farther than the last cycle did
+test: cargo test --release -p funfern-app --lib adaptation::tests
+expect: left: 0\.0
+needs: cpu

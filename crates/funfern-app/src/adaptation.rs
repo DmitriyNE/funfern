@@ -7,7 +7,7 @@
 //! estimate, on a run stepped on the CPU (AMR-01 to AMR-04 of
 //! `docs/spikes/funfern-testing-campaign-plan.md`, section 6l).
 
-use crate::document::AdaptationSettings;
+use crate::document::{AdaptationSettings, PresentationSettings};
 use crate::topology_runtime::{PreparedTopology, TopologyRuntime};
 use funfern_core::*;
 use std::collections::BTreeMap;
@@ -43,6 +43,21 @@ pub const AMR_ESTIMATE_STEPS: u64 = 8;
 /// The fewest wall-clock seconds between the starts of two estimates, which
 /// at a simulation speed of one is as many simulated seconds.
 pub const AMR_ESTIMATE_SECONDS: f64 = 0.75;
+/// How many times over the field's reach ([`FieldReach`]) covers the time
+/// until adaptation can next act: an element the field may get to is
+/// refined back a cycle before it can, and a cycle up to this much longer
+/// than the last still finds it refined.
+pub const AMR_REACH_MARGIN: f64 = 2.0;
+/// An element holds the field when its energy density exceeds this share of
+/// the experiment's peak energy spread evenly over the domain. Tied to the
+/// peak, as dormancy is, a leftover that has spread thin stops holding the
+/// mesh at its authored size once it fades; a weak field that stays
+/// localized still holds it.
+pub const AMR_FIELD_PRESENCE_RATIO: f64 = 1.0e-2;
+/// The authored mesh's largest element over its target edge: the mesher
+/// splits every edge past this of its target, as adaptation does, so a limit
+/// at it never refines the authored mesh.
+pub const AMR_AUTHORED_EDGE_SLACK: f64 = 1.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AmrDecision {
@@ -468,6 +483,9 @@ pub struct AdaptationController {
     /// The most energy the field has held since the experiment began, which
     /// sets the floor under which its error is no longer chased.
     pub energy_peak: f64,
+    /// The simulated time of the last estimate's snapshot: the next one's,
+    /// less it, is how long adaptation last took to come round.
+    pub last_estimate_time: Option<f64>,
 }
 
 impl AdaptationController {
@@ -488,18 +506,51 @@ impl AdaptationController {
         }
     }
 
-    /// The estimate of `snapshots`, a state of `active`, under `settings`.
+    /// How far, in simulated seconds, the field may run before a transaction
+    /// an estimate at `time` leads to could be followed by another: the
+    /// longer of the last cycle, snapshot to snapshot, and the estimates'
+    /// cadence at the speed ceiling `simulation_speed`, which covers a
+    /// ceiling raised since, [`AMR_REACH_MARGIN`] times over. A first
+    /// estimate, or one after the clock went back, has the cadence alone.
+    pub fn reach_horizon(&self, time: f64, simulation_speed: f64) -> f64 {
+        let cadence = simulation_speed * AMR_ESTIMATE_SECONDS;
+        let cycle = self
+            .last_estimate_time
+            .map(|last| time - last)
+            .filter(|cycle| cycle.is_finite() && *cycle > 0.0)
+            .unwrap_or(0.0);
+        AMR_REACH_MARGIN * cycle.max(cadence)
+    }
+
+    /// The estimate of `snapshots`, a state of `active`, under `presentation`'s
+    /// adaptation settings, its authored mesh edge and its speed ceiling.
     pub fn estimate(
-        &self,
+        &mut self,
         active: &PreparedTopology,
         snapshots: IndicatorSnapshots,
-        settings: AdaptationSettings,
+        presentation: &PresentationSettings,
     ) -> AmrIndicatorJob {
+        let settings = presentation.adaptation;
         let IndicatorSnapshots {
             scalar: snapshot,
             canonical: canonical_snapshot,
             temporal,
         } = snapshots;
+        let time = canonical_snapshot.time;
+        let horizon = self.reach_horizon(time, presentation.simulation_speed);
+        self.last_estimate_time = Some(time);
+        // The drives' and field laws' floors bound how far under the authored
+        // coefficients the solver's divisors fall, which is how much faster
+        // than authored any wave of the generation runs. Never under one: the
+        // authored speed the estimate samples is the fixed medium's.
+        let speed_factor = active
+            .canonical_temporal_operator
+            .as_ref()
+            .map_or(1.0, |operator| {
+                let bound = operator.time_step_bound();
+                (1.0 / (bound.primary_floor * bound.complementary_floor)).sqrt()
+            })
+            .max(1.0);
         let patterns = scene_resolution_demand(&active.bundle.authored);
         let job = SolutionIndicatorJob::new_topology(
             active.mesh.clone(),
@@ -528,6 +579,12 @@ impl AdaptationController {
                 ),
                 coarsen_ratio: AMR_COARSEN_EDGE_RATIO,
                 dormant_below_energy: self.energy_peak * DORMANT_ENERGY_RATIO,
+                field_reach: Some(FieldReach {
+                    horizon,
+                    speed_factor,
+                    authored_edge: AMR_AUTHORED_EDGE_SLACK * presentation.mesh_edge,
+                    holding_energy: self.energy_peak * AMR_FIELD_PRESENCE_RATIO,
+                }),
                 ..Default::default()
             },
         )
@@ -656,5 +713,52 @@ impl AdaptationController {
         // carried over, the new one was coarsened on a single estimate taken
         // right after its transfer (MESH-4 of the 2026-10-20 review).
         self.coarsen_streak = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_first_estimate_reaches_as_far_as_the_cadence_at_the_ceiling() {
+        let controller = AdaptationController::default();
+        let horizon = controller.reach_horizon(3.0, 0.5);
+        assert_eq!(horizon, AMR_REACH_MARGIN * 0.5 * AMR_ESTIMATE_SECONDS);
+    }
+
+    #[test]
+    fn a_slow_cycle_reaches_as_far_as_it_took() {
+        let controller = AdaptationController {
+            last_estimate_time: Some(1.0),
+            ..Default::default()
+        };
+        // A transaction and its handoff stretched the last cycle past the
+        // cadence: the next may take as long.
+        assert_eq!(controller.reach_horizon(2.5, 1.0), AMR_REACH_MARGIN * 1.5);
+    }
+
+    #[test]
+    fn a_ceiling_raised_since_the_last_cycle_reaches_at_once() {
+        let controller = AdaptationController {
+            last_estimate_time: Some(1.0),
+            ..Default::default()
+        };
+        // The last cycle ran at a tenth of the speed; the ceiling is two now.
+        let horizon = controller.reach_horizon(1.075, 2.0);
+        assert_eq!(horizon, AMR_REACH_MARGIN * 2.0 * AMR_ESTIMATE_SECONDS);
+    }
+
+    #[test]
+    fn a_clock_gone_back_reaches_as_far_as_the_cadence() {
+        let controller = AdaptationController {
+            last_estimate_time: Some(40.0),
+            ..Default::default()
+        };
+        // A Reset restarts the clock at zero.
+        assert_eq!(
+            controller.reach_horizon(0.2, 1.0),
+            AMR_REACH_MARGIN * AMR_ESTIMATE_SECONDS
+        );
     }
 }
