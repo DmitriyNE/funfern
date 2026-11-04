@@ -32349,3 +32349,40 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-04 — AMR-01: the adaptive loop closed on the CPU
+
+- **What.** Milestone C's AMR-01 (campaign plan, section 6l): the app's own
+  estimate, decision, transaction, preparation, handoff and flux cleanup,
+  driven estimate by estimate on runs stepped on the CPU at the app's
+  cadence, beside a fixed coarse run on the authored mesh and a fixed fine
+  one at the smallest element allowed. Its study found three defects first,
+  each fixed with the user: the handoff's stationary flux, the run-long
+  floor, and the coarsening ahead of a slow packet.
+- **The study** (`study_the_adaptive_loop`, the box, both starts at speeds
+  1, 0.25 and 0.1 for 8 s). The three skins are bit-identical on the box,
+  whose one unit medium and outgoing walls make one operator of them, so the
+  bounds hold in the Mechanical one. The ring is never refined while it is
+  inside: its estimate reads 0.09 against the 0.12 target, and it refines
+  only as it reaches the walls (AMR-02). The packet refines at once and is
+  the more accurate while inside, by 10% to 44%. Every case goes dormant
+  between 4.1 and 4.5 s and coarsens back; below full speed quiet regions
+  then grow past the authored mesh, the slow packet to 1915 triangles
+  against the authored 2772. At slow speeds the drain keeps refining after
+  the field has left, chasing what the walls send back, to 12,902 triangles
+  for the ring at a tenth.
+- **Bounds.** Six tests, `a_ring_at_full_speed_closes_the_loop` and the
+  rest, with the margins `checks.md` gives. The fine and the coarse run stop
+  at 2.5 s, past which their errors read residue over residue, and the
+  adapted run goes on alone: a case costs about 160 s of one core, the six
+  about 3 min on ten.
+- **Mutation.** `error-refinement-applies-the-limits-alone`: the packet at
+  full speed reads 0.1063 against the coarse run's 0.1063. The planned
+  `refine-whatever-the-target` was dropped as equivalent in the loop: the
+  refinement it starts applies the limits' field, `adaptation_field`'s own
+  rule, which asks for nothing, so the mesh never changes.
+- **Not done.** A dormant coarsening can add energy to what is left, 30% of
+  a residue 7e-6 of the peak the most (plan.md, Worth checking sometime).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

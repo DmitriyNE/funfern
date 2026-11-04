@@ -1569,6 +1569,28 @@ distance and within two cell diagonals of it, and its targets within the reach,
 past twice it and with the authored size at the largest allowed;
 `reach-ignores-the-speed-ceiling` fails the controller's horizon tests.
 
+AMR-01, the closed loop, is six tests of `tests/adaptation.rs`, a ring and a
+packet each at full speed, a quarter and a tenth of it
+(`a_ring_at_full_speed_closes_the_loop` and its five siblings, about 3 min
+together on ten cores). Each runs 8 s in the default box as the app adapts
+it, the fine and the coarse run beside it until 2.5 s, when the field has
+left. While the reference's norm is above nine tenths of its largest, the
+adapted run's error must not exceed the coarse run's, and the packet's, which
+refines while inside, must be 5% under it after the first estimate (at a
+tenth of the speed it is 10% under the closest). At every estimate no element
+past 1.25 of the authored edge may lie where the field gets before the next
+transaction. The mesh must stay under a third of the fine mesh's triangles
+(12,902 of 45,203 the most), go dormant and refine nothing after, end at most
+nine tenths of its peak (0.82 at full speed, 0.35 and less slower) and,
+below full speed, hold elements past the authored size. A handoff while the
+field lives must change its energy by between -1% and +1e-4 (-0.7% and
++4.6e-6 measured). Its mutation is
+`error-refinement-applies-the-limits-alone`, under which the packet at full
+speed reads 0.1063 against the coarse run's 0.1063. The one planned,
+refining whatever the error reads against the target, is equivalent in the
+loop: the transaction it starts applies the limits' field, which asks for
+nothing, and the mesh does not change.
+
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
 catch it and the pattern its failure must match; the script applies each,

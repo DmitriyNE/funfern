@@ -1,0 +1,4 @@
+about: a refinement the error estimate asks for applies the size rule's field alone, so the loop refines nothing for error and the adapted packet is no more accurate than the coarse one
+test: cargo test --release -p funfern-app --test adaptation -- a_packet_at_full_speed_closes_the_loop
+expect: the refined packet reads
+needs: cpu

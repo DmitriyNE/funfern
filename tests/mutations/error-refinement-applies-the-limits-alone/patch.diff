@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-app/src/adaptation.rs b/crates/funfern-app/src/adaptation.rs
+--- a/crates/funfern-app/src/adaptation.rs
++++ b/crates/funfern-app/src/adaptation.rs
+@@ -136,7 +136,7 @@
+     result: &SolutionIndicatorResult,
+     target_accuracy: f64,
+ ) -> Arc<AdaptiveSizeField> {
+-    if size_rule_refines(&result.report, target_accuracy) {
++    if size_rule_refines(&result.report, target_accuracy) || target_accuracy > 0.0 {
+         result.limit_field.clone()
+     } else {
+         result.field.clone()

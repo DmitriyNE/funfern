@@ -1434,7 +1434,8 @@ mutation, in this order:
   where the field was coarsened the region a slow packet was about to
   enter past the authored size, which the packet scattered off, leaving the
   adapted run less accurate than the coarse one (2026-11-04, the authored
-  size held within the field's reach).
+  size held within the field's reach). AMR-01 then landed (2026-11-04): six
+  cases, a ring and a packet at three speeds, in the workspace tests.
 - **PH-19**, after C6.
 - **C7, the runtime on the device:** RT-03 on the host first, then RT-02,
   RT-04, RT-05, the adaptive loop's device half, held to statistics rather

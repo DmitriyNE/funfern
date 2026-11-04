@@ -512,12 +512,16 @@ const EXPOSED_EDGE: f64 = 1.25;
 const STEP_SHARE: f64 = 0.5;
 
 /// `start` in the box in `physics`, run `duration` and adapted at
-/// `speed`'s cadence, beside the coarse and the fine run.
+/// `speed`'s cadence, beside the coarse and the fine run until
+/// `reference_until`. Past it the field has left, its error against the
+/// reference reads residue over residue, and the adapted run goes on alone:
+/// its readings have no errors and where the field is is its own.
 fn looped(
     physics: PhysicsModel,
     start: Start,
     speed: f64,
     duration: f64,
+    reference_until: f64,
 ) -> Result<Looped, String> {
     let mut document = box_document(physics)?;
     // The speed ceiling the app runs this run's speed under, which bounds
@@ -568,33 +572,52 @@ fn looped(
     // it, and estimates no pair of states a filter stands between.
     let filtered = std::env::var("AMR_UNFILTERED").is_err();
     for step in 1..=total {
+        let referenced = step as f64 * time_step <= reference_until;
         let boundary = filtered && step.is_multiple_of(GRID_SCALE_FILTER_CADENCE);
         let due = !boundary && last.is_none_or(|last| step >= last + gap);
-        let fine_previous = (due && diagnose).then(|| fine_run.clone());
-        let coarse_previous = (due && diagnose).then(|| coarse_run.clone());
-        fine_run.step(&fine)?;
-        coarse_run.step(&coarse)?;
+        let fine_previous = (due && diagnose && referenced).then(|| fine_run.clone());
+        let coarse_previous = (due && diagnose && referenced).then(|| coarse_run.clone());
+        if referenced {
+            fine_run.step(&fine)?;
+            coarse_run.step(&coarse)?;
+        }
         // The state a step earlier on this generation: a handoff falls
         // between steps, so the generation estimated has stepped since its own.
         let previous = run.clone();
         run.step(&prepared)?;
         if boundary {
-            fine_run.filter(&fine)?;
-            coarse_run.filter(&coarse)?;
+            if referenced {
+                fine_run.filter(&fine)?;
+                coarse_run.filter(&coarse)?;
+            }
             run.filter(&prepared)?;
         }
         if !due {
             continue;
         }
         last = Some(step);
-        let reference = read(&fine_stencils, &fine_run)?;
-        let norm = densities(&reference).iter().sum::<f64>().sqrt();
-        largest_norm = largest_norm.max(norm);
-        largest_mean = largest_mean.max(norm * norm / points.len() as f64);
         let adaptive_readings = read(&adaptive_stencils, &run)?;
-        let coarse_readings = read(&coarse_stencils, &coarse_run)?;
-        let adaptive = relative_error(&adaptive_readings, &reference);
-        let coarse_error = relative_error(&coarse_readings, &reference);
+        let (reference, coarse_readings) = if referenced {
+            (
+                read(&fine_stencils, &fine_run)?,
+                read(&coarse_stencils, &coarse_run)?,
+            )
+        } else {
+            (adaptive_readings.clone(), adaptive_readings.clone())
+        };
+        let norm = densities(&reference).iter().sum::<f64>().sqrt();
+        if referenced {
+            largest_norm = largest_norm.max(norm);
+            largest_mean = largest_mean.max(norm * norm / points.len() as f64);
+        }
+        let (adaptive, coarse_error) = if referenced {
+            (
+                relative_error(&adaptive_readings, &reference),
+                relative_error(&coarse_readings, &reference),
+            )
+        } else {
+            (f64::NAN, f64::NAN)
+        };
         let primary = [
             primary_share(&adaptive_readings),
             primary_share(&coarse_readings),
@@ -667,7 +690,11 @@ fn looped(
             dormant: result.report.dormant,
             adaptive,
             coarse: coarse_error,
-            norm: norm / largest_norm,
+            norm: if referenced {
+                norm / largest_norm
+            } else {
+                f64::NAN
+            },
             energy: run.energy(&prepared)? / controller.energy_peak,
             decided: "hold",
             changes: 0,
@@ -819,7 +846,7 @@ fn study_the_adaptive_loop() {
     for start in starts {
         for speed in speeds.iter().copied() {
             let started = std::time::Instant::now();
-            let looped = match looped(physics, start, speed, duration) {
+            let looped = match looped(physics, start, speed, duration, f64::INFINITY) {
                 Ok(looped) => looped,
                 Err(error) => {
                     eprintln!("{start:?} at speed {speed}: FAILED {error}");
@@ -943,6 +970,142 @@ fn first_refinement(document: &TopologyDocument, time_step: f64) -> Result<Refin
     Ok((coarse, refined, maps))
 }
 
+/// How long AMR-01's cases run: at full speed past two coarsenings after
+/// the field has gone, at the slower ones until quiet regions have grown
+/// past the authored mesh.
+const LOOP_DURATION: f64 = 8.0;
+/// Until when the fine and the coarse run step beside the adapted one: by
+/// then the ring holds 4% of its norm and the packet 2%, and their errors
+/// read residue over residue.
+const LOOP_REFERENCE: f64 = 2.5;
+/// The reference's norm over its largest above which the field is inside.
+const INSIDE: f64 = 0.9;
+
+/// AMR-01, the closed loop: `start` adapted at `speed`'s cadence as the app
+/// adapts it, beside the coarse and the fine run. From the study of
+/// 2026-11-04 (the box in the Mechanical skin, its three skins bit-identical
+/// there):
+///
+/// - while the field is inside, the adapted run is never less accurate than
+///   the coarse one; the packet, which refines, at least 5% more accurate
+///   after its first estimate (10% at a tenth of the speed the closest). The
+///   ring is not refined while inside: its estimate reads 0.09 against the
+///   0.12 target (AMR-02);
+/// - no element past the authored size lies where the field gets before the
+///   next transaction;
+/// - the mesh never holds a third of the fine mesh's triangles (12,902 of
+///   45,203 the most, the ring at a tenth, chasing what its walls send back);
+/// - the field goes dormant, and nothing refines after;
+/// - it coarsens back, to at most nine tenths of its peak (0.82 at
+///   full speed, 0.35 and less slower), and below full speed quiet
+///   regions grow past the authored mesh;
+/// - a handoff while the field lives takes at most 1% of its energy (0.7%
+///   the most) and adds at most 1e-4 (4.6e-6).
+fn closes_the_loop(start: Start, speed: f64) {
+    let looped = looped(
+        PhysicsModel::Mechanical,
+        start,
+        speed,
+        LOOP_DURATION,
+        LOOP_REFERENCE,
+    )
+    .unwrap();
+    let readings = &looped.readings;
+    let case = format!("{start:?} at speed {speed}");
+    for (index, reading) in readings.iter().enumerate() {
+        assert_eq!(
+            reading.exposed, 0,
+            "{case} at {:.3} s: {reading:?}",
+            reading.time
+        );
+        if reading.norm > INSIDE {
+            assert!(
+                reading.adaptive <= reading.coarse,
+                "{case} at {:.3} s: the adapted run reads {:.4} against the coarse run's {:.4}",
+                reading.time,
+                reading.adaptive,
+                reading.coarse
+            );
+            if start == Start::Packet && index > 0 {
+                assert!(
+                    reading.adaptive <= 0.95 * reading.coarse,
+                    "{case} at {:.3} s: the refined packet reads {:.4} against {:.4}",
+                    reading.time,
+                    reading.adaptive,
+                    reading.coarse
+                );
+            }
+        }
+        if reading.changes > 0 && !reading.dormant {
+            assert!(
+                (-1.0e-2..=1.0e-4).contains(&reading.handoff),
+                "{case} at {:.3} s: a handoff changed the energy by {:.2e}",
+                reading.time,
+                reading.handoff
+            );
+        }
+    }
+    let peak = readings.iter().map(|reading| reading.after).max().unwrap();
+    assert!(
+        3 * peak < looped.fine_triangles,
+        "{case}: the mesh peaked at {peak} triangles against the fine mesh's {}",
+        looped.fine_triangles
+    );
+    let dormant = readings
+        .iter()
+        .position(|reading| reading.dormant)
+        .unwrap_or_else(|| panic!("{case} never goes dormant"));
+    for reading in &readings[dormant..] {
+        assert_ne!(
+            reading.decided, "refine",
+            "{case} refines at {:.3} s, dormant since {:.3} s",
+            reading.time, readings[dormant].time
+        );
+    }
+    let last = readings.last().unwrap();
+    assert!(
+        last.after as f64 <= 0.9 * peak as f64,
+        "{case} ends at {} triangles from a peak of {peak}",
+        last.after
+    );
+    if speed < 1.0 {
+        assert!(
+            last.coarser > 0,
+            "{case}: no quiet region grew past the authored mesh"
+        );
+    }
+}
+
+#[test]
+fn a_ring_at_full_speed_closes_the_loop() {
+    closes_the_loop(Start::Ring, 1.0);
+}
+
+#[test]
+fn a_ring_at_a_quarter_of_the_speed_closes_the_loop() {
+    closes_the_loop(Start::Ring, 0.25);
+}
+
+#[test]
+fn a_ring_at_a_tenth_of_the_speed_closes_the_loop() {
+    closes_the_loop(Start::Ring, 0.1);
+}
+
+#[test]
+fn a_packet_at_full_speed_closes_the_loop() {
+    closes_the_loop(Start::Packet, 1.0);
+}
+
+#[test]
+fn a_packet_at_a_quarter_of_the_speed_closes_the_loop() {
+    closes_the_loop(Start::Packet, 0.25);
+}
+
+#[test]
+fn a_packet_at_a_tenth_of_the_speed_closes_the_loop() {
+    closes_the_loop(Start::Packet, 0.1);
+}
+
 /// A packet at a quarter of the speed ceiling, adapted as the app adapts it.
 /// Its first estimate refines around it, and once it has left that patch the
 /// estimate reads well under target and asks to coarsen. Judged by where the
@@ -956,7 +1119,7 @@ fn first_refinement(document: &TopologyDocument, time_step: f64) -> Result<Refin
 /// accurate at every estimate, 0.152 against 0.167 at 1.5 the closest.
 #[test]
 fn a_slow_packet_never_meets_a_mesh_coarsened_ahead_of_it() {
-    let looped = looped(PhysicsModel::Mechanical, Start::Packet, 0.25, 1.6).unwrap();
+    let looped = looped(PhysicsModel::Mechanical, Start::Packet, 0.25, 1.6, 1.6).unwrap();
     assert!(
         looped
             .readings

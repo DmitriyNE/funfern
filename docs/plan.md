@@ -1789,6 +1789,13 @@ is next touched.
   (2026-11-03). How much a long run gathers is unmeasured; C9's long runs
   are the place to read it, from a readback through
   `CanonicalStationaryFluxJob`.
+- A coarsening of a dormant field can raise its energy: in AMR-01's study
+  the ring at a tenth of the speed, once its residue was 7e-6 of its peak,
+  met handoffs that added 13% and 30% of what was left, and the packet 8%
+  and 5%, where every handoff while the field lived took energy away or
+  added under 5e-6. A lossless carry should not add any; at that level
+  nothing shows it, and dormancy has stopped the estimate reading it
+  (2026-11-04).
 
 ## Working practice
 
