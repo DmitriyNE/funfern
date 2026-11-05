@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/indicator.rs b/crates/funfern-core/src/indicator.rs
+--- a/crates/funfern-core/src/indicator.rs
++++ b/crates/funfern-core/src/indicator.rs
+@@ -2477,7 +2477,7 @@
+         self.report.total_energy = self.total_energy;
+         self.report.total_residual = self.report.recovery_contribution
+             + self.report.cell_residual_contribution
+-            + self.report.interior_jump_contribution
++            + 0.0 * self.report.interior_jump_contribution
+             + self.report.boundary_residual_contribution;
+         if let Some(canonical) = &self.canonical {
+             self.report.canonical_drift_contribution = canonical.drift_contribution;

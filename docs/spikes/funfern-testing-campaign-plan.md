@@ -1438,9 +1438,11 @@ mutation, in this order:
   cases, a ring and a packet at three speeds, in the workspace tests. AMR-02's study (2026-11-05)
   found the estimate ranking elements where the field is weakest, fixed
   with the user by weighing each against its share of the field and
-  measuring a fading field against 1% of its experiment's peak; the index
-  rising under refinement waits on a decision, and the accumulated phase
-  error it does not see is left to the definition, with the user.
+  measuring a fading field against 1% of its experiment's peak, and the
+  accumulated phase error it does not see is left to the definition, with
+  the user. The index that seemed to rise under refinement was read against
+  the probes' recovered flux; against the solver's own it holds at 1.5 to
+  1.9, and AMR-02 landed with that bound (2026-11-05).
 - **PH-19**, after C6.
 - **C7, the runtime on the device:** RT-03 on the host first, then RT-02,
   RT-04, RT-05, the adaptive loop's device half, held to statistics rather

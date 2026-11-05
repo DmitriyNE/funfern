@@ -32461,3 +32461,34 @@ the device.
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs; the
   device suite's handoff fixtures, 26 of 26.
+
+## 2026-11-05 — AMR-02: the index holds under refinement
+
+- **A correction.** The entry above, and `checks.md` until now, had the
+  estimate's index against the carried state rise under refinement, 1.9, 2.6
+  and 3.9 for the ring and 2.2, 3.2 and 5.2 for the packet, the estimate
+  falling as h^2.2 and the error as h^3.2. The error was read through the
+  point probes, and a probe recovers its flux from the samples around it
+  (2026-10-31): a post-processed flux, which falls as h³ where the one the
+  solver holds falls as h². Read at the solver's own samples, against the
+  reference there, the error falls as h^1.8 to h^2.2 and the index reads
+  1.88, 1.72 and 1.57 for the ring, 1.79, 1.69 and 1.51 for the packet and
+  1.38, 1.24 and 0.97 for the broad pulse: steady, easing a little as the
+  mesh refines, within the calibration example's 1.26 to 1.67 for its box
+  modes. Nothing in the estimator to change; the user had asked for the
+  terms' rates before deciding.
+- **The terms.** The flux's jump across faces is three quarters of the
+  estimate and falls as h^1.9 to h^2.4, the complementary recovery as h^2.5
+  to h^2.8; the cell residual reads 7e-7 at every mesh and the boundary
+  nothing in the outgoing box.
+- **Test.** `an_estimates_index_holds_under_refinement`
+  (`tests/adaptation.rs`), about 2.5 min: the packet's and the ring's
+  reference state, the box at 0.014, carried onto the authored mesh and half
+  of it while the field is inside; the index within [1.2, 2.4] at every
+  reading (1.42 to 1.91) and the finer mesh's median within 0.7 to 1.3 of
+  the coarser's (0.84 and 0.85). Mutation `estimate-drops-the-flux-jump`,
+  which reads 0.89. With the ranking regression of the entry above, AMR-02's
+  bounds are in.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

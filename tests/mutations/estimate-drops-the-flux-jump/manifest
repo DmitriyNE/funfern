@@ -1,0 +1,4 @@
+about: the whole field's estimate leaves out the flux's jump across faces, three quarters of what it reads, so the accuracy target names an accuracy the field does not have
+test: cargo test --release -p funfern-app --test adaptation -- an_estimates_index_holds_under_refinement
+expect: the index reads
+needs: cpu

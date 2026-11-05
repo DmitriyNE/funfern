@@ -1601,11 +1601,21 @@ AMR-02, the estimator's calibration, has its study
 (`study_the_estimators_calibration`, ignored): the broad pulse, the ring and
 the packet on uniform meshes at 0.08, 0.057 and 0.04, against the box at 0.014,
 read against two truths, the mesh's own run from the start and the reference's
-state carried onto it now. Against the carried state the index is steady in
-time and rises under refinement, 1.9, 2.6 and 3.9 for the ring and 2.2, 3.2 and
-5.2 for the packet, the estimate falling as h^2.2 and the error as h^3.2;
-against the run's own, it falls in time as phase error gathers, which the
-estimate of a present state does not see. Where it points:
+state carried onto it now, with each of the estimate's terms and the rate it
+falls at. Against the carried state, its flux the one the solver holds at its
+own samples, the error falls as about h² and so does the estimate, three
+quarters of it the flux's jump across faces: the index reads 1.88, 1.72 and
+1.57 for the ring and 1.79, 1.69 and 1.51 for the packet. Read through the
+point probes, whose flux is recovered from the samples around them and falls
+as h³, it seemed to rise to 3.9 and 5.2 (2026-11-04). Against the run's own
+state the index falls in time as phase error gathers, which an estimate of the
+present state does not see. `an_estimates_index_holds_under_refinement` carries
+the packet's and the ring's reference state onto the authored mesh and onto
+half of it every tenth of a second while the field is inside, about 2.5 min,
+and requires the index within [1.2, 2.4] at every reading (1.42 to 1.91) and
+the finer mesh's median within 0.7 to 1.3 of the coarser's (0.84 and 0.85).
+Its mutation is `estimate-drops-the-flux-jump`, which reads 0.89.
+Where it points:
 `an_estimate_ranks_first_the_elements_holding_the_error` carries the packet's
 and the ring's reference state onto the authored mesh every tenth of a second
 to 0.5 s and requires the tenth of the box the indicators rank first to hold

@@ -1480,6 +1480,9 @@ struct Level {
     elements: Vec<usize>,
     fine_stencils: Vec<CanonicalPointStencil>,
     stencils: Vec<CanonicalPointStencil>,
+    /// The reference read at the level's own constitutive samples, where the
+    /// solver holds its flux.
+    sample_stencils: Vec<CanonicalPointStencil>,
     accumulated: AdaptationController,
     instantaneous: AdaptationController,
 }
@@ -1580,6 +1583,13 @@ impl Level {
         }
         let fine_stencils = stencils_in_parallel(fine, &points)?;
         let stencils = stencils_in_parallel(&prepared, &points)?;
+        let sample_points = prepared
+            .canonical_operator
+            .constitutive_samples()
+            .iter()
+            .map(|sample| sample.point)
+            .collect::<Vec<_>>();
+        let sample_stencils = stencils_in_parallel(fine, &sample_points)?;
         // Each start puts its own run here.
         let run = started(&prepared, time_step, Start::Broad)?;
         Ok(Self {
@@ -1593,6 +1603,7 @@ impl Level {
             elements,
             fine_stencils,
             stencils,
+            sample_stencils,
             accumulated: AdaptationController::default(),
             instantaneous: AdaptationController::default(),
         })
@@ -1637,7 +1648,37 @@ impl Level {
             time_step,
         )?;
         cleaned(&mut carried, &self.prepared)?;
-        let (instantaneous_errors, _) = errors(&read(&self.stencils, &carried)?);
+        let carried_readings = read(&self.stencils, &carried)?;
+        let (instantaneous_errors, _) = errors(&carried_readings);
+        // The field's and the flux's share of that error apart, the field's
+        // norm alone, and the flux the solver holds at its own samples against
+        // the reference's there: the point probes recover theirs from the
+        // samples around them, a post-processed flux that converges faster.
+        let mut parts = [0.0; 2];
+        let mut field_norm = 0.0;
+        for (((field, complementary), (expected, expected_complementary)), weight) in
+            carried_readings.iter().zip(&reference).zip(&self.weights)
+        {
+            let along = *complementary - *expected_complementary;
+            parts[0] += weight * (field - expected).powi(2);
+            parts[1] += weight * along.dot(along);
+            field_norm += weight * expected * expected;
+        }
+        let reference_samples = read(&self.sample_stencils, fine_run)?;
+        let (mut raw_flux, mut flux_norm) = (0.0, 0.0);
+        for ((sample, flux), (_, expected)) in self
+            .prepared
+            .canonical_operator
+            .constitutive_samples()
+            .iter()
+            .zip(carried.complementary())
+            .zip(&reference_samples)
+        {
+            let difference = sample.complementary_inverse.apply(*flux) - *expected;
+            raw_flux += sample.integration_weight * difference.dot(difference);
+            flux_norm += sample.integration_weight * expected.dot(*expected);
+        }
+        let raw_norm = field_norm + flux_norm;
         let before = carried.clone();
         carried.step(&self.prepared)?;
         let instantaneous = estimated(
@@ -1653,6 +1694,9 @@ impl Level {
             accumulated,
             accumulated_errors,
             instantaneous_error: (instantaneous_errors.iter().sum::<f64>() / norm).sqrt(),
+            instantaneous_parts: parts.map(|part| (part / norm).sqrt()),
+            instantaneous_raw: ((parts[0] + raw_flux) / raw_norm).sqrt(),
+            instantaneous_raw_flux: (raw_flux / raw_norm).sqrt(),
             instantaneous,
             instantaneous_errors,
         })
@@ -1668,8 +1712,56 @@ struct Calibration {
     accumulated: SolutionIndicatorResult,
     accumulated_errors: Vec<f64>,
     instantaneous_error: f64,
+    /// The field's and the flux's part of the instantaneous error, each over
+    /// the reference's whole norm.
+    instantaneous_parts: [f64; 2],
+    /// The instantaneous error with the flux the solver holds at its own
+    /// samples in place of the probes' recovered one, and that flux's part.
+    instantaneous_raw: f64,
+    instantaneous_raw_flux: f64,
     instantaneous: SolutionIndicatorResult,
     instantaneous_errors: Vec<f64>,
+}
+
+/// What [`study_the_estimators_calibration`] fits a rate to, on the carried
+/// state: its error, the field's and the flux's part of it, the estimate,
+/// and each term's share of the estimate - the complementary recovery, the
+/// cell residual, the interior jump and the boundary - with the scalar
+/// gradient recovery the canonical estimate leaves out beside them.
+const TERMS: [&str; 12] = [
+    "error",
+    "field",
+    "flux",
+    "raw error",
+    "raw flux",
+    "raw index",
+    "estimate",
+    "recovery",
+    "cell",
+    "jump",
+    "boundary",
+    "scalar",
+];
+
+/// [`TERMS`] of `calibration`.
+fn terms(calibration: &Calibration) -> [f64; 12] {
+    let report = &calibration.instantaneous.report;
+    let estimate = report.global_indicator;
+    let share = |term: f64| estimate * (term / report.total_residual).sqrt();
+    [
+        calibration.instantaneous_error,
+        calibration.instantaneous_parts[0],
+        calibration.instantaneous_parts[1],
+        calibration.instantaneous_raw,
+        calibration.instantaneous_raw_flux,
+        estimate / calibration.instantaneous_raw,
+        estimate,
+        share(report.recovery_contribution),
+        share(report.cell_residual_contribution),
+        share(report.interior_jump_contribution),
+        share(report.boundary_residual_contribution),
+        share(report.displacement_recovery_contribution),
+    ]
 }
 
 /// `start` struck on the reference `fine` and on each of `levels`, stepped
@@ -1772,6 +1864,78 @@ fn an_estimate_ranks_first_the_elements_holding_the_error() {
     }
 }
 
+/// AMR-02: the estimate reads the solver's error alike on every mesh. The
+/// packet's and the ring's reference state, the box at 0.014, carried onto
+/// the box meshed uniformly at the authored 0.08 and at half that every tenth
+/// of a second while the field is inside; its error against the flux the
+/// solver holds at its own samples. The index, estimate over error, must
+/// stay within [1.2, 2.4] at every reading on both meshes (1.42 to 1.91
+/// measured), and its median on the finer within 0.7 to 1.3 of the coarser's
+/// (0.84 and 0.85): an index that moved with the mesh would make the accuracy
+/// target mean another accuracy on each. Read against the point probes'
+/// recovered flux, which converges as h³ where the solver's own does as h²,
+/// it seemed to rise from 1.9 to 3.9 (2026-11-04).
+#[test]
+fn an_estimates_index_holds_under_refinement() {
+    let document = box_document(PhysicsModel::Mechanical).unwrap();
+    let fine_edge = 0.014;
+    let (_, _, fine) = prepare_at(&document, fine_edge).unwrap();
+    let time_step = STEP_SHARE * fine.recommended_time_step();
+    let edges = [
+        document.presentation.mesh_edge,
+        0.5 * document.presentation.mesh_edge,
+    ];
+    let mut levels = edges
+        .iter()
+        .map(|edge| Level::new(&document, &fine, fine_edge, *edge, time_step).unwrap())
+        .collect::<Vec<_>>();
+    for start in [Start::Packet, Start::Ring] {
+        let mut largest_norm: f64 = 0.0;
+        let mut indices = vec![Vec::new(); edges.len()];
+        calibrate(
+            &fine,
+            &mut levels,
+            start,
+            0.7,
+            0.1,
+            &document.presentation,
+            time_step,
+            |time, level, calibration| {
+                largest_norm = largest_norm.max(calibration.norm.sqrt());
+                if calibration.norm.sqrt() / largest_norm <= INSIDE {
+                    return;
+                }
+                let index = calibration.instantaneous.report.global_indicator
+                    / calibration.instantaneous_raw;
+                eprintln!(
+                    "{start:?} at {time:.3} s on {}: index {index:.3}",
+                    level.edge
+                );
+                assert!(
+                    (1.2..=2.4).contains(&index),
+                    "{start:?} at {time:.3} s on {}: the index reads {index:.3}",
+                    level.edge
+                );
+                let level = edges.iter().position(|edge| *edge == level.edge).unwrap();
+                indices[level].push(index);
+            },
+        )
+        .unwrap();
+        let median = |values: &mut Vec<f64>| {
+            values.sort_by(f64::total_cmp);
+            values[values.len() / 2]
+        };
+        let (coarse, finer) = (median(&mut indices[0]), median(&mut indices[1]));
+        eprintln!(
+            "{start:?}: the median index {coarse:.3} on the authored mesh, {finer:.3} on half"
+        );
+        assert!(
+            (0.7..=1.3).contains(&(finer / coarse)),
+            "{start:?}: the median index moved from {coarse:.3} to {finer:.3} with the mesh"
+        );
+    }
+}
+
 /// AMR-02's study: the estimator's efficiency index, its estimate over the
 /// true error, for each start in the box on a sequence of uniform meshes,
 /// against two truths. Accumulated: the mesh's own run from the start
@@ -1839,6 +2003,8 @@ fn study_the_estimators_calibration() {
             "now25"
         );
         let mut largest_norm: f64 = 0.0;
+        // Each level's readings of the field inside, for the rates.
+        let mut inside = vec![Vec::new(); levels.len()];
         calibrate(
             &fine,
             &mut levels,
@@ -1871,9 +2037,62 @@ fn study_the_estimators_calibration() {
                     points(&calibration.instantaneous, &calibration.instantaneous_errors, 0.1),
                     points(&calibration.instantaneous, &calibration.instantaneous_errors, 0.25),
                 );
+                let terms = terms(calibration);
+                if std::env::var("CAL_TERMS").is_ok() {
+                    eprintln!(
+                        "{:>22}| {}",
+                        "",
+                        TERMS
+                            .iter()
+                            .zip(terms)
+                            .map(|(name, value)| format!("{name} {value:.2e}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                if calibration.norm.sqrt() / largest_norm > INSIDE {
+                    let index = edges.iter().position(|edge| *edge == level.edge).unwrap();
+                    inside[index].push(terms);
+                }
             },
         )
         .unwrap();
+        // The median of each over the readings inside, per level, and the
+        // rate it falls at between levels: `log(q₁/q₂)/log(h₁/h₂)`.
+        let medians = inside
+            .iter()
+            .map(|readings| {
+                (0..TERMS.len())
+                    .map(|term| {
+                        let mut values = readings
+                            .iter()
+                            .map(|reading: &[f64; 12]| reading[term])
+                            .collect::<Vec<_>>();
+                        values.sort_by(f64::total_cmp);
+                        values[values.len() / 2]
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        eprintln!("{start:?}, the carried state's medians inside and the rates between levels:");
+        for (term, name) in TERMS.iter().enumerate() {
+            let values = medians
+                .iter()
+                .map(|median| format!("{:.3e}", median[term]))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let rates = (1..edges.len())
+                .map(|level| {
+                    format!(
+                        "{:.2}",
+                        (medians[level - 1][term] / medians[level][term]).ln()
+                            / (edges[level - 1] / edges[level]).ln()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            eprintln!("  {name:>9}: {values} | rates {rates}");
+        }
         eprintln!("{start:?} in {:.1} s", started_at.elapsed().as_secs_f64());
     }
 }
