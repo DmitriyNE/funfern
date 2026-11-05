@@ -1223,10 +1223,7 @@ mod tests {
 
         let mut mesh = active.mesh.as_ref().clone();
         mesh.mesh_revision = state.runtime.reserve_mesh_revision();
-        state
-            .runtime
-            .request_adapted(state.editor.revision, &state.editor.document, mesh)
-            .unwrap();
+        state.runtime.request_adapted(mesh).unwrap();
         let (text, activity) = state.status();
         assert_eq!(activity, Activity::Automatic);
         assert!(text.starts_with("Adapting mesh: "), "{text}");

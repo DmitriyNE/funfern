@@ -1,0 +1,4 @@
+about: a refused coarsening never makes the next wait, so a mesh whose candidates shift asks at every second estimate
+test: cargo test --release -p funfern-app --lib -- adaptation::tests::each_refusal_in_a_row_waits_twice_as_long
+expect: left: \[0, 0, 0, 0, 0, 0, 0\]
+needs: cpu

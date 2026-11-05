@@ -447,6 +447,8 @@ struct PendingSourceCommit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProtocolNote {
     Requested(TopologyToken),
+    /// Adaptation asked for the running topology on its mesh.
+    Adapted(TopologyToken),
     /// A preparation settled, prepared or failed.
     Prepared(bool),
     /// A ready candidate is carried: whether its step is the one the device

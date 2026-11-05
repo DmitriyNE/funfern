@@ -32577,3 +32577,132 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-05 — AMR-04: edits during adaptation; an adapted mesh is what runs, re-meshed, and refusals back off
+
+- **Why.** AMR-04 of the campaign plan (section 6l): the user acting while an
+  adaptation is on its way to the device. What there was: stale estimates
+  and adapted meshes dropped in host tests (2026-09-15, MESH-4, MESH-5).
+  What there was not: an edit landing while an adapted mesh prepares,
+  uploads or hands off, and adaptation in the runtime sequences or the
+  protocol model at all.
+- **Harness.** The runtime sequences' session (`ui/sequences/generations.rs`)
+  gains an adaptive mode: its frames run the display, the flux cleanup and
+  `refresh_amr` after the runtime, as the app's do, and adaptation's jobs
+  advance by a grant of slices (`Playground::amr_grant`, test builds) instead
+  of 2 ms of wall clock, so the order is the sequence's. The test device's
+  readbacks carry no field, so an estimate is handed in: the production job's
+  estimate of a field struck in a cell and stepped twice on the CPU, at the
+  generation's own paced step (`Session::estimate_struck`). The session holds
+  each adapted publication to the topology it was requested over, and at rest
+  adaptation's history to the mesh that runs, no adapted mesh's history
+  waiting and no adaptation error; at rest also means no request is due,
+  the runtime's own decision, now `Playground::request_is_due`, factored out
+  of `request_runtime`. Before, a Remesh or a mesh edge set while an upload
+  was in flight read as rest, and the next frame asked for it.
+- **Study.** Nine stages of an adaptation's way (estimate held, transaction
+  started, finished on a worker, mesh preparing, packed, uploading, admitted,
+  refused, published and not yet stepped) by fourteen actions (nothing, a
+  material, a nudge, a draft made invalid, the mesh edge, Remesh, the source,
+  Reset, an edit undone, another scene, a pulse with Switch, a pause, the
+  speed, adaptation off and on), 126 cases in 21 s; and 3,000 sequences with
+  estimates among the actions, which asked for 619 adapted meshes and
+  published 246 once each sequence started from rest (from an opened scene,
+  7 in 300 sequences: most never had a generation to estimate). Nothing
+  published over a newer generation, and every case came to rest on the
+  editor's accepted scene. Found:
+  - **An adaptation after a refused or failed edit lit an error, every
+    cycle.** Shrunk by the sequences: a material edited, an estimate taken
+    while the edit validates, the edit's handoff refused by the device. The
+    scene before the edit still ran while the editor had accepted the edit;
+    the adaptation of what ran asked for the editor's scene on its mesh, and
+    the runtime refused it as "Adapted mesh does not match the active
+    topology", lit in the adaptation panel. A preparation that fails does the
+    same, and every adaptation after it did too, until an edit ran: the race
+    2026-09-15 dressed down, in a window its stale check does not see.
+  - **An adaptation while the draft was invalid was prepared again.** The
+    adapted mesh was requested under the editor's revision, the invalid
+    draft's, at which nothing had been requested; once it ran, the next frame
+    prepared the same scene on the same mesh to account for it and committed
+    it in place under the same token, dropping the estimate in flight.
+  - **An adapted mesh an edit replaced kept its history waiting**, as did one
+    the device refused, for a handoff never to come. Only its own mesh, which
+    never runs, could take it: inert.
+  - **AMR-03's memory gives up when the source's frequency halves.** The
+    settled source, its frequency halved at 15 s: the mesh refined for the
+    old frequency coarsens 250 elements at once and the mesher refuses the
+    rest, 450 to 500 candidates against about 65 before, a set that shifts
+    with the driven field. The refusals kept grew from 448 to 503 elements
+    in 10 s and never held it, and each of the mesher's rare collapses
+    (1 element at 33.8 s, 3 at 38.3 s) was a new mesh, its memory empty:
+    14 empty transactions from 21 s to 45 s, 0.58 a second, about 12 ms each.
+    The accuracy loosened from 12% to 25% instead coarsens at once, asks
+    twice for nothing, and holds.
+  - Not borne out: the refusals outliving an edit that keeps the mesh (the
+    source's frequency, a material, the accuracy). A target that grows brings
+    new candidates, and the coarsening goes ahead; the runs keeping and
+    forgetting the refusals at the edit are identical.
+- **Fixes, with the user.**
+  - An adapted mesh is the running topology re-meshed:
+    `TopologyRuntime::request_adapted` takes the mesh alone, and the candidate
+    takes the active generation's revision, scene, source, probes and far
+    field, whatever the document has come to; an edit not yet run, or that
+    failed to, is the document's request to make. The request clears a
+    failure of what runs, a refused adaptation's or remesh's, but not one of
+    a later revision, which is an edit's: cleared, the edit would be prepared
+    and fail again after every adapted mesh.
+  - `refresh_amr` drops an adapted mesh's history once the runtime no longer
+    holds the mesh.
+  - Each refusal in a row waits twice as many estimates as the last before
+    the next coarsening, from two to 32, some 24 s at speed one
+    (`AdaptationController::coarsen_wait`, `AMR_COARSEN_BACKOFF_ESTIMATES`).
+    A refinement, a new experiment, an edit's handoff, a settings change,
+    Reset and adaptation turned off forget the count; a coarsening that
+    makes changes leaves it, so the next refusal waits longer still. The
+    halved source over 90 s: 3 empty transactions from 45 s to 90 s, 0.07 a
+    second, while the mesher still makes the few collapses it can, five in
+    four coarsenings.
+- **Protocol model.** Adaptation is a frame's input (`Frame::adapted`): after
+  the runtime's blocks, unless paused or while anything is prepared, carried
+  or uploaded, it asks for the running topology at its revision and on what
+  it read, leaving the document's request and a failure of it alone. The
+  adaptive sequences run in lockstep with it, which found the session
+  assuming one request a frame: an edit undone during an adaptation is
+  committed in place and the adaptation asks in the same frame, as the model
+  does. Kani: 228 s and 51 s (from about 180 and 30). Dropping the model's
+  "not while uploading" is caught by nothing, and rightly: a candidate stays
+  ready until its upload publishes, so "nothing ready" already holds it, in
+  the app as in the model.
+- **Tests.** In `ui/sequences/generations/adapting.rs`:
+  `every_action_at_every_stage_of_an_adaptation_comes_to_rest` (the
+  126 cases, about 22 s), `the_host_and_the_device_agree_while_adaptation_asks`
+  (64 sequences in the gate; 2,000 pass locally),
+  `an_adaptation_after_a_refused_edit_adapts_what_runs`,
+  `an_adaptation_while_the_draft_is_invalid_asks_for_nothing_after_it` and
+  `an_adapted_mesh_an_edit_replaced_leaves_no_history`. The model's
+  `an_adaptation_leaves_a_failed_edit_standing` and
+  `an_adaptation_while_the_draft_is_invalid_asks_for_nothing_after_it`. The
+  controller's `each_refusal_in_a_row_waits_twice_as_long`. In
+  `tests/adaptation.rs`, a long run's strikes became events, the point
+  source's frequency scaled among them, and AMR-03's
+  `a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make` runs
+  `source-halved` for 90 s nightly under its bound of 0.1 a second. AMR-01
+  to AMR-03's tests pass with the backoff.
+- **Mutations:** `adapted-request-clears-an-edits-failure`,
+  `adapted-history-outlives-its-mesh`, `coarsening-never-backs-off`,
+  `model-adaptation-clears-an-edits-failure` and
+  `model-adaptation-asks-for-the-document`; `experiment-keeps-the-runs-peak`
+  regenerated against the moved `mark_experiment`. All detected by
+  `scripts/mutations.sh` once two manifests were repointed:
+  `adapted-request-clears-an-edits-failure` is caught a step earlier than
+  its test's own check, the runtime parting from the model at the frame it
+  clears the failure; and AMR-03's `coarsening-refusal-last-only` now reads
+  under the settled source's bound, the backoff covering what the last
+  refusal alone misses, so the controller's
+  `a_coarsening_the_mesher_refused_is_not_asked_for_again_on_its_mesh`
+  holds it.
+- **Not covered:** the device's side of adaptation, C7's.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs. No device
+  run: the runtime's device path is unchanged.

@@ -95,6 +95,9 @@ enum Act {
     Open(bool),
     Undo,
     Redo,
+    /// An estimate of a field struck in the `cell`th cell, finished, as a
+    /// full readback of the running generation would have led to.
+    Adapt(u8),
 }
 
 fn acts() -> BoxedStrategy<Act> {
@@ -124,6 +127,13 @@ fn acts() -> BoxedStrategy<Act> {
         1 => Just(Act::Redo),
     ]
     .boxed()
+}
+
+/// [`fixture`], adapting if `adaptive`.
+fn scene(other: bool, adaptive: bool) -> TopologyDocument {
+    let mut document = fixture(other);
+    document.presentation.adaptation.enabled = adaptive;
+    document
 }
 
 /// A small scene to run: the unit square on a coarse mesh, a subdomain of a
@@ -212,6 +222,15 @@ struct Session {
     /// model knows it as; the same for mesh edges.
     inputs: Vec<PreparedInputs>,
     edges: Vec<f64>,
+    /// Whether the scenes adapt, and the frames run adaptation after the
+    /// runtime as the app's do.
+    adaptive: bool,
+    /// The field the display paints, which adaptation reads beside the
+    /// device's.
+    wave: WaveDisplay,
+    /// Each adapted request, and the topology active when it was made: the
+    /// generation it may publish over.
+    adapted_from: Vec<(TopologyToken, Option<TopologyToken>)>,
 }
 
 /// What the model is told an edit changed, read before it.
@@ -271,14 +290,27 @@ impl Session {
     /// The fixture opened as at launch, with preparation and packing on the
     /// sequence's word and the device fresh.
     fn start() -> Self {
+        Self::opening(false)
+    }
+
+    /// [`Self::start`] with adaptation on, its jobs on the frame and on the
+    /// sequence's word too.
+    fn adapting() -> Self {
+        Self::opening(true)
+    }
+
+    fn opening(adaptive: bool) -> Self {
         let mut state = Playground {
             background_preparation: None,
             background_amr: None,
             preparation_grant: Some(usize::MAX),
+            amr_grant: Some(usize::MAX),
             pack_inline: true,
             ..Playground::default()
         };
-        state.set_document(fixture(false), false, true).unwrap();
+        state
+            .set_document(scene(false, adaptive), false, true)
+            .unwrap();
         let mut world = World::new();
         world.init_resource::<Assets<ShaderBuffer>>();
         let scenes = vec![state.editor.document.model.accepted.clone()];
@@ -296,6 +328,9 @@ impl Session {
             tokens: Vec::new(),
             inputs: Vec::new(),
             edges: Vec::new(),
+            adaptive,
+            wave: WaveDisplay::default(),
+            adapted_from: Vec::new(),
         }
         .named()
     }
@@ -411,6 +446,9 @@ impl Session {
                         .unwrap_or(true),
                     behind: !self.request.caught_up(),
                     retime: log.contains(&ProtocolNote::Retimed),
+                    adapted: log
+                        .iter()
+                        .any(|note| matches!(note, ProtocolNote::Adapted(_))),
                 })
             }
             Act::Readbacks(_) => model::Step::Readbacks {
@@ -419,6 +457,7 @@ impl Session {
             Act::Handoff(admit) => model::Step::Handoff { admit: *admit },
             Act::Event(take) => model::Step::Settle { take: *take },
             Act::Fault => model::Step::Fault,
+            Act::Adapt(_) => return None,
             Act::Validate => model::Step::Validate { inputs },
             Act::Reset => model::Step::Reset,
             Act::Remesh => model::Step::Remesh,
@@ -576,28 +615,27 @@ impl Session {
     /// proofs are about or the model does not describe it.
     fn conform(&mut self, act: &Act, was: Was) {
         let log = std::mem::take(&mut self.state.protocol_log);
-        let requested = self.model.requested;
+        let next = self.model.next;
         if let Some(step) = self.model_step(act, &was, &log) {
             self.model.step(step);
             self.model.check();
         }
-        for note in &log {
-            if let ProtocolNote::Requested(real) = *note {
-                let token = self
-                    .model
-                    .requested
-                    .filter(|token| Some(*token) != requested)
-                    .unwrap_or_else(|| {
-                        panic!("the runtime requested {real:?} and the model did not")
-                    });
-                assert_eq!(
-                    token as usize,
-                    self.tokens.len(),
-                    "the model's tokens are in order"
-                );
-                self.tokens.push(real);
-            }
-        }
+        // A frame may request twice: an edit's candidate committed in place,
+        // and then adaptation's.
+        let requested = log
+            .iter()
+            .filter_map(|note| match *note {
+                ProtocolNote::Requested(real) | ProtocolNote::Adapted(real) => Some(real),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            usize::from(self.model.next - next),
+            requested.len(),
+            "after {act:?} the runtime requested {requested:?} and the model {} times",
+            self.model.next - next
+        );
+        self.tokens.extend(requested);
         assert_eq!(
             self.projection(),
             self.modelled(),
@@ -624,7 +662,8 @@ impl Session {
         }
     }
 
-    /// One host frame as the app's: validation's share, then the runtime.
+    /// One host frame as the app's: validation's share, then the runtime,
+    /// and in an adaptive session the display and adaptation.
     fn frame(&mut self, grant: Option<usize>) {
         let Session {
             state,
@@ -633,9 +672,12 @@ impl Session {
             display,
             recorders,
             vector,
+            adaptive,
+            wave,
             ..
         } = self;
         state.preparation_grant = Some(grant.unwrap_or(usize::MAX));
+        state.amr_grant = Some(grant.unwrap_or(usize::MAX));
         state.editor.validate_frame(12000);
         world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
             let mut queue = CommandQueue::default();
@@ -649,6 +691,83 @@ impl Session {
                 &mut commands,
                 1.0 / 60.0,
             );
+        });
+        if *adaptive {
+            state.display_fell_back |= refresh_canonical_wave_display(
+                state.runtime.active(),
+                display,
+                request,
+                state.display_material_runtime.as_ref(),
+                wave,
+            );
+            state.refresh_flux_cleanup(request, display);
+            state.refresh_amr(request, display, wave);
+        }
+    }
+
+    /// Hands the session a finished estimate of the running generation, as a
+    /// full readback of it would have led to: a field struck by a narrow
+    /// pulse at `centre` and stepped twice on the CPU, estimated by the
+    /// production job. The device's readbacks here carry no field, so the
+    /// session never estimates on its own.
+    fn estimate_struck(&mut self, centre: Point2) {
+        let state = &mut self.state;
+        let Some(active) = state.runtime.active().cloned() else {
+            return;
+        };
+        // The step the generation runs at its speed, which its drives hold
+        // stable; what the host last uploaded may be another generation's.
+        let dt = paced_time_step(
+            active.recommended_time_step(),
+            state.editor.document.presentation.simulation_speed,
+        );
+        let increment = active
+            .canonical_operator
+            .node_points()
+            .iter()
+            .map(|point| {
+                let offset = *point - centre;
+                0.1 * (-offset.dot(offset) / 0.01).exp()
+            })
+            .collect::<Vec<_>>();
+        let forcing = &active.canonical_forcing;
+        let snapshots = match &active.canonical_temporal_operator {
+            Some(temporal) => (|| {
+                let mut run = CanonicalTemporalWaveState::zero(temporal, dt).ok()?;
+                run.apply_primary_pulse(temporal, forcing, &increment)
+                    .ok()?;
+                run.step_with_forcing(temporal, forcing).ok()?;
+                let previous = run.clone();
+                run.step_with_forcing(temporal, forcing).ok()?;
+                IndicatorSnapshots::of_temporal_run(&active, temporal, &run, &previous).ok()
+            })(),
+            None => (|| {
+                let operator = &active.canonical_operator;
+                let mut run = CanonicalWaveState::zero(operator, dt).ok()?;
+                run.apply_primary_pulse(operator, forcing, &increment)
+                    .ok()?;
+                run.step_with_forcing(operator, forcing).ok()?;
+                let previous = run.clone();
+                run.step_with_forcing(operator, forcing).ok()?;
+                IndicatorSnapshots::of_fixed_run(&active, &run, &previous).ok()
+            })(),
+        };
+        let Some(snapshots) = snapshots else {
+            return;
+        };
+        let mut job = state
+            .amr
+            .estimate(&active, snapshots, &state.editor.document.presentation);
+        let result = loop {
+            if let Some(result) = job.advance(1 << 16) {
+                break result;
+            }
+        };
+        state.amr_indicator_completed = Some(result);
+        state.amr_indicator_source = Some(AmrIndicatorSource {
+            topology: active.bundle.token,
+            gpu_generation: self.request.generation(),
+            accepted_step: self.wave.snapshot_completed_steps,
         });
     }
 
@@ -762,10 +881,13 @@ impl Session {
             Act::Pulse(cell) => self.state.place_pulse(cell_point(domain, *cell)),
             Act::Switch => self.state.request_material_switch(),
             Act::Open(other) => {
-                let _ = self.state.set_document(fixture(*other), true, true);
+                let _ = self
+                    .state
+                    .set_document(scene(*other, self.adaptive), true, true);
             }
             Act::Undo => self.state.undo(),
             Act::Redo => self.state.redo(),
+            Act::Adapt(cell) => self.estimate_struck(cell_point(domain, *cell)),
         }
     }
 
@@ -864,6 +986,11 @@ impl Session {
     }
 
     fn step(&mut self, act: &Act) {
+        let before_adaptation = self
+            .state
+            .runtime
+            .active()
+            .map(|active| active.bundle.token);
         let before = self.before();
         let was = self.was();
         self.state.notices.clear();
@@ -871,7 +998,45 @@ impl Session {
         self.act(act);
         self.observe(act, before);
         self.check();
+        if self.adaptive {
+            self.observe_adaptation(act, &before_adaptation);
+        }
         self.conform(act, was);
+    }
+
+    /// Follows adaptation's requests, and holds each adapted publication to
+    /// the topology it was requested over: an adaptation publishes over the
+    /// generation it was adapted from, never over one that replaced it.
+    /// `before` was active before the step.
+    fn observe_adaptation(&mut self, act: &Act, before: &Option<TopologyToken>) {
+        let runtime = &self.state.runtime;
+        let active = runtime.active();
+        if runtime.requested_adaptation()
+            && let Some(requested) = runtime.requested()
+            && !self
+                .adapted_from
+                .iter()
+                .any(|(token, _)| *token == requested)
+        {
+            self.adapted_from
+                .push((requested, active.map(|active| active.bundle.token)));
+        }
+        if let Some(active) = active.filter(|active| Some(active.bundle.token) != *before)
+            && active.adapted
+        {
+            let over = self
+                .adapted_from
+                .iter()
+                .find(|(token, _)| *token == active.bundle.token)
+                .map(|(_, over)| *over)
+                .unwrap_or_else(|| {
+                    panic!("after {act:?} an adapted mesh no request made published")
+                });
+            assert_eq!(
+                over, *before,
+                "after {act:?} an adapted mesh published over another topology than it was adapted from"
+            );
+        }
     }
 
     fn check(&self) {
@@ -941,6 +1106,45 @@ impl Session {
         if let Some((what, _)) = waits.iter().find(|(_, waiting)| *waiting) {
             return Some(format!("{what} still waits"));
         }
+        // A Remesh pressed, a mesh edge set or an edit made while an upload
+        // was in flight is taken up by the next frame.
+        if state.request_is_due() {
+            return Some("a request is due".into());
+        }
+        // A pause holds adaptation where it is, by design.
+        let adapting = self.adaptive
+            && state.wave_running
+            && state.editor.document.presentation.adaptation.enabled;
+        if adapting && state.adaptation_in_flight() {
+            return Some("an adaptation still waits".into());
+        }
+        if adapting && (state.estimate_in_flight() || state.amr_indicator_completed.is_some()) {
+            return Some("an estimate still waits".into());
+        }
+        // What adaptation remembers is of the mesh that runs, error or not.
+        if self.adaptive
+            && let Some(active) = state.runtime.active()
+        {
+            let mesh = active.mesh.mesh_revision;
+            if let Some(history) = state.amr.state.as_ref()
+                && history.mesh_revision != mesh
+            {
+                return Some(format!(
+                    "adaptation's history is of mesh {} where {mesh} runs",
+                    history.mesh_revision
+                ));
+            }
+            if let Some(pending) = state.amr.pending.as_ref() {
+                return Some(format!(
+                    "the history of adapted mesh {} waits for a handoff nothing will make",
+                    pending.mesh_revision
+                ));
+            }
+            if let Some(error) = &state.amr_error {
+                return Some(format!("adaptation reports {error:?}"));
+            }
+        }
+
         // An invalid draft leaves the accepted scene alone, and the runtime
         // comes to rest on it and on what lies outside the draft as they
         // stand; a valid one, on its own revision. Either way an error naming
@@ -1370,3 +1574,5 @@ fn a_scene_opened_after_a_fault_takes_none_of_it() {
     );
     session.quiesce();
 }
+
+mod adapting;

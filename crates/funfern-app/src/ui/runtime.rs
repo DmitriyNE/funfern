@@ -181,19 +181,15 @@ impl Playground {
         }
     }
 
-    pub(super) fn request_runtime(&mut self) {
-        if self.editor.editing()
-            || self.mesh_edge_dragging
-            || self.coordinator.source_commit.is_some()
-        {
-            return;
-        }
+    /// Whether the document as it stands takes a new request: the
+    /// protocol's [`request_due`], of what the host holds now.
+    pub(super) fn request_is_due(&self) -> bool {
         let acceptance = match self.editor.acceptance {
             TopologyAcceptance::Pending => Acceptance::Pending,
             TopologyAcceptance::Valid => Acceptance::Valid,
             TopologyAcceptance::Invalid(_) => Acceptance::Invalid,
         };
-        let due = request_due(RequestSeen {
+        request_due(RequestSeen {
             acceptance,
             standing: standing(
                 acceptance,
@@ -219,8 +215,17 @@ impl Playground {
                 .runtime
                 .last_error()
                 .map(|failure| failure.token.document_revision),
-        });
-        if !due {
+        })
+    }
+
+    pub(super) fn request_runtime(&mut self) {
+        if self.editor.editing()
+            || self.mesh_edge_dragging
+            || self.coordinator.source_commit.is_some()
+        {
+            return;
+        }
+        if !self.request_is_due() {
             return;
         }
         let domain = self.editor.document.model.accepted.geometry.domain;

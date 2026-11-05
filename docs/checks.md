@@ -428,7 +428,17 @@ the one the device runs, at the step it was packed for; a topology is only
 prepared from a scene the editor has held since its last replacement; a commit
 without a new generation must be one that needs none; and with the device fair
 at the end, the runtime must come to rest on the accepted revision or with an
-error naming it.
+error naming it. Its twin, `the_host_and_the_device_agree_while_adaptation_asks`
+in `generations/adapting.rs`, starts each sequence from rest with adaptation
+on and draws estimates among the steps: the test device's readbacks carry no
+field, so an estimate is the production job's of a field struck in a cell and
+stepped on the CPU, handed to the session as a full readback would have led to
+it, and the frames run adaptation after the runtime as the app's do. An
+adapted mesh must publish over the topology it was adapted from, and at rest
+adaptation's history must be of the mesh that runs, no adapted mesh's history
+may wait for a handoff, and no adaptation error may stand. At rest also means
+no request is due, the runtime's own decision, which counts a Remesh or a mesh
+edge set while an upload was in flight.
 
 The protocol that machine exercises is also a small state machine of its own,
 `crates/funfern-protocol`: requests, preparation, packing, uploads, handoffs,
@@ -438,12 +448,18 @@ it with [Kani](https://model-checking.github.io/kani/): every state reached in
 nine steps of any kind keeps the host's active topology on the device while
 nothing uploads, at the step the device runs, and no live event in flight
 while a handoff is pending; and from any state reached in six, a fair device
-and preparation bring it to rest within nine rounds. The model's device, like
+and preparation bring it to rest within nine rounds. Adaptation is a frame's
+input: after the runtime's blocks, unless paused or while anything is
+prepared, carried or uploaded, it asks for the running topology on a mesh of
+its own, at that topology's revision and on what it read, leaving the
+document's request and a failure of it alone. The model's device, like
 the real one, processes nothing once it has failed: an event still in flight
 is stranded until clearing the failure sends it again. Its unit tests walk the
 two sequences the 2026-10-20 review found the model could not reach, a pulse
-sent while a packed candidate waits and a pulse stranded by a fault. It
-takes about three and a half minutes; CI runs it in a job of its own, with
+sent while a packed candidate waits and a pulse stranded by a fault, and
+AMR-04's two, an adaptation after an edit failed and one while the draft is
+invalid, neither of which asks for anything again. It takes about four and
+three-quarter minutes; CI runs it in a job of its own, with
 Kani 0.67.0, and Pages deploys only once it has passed. The runtime machine
 runs the model in lockstep with the real runtime and compares the two after
 every step, so the proofs speak about the app's runtime only while that
@@ -1650,7 +1666,9 @@ fiber) and no reversal. Before the controller remembered the coarsenings the
 mesher refused on its mesh, they asked 0.67 and 0.63 times a second, forever.
 Its mutations are `coarsening-refusals-forgotten` and
 `coarsening-refusal-last-only`, the first fix, which kept only the last
-refusal; both read 0.60. The app's
+refusal; both read 0.60. Since AMR-04's backoff the second reads under the
+bound there, the waits covering what the last refusal alone misses, and the
+controller's test of the rule below holds it. The app's
 `a_coarsening_the_mesher_refused_is_not_asked_for_again_on_its_mesh` and
 `a_coarsening_refused_while_a_vertex_cooled_down_is_asked_again` hold the
 rule. `a_packet_in_a_reflecting_box_keeps_its_total_as_the_mesh_follows_it`
@@ -1661,6 +1679,43 @@ spreads and fades, and no reversal over the second half. The study,
 ring alone in the reflecting box, which never adapts: its estimate reads
 9.8% at most against the 12% target, and the field fills the box, which it
 holds at the authored size.
+
+AMR-04, edits during adaptation, is held on the host, against the test
+device, in `ui/sequences/generations/adapting.rs`.
+`every_action_at_every_stage_of_an_adaptation_comes_to_rest`, about 22 s,
+brings an adaptation of the fixture to each of nine stages - its estimate
+held, its transaction started, finished on a worker, its mesh preparing,
+packed, uploading, admitted, refused, published and not yet stepped - and at
+each takes one of fourteen actions: nothing, a material, a curve nudged, a
+draft made invalid, the mesh edge, Remesh, the source, Reset, an edit undone,
+another scene, a pulse with Switch, a pause, the speed, and adaptation off and
+on. Each case must keep the runtime machine's checks at every step and its
+rest, and adaptation must come round again and change the mesh. The fuzzer
+twin above draws the rest of the orders, 64 sequences in the gate. The study
+that set them, 126 cases and 3,000 sequences, found that after an edit the
+device refused, or one that failed to prepare, an adaptation of the scene
+still running asked for the editor's newer scene on its mesh and lit
+"Adapted mesh does not match the active topology" at every cycle; and that
+while the draft was invalid an adapted mesh published under the draft's
+revision, which the next frame prepared again, dropping the estimate in
+flight. An adapted mesh is now the running topology re-meshed, and a failure
+of a later revision stands: `an_adaptation_after_a_refused_edit_adapts_what_runs`
+and `an_adaptation_while_the_draft_is_invalid_asks_for_nothing_after_it` hold
+it, with `an_adapted_mesh_an_edit_replaced_leaves_no_history`. Halving the
+settled source's frequency left 450 to 500 coarsening candidates the mesher
+refused, shifting with the field, which AMR-03's remembered refusals never
+held: 0.58 empty transactions a second. Each refusal in a row now waits twice
+as many estimates as the last, from two to 32; the app's
+`each_refusal_in_a_row_waits_twice_as_long` holds the rule, and
+`a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make` runs the case,
+`source-halved`, for 90 s nightly, under AMR-03's bound of 0.1 a second
+(0.07). Its mutations are `adapted-request-clears-an-edits-failure`,
+`adapted-history-outlives-its-mesh`, `coarsening-never-backs-off`,
+`model-adaptation-clears-an-edits-failure` and
+`model-adaptation-asks-for-the-document`. Dropping the model's "not while
+uploading" is not one: a candidate stays ready until its upload publishes, so
+"nothing ready" already holds it, in the app as in the model. The device's
+side of adaptation is C7's.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

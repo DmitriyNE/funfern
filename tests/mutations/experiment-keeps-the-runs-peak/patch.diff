@@ -1,12 +1,12 @@
 diff --git a/crates/funfern-app/src/adaptation.rs b/crates/funfern-app/src/adaptation.rs
 --- a/crates/funfern-app/src/adaptation.rs
 +++ b/crates/funfern-app/src/adaptation.rs
-@@ -477,7 +477,7 @@
+@@ -547,7 +547,7 @@
      /// under its floor, neither refined nor painted; the peak starts again
      /// from the field as it next reads, which holds whatever still rings.
      pub fn mark_experiment(&mut self) {
 -        self.energy_peak = 0.0;
 +        let _ = &mut self.energy_peak;
+         self.forget_refusals_in_a_row();
      }
  
-     /// Raises the experiment's energy peak to `energy`, a stored energy of

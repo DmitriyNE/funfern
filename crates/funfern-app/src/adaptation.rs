@@ -46,6 +46,13 @@ pub const AMR_TOPOLOGY_COOLDOWN_GENERATIONS: u64 = 2;
 /// taken just after a wave has passed may read a field the next one no
 /// longer sees.
 pub const AMR_COARSEN_CONFIRMATIONS: u8 = 2;
+/// The most estimates a coarsening waits after the last refused one. Each
+/// refusal in a row doubles the wait from two, to this, some 24 s at the
+/// estimates' cadence at speed one: a mesh refined for a source whose
+/// frequency was then halved kept 450 to 500 candidates the mesher refused,
+/// shifting with the field faster than [`RefusedCoarsening`] gathered them,
+/// and asked at every second estimate again (AMR-04, 2026-11-05).
+pub const AMR_COARSEN_BACKOFF_ESTIMATES: u32 = 32;
 /// The fewest solver steps between the snapshots of two estimates.
 pub const AMR_ESTIMATE_STEPS: u64 = 8;
 /// The fewest wall-clock seconds between the starts of two estimates, which
@@ -523,6 +530,14 @@ pub struct AdaptationController {
     /// out of the candidates, and the last alone was asked past at every
     /// second estimate still.
     pub refused_coarsening: Option<RefusedCoarsening>,
+    /// Coarsenings refused in a row, as [`Self::refused_coarsening`] keeps
+    /// them, since the mesh last needed refining or what it holds last
+    /// changed; a coarsening that makes changes leaves the count, so that
+    /// the next refusal waits longer still.
+    pub refusals_in_a_row: u32,
+    /// Estimates the next coarsening still waits: twice as many after each
+    /// refusal in a row, up to [`AMR_COARSEN_BACKOFF_ESTIMATES`].
+    pub coarsen_wait: u32,
 }
 
 impl AdaptationController {
@@ -533,6 +548,14 @@ impl AdaptationController {
     /// from the field as it next reads, which holds whatever still rings.
     pub fn mark_experiment(&mut self) {
         self.energy_peak = 0.0;
+        self.forget_refusals_in_a_row();
+    }
+
+    /// What the mesh holds, or what it is asked to resolve, has changed: a
+    /// coarsening refused before may be made now, and waits no longer.
+    pub fn forget_refusals_in_a_row(&mut self) {
+        self.refusals_in_a_row = 0;
+        self.coarsen_wait = 0;
     }
 
     /// Raises the experiment's energy peak to `energy`, a stored energy of
@@ -640,8 +663,9 @@ impl AdaptationController {
     /// The direction an estimate of the mesh at `mesh_revision`, its `report`
     /// and the `coarsen_elements` it counted, asks for under
     /// `target_accuracy`: [`adaptation_decision`]'s, except that a coarsening
-    /// of no element but those the mesher refused on this mesh holds. One
-    /// element more, and it may be the one that collapses.
+    /// holds while it waits after a refusal, and when it is of no element but
+    /// those the mesher refused on this mesh. One element more, and it may be
+    /// the one that collapses.
     pub fn direction(
         &self,
         report: &SolutionIndicatorReport,
@@ -656,11 +680,34 @@ impl AdaptationController {
                     .iter()
                     .all(|element| refused.elements.binary_search(element).is_ok())
         });
-        if decision == AmrDecision::Coarsen && refused {
+        if decision == AmrDecision::Coarsen && (refused || self.coarsen_wait > 0) {
             AmrDecision::Hold
         } else {
             decision
         }
+    }
+
+    /// [`Self::direction`], taken at an estimate: the wait after a refusal
+    /// runs down by one, a refinement forgets the refusals in a row, and the
+    /// estimates in a row asking to coarsen are counted.
+    pub fn next_direction(
+        &mut self,
+        report: &SolutionIndicatorReport,
+        coarsen_elements: &[usize],
+        mesh_revision: u64,
+        target_accuracy: f64,
+    ) -> AmrDecision {
+        let decision = self.direction(report, coarsen_elements, mesh_revision, target_accuracy);
+        self.coarsen_wait = self.coarsen_wait.saturating_sub(1);
+        if decision == AmrDecision::Refine {
+            self.forget_refusals_in_a_row();
+        }
+        self.coarsen_streak = if decision == AmrDecision::Coarsen {
+            self.coarsen_streak.saturating_add(1)
+        } else {
+            0
+        };
+        decision
     }
 
     /// What `result`, an estimate of `active`, decides under `settings`; a
@@ -674,17 +721,12 @@ impl AdaptationController {
     ) -> AdaptationStep {
         self.observe_energy(result.report.total_energy);
         let target = target_accuracy(settings);
-        let decision = self.direction(
+        let decision = self.next_direction(
             &result.report,
             &result.coarsen_elements,
             active.mesh.mesh_revision,
             target,
         );
-        self.coarsen_streak = if decision == AmrDecision::Coarsen {
-            self.coarsen_streak.saturating_add(1)
-        } else {
-            0
-        };
         if decision == AmrDecision::Hold {
             return AdaptationStep::Hold;
         }
@@ -775,6 +817,11 @@ impl AdaptationController {
                         mesh_revision: active.mesh_revision,
                         elements: refused,
                     });
+                    self.refusals_in_a_row = self.refusals_in_a_row.saturating_add(1);
+                    self.coarsen_wait = 1_u32
+                        .checked_shl(self.refusals_in_a_row)
+                        .unwrap_or(u32::MAX)
+                        .min(AMR_COARSEN_BACKOFF_ESTIMATES);
                 }
                 self.state = Some(state);
             }
@@ -796,6 +843,7 @@ impl AdaptationController {
                 .or_else(|| Some(MeshAdaptationState::from_mesh(&active.mesh)))
         } else {
             self.pending = None;
+            self.forget_refusals_in_a_row();
             Some(MeshAdaptationState::from_mesh(&active.mesh))
         };
         // A streak of estimates asking to coarsen was of the old mesh:
@@ -867,6 +915,9 @@ mod tests {
         let (mesh, result) = empty_transaction(7, 4, vec![0, 1, 2]);
         let (_, handed) = controller.adapted(result, Some(&mesh));
         assert!(handed.is_none());
+        // Past the wait a refusal sets
+        // (`each_refusal_in_a_row_waits_twice_as_long`).
+        controller.coarsen_wait = 0;
         let direction = |controller: &AdaptationController, elements: &[usize], mesh_revision| {
             controller.direction(&coarsening(elements), elements, mesh_revision, 0.12)
         };
@@ -894,6 +945,7 @@ mod tests {
         controller.coarsening = Some(vec![3, 5, 8, 13, 34]);
         let (mesh, result) = empty_transaction(7, 5, vec![0, 1, 2]);
         controller.adapted(result, Some(&mesh));
+        controller.coarsen_wait = 0;
         assert_eq!(
             direction(&controller, &[3, 5, 8, 13, 21], 7),
             AmrDecision::Hold
@@ -928,6 +980,55 @@ mod tests {
             controller.direction(&coarsening(&[3, 5, 8, 13]), &[3, 5, 8, 13], 7, 0.12),
             AmrDecision::Coarsen
         );
+    }
+
+    /// The settled source with its frequency halved kept 450 to 500
+    /// candidates the mesher refused, a set that moved with the field: the
+    /// refusals kept never held it. Each refusal in a row waits twice as many
+    /// estimates as the one before, from two, to the cap.
+    #[test]
+    fn each_refusal_in_a_row_waits_twice_as_long() {
+        let mut controller = AdaptationController::default();
+        // Estimates held after the refusal of `element`, each asking to
+        // coarsen elements no refusal named.
+        let held_after = |controller: &mut AdaptationController, element: usize| {
+            controller.coarsening = Some(vec![element]);
+            let (mesh, result) = empty_transaction(7, 10 + element as u64, vec![0, 1, 2]);
+            controller.adapted(result, Some(&mesh));
+            let asked = (0..4).map(|k| 1000 + 10 * element + k).collect::<Vec<_>>();
+            (0..100)
+                .take_while(|_| {
+                    controller.next_direction(&coarsening(&asked), &asked, 7, 0.12)
+                        == AmrDecision::Hold
+                })
+                .count()
+        };
+        let waits = (0..7)
+            .map(|element| held_after(&mut controller, element))
+            .collect::<Vec<_>>();
+        assert_eq!(waits, [2, 4, 8, 16, 32, 32, 32]);
+
+        // A coarsening that makes changes leaves the count where it is.
+        controller.forget_refusals_in_a_row();
+        held_after(&mut controller, 20);
+        held_after(&mut controller, 21);
+        let (mut mesh, mut result) = empty_transaction(7, 40, vec![0, 1, 2]);
+        result.report.topology_changes = 1;
+        mesh.mesh_revision = 8;
+        result.mesh = mesh.clone();
+        controller.coarsening = Some(vec![22]);
+        controller.adapted(result, Some(&mesh));
+        assert_eq!(held_after(&mut controller, 23), 8);
+
+        // A refinement, or a new experiment, starts the count again.
+        let refining = SolutionIndicatorReport {
+            limit_refine_candidates: 4,
+            ..coarsening(&[1])
+        };
+        controller.next_direction(&refining, &[1], 7, 0.12);
+        assert_eq!(held_after(&mut controller, 30), 2);
+        controller.mark_experiment();
+        assert_eq!(held_after(&mut controller, 31), 2);
     }
 
     #[test]

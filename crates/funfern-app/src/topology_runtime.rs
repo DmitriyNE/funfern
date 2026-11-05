@@ -720,22 +720,27 @@ impl TopologyPreparationJob {
         })
     }
 
+    /// `previous`, what runs, on `mesh`: its revision, its scene and what it
+    /// read beside the scene, whatever the document has come to since. An
+    /// edit that has not run yet, or that failed to, is the document's
+    /// request to make; carried here, an adaptation finishing after an edit
+    /// was refused met a document whose scene no longer ran, and lit "Adapted
+    /// mesh does not match the active topology" at every cycle, and one
+    /// published while the draft was invalid ran under a revision nothing had
+    /// requested, which the next frame prepared again (AMR-04, 2026-11-05).
     fn new_adapted(
-        document_revision: u64,
-        document: &TopologyDocument,
         previous: Arc<PreparedTopology>,
         mesh: TriMesh,
         carries_totals: bool,
     ) -> Result<Self, String> {
-        if document.model.accepted != *previous.bundle.authored
-            || mesh.geometry_revision != previous.bundle.plan.geometry_revision
+        if mesh.geometry_revision != previous.bundle.plan.geometry_revision
             || mesh.mesh_revision == previous.mesh.mesh_revision
         {
             return Err("Adapted mesh does not match the active topology".into());
         }
         let bundle = Arc::new(AcceptedTopology {
             token: TopologyToken {
-                document_revision,
+                document_revision: previous.bundle.token.document_revision,
                 topology_revision: previous.bundle.token.topology_revision,
                 mesh_generation: mesh.mesh_revision,
             },
@@ -746,9 +751,9 @@ impl TopologyPreparationJob {
         let full_build_worst_angle = previous.full_build_worst_angle;
         Ok(Self {
             bundle,
-            probes: document.model.probes.clone().into(),
-            point_source: document.model.source,
-            far_field: document.model.far_field,
+            probes: previous.probe_definitions.clone(),
+            point_source: previous.point_source,
+            far_field: previous.far_field_settings,
             meshing: previous.meshing,
             previous: Some(previous),
             mesh_action: TopologyMeshUpdateAction::Reuse,
@@ -1609,22 +1614,15 @@ impl TopologyRuntime {
     }
 
     /// Continues the normal preparation and GPU-acknowledged publication path
-    /// from a fixed-topology AMR result.
-    pub fn request_adapted(
-        &mut self,
-        document_revision: u64,
-        document: &TopologyDocument,
-        mesh: TriMesh,
-    ) -> Result<TopologyToken, String> {
-        self.request_adapted_carrying(document_revision, document, mesh, true)
+    /// from a fixed-topology AMR result: the active topology on `mesh`.
+    pub fn request_adapted(&mut self, mesh: TriMesh) -> Result<TopologyToken, String> {
+        self.request_adapted_carrying(mesh, true)
     }
 
     /// [`Self::request_adapted`], its handoff restoring each component's
     /// flux total where `carries_totals` and the geometry allow it.
     pub fn request_adapted_carrying(
         &mut self,
-        document_revision: u64,
-        document: &TopologyDocument,
         mesh: TriMesh,
         carries_totals: bool,
     ) -> Result<TopologyToken, String> {
@@ -1632,20 +1630,30 @@ impl TopologyRuntime {
             .active
             .clone()
             .ok_or_else(|| "Cannot adapt before a topology is active".to_owned())?;
-        let job = TopologyPreparationJob::new_adapted(
-            document_revision,
-            document,
-            previous,
-            mesh,
-            carries_totals,
-        )?;
+        let running = previous.bundle.token.document_revision;
+        let job = TopologyPreparationJob::new_adapted(previous, mesh, carries_totals)?;
         let token = job.token();
         self.preparing = Some(job);
         self.ready = None;
         self.requested = Some(token);
         self.requested_adaptation = true;
-        self.last_error = None;
+        // A failure of what runs, a refused adaptation's or remesh's, this
+        // request replaces. One of a later revision is an edit's, which
+        // stands: forgotten, the edit that could not be prepared was asked
+        // for again after every adaptation.
+        if self
+            .last_error
+            .as_ref()
+            .is_some_and(|error| error.token.document_revision == running)
+        {
+            self.last_error = None;
+        }
         Ok(token)
+    }
+
+    /// The latest request's token, prepared, ready or published.
+    pub fn requested(&self) -> Option<TopologyToken> {
+        self.requested
     }
 
     /// Whether the latest request came from adaptation rather than an edit,
@@ -3640,9 +3648,7 @@ mod tests {
         let mut adapted_mesh = active.mesh.as_ref().clone();
         adapted_mesh.mesh_revision = runtime.reserve_mesh_revision();
         assert!(!runtime.requested_adaptation());
-        let adapted = runtime
-            .request_adapted(editor.revision, &editor.document, adapted_mesh)
-            .unwrap();
+        let adapted = runtime.request_adapted(adapted_mesh).unwrap();
         assert!(runtime.requested_adaptation());
         assert_eq!(adapted.document_revision, initial.document_revision);
         assert_eq!(adapted.topology_revision, initial.topology_revision);
@@ -4455,9 +4461,7 @@ mod tests {
             }
         };
         assert!(adapted.triangles.len() > base.mesh.triangles.len() * 3 / 2);
-        let token = runtime
-            .request_adapted(editor.revision, &editor.document, adapted.clone())
-            .unwrap();
+        let token = runtime.request_adapted(adapted.clone()).unwrap();
         assert_eq!(prepare(&mut runtime).unwrap(), token);
         runtime.commit_ready(token).unwrap();
 
@@ -4528,9 +4532,7 @@ mod tests {
                 break result.unwrap().mesh;
             }
         };
-        let token = runtime
-            .request_adapted(editor.revision, &editor.document, adapted)
-            .unwrap();
+        let token = runtime.request_adapted(adapted).unwrap();
         assert_eq!(prepare(&mut runtime).unwrap(), token);
         runtime.commit_ready(token).unwrap();
 

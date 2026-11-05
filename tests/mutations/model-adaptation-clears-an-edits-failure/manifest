@@ -1,0 +1,4 @@
+about: the model's adaptation clears an edit's failure, which is then asked for again
+test: cargo test -p funfern-protocol --release --locked
+expect: an_adaptation_leaves_a_failed_edit_standing \.\.\. FAILED
+needs: cpu

@@ -1,4 +1,4 @@
 about: the controller keeps only the last refused coarsening's elements, so a driven field's wobble, moving a borderline edge in and out of the candidates, is asked past at every second estimate still
-test: cargo test --release -p funfern-app --test adaptation -- a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make
-expect: asks for an empty coarsening [0-9.]+ times a second
+test: cargo test --release -p funfern-app --lib -- adaptation::tests::a_coarsening_the_mesher_refused_is_not_asked_for_again_on_its_mesh
+expect: left: Coarsen
 needs: cpu

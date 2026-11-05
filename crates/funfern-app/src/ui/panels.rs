@@ -569,6 +569,7 @@ impl Playground {
             self.amr_last_analyzed_step = None;
             self.amr_last_started = None;
             self.amr.coarsen_streak = 0;
+            self.amr.forget_refusals_in_a_row();
             self.amr_error = None;
         }
     }

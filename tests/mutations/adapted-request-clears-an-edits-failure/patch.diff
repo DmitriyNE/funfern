@@ -1,0 +1,19 @@
+diff --git a/crates/funfern-app/src/topology_runtime.rs b/crates/funfern-app/src/topology_runtime.rs
+--- a/crates/funfern-app/src/topology_runtime.rs
++++ b/crates/funfern-app/src/topology_runtime.rs
+@@ -1641,13 +1641,8 @@
+         // request replaces. One of a later revision is an edit's, which
+         // stands: forgotten, the edit that could not be prepared was asked
+         // for again after every adaptation.
+-        if self
+-            .last_error
+-            .as_ref()
+-            .is_some_and(|error| error.token.document_revision == running)
+-        {
+-            self.last_error = None;
+-        }
++        let _ = running;
++        self.last_error = None;
+         Ok(token)
+     }
+ 

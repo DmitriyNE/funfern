@@ -415,14 +415,14 @@ fn compare(
 
 fn renumbered(scene: &Scene) -> Result<(String, Apart), String> {
     let started = Instant::now();
-    let (editor, mut runtime, fresh) = prepare(&scene.document)?;
+    let (_, mut runtime, fresh) = prepare(&scene.document)?;
     let mut same = (*fresh.mesh).clone();
     same.mesh_revision = runtime.reserve_mesh_revision();
-    runtime.request_adapted(editor.revision, &editor.document, same)?;
+    runtime.request_adapted(same)?;
     let control = finish(&mut runtime)?;
     let revision = runtime.reserve_mesh_revision();
     let (mesh, elements) = shuffled(&fresh.mesh, revision, 0x1f03_2026);
-    runtime.request_adapted(editor.revision, &editor.document, mesh)?;
+    runtime.request_adapted(mesh)?;
     let shuffled = finish(&mut runtime)?;
 
     let time_step = control.recommended_time_step();

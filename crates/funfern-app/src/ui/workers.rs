@@ -910,12 +910,7 @@ mod tests {
             mesh.mesh_revision = state.runtime.reserve_mesh_revision();
             state
                 .runtime
-                .request_adapted_carrying(
-                    state.editor.revision,
-                    &state.editor.document,
-                    mesh,
-                    carries,
-                )
+                .request_adapted_carrying(mesh, carries)
                 .unwrap();
             finish(&mut state);
             let adapted = state.runtime.ready().unwrap();

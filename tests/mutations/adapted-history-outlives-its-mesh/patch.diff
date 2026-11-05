@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-app/src/ui/amr.rs b/crates/funfern-app/src/ui/amr.rs
+--- a/crates/funfern-app/src/ui/amr.rs
++++ b/crates/funfern-app/src/ui/amr.rs
+@@ -184,9 +184,6 @@
+         // An adapted mesh's history waits for its handoff while the runtime
+         // holds the mesh. One an edit's request replaced, or the device
+         // refused, is never published, and its history would wait on.
+-        if !(self.runtime.requested_adaptation() && self.preparation_in_progress()) {
+-            self.amr.pending = None;
+-        }
+         #[cfg(test)]
+         let grant = self.amr_grant;
+         #[cfg(not(test))]

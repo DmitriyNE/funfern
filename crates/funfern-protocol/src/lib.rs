@@ -15,7 +15,9 @@
 //!
 //! [`Protocol::step`] takes one [`Step`] the way the app does: a host frame
 //! runs the blocks of `refresh_runtime` in its order, and the device's and
-//! the user's steps change what those blocks read. [`Protocol::check`] holds
+//! the user's steps change what those blocks read, and adaptation, which
+//! runs after them, may ask for the running topology on a mesh of its own.
+//! [`Protocol::check`] holds
 //! the properties every reachable state keeps, [`Protocol::at_rest`] says
 //! whether nothing is left to happen, and [`Protocol::settle`] runs the fair
 //! suffix that should bring any state to rest.
@@ -118,6 +120,9 @@ pub struct Frame {
     /// The speed no longer asks for the running step, past the hysteresis,
     /// so the running generation is requested again.
     pub retime: bool,
+    /// Adaptation finished a transaction that changed the mesh, and asks for
+    /// the running topology on it once the runtime's blocks are done.
+    pub adapted: bool,
 }
 
 /// One step of the interleaving.
@@ -446,9 +451,49 @@ impl Protocol {
             .is_some_and(|device| !device.caught_up && !device.failed)
     }
 
-    /// One host frame: validation's share, then the blocks of
-    /// `refresh_runtime` in its order.
+    /// One host frame: validation's share, the blocks of `refresh_runtime`
+    /// in its order, and then adaptation's, `refresh_amr`.
     fn frame(&mut self, frame: Frame) {
+        self.refresh_runtime(frame);
+        if frame.adapted {
+            self.adapt();
+        }
+    }
+
+    /// `refresh_amr` asking for the active topology on an adapted mesh: not
+    /// while paused, nor while anything is prepared, carried or uploaded,
+    /// which has priority. The request is for what runs, at its revision and
+    /// on what it read, whatever the document has come to; it leaves the
+    /// request the document stands on alone, and a failure of it too, which
+    /// cleared would be asked for again once the adapted mesh ran (AMR-04,
+    /// 2026-11-05). A failure of what runs it replaces.
+    fn adapt(&mut self) {
+        let Some(active) = self.active else {
+            return;
+        };
+        if !self.running
+            || self.uploading.is_some()
+            || self.preparing.is_some()
+            || self.ready.is_some()
+            || self.next as usize >= TOKENS
+        {
+            return;
+        }
+        let token = self.next;
+        self.next += 1;
+        self.requests[token as usize] = self.requests[active as usize % TOKENS];
+        self.fresh_tokens[token as usize] = false;
+        self.requested = Some(token);
+        self.preparing = Some(token);
+        if self
+            .last_error
+            .is_some_and(|failed| self.revision_of(failed) == self.revision_of(active))
+        {
+            self.last_error = None;
+        }
+    }
+
+    fn refresh_runtime(&mut self, frame: Frame) {
         if frame.validated {
             self.validate(frame.inputs);
         }
@@ -928,6 +973,7 @@ impl Protocol {
             switch: true,
             behind: false,
             retime: false,
+            adapted: false,
         };
         for _ in 0..rounds {
             if self.fault || self.failed() {
@@ -995,6 +1041,7 @@ mod tests {
             switch: true,
             behind,
             retime: false,
+            adapted: false,
         }
     }
 
@@ -1078,6 +1125,60 @@ mod tests {
         protocol.step(Step::Speed);
         protocol.step(Step::Frame(refused));
         assert_eq!(protocol.next, requests + 2, "a speed changed asks again");
+    }
+
+    /// AMR-04: an adaptation of what runs after an edit failed to prepare.
+    /// The edit's failure stands, and once the adapted mesh runs nothing asks
+    /// for the edit again; cleared, it was prepared and failed again after
+    /// every adaptation.
+    #[test]
+    fn an_adaptation_leaves_a_failed_edit_standing() {
+        let mut protocol = Protocol::default();
+        assert!(protocol.settle(8, Carried::WHOLE));
+        let running = protocol.active.unwrap();
+        protocol.step(Step::Edit {
+            inputs: 1,
+            valid: true,
+        });
+        protocol.step(Step::Frame(Frame {
+            prepared: Prepared::Failed,
+            ..frame(false)
+        }));
+        let failed = protocol.last_error.expect("the edit failed");
+        let requests = protocol.next;
+        protocol.step(Step::Frame(Frame {
+            adapted: true,
+            ..frame(false)
+        }));
+        assert_eq!(protocol.next, requests + 1, "adaptation asked");
+        assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
+        let active = protocol.active.unwrap();
+        assert_ne!(active, running);
+        assert_eq!(protocol.revision_of(active), protocol.revision_of(running));
+        assert_eq!(protocol.last_error, Some(failed));
+        assert_eq!(protocol.next, requests + 1, "nothing asked again");
+    }
+
+    /// AMR-04: an adaptation while the draft is invalid runs under the
+    /// revision it adapts, and nothing is prepared again to account for it.
+    #[test]
+    fn an_adaptation_while_the_draft_is_invalid_asks_for_nothing_after_it() {
+        let mut protocol = Protocol::default();
+        assert!(protocol.settle(8, Carried::WHOLE));
+        protocol.step(Step::Edit {
+            inputs: 0,
+            valid: false,
+        });
+        protocol.step(Step::Validate { inputs: 0 });
+        assert_eq!(protocol.acceptance, Acceptance::Invalid);
+        let requests = protocol.next;
+        protocol.step(Step::Frame(Frame {
+            inputs: 0,
+            adapted: true,
+            ..frame(false)
+        }));
+        assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
+        assert_eq!(protocol.next, requests + 1, "nothing asked again");
     }
 
     /// An edit, a Reset and a fault on the way all come to rest.

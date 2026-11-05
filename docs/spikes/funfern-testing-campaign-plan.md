@@ -1448,6 +1448,16 @@ mutation, in this order:
   with the user, the controller now remembers the mesher's refusals on its
   mesh. AMR-03 landed with one experiment after another, the settled source
   and fiber and the packet in the reflecting box, at full length nightly.
+  AMR-04's study (2026-11-05) ran adaptation in the runtime sequences, with
+  every action at every stage of an adaptation's way to the device, and
+  found an adaptation finishing after an edit was refused or failed lit
+  "Adapted mesh does not match the active topology" at every cycle, one
+  published while the draft was invalid prepared again, and AMR-03's memory
+  defeated by the source's frequency halved; with the user an adapted mesh
+  is the running topology re-meshed, and each refusal in a row waits twice
+  as long. AMR-04 landed with the stage matrix, the adaptive sequences in
+  lockstep with the protocol model, which takes adaptation's request as an
+  input under Kani, and the halved source nightly.
 - **PH-19**, after C6.
 - **C7, the runtime on the device:** RT-03 on the host first, then RT-02,
   RT-04, RT-05, the adaptive loop's device half, held to statistics rather

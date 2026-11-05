@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-app/src/adaptation.rs b/crates/funfern-app/src/adaptation.rs
+--- a/crates/funfern-app/src/adaptation.rs
++++ b/crates/funfern-app/src/adaptation.rs
+@@ -680,7 +680,7 @@
+                     .iter()
+                     .all(|element| refused.elements.binary_search(element).is_ok())
+         });
+-        if decision == AmrDecision::Coarsen && (refused || self.coarsen_wait > 0) {
++        if decision == AmrDecision::Coarsen && refused {
+             AmrDecision::Hold
+         } else {
+             decision

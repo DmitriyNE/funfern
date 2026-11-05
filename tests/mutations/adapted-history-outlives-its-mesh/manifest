@@ -1,0 +1,4 @@
+about: an adapted mesh an edit replaced keeps its history waiting for a handoff that never comes
+test: cargo test --release -p funfern-app --lib -- an_adapted_mesh_an_edit_replaced_leaves_no_history
+expect: the history of adapted mesh [0-9]+ waits for a handoff nothing will make
+needs: cpu

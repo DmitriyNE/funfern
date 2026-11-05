@@ -26,7 +26,9 @@ use funfern_app::adaptation::{
 };
 use funfern_app::document::PresentationSettings;
 use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
-use funfern_app::topology_runtime::{PreparedCanonicalTransfer, PreparedTopology};
+use funfern_app::topology_runtime::{
+    PreparedCanonicalTransfer, PreparedSolverUpdate, PreparedTopology,
+};
 use funfern_core::{
     CanonicalPointStencil, CanonicalTemporalWaveState, CanonicalWaveState, DomainRect,
     ElectromagneticPolarization, GRID_SCALE_FILTER_CADENCE, OuterBoundaryCondition,
@@ -544,6 +546,15 @@ const EXPOSED_EDGE: f64 = 1.25;
 /// tenth of the speed met a generation that allowed 0.69 of it.
 const STEP_SHARE: f64 = 0.5;
 
+/// What happens to a long run at a time, a new experiment either way: the
+/// field struck again, or the point source's frequency scaled, an edit the
+/// app commits in place on the mesh it runs.
+#[derive(Clone, Copy, Debug)]
+enum Event {
+    Strike(Pulse),
+    Frequency(f64),
+}
+
 /// `start` in the box in `physics`, run `duration` and adapted at
 /// `speed`'s cadence, beside the coarse and the fine run until
 /// `reference_until`. Past it the field has left, its error against the
@@ -573,7 +584,7 @@ fn looped(
 fn looped_in(
     mut document: TopologyDocument,
     start: Start,
-    strikes: &[(f64, Pulse)],
+    events: &[(f64, Event)],
     speed: Option<f64>,
     duration: f64,
     reference_until: f64,
@@ -586,8 +597,8 @@ fn looped_in(
     let presentation = &document.presentation;
     let settings = presentation.adaptation;
     let domain = document.model.accepted.geometry.domain;
-    let (_, _, fine) = prepare_at(&document, settings.minimum_edge)?;
-    let (editor, mut runtime, coarse) = prepare(&document)?;
+    let (_, _, mut fine) = prepare_at(&document, settings.minimum_edge)?;
+    let (mut editor, mut runtime, mut coarse) = prepare(&document)?;
     let time_step = STEP_SHARE * fine.recommended_time_step();
     let points = lattice(domain, LATTICE);
     let fine_stencils = stencils(&fine, &points)?;
@@ -640,12 +651,12 @@ fn looped_in(
         let referenced = step as f64 * time_step <= reference_until;
         let coarsened = step as f64 * time_step <= coarse_until;
         let boundary = filtered && step.is_multiple_of(GRID_SCALE_FILTER_CADENCE);
-        // A strike lands after this step, a new experiment the app begins
+        // An event lands after this step, a new experiment the app begins
         // when the device takes it; no estimate reads a pair across it.
-        let struck = strikes.iter().find(|(time, _)| {
+        let event = events.iter().find(|(time, _)| {
             (step as f64 - 0.5) * time_step < *time && *time <= (step as f64 + 0.5) * time_step
         });
-        let due = !boundary && struck.is_none() && last.is_none_or(|last| step >= last + gap);
+        let due = !boundary && event.is_none() && last.is_none_or(|last| step >= last + gap);
         let fine_previous = (due && diagnose && referenced).then(|| fine_run.clone());
         let coarse_previous = (due && diagnose && referenced).then(|| coarse_run.clone());
         if referenced {
@@ -689,7 +700,7 @@ fn looped_in(
                 )
             })?;
         }
-        if let Some((_, pulse)) = struck {
+        if let Some((_, Event::Strike(pulse))) = event {
             if referenced {
                 fine_run.strike(&fine, *pulse)?;
                 fine_controller.mark_experiment();
@@ -709,6 +720,48 @@ fn looped_in(
                 run.energy(&prepared).unwrap_or(f64::NAN),
                 if boundary { " filtered" } else { "" }
             );
+        }
+        if let Some((_, Event::Frequency(factor))) = event {
+            let mut source = editor.document.model.source;
+            *source.signal.carrier_mut().2 *= factor;
+            editor.set_point_source(source)?;
+            settle(&mut editor);
+            // The fixed runs, edited on meshes the mesher builds again as
+            // they were.
+            let again = |prepared: &PreparedTopology, edited: Arc<PreparedTopology>| {
+                if edited.mesh.triangles != prepared.mesh.triangles {
+                    return Err("the edit's mesh is not the run's".to_string());
+                }
+                Ok(edited)
+            };
+            if referenced {
+                fine = again(
+                    &fine,
+                    prepare_at(&editor.document, settings.minimum_edge)?.2,
+                )?;
+                fine_controller.mark_experiment();
+            }
+            if coarsened {
+                coarse = again(&coarse, prepare(&editor.document)?.2)?;
+                coarse_controller.mark_experiment();
+            }
+            runtime.request(
+                editor.revision,
+                &editor.document,
+                editor.compiled_accepted.clone(),
+                meshing(domain, document.presentation.mesh_edge),
+                false,
+            )?;
+            let target = finish(&mut runtime)?;
+            // The app patches the drive in place on the mesh it runs, and
+            // hands off only what needs it.
+            if target.solver_update == PreparedSolverUpdate::FullHandoff {
+                controller.published(&target);
+            }
+            prepared = target;
+            adaptive_stencils = stencils(&prepared, &points)?;
+            controller.mark_experiment();
+            largest_mean = 0.0;
         }
         if !due {
             continue;
@@ -859,6 +912,23 @@ fn looped_in(
                 ]
             },
         };
+        if std::env::var("AMR_TRACE").is_ok()
+            && adaptation_decision(&result.report, target_accuracy(settings))
+                == AmrDecision::Coarsen
+            && controller.direction(
+                &result.report,
+                &result.coarsen_elements,
+                prepared.mesh.mesh_revision,
+                target_accuracy(settings),
+            ) == AmrDecision::Hold
+        {
+            eprintln!(
+                "  {:.3} s: a coarsening of {} held by the refusals on mesh {}",
+                reading.time,
+                result.coarsen_elements.len(),
+                prepared.mesh.mesh_revision
+            );
+        }
         let decided = if reading.time < freeze {
             controller.decide(&result, &prepared, settings, &mut runtime)
         } else {
@@ -897,12 +967,7 @@ fn looped_in(
             let (report, mesh) = controller.adapted(result, Some(&prepared.mesh));
             reading.changes = report.topology_changes;
             if let Some(mesh) = mesh {
-                runtime.request_adapted_carrying(
-                    editor.revision,
-                    &editor.document,
-                    mesh,
-                    !controller.dormant_transaction,
-                )?;
+                runtime.request_adapted_carrying(mesh, !controller.dormant_transaction)?;
                 let (target, maps) = finish_with_maps(&mut runtime)
                     .map_err(|error| format!("the preparation at step {step}: {error}"))?;
                 controller.published(&target);
@@ -983,7 +1048,7 @@ fn looped_in(
         );
         if std::env::var("AMR_TRACE").is_ok() {
             eprintln!(
-                "{:.3} s: {} triangles, estimate {:.4}{}, energy {:.2e}, {} {} changes, handoff {:.2e}, cleaned {:.2e}",
+                "{:.3} s: {} triangles, estimate {:.4}{}, energy {:.2e}, {} {} changes, handoff {:.2e}, cleaned {:.2e}, {} coarsen candidates, {} refused on mesh {:?}",
                 reading.time,
                 reading.triangles,
                 reading.estimate,
@@ -992,7 +1057,16 @@ fn looped_in(
                 reading.decided,
                 reading.changes,
                 reading.handoff,
-                reading.cleaned
+                reading.cleaned,
+                result.report.coarsen_candidates,
+                controller
+                    .refused_coarsening
+                    .as_ref()
+                    .map_or(0, |refused| refused.elements.len()),
+                controller
+                    .refused_coarsening
+                    .as_ref()
+                    .map(|refused| refused.mesh_revision),
             );
         }
         readings.push(reading);
@@ -1127,7 +1201,7 @@ type Refinement = (
 /// packet as it starts.
 fn first_refinement(document: &TopologyDocument, time_step: f64) -> Result<Refinement, String> {
     let settings = document.presentation.adaptation;
-    let (editor, mut runtime, coarse) = prepare(document)?;
+    let (_, mut runtime, coarse) = prepare(document)?;
     let mut run = started(&coarse, time_step, Start::Packet)?;
     let previous = run.clone();
     run.step(&coarse)?;
@@ -1151,11 +1225,7 @@ fn first_refinement(document: &TopologyDocument, time_step: f64) -> Result<Refin
         }
     };
     let (_, mesh) = controller.adapted(adapted, Some(&coarse.mesh));
-    runtime.request_adapted(
-        editor.revision,
-        &editor.document,
-        mesh.ok_or("the refinement changed nothing")?,
-    )?;
+    runtime.request_adapted(mesh.ok_or("the refinement changed nothing")?)?;
     let (refined, maps) = finish_with_maps(&mut runtime)?;
     Ok((coarse, refined, maps))
 }
@@ -2195,8 +2265,8 @@ struct LongCase {
     name: &'static str,
     document: TopologyDocument,
     start: Start,
-    /// When the field is struck again, and by what.
-    strikes: Vec<(f64, Pulse)>,
+    /// What happens to it, and when.
+    events: Vec<(f64, Event)>,
     speed: Option<f64>,
     duration: f64,
     reference_until: f64,
@@ -2212,18 +2282,20 @@ const OTHER_RING: Pulse = Pulse {
 /// One experiment after another, as the app is played with: the ring struck
 /// every `period` seconds until `duration`, by turns across the box and
 /// where it began.
-fn strikes(period: f64, duration: f64) -> Vec<(f64, Pulse)> {
+fn strikes(period: f64, duration: f64) -> Vec<(f64, Event)> {
     (1..)
         .map(|index| index as f64 * period)
         .take_while(|time| *time < duration)
         .zip([OTHER_RING, RING].into_iter().cycle())
+        .map(|(time, pulse)| (time, Event::Strike(pulse)))
         .collect()
 }
 
 /// AMR-03's cases, at their full length: the packet in the reflecting box,
 /// one experiment after another in the outgoing box, a driven point source
-/// in it, and the parametric fiber amplifier from the gallery at its own
-/// speed, from rest. The ring alone in the reflecting box never adapts: its
+/// in it, the source's frequency halved once its mesh has settled (AMR-04),
+/// and the parametric fiber amplifier from the gallery at its own speed,
+/// from rest. The ring alone in the reflecting box never adapts: its
 /// estimate reads 9.8% at most, inside the 12% target, and the field fills
 /// the box, which it holds at the authored size.
 fn long_cases() -> Result<Vec<LongCase>, String> {
@@ -2240,7 +2312,7 @@ fn long_cases() -> Result<Vec<LongCase>, String> {
             name: "cavity-packet",
             document: cavity_document()?,
             start: Start::Packet,
-            strikes: Vec::new(),
+            events: Vec::new(),
             speed: Some(1.0),
             duration: 60.0,
             reference_until: 10.0,
@@ -2249,25 +2321,34 @@ fn long_cases() -> Result<Vec<LongCase>, String> {
             name: "strikes",
             document: box_document(PhysicsModel::Mechanical)?,
             start: Start::Ring,
-            strikes: strikes(8.0, 60.0),
+            events: strikes(8.0, 60.0),
             speed: Some(1.0),
             duration: 60.0,
             reference_until: 10.0,
         },
         LongCase {
             name: "source",
-            document: source,
+            document: source.clone(),
             start: Start::Rest,
-            strikes: Vec::new(),
+            events: Vec::new(),
             speed: Some(1.0),
             duration: 30.0,
             reference_until: 10.0,
         },
         LongCase {
+            name: "source-halved",
+            document: source,
+            start: Start::Rest,
+            events: vec![(15.0, Event::Frequency(0.5))],
+            speed: Some(1.0),
+            duration: 90.0,
+            reference_until: 0.0,
+        },
+        LongCase {
             name: "fiber",
             document: fiber,
             start: Start::Rest,
-            strikes: Vec::new(),
+            events: Vec::new(),
             speed: None,
             duration: 60.0,
             reference_until: 0.0,
@@ -2293,10 +2374,10 @@ struct Experiment {
 }
 
 /// `readings`' experiments: the first from the start, then one from each of
-/// `strikes` before `duration`.
-fn experiments(readings: &[Reading], strikes: &[(f64, Pulse)], duration: f64) -> Vec<Experiment> {
+/// `events` before `duration`.
+fn experiments(readings: &[Reading], events: &[(f64, Event)], duration: f64) -> Vec<Experiment> {
     let starts = std::iter::once(0.0)
-        .chain(strikes.iter().map(|(time, _)| *time))
+        .chain(events.iter().map(|(time, _)| *time))
         .filter(|start| *start < duration)
         .collect::<Vec<_>>();
     starts
@@ -2386,7 +2467,7 @@ fn long_run(name: &str, gate: f64) -> (LongCase, f64, Looped) {
     let looped = looped_in(
         case.document.clone(),
         case.start,
-        &case.strikes,
+        &case.events,
         case.speed,
         duration,
         reference_until,
@@ -2418,8 +2499,8 @@ fn empty_rate(readings: &[Reading], duration: f64) -> f64 {
 #[test]
 fn one_experiment_after_another_refines_and_comes_back_down() {
     let (case, duration, looped) = long_run("strikes", 24.0);
-    let experiments = experiments(&looped.readings, &case.strikes, duration);
-    let period = case.strikes[0].0;
+    let experiments = experiments(&looped.readings, &case.events, duration);
+    let period = case.events[0].0;
     let first = experiments[0].peak;
     for experiment in &experiments {
         let label = format!("{experiment:?}");
@@ -2464,10 +2545,18 @@ fn one_experiment_after_another_refines_and_comes_back_down() {
 /// Remembered, the source asks 0.07 times a second over its second half as
 /// a borderline edge comes into the candidates, none in the gate's 20 s,
 /// and the fiber none past 10.5 s. Nightly, 30 s and the fiber's 60 s.
+///
+/// AMR-04: with the source's frequency halved at 15 s the mesh refined for
+/// it keeps 450 to 500 candidates the mesher refuses, shifting with the
+/// field, which the refusals remembered never held: 0.58 a second from 21 s
+/// to 45 s. Each refusal in a row now waits twice as long as the last, and
+/// over the second half of 90 s, nightly, it asks 0.07 times a second while
+/// the mesher still makes the few collapses it can, five in four
+/// coarsenings.
 #[test]
 fn a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make() {
     let names: &[&str] = if long_nightly() {
-        &["source", "fiber"]
+        &["source", "fiber", "source-halved"]
     } else {
         &["source"]
     };
@@ -2538,7 +2627,7 @@ fn study_long_adaptation() {
         let looped = match looped_in(
             document,
             case.start,
-            &case.strikes,
+            &case.events,
             case.speed,
             duration,
             case.reference_until.min(duration),
@@ -2638,7 +2727,7 @@ fn study_long_adaptation() {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        for (index, experiment) in experiments(&looped.readings, &case.strikes, duration)
+        for (index, experiment) in experiments(&looped.readings, &case.events, duration)
             .iter()
             .enumerate()
         {

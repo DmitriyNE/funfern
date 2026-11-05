@@ -90,6 +90,7 @@ impl Playground {
         self.amr_indicator_result = None;
         self.amr_shown_report = None;
         self.amr.coarsen_streak = 0;
+        self.amr.forget_refusals_in_a_row();
     }
 
     /// Adaptation as at launch, for a scene whose mesh has no history: its
@@ -180,6 +181,16 @@ impl Playground {
         display: &WaveDisplay,
     ) {
         self.drain_background_amr();
+        // An adapted mesh's history waits for its handoff while the runtime
+        // holds the mesh. One an edit's request replaced, or the device
+        // refused, is never published, and its history would wait on.
+        if !(self.runtime.requested_adaptation() && self.preparation_in_progress()) {
+            self.amr.pending = None;
+        }
+        #[cfg(test)]
+        let grant = self.amr_grant;
+        #[cfg(not(test))]
+        let grant = None;
         if !self.editor.document.presentation.adaptation.enabled {
             self.stop_adaptation_work();
             self.amr_status = "off".into();
@@ -241,12 +252,7 @@ impl Playground {
 
         if let Some(job) = &mut self.amr_adaptation_job {
             self.amr_status = job.phase().into();
-            let started = Instant::now();
-            let mut result = None;
-            while result.is_none() && started.elapsed().as_secs_f64() < 0.002 {
-                result = job.advance(64);
-            }
-            if let Some(result) = result {
+            if let Some(result) = frame_slices(grant, || job.advance(64)) {
                 self.amr_adaptation_completed = Some(result);
                 self.amr_adaptation_job = None;
             } else {
@@ -265,13 +271,13 @@ impl Playground {
                         self.amr_error = None;
                         return;
                     };
-                    match self.runtime.request_adapted_carrying(
-                        self.editor.revision,
-                        &self.editor.document,
-                        mesh,
-                        !self.amr.dormant_transaction,
-                    ) {
-                        Ok(_) => {
+                    match self
+                        .runtime
+                        .request_adapted_carrying(mesh, !self.amr.dormant_transaction)
+                    {
+                        Ok(_token) => {
+                            #[cfg(test)]
+                            self.protocol_log.push(ProtocolNote::Adapted(_token));
                             self.amr_status = "preparing adaptive handoff".into();
                             self.amr_error = None;
                             self.begin_handoff_timeline();
@@ -300,12 +306,7 @@ impl Playground {
 
         if let Some(job) = &mut self.amr_indicator_job {
             self.amr_status = job.phase().into();
-            let started = Instant::now();
-            let mut result = None;
-            while result.is_none() && started.elapsed().as_secs_f64() < 0.002 {
-                result = job.advance(64);
-            }
-            if let Some(result) = result {
+            if let Some(result) = frame_slices(grant, || job.advance(64)) {
                 self.amr_indicator_completed = Some(result);
                 self.amr_indicator_job = None;
             } else {
@@ -449,6 +450,20 @@ impl Playground {
         self.amr_last_started = Some(Instant::now());
         self.amr_status = "preparing estimate".into();
     }
+}
+
+/// What `advance` comes to in a frame: slices of work for the frame's 2 ms,
+/// or the `grant` of slices a test lends it.
+fn frame_slices<T>(grant: Option<usize>, mut advance: impl FnMut() -> Option<T>) -> Option<T> {
+    if let Some(slices) = grant {
+        return (0..slices).find_map(|_| advance());
+    }
+    let started = Instant::now();
+    let mut result = None;
+    while result.is_none() && started.elapsed().as_secs_f64() < 0.002 {
+        result = advance();
+    }
+    result
 }
 
 /// Builds the estimator's snapshots from what the displays hold of the latest

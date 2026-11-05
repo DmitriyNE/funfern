@@ -1,0 +1,4 @@
+about: an adaptation clears the failure of an edit that could not run, so the edit is prepared again after every adapted mesh
+test: cargo test --release -p funfern-app --lib -- an_adaptation_after_a_refused_edit_adapts_what_runs
+expect: the runtime and the protocol model part
+needs: cpu

@@ -1,0 +1,4 @@
+about: the model's adaptation asks for the document's revision and inputs, not what runs
+test: cargo test -p funfern-protocol --release --locked
+expect: an_adaptation_(leaves_a_failed_edit_standing|while_the_draft_is_invalid_asks_for_nothing_after_it) \.\.\. FAILED
+needs: cpu

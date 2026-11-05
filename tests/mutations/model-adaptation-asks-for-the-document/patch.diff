@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-protocol/src/lib.rs b/crates/funfern-protocol/src/lib.rs
+--- a/crates/funfern-protocol/src/lib.rs
++++ b/crates/funfern-protocol/src/lib.rs
+@@ -481,7 +481,8 @@
+         }
+         let token = self.next;
+         self.next += 1;
+-        self.requests[token as usize] = self.requests[active as usize % TOKENS];
++        let _ = active;
++        self.requests[token as usize] = (self.revision, self.inputs);
+         self.fresh_tokens[token as usize] = false;
+         self.requested = Some(token);
+         self.preparing = Some(token);

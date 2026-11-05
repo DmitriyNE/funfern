@@ -58,6 +58,11 @@ pub struct Playground {
     /// as in the app.
     #[cfg(test)]
     pub(super) preparation_grant: Option<usize>,
+    /// Slices of 64 work units each frame lends an estimate or adaptation
+    /// job running on the frame, for tests that decide when it finishes;
+    /// none, the frame's 2 ms, as in the app.
+    #[cfg(test)]
+    pub(super) amr_grant: Option<usize>,
     /// Packs a candidate on the frame that asks for it rather than on a
     /// thread, for tests that decide when the device sees it.
     #[cfg(test)]
@@ -416,6 +421,8 @@ impl Default for Playground {
             background_amr: BackgroundAmrWorker::spawn(),
             #[cfg(test)]
             preparation_grant: None,
+            #[cfg(test)]
+            amr_grant: None,
             #[cfg(test)]
             pack_inline: false,
             #[cfg(test)]
