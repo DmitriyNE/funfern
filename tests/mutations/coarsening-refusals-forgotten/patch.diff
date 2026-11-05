@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-app/src/adaptation.rs b/crates/funfern-app/src/adaptation.rs
+--- a/crates/funfern-app/src/adaptation.rs
++++ b/crates/funfern-app/src/adaptation.rs
+@@ -759,7 +759,7 @@
+                 state.mesh_revision = active.mesh_revision;
+                 // A vertex still cooling down may collapse once it has
+                 // cooled, so only a refusal with none is for good.
+-                if let Some(elements) = coarsening.filter(|_| cooled(&state)) {
++                if let Some(elements) = coarsening.filter(|_| false) {
+                     let mut refused = self
+                         .refused_coarsening
+                         .take()

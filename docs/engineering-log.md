@@ -32492,3 +32492,88 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-05 — AMR-03: long adaptation, and a settled mesh stops asking
+
+- **Why.** AMR-03 (campaign plan, section 6l): repeated refinement and
+  coarsening over long runs, looking for oscillation, cumulative damping or
+  growth, drift of the totals, growing error and repeated or abandoned jobs.
+- **The study** (`study_long_adaptation`, ignored) ran the ring in the
+  reflecting box at full and at a quarter of the speed for 60 s, the driven
+  point source for 30 s and the parametric fiber from rest at its own speed
+  for 60 s, about 71 min. No reversal of the mesh in any second half, no
+  element coarser than authored where the field got, the reflecting box's
+  primary total to seven digits for a minute, the source's error against
+  the fine run 0.028 against the coarse run's 0.046 and flat from 3 s, and
+  the energy the handoffs took taken in the first refinements alone (0.21%
+  and 0.76%). Two findings:
+  - **The ring alone in the reflecting box never adapts.** Its estimate
+    reads 9.8% at most against the 12% target, and the field fills the box,
+    which it holds at the authored size: no transaction in 60 s. At a 5%
+    target it refines three times in 2.25 s and holds; a packet in the box
+    refines once and coarsens as it fades. Cycles come from one experiment
+    after another, as the app is played with, and the harness now strikes a
+    running field (`Run::strike`, the app's own primary pulse, each
+    controller marking the experiment).
+  - **A settled mesh asks for a coarsening it cannot make at every second
+    estimate, forever**: the source 0.67 times a second at 14 ms of work
+    each, the fiber 0.63 at 32 ms, the status line confirming and adapting
+    in turn. 2026-10-03 had found why and left it: the estimate counts an
+    element by its shortest edge, each collapse the transaction finds would
+    leave an edge past its target, and on an unchanged mesh a retry
+    succeeds only where a target has grown, which no cheap rule predicts.
+- **Fix, with the user**, reversing 2026-10-03 knowingly: the estimate
+  returns the elements it counts (`SolutionIndicatorResult::coarsen_elements`);
+  a coarsening that changes nothing with no vertex cooling down records them
+  against the mesh revision (`AdaptationController::refused_coarsening`), and
+  a later coarsening of none but those elements on that mesh holds
+  (`AdaptationController::direction`, which the diagnostics panel reads too).
+  The first version kept the last refusal alone, and a driven field's wobble
+  moved a borderline edge in and out of the candidates at every estimate:
+  0.40 a second still. Every refusal on the mesh is kept now. The source
+  asks 0.07 times a second over its second half, the fiber none past 10.5 s.
+  What is given up: the fiber's one collapse in a minute (7,348 to 7,346
+  triangles) and four single-element coarsenings of the packet in the
+  reflecting box after 50 s, 6 triangles; that packet, its field fading,
+  still asks 0.33 times a second, each estimate bringing new candidates and
+  each real coarsening a new mesh.
+- **Measured with the fix.** One experiment after another, a ring struck
+  every 8 s by turns across the box and where it began, for 60 s: eight
+  experiments, each refined to 4,247-5,410 triangles from 2,772 and back
+  down to 0.67-0.72 of its peak by the next, none refining again once it had
+  begun to coarsen, no empty transaction, the handoffs taking 1.6e-4 to
+  4.8e-3 of each experiment's peak energy, the mesh ending each experiment
+  between 2,826 and 3,874 with no trend; up to 64 elements coarser than
+  authored outside the reach while dormant. The adapted run ends at 1.498e-3
+  of its last peak against the coarse run's 1.501e-3.
+- **Harness.** Without the fine reference, the floor of where the field is
+  read 0, so every coarsened element counted as exposed; it is now each
+  experiment's own peak density, the reference's while it steps and the
+  adapted run's own after, as the app holds the field.
+- **Tests** (`tests/adaptation.rs`), about a minute together in the gate,
+  the adapted run alone; `FUNFERN_AMR_LONG=1` runs them at full length
+  beside the fine and the coarse run in the new nightly job
+  `adaptation-long-runs`:
+  - `one_experiment_after_another_refines_and_comes_back_down`, 24 s
+    (60 s nightly): each experiment refines past 1.3 times the authored
+    mesh, ends under four fifths of its peak, peaks under 1.25 times the
+    first, refines nothing after it begins to coarsen, has no empty
+    transaction and loses at most 1% of its peak at its handoffs; no
+    exposure; AMR-01's handoff bound.
+  - `a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make`, the
+    source 20 s (30 s and the fiber's 60 s nightly): at most 0.1 empty
+    transactions a second over the second half, no reversal. Mutations
+    `coarsening-refusals-forgotten` and `coarsening-refusal-last-only`, both
+    reading 0.60.
+  - `a_packet_in_a_reflecting_box_keeps_its_total_as_the_mesh_follows_it`,
+    24 s (60 s nightly): the primary total within 1e-9, a coarsening, no
+    reversal over the second half, no exposure.
+  - The app's `a_coarsening_the_mesher_refused_is_not_asked_for_again_on_its_mesh`
+    and `a_coarsening_refused_while_a_vertex_cooled_down_is_asked_again`.
+  - Both nightly-length runs of the strikes and the packet pass locally
+    (435 s); the source's and the fiber's from the study.
+  - `dormant-carry-keeps-its-totals` regenerated against the moved
+    controller; detected.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

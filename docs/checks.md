@@ -1628,6 +1628,40 @@ a fading field is measured against, mutation
 `a_dormant_adaptation_carries_without_its_totals` the handoff of an adaptation
 a dormant estimate asked for.
 
+AMR-03, long adaptation, is three tests of `tests/adaptation.rs`, about a
+minute together on ten cores in the gate, where each runs its adapted run
+alone; with `FUNFERN_AMR_LONG=1` the nightly job runs them at full length
+beside the fine and the coarse run.
+`one_experiment_after_another_refines_and_comes_back_down` strikes the ring
+in the default box every 8 s, by turns across it and where it began, as the
+app is played with: 24 s in the gate, 60 s nightly. Each experiment must
+refine to 1.3 times the authored mesh (4,247 to 5,410 triangles from 2,772),
+come back down to four fifths of its peak before the next (0.67 to 0.72),
+need at most 1.25 times the first's peak (1.13), refine nothing once it has
+begun to coarsen, run no transaction that changes nothing, and lose at most
+1% of its peak energy at its handoffs (1.6e-4 to 4.8e-3); no element past
+1.25 of the authored edge may lie where the field gets, held against its
+experiment's own peak, and every handoff keeps AMR-01's bound.
+`a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make` runs the
+driven point source, 20 s in the gate and 30 s nightly with the parametric
+fiber's minute: over the second half at most one transaction in ten seconds
+that changes nothing (0 and 0.07 a second for the source, none for the
+fiber) and no reversal. Before the controller remembered the coarsenings the
+mesher refused on its mesh, they asked 0.67 and 0.63 times a second, forever.
+Its mutations are `coarsening-refusals-forgotten` and
+`coarsening-refusal-last-only`, the first fix, which kept only the last
+refusal; both read 0.60. The app's
+`a_coarsening_the_mesher_refused_is_not_asked_for_again_on_its_mesh` and
+`a_coarsening_refused_while_a_vertex_cooled_down_is_asked_again` hold the
+rule. `a_packet_in_a_reflecting_box_keeps_its_total_as_the_mesh_follows_it`
+runs the packet in the box with reflecting walls, 24 s in the gate and 60 s
+nightly: its primary total within 1e-9 at every estimate, a coarsening as it
+spreads and fades, and no reversal over the second half. The study,
+`study_long_adaptation` (ignored, `LONG_CASE` picks a case), also had the
+ring alone in the reflecting box, which never adapts: its estimate reads
+9.8% at most against the 12% target, and the field fills the box, which it
+holds at the authored size.
+
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
 catch it and the pattern its failure must match; the script applies each,

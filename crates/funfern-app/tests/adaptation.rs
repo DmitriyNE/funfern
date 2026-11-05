@@ -28,8 +28,9 @@ use funfern_app::document::PresentationSettings;
 use funfern_app::topology_editor::{TopologyDocument, TopologyEditor};
 use funfern_app::topology_runtime::{PreparedCanonicalTransfer, PreparedTopology};
 use funfern_core::{
-    CanonicalPointStencil, CanonicalWaveState, DomainRect, ElectromagneticPolarization,
-    GRID_SCALE_FILTER_CADENCE, PhysicsModel, Point2, SolutionIndicatorResult, TriMesh,
+    CanonicalPointStencil, CanonicalTemporalWaveState, CanonicalWaveState, DomainRect,
+    ElectromagneticPolarization, GRID_SCALE_FILTER_CADENCE, OuterBoundaryCondition,
+    OuterBoundaryConditions, PhysicsModel, Point2, SolutionIndicatorResult, TriMesh,
 };
 use std::sync::Arc;
 
@@ -45,6 +46,8 @@ enum Start {
     /// A broad pulse struck where the ring is: smooth content, which the
     /// authored mesh carries and the estimator was calibrated on.
     Broad,
+    /// At rest, for a scene whose sources and drives put the field in.
+    Rest,
 }
 
 /// The broad pulse, four authored elements across.
@@ -86,6 +89,14 @@ fn started(prepared: &PreparedTopology, time_step: f64, start: Start) -> Result<
     match start {
         Start::Ring => Run::struck_by(prepared, time_step, RING),
         Start::Broad => Run::struck_by(prepared, time_step, BROAD),
+        Start::Rest => match &prepared.canonical_temporal_operator {
+            Some(temporal) => CanonicalTemporalWaveState::zero(temporal, time_step)
+                .map(Run::Temporal)
+                .map_err(|error| error.to_string()),
+            None => CanonicalWaveState::zero(&prepared.canonical_operator, time_step)
+                .map(Run::Fixed)
+                .map_err(|error| error.to_string()),
+        },
         Start::Packet => {
             let operator = &prepared.canonical_operator;
             let (field, potential): (Vec<f64>, Vec<f64>) = operator
@@ -407,6 +418,13 @@ struct Reading {
     exposed: usize,
     /// The elements of that mesh coarser than the authored one anywhere.
     coarser: usize,
+    /// Each run's primary total, which nothing in a lossless closed box
+    /// changes, and the coarse run's energy over its peak.
+    total: f64,
+    coarse_total: f64,
+    coarse_energy: f64,
+    /// The wall-clock time the transaction took, in milliseconds.
+    job_ms: f64,
     /// The share of the energy the cleanup took after the handoff, the
     /// stationary flux the carry left.
     cleaned: f64,
@@ -538,9 +556,32 @@ fn looped(
     duration: f64,
     reference_until: f64,
 ) -> Result<Looped, String> {
-    let mut document = box_document(physics)?;
+    looped_in(
+        box_document(physics)?,
+        start,
+        &[],
+        Some(speed),
+        duration,
+        reference_until,
+        reference_until,
+    )
+}
+
+/// [`looped`] in `document` at `speed`, or its own speed ceiling, the
+/// coarse run stepping beside it until `coarse_until`, which for a run
+/// whose energy and totals are compared with it can outlast the fine one.
+fn looped_in(
+    mut document: TopologyDocument,
+    start: Start,
+    strikes: &[(f64, Pulse)],
+    speed: Option<f64>,
+    duration: f64,
+    reference_until: f64,
+    coarse_until: f64,
+) -> Result<Looped, String> {
     // The speed ceiling the app runs this run's speed under, which bounds
     // how far the field gets between estimates.
+    let speed = speed.unwrap_or(document.presentation.simulation_speed);
     document.presentation.simulation_speed = speed;
     let presentation = &document.presentation;
     let settings = presentation.adaptation;
@@ -579,13 +620,16 @@ fn looped(
     let total = (duration / time_step).ceil() as u64;
     let mut last = None;
     let mut largest_norm: f64 = 0.0;
-    // The lattice's mean density at its largest, the reference's peak energy
-    // spread evenly over the box, in the lattice's units.
+    // The lattice's mean density at its largest this experiment, its peak
+    // energy spread evenly over the box in the lattice's units: the
+    // reference's while it steps, the adapted run's own past it or without
+    // one, as the app holds the field against its experiment's peak.
     let mut largest_mean: f64 = 0.0;
     let mut readings = Vec::new();
     // The app filters the grid scale every few steps, as a new document has
     // it, and estimates no pair of states a filter stands between.
-    let filtered = std::env::var("AMR_UNFILTERED").is_err();
+    let filtered = presentation.grid_scale_filter && std::env::var("AMR_UNFILTERED").is_err();
+    let mut coarse_peak: f64 = 0.0;
     // A study's watch on every step's energy from a time on.
     let watch_from = std::env::var("AMR_WATCH_FROM")
         .ok()
@@ -594,12 +638,20 @@ fn looped(
     let watching = |step: u64| step as f64 * time_step >= watch_from;
     for step in 1..=total {
         let referenced = step as f64 * time_step <= reference_until;
+        let coarsened = step as f64 * time_step <= coarse_until;
         let boundary = filtered && step.is_multiple_of(GRID_SCALE_FILTER_CADENCE);
-        let due = !boundary && last.is_none_or(|last| step >= last + gap);
+        // A strike lands after this step, a new experiment the app begins
+        // when the device takes it; no estimate reads a pair across it.
+        let struck = strikes.iter().find(|(time, _)| {
+            (step as f64 - 0.5) * time_step < *time && *time <= (step as f64 + 0.5) * time_step
+        });
+        let due = !boundary && struck.is_none() && last.is_none_or(|last| step >= last + gap);
         let fine_previous = (due && diagnose && referenced).then(|| fine_run.clone());
         let coarse_previous = (due && diagnose && referenced).then(|| coarse_run.clone());
         if referenced {
             fine_run.step(&fine)?;
+        }
+        if coarsened {
             coarse_run.step(&coarse)?;
         }
         // The state a step earlier on this generation: a handoff falls
@@ -616,6 +668,8 @@ fn looped(
         if boundary {
             if referenced {
                 fine_run.filter(&fine)?;
+            }
+            if coarsened {
                 coarse_run.filter(&coarse)?;
             }
             if watching(step) {
@@ -634,6 +688,19 @@ fn looped(
                     unfiltered.energy(&prepared).unwrap_or(f64::NAN)
                 )
             })?;
+        }
+        if let Some((_, pulse)) = struck {
+            if referenced {
+                fine_run.strike(&fine, *pulse)?;
+                fine_controller.mark_experiment();
+            }
+            if coarsened {
+                coarse_run.strike(&coarse, *pulse)?;
+                coarse_controller.mark_experiment();
+            }
+            run.strike(&prepared, *pulse)?;
+            controller.mark_experiment();
+            largest_mean = 0.0;
         }
         if watching(step) {
             eprintln!(
@@ -659,8 +726,8 @@ fn looped(
         let norm = densities(&reference).iter().sum::<f64>().sqrt();
         if referenced {
             largest_norm = largest_norm.max(norm);
-            largest_mean = largest_mean.max(norm * norm / points.len() as f64);
         }
+        largest_mean = largest_mean.max(norm * norm / points.len() as f64);
         let (adaptive, coarse_error) = if referenced {
             (
                 relative_error(&adaptive_readings, &reference),
@@ -757,6 +824,20 @@ fn looped(
             reach: result.report.field_reach,
             exposed: 0,
             coarser: 0,
+            total: run.primary().iter().sum(),
+            coarse_total: if coarsened {
+                coarse_run.primary().iter().sum()
+            } else {
+                f64::NAN
+            },
+            coarse_energy: if coarsened {
+                let energy = coarse_run.energy(&coarse)?;
+                coarse_peak = coarse_peak.max(energy);
+                energy / coarse_peak
+            } else {
+                f64::NAN
+            },
+            job_ms: 0.0,
             cleaned: 0.0,
             fine_estimate,
             coarse_estimate,
@@ -799,11 +880,13 @@ fn looped(
             }
         };
         if let Some(job) = &mut job {
+            let started_job = std::time::Instant::now();
             let result = loop {
                 if let Some(result) = job.advance(1 << 16) {
                     break result.map_err(|error| error.to_string())?;
                 }
             };
+            reading.job_ms = started_job.elapsed().as_secs_f64() * 1000.0;
             reading.decided = if result.report.inserted_vertices > 0 {
                 "refine"
             } else if result.report.collapsed_vertices > 0 {
@@ -2094,5 +2177,502 @@ fn study_the_estimators_calibration() {
             eprintln!("  {name:>9}: {values} | rates {rates}");
         }
         eprintln!("{start:?} in {:.1} s", started_at.elapsed().as_secs_f64());
+    }
+}
+
+/// The default box with reflecting walls: nothing leaves and nothing is
+/// lost, so whatever its energy and its primary total do the run does.
+fn cavity_document() -> Result<TopologyDocument, String> {
+    let mut document = box_document(PhysicsModel::Mechanical)?;
+    let walls = OuterBoundaryConditions::uniform(OuterBoundaryCondition::Reflecting);
+    document.model.draft.outer_boundaries = walls;
+    document.model.accepted.outer_boundaries = walls;
+    Ok(document)
+}
+
+/// One of AMR-03's long runs.
+struct LongCase {
+    name: &'static str,
+    document: TopologyDocument,
+    start: Start,
+    /// When the field is struck again, and by what.
+    strikes: Vec<(f64, Pulse)>,
+    speed: Option<f64>,
+    duration: f64,
+    reference_until: f64,
+}
+
+/// A ring like [`RING`], across the box from it.
+const OTHER_RING: Pulse = Pulse {
+    centre: Point2 { x: 0.35, y: 0.3 },
+    width: 0.06,
+    height: 1.0,
+};
+
+/// One experiment after another, as the app is played with: the ring struck
+/// every `period` seconds until `duration`, by turns across the box and
+/// where it began.
+fn strikes(period: f64, duration: f64) -> Vec<(f64, Pulse)> {
+    (1..)
+        .map(|index| index as f64 * period)
+        .take_while(|time| *time < duration)
+        .zip([OTHER_RING, RING].into_iter().cycle())
+        .collect()
+}
+
+/// AMR-03's cases, at their full length: the packet in the reflecting box,
+/// one experiment after another in the outgoing box, a driven point source
+/// in it, and the parametric fiber amplifier from the gallery at its own
+/// speed, from rest. The ring alone in the reflecting box never adapts: its
+/// estimate reads 9.8% at most, inside the 12% target, and the field fills
+/// the box, which it holds at the authored size.
+fn long_cases() -> Result<Vec<LongCase>, String> {
+    let mut source = box_document(PhysicsModel::Mechanical)?;
+    source.model.source.enabled = true;
+    let fiber = funfern_app::topology_examples::catalog()
+        .iter()
+        .find(|example| example.name == "Parametric fiber amplifier")
+        .ok_or("the gallery has no parametric fiber amplifier")?
+        .document
+        .clone();
+    Ok(vec![
+        LongCase {
+            name: "cavity-packet",
+            document: cavity_document()?,
+            start: Start::Packet,
+            strikes: Vec::new(),
+            speed: Some(1.0),
+            duration: 60.0,
+            reference_until: 10.0,
+        },
+        LongCase {
+            name: "strikes",
+            document: box_document(PhysicsModel::Mechanical)?,
+            start: Start::Ring,
+            strikes: strikes(8.0, 60.0),
+            speed: Some(1.0),
+            duration: 60.0,
+            reference_until: 10.0,
+        },
+        LongCase {
+            name: "source",
+            document: source,
+            start: Start::Rest,
+            strikes: Vec::new(),
+            speed: Some(1.0),
+            duration: 30.0,
+            reference_until: 10.0,
+        },
+        LongCase {
+            name: "fiber",
+            document: fiber,
+            start: Start::Rest,
+            strikes: Vec::new(),
+            speed: None,
+            duration: 60.0,
+            reference_until: 0.0,
+        },
+    ])
+}
+
+/// One experiment of a long run: from its strike to the next.
+#[derive(Debug)]
+struct Experiment {
+    start: f64,
+    end: f64,
+    /// The most triangles the mesh held, and how many it came down to.
+    peak: usize,
+    ends: usize,
+    /// What the handoffs took, as a share of the experiment's peak energy:
+    /// a share of a field that has drained to nothing is nothing.
+    lost: f64,
+    /// Refinements after it had begun coarsening.
+    returns: usize,
+    /// Transactions that changed nothing.
+    empty: usize,
+}
+
+/// `readings`' experiments: the first from the start, then one from each of
+/// `strikes` before `duration`.
+fn experiments(readings: &[Reading], strikes: &[(f64, Pulse)], duration: f64) -> Vec<Experiment> {
+    let starts = std::iter::once(0.0)
+        .chain(strikes.iter().map(|(time, _)| *time))
+        .filter(|start| *start < duration)
+        .collect::<Vec<_>>();
+    starts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, start)| {
+            let end = starts.get(index + 1).copied().unwrap_or(duration);
+            let experiment = readings
+                .iter()
+                .filter(|reading| *start <= reading.time && reading.time < end)
+                .collect::<Vec<_>>();
+            let mut coarsening = false;
+            let mut returns = 0;
+            for reading in &experiment {
+                match reading.decided {
+                    "coarsen" => coarsening = true,
+                    "refine" if coarsening => returns += 1,
+                    _ => {}
+                }
+            }
+            Some(Experiment {
+                start: *start,
+                end,
+                peak: experiment.iter().map(|reading| reading.after).max()?,
+                ends: experiment.last()?.after,
+                lost: experiment
+                    .iter()
+                    .filter(|reading| reading.changes > 0)
+                    .map(|reading| -reading.handoff * reading.energy)
+                    .sum(),
+                returns,
+                empty: experiment
+                    .iter()
+                    .filter(|reading| reading.decided == "unchanged")
+                    .count(),
+            })
+        })
+        .collect()
+}
+
+/// `readings` past half of `duration`, where a long run has settled.
+fn second_half(readings: &[Reading], duration: f64) -> Vec<&Reading> {
+    readings
+        .iter()
+        .filter(|reading| reading.time > 0.5 * duration)
+        .collect()
+}
+
+/// How often a transaction in `readings` changed the mesh the other way from
+/// the last one that changed it.
+fn reversals(readings: &[&Reading]) -> usize {
+    let mut reversals = 0;
+    let mut direction = 0i64;
+    for reading in readings {
+        let change = reading.after as i64 - reading.triangles as i64;
+        if change != 0 {
+            if direction != 0 && change.signum() != direction {
+                reversals += 1;
+            }
+            direction = change.signum();
+        }
+    }
+    reversals
+}
+
+/// Whether AMR-03's tests run their cases at full length against the fine
+/// reference, as the nightly job does, rather than the gate's shorter runs
+/// without one.
+fn long_nightly() -> bool {
+    std::env::var_os("FUNFERN_AMR_LONG").is_some()
+}
+
+/// AMR-03's case `name` and how long it ran: `gate` seconds in the gate with
+/// the adapted run alone, its full length beside the fine and the coarse run
+/// with `FUNFERN_AMR_LONG=1`.
+fn long_run(name: &str, gate: f64) -> (LongCase, f64, Looped) {
+    let case = long_cases()
+        .unwrap()
+        .into_iter()
+        .find(|case| case.name == name)
+        .unwrap();
+    let (duration, reference_until) = if long_nightly() {
+        (case.duration, case.reference_until)
+    } else {
+        (gate, 0.0)
+    };
+    let looped = looped_in(
+        case.document.clone(),
+        case.start,
+        &case.strikes,
+        case.speed,
+        duration,
+        reference_until,
+        reference_until,
+    )
+    .unwrap_or_else(|error| panic!("{name}: {error}"));
+    (case, duration, looped)
+}
+
+/// Transactions that changed nothing, per second, over `readings`' second
+/// half of `duration`.
+fn empty_rate(readings: &[Reading], duration: f64) -> f64 {
+    let settled = second_half(readings, duration);
+    let empty = settled
+        .iter()
+        .filter(|reading| reading.decided == "unchanged")
+        .count();
+    empty as f64 / (0.5 * duration)
+}
+
+/// AMR-03: one experiment after another, a ring struck every 8 s by turns
+/// across the box and where it began, as the app is played with. Each
+/// refines, to 4,247-5,410 triangles from the authored 2,772, and comes back
+/// down to 0.67-0.72 of its peak before the next; no later one needs more
+/// than 1.13 times the first; none refines again once it has begun to
+/// coarsen; no coarsening comes back empty; and the handoffs take 1.6e-4 to
+/// 4.8e-3 of an experiment's peak energy. 24 s, three experiments, in the
+/// gate; 60 s, eight, nightly.
+#[test]
+fn one_experiment_after_another_refines_and_comes_back_down() {
+    let (case, duration, looped) = long_run("strikes", 24.0);
+    let experiments = experiments(&looped.readings, &case.strikes, duration);
+    let period = case.strikes[0].0;
+    let first = experiments[0].peak;
+    for experiment in &experiments {
+        let label = format!("{experiment:?}");
+        assert!(
+            experiment.peak as f64 >= 1.3 * looped.coarse_triangles as f64,
+            "never refined from the authored {}: {label}",
+            looped.coarse_triangles
+        );
+        if experiment.end - experiment.start >= period - 1.0e-9 {
+            assert!(
+                experiment.ends as f64 <= 0.8 * experiment.peak as f64,
+                "never came back down: {label}"
+            );
+        }
+        assert!(
+            experiment.peak as f64 <= 1.25 * first as f64,
+            "needed more than the first's {first}: {label}"
+        );
+        assert_eq!(experiment.returns, 0, "{label}");
+        assert_eq!(experiment.empty, 0, "{label}");
+        assert!(experiment.lost <= 1.0e-2, "{label}");
+    }
+    for reading in &looped.readings {
+        assert_eq!(reading.exposed, 0, "at {:.3} s: {reading:?}", reading.time);
+        if reading.changes > 0 && reading.energy >= AMR_ERROR_FLOOR_RATIO {
+            assert!(
+                (-1.0e-2..=1.0e-6).contains(&reading.handoff),
+                "at {:.3} s a handoff changed the energy by {:.2e}",
+                reading.time,
+                reading.handoff
+            );
+        }
+    }
+}
+
+/// AMR-03: a driven point source settles its mesh in 3 s, and the settled
+/// mesh stops asking for a coarsening it cannot make. The estimate counts an
+/// element by its shortest edge, each collapse the transaction finds would
+/// leave an edge past its target, and before the controller remembered the
+/// mesher's refusals it asked every second estimate, 0.67 times a second at
+/// 14 ms of work each, forever; the parametric fiber 0.63 at 32 ms.
+/// Remembered, the source asks 0.07 times a second over its second half as
+/// a borderline edge comes into the candidates, none in the gate's 20 s,
+/// and the fiber none past 10.5 s. Nightly, 30 s and the fiber's 60 s.
+#[test]
+fn a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make() {
+    let names: &[&str] = if long_nightly() {
+        &["source", "fiber"]
+    } else {
+        &["source"]
+    };
+    for name in names {
+        let (_, duration, looped) = long_run(name, 20.0);
+        let rate = empty_rate(&looped.readings, duration);
+        assert!(
+            rate <= 0.1,
+            "{name} asks for an empty coarsening {rate:.2} times a second over its second half"
+        );
+        assert_eq!(
+            reversals(&second_half(&looped.readings, duration)),
+            0,
+            "{name}"
+        );
+    }
+}
+
+/// AMR-03: the packet in the reflecting box, refined once as it starts and
+/// coarsened back as it spreads and fades, keeps its primary total: nothing
+/// leaves the box, and no handoff may take any. 24 s in the gate, past its
+/// first coarsening at 20 s; 60 s nightly, from 3,384 triangles at its peak
+/// to 2,874.
+#[test]
+fn a_packet_in_a_reflecting_box_keeps_its_total_as_the_mesh_follows_it() {
+    let (_, duration, looped) = long_run("cavity-packet", 24.0);
+    let readings = &looped.readings;
+    let first = readings[0].total;
+    for reading in readings {
+        assert!(
+            (reading.total - first).abs() <= 1.0e-9 * first.abs(),
+            "at {:.3} s the total reads {:.9e} against {first:.9e}",
+            reading.time,
+            reading.total
+        );
+        assert_eq!(reading.exposed, 0, "at {:.3} s: {reading:?}", reading.time);
+    }
+    assert!(
+        readings.iter().any(|reading| reading.decided == "coarsen"),
+        "the packet's mesh never coarsened"
+    );
+    assert_eq!(reversals(&second_half(readings, duration)), 0);
+}
+
+/// AMR-03's study: each long case adapted as the app adapts it, every
+/// estimate's reading printed, and over its second half how the mesh moved,
+/// what the transactions did and what the run kept.
+#[test]
+#[ignore = "a study: cargo test --release --test adaptation study_long -- --ignored --nocapture"]
+fn study_long_adaptation() {
+    let wanted = std::env::var("LONG_CASE").ok();
+    // A study's knobs: another accuracy target, a shorter run.
+    let variable = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+    };
+    for case in long_cases().unwrap() {
+        if wanted.as_deref().is_some_and(|wanted| wanted != case.name) {
+            continue;
+        }
+        let started_at = std::time::Instant::now();
+        let mut document = case.document;
+        if let Some(accuracy) = variable("AMR_ACCURACY") {
+            document.presentation.adaptation.accuracy_percent = accuracy;
+        }
+        let duration = variable("LONG_DURATION").unwrap_or(case.duration);
+        let looped = match looped_in(
+            document,
+            case.start,
+            &case.strikes,
+            case.speed,
+            duration,
+            case.reference_until.min(duration),
+            duration,
+        ) {
+            Ok(looped) => looped,
+            Err(error) => {
+                eprintln!("{}: FAILED {error}", case.name);
+                continue;
+            }
+        };
+        eprintln!(
+            "{}: fine {} triangles, coarse {}, in {:.1} s",
+            case.name,
+            looped.fine_triangles,
+            looped.coarse_triangles,
+            started_at.elapsed().as_secs_f64()
+        );
+        eprintln!(
+            "{:>7} {:>6} {:>9} {:>9} {:>5} {:>9} {:>9} {:>8} {:>8} {:>10} {:>10} {:>7} {:>7} {:>7} {:>4} {:>5}",
+            "t",
+            "tris",
+            "estimate",
+            "decided",
+            "chg",
+            "handoff",
+            "carried",
+            "energy",
+            "coarse",
+            "total",
+            "c total",
+            "adapt",
+            "c err",
+            "job ms",
+            "exp",
+            "past"
+        );
+        let mut carried = 1.0;
+        for reading in &looped.readings {
+            if reading.changes > 0 {
+                carried *= 1.0 + reading.handoff;
+            }
+            eprintln!(
+                "{:>7.3} {:>6} {:>8.4}{} {:>9} {:>5} {:>9.2e} {:>9.6} {:>8.2e} {:>8.2e} {:>10.3e} {:>10.3e} {:>7.4} {:>7.4} {:>7.1} {:>4} {:>5}",
+                reading.time,
+                reading.triangles,
+                reading.estimate,
+                if reading.dormant { "d" } else { " " },
+                reading.decided,
+                reading.changes,
+                reading.handoff,
+                carried,
+                reading.energy,
+                reading.coarse_energy,
+                reading.total,
+                reading.coarse_total,
+                reading.adaptive,
+                reading.coarse,
+                reading.job_ms,
+                reading.exposed,
+                reading.coarser
+            );
+        }
+        let settled = second_half(&looped.readings, duration);
+        if settled.is_empty() {
+            continue;
+        }
+        let triangles = settled
+            .iter()
+            .map(|reading| reading.after)
+            .collect::<Vec<_>>();
+        let (least, most) = (
+            *triangles.iter().min().unwrap(),
+            *triangles.iter().max().unwrap(),
+        );
+        let mean = triangles.iter().sum::<usize>() as f64 / triangles.len() as f64;
+        let reversals = reversals(&settled);
+        let kinds = ["refine", "coarsen", "unchanged"];
+        let span = duration - settled[0].time;
+        let summary = kinds
+            .iter()
+            .map(|kind| {
+                let of_kind = settled
+                    .iter()
+                    .filter(|reading| reading.decided == *kind)
+                    .collect::<Vec<_>>();
+                let cost = if of_kind.is_empty() {
+                    0.0
+                } else {
+                    of_kind.iter().map(|reading| reading.job_ms).sum::<f64>() / of_kind.len() as f64
+                };
+                format!(
+                    "{kind} {} ({:.2}/s, {cost:.0} ms each)",
+                    of_kind.len(),
+                    of_kind.len() as f64 / span
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        for (index, experiment) in experiments(&looped.readings, &case.strikes, duration)
+            .iter()
+            .enumerate()
+        {
+            eprintln!(
+                "{} experiment {index} from {:.1} s: peak {}, ends at {}, the handoffs took {:.2e} of its peak, refined again {} times after coarsening, {} empty",
+                case.name,
+                experiment.start,
+                experiment.peak,
+                experiment.ends,
+                experiment.lost,
+                experiment.returns,
+                experiment.empty
+            );
+        }
+        let first = &looped.readings[0];
+        let last = looped.readings.last().unwrap();
+        eprintln!(
+            "{} over its second half: {least} to {most} triangles, mean {mean:.0}, {reversals} reversals; {summary}",
+            case.name
+        );
+        eprintln!(
+            "{} at the end: the handoffs kept {carried:.6} of the energy; the adapted run's energy over its peak {:.3e}, the coarse run's {:.3e}; the totals from {:.6e} to {:.6e} adapted and {:.6e} coarse; exposed at most {}",
+            case.name,
+            last.energy,
+            last.coarse_energy,
+            first.total,
+            last.total,
+            last.coarse_total,
+            looped
+                .readings
+                .iter()
+                .map(|reading| reading.exposed)
+                .max()
+                .unwrap_or(0)
+        );
     }
 }

@@ -901,6 +901,10 @@ pub struct SolutionIndicatorResult {
     pub limit_field: Arc<AdaptiveSizeField>,
     pub element_indicators: Vec<f64>,
     pub element_targets: Vec<f64>,
+    /// The elements counted in the report's `coarsen_candidates`, in order:
+    /// what a coarsening the mesher could not make was asked for, so that the
+    /// same request on the same mesh is not made again.
+    pub coarsen_elements: Vec<usize>,
     pub report: SolutionIndicatorReport,
 }
 
@@ -2497,6 +2501,7 @@ impl SolutionIndicatorJob {
         } else {
             0.0
         };
+        let mut coarsen_elements = Vec::new();
         for (index, (triangle, target)) in self.mesh.triangles.iter().zip(&self.targets).enumerate()
         {
             let points = triangle
@@ -2525,6 +2530,7 @@ impl SolutionIndicatorJob {
                 .any(|length| *length < self.options.coarsen_ratio * target)
             {
                 self.report.coarsen_candidates += 1;
+                coarsen_elements.push(index);
             }
         }
         let field = |targets| {
@@ -2540,6 +2546,7 @@ impl SolutionIndicatorJob {
             limit_field: field(limit_targets),
             element_indicators: self.indicators.clone(),
             element_targets: self.targets.clone(),
+            coarsen_elements,
             report: self.report.clone(),
         }
     }

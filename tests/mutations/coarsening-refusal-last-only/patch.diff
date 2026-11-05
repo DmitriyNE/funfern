@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-app/src/adaptation.rs b/crates/funfern-app/src/adaptation.rs
+--- a/crates/funfern-app/src/adaptation.rs
++++ b/crates/funfern-app/src/adaptation.rs
+@@ -763,7 +763,7 @@
+                     let mut refused = self
+                         .refused_coarsening
+                         .take()
+-                        .filter(|refused| refused.mesh_revision == active.mesh_revision)
++                        .filter(|_| false)
+                         .map_or_else(Vec::new, |refused| refused.elements);
+                     refused.extend(elements);
+                     refused.sort_unstable();

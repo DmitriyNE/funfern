@@ -478,6 +478,15 @@ pub enum AdaptationStep {
     Adapt(Box<MeshAdaptationJob>),
 }
 
+/// The coarsenings the mesher could make none of on one mesh: its revision,
+/// and every element the estimates asked to coarsen there.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RefusedCoarsening {
+    pub mesh_revision: u64,
+    /// In order, as [`SolutionIndicatorResult::coarsen_elements`] lists them.
+    pub elements: Vec<usize>,
+}
+
 /// What adaptation keeps from one estimate to the next.
 #[derive(Clone, Debug, Default)]
 pub struct AdaptationController {
@@ -498,6 +507,22 @@ pub struct AdaptationController {
     /// a dormant estimate, whose handoff carries a leftover and keeps no
     /// totals ([`crate::topology_runtime::PreparedTopology::carries_totals`]).
     pub dormant_transaction: bool,
+    /// The elements the transaction [`Self::decide`] last started was asked
+    /// to coarsen, when it coarsens.
+    pub coarsening: Option<Vec<usize>>,
+    /// The coarsenings on the running mesh that could make none of their
+    /// changes with nothing cooling down. The estimate counts an element by
+    /// its shortest edge, and each collapse the transaction finds would leave
+    /// an edge past its target (2026-10-03): a settled source and the
+    /// parametric fiber asked every second estimate, 14 and 32 ms of work
+    /// each, forever. Asked again of the same elements on the same mesh, a
+    /// collapse succeeds only where a target has grown enough since, which
+    /// the fiber found once in a minute; with the user, those few are given
+    /// up (AMR-03, 2026-11-05). Every refusal's elements are kept, not the
+    /// last one's: a driven field's wobble moves a borderline edge in and
+    /// out of the candidates, and the last alone was asked past at every
+    /// second estimate still.
+    pub refused_coarsening: Option<RefusedCoarsening>,
 }
 
 impl AdaptationController {
@@ -612,6 +637,32 @@ impl AdaptationController {
         )
     }
 
+    /// The direction an estimate of the mesh at `mesh_revision`, its `report`
+    /// and the `coarsen_elements` it counted, asks for under
+    /// `target_accuracy`: [`adaptation_decision`]'s, except that a coarsening
+    /// of no element but those the mesher refused on this mesh holds. One
+    /// element more, and it may be the one that collapses.
+    pub fn direction(
+        &self,
+        report: &SolutionIndicatorReport,
+        coarsen_elements: &[usize],
+        mesh_revision: u64,
+        target_accuracy: f64,
+    ) -> AmrDecision {
+        let decision = adaptation_decision(report, target_accuracy);
+        let refused = self.refused_coarsening.as_ref().is_some_and(|refused| {
+            refused.mesh_revision == mesh_revision
+                && coarsen_elements
+                    .iter()
+                    .all(|element| refused.elements.binary_search(element).is_ok())
+        });
+        if decision == AmrDecision::Coarsen && refused {
+            AmrDecision::Hold
+        } else {
+            decision
+        }
+    }
+
     /// What `result`, an estimate of `active`, decides under `settings`; a
     /// transaction takes its target revision from `runtime`.
     pub fn decide(
@@ -623,7 +674,12 @@ impl AdaptationController {
     ) -> AdaptationStep {
         self.observe_energy(result.report.total_energy);
         let target = target_accuracy(settings);
-        let decision = adaptation_decision(&result.report, target);
+        let decision = self.direction(
+            &result.report,
+            &result.coarsen_elements,
+            active.mesh.mesh_revision,
+            target,
+        );
         self.coarsen_streak = if decision == AmrDecision::Coarsen {
             self.coarsen_streak.saturating_add(1)
         } else {
@@ -673,6 +729,8 @@ impl AdaptationController {
         };
         let field: Arc<dyn MeshSizeField> = adaptation_field(result, target);
         self.dormant_transaction = result.report.dormant;
+        self.coarsening =
+            (decision == AmrDecision::Coarsen).then(|| result.coarsen_elements.clone());
         AdaptationStep::Adapt(Box::new(MeshAdaptationJob::new_topology(
             active.mesh.clone(),
             &active.bundle.plan,
@@ -698,9 +756,26 @@ impl AdaptationController {
             mut state,
             report,
         } = result;
+        let coarsening = self.coarsening.take();
         if report.topology_changes == 0 {
             if let Some(active) = active {
                 state.mesh_revision = active.mesh_revision;
+                // A vertex still cooling down may collapse once it has
+                // cooled, so only a refusal with none is for good.
+                if let Some(elements) = coarsening.filter(|_| cooled(&state)) {
+                    let mut refused = self
+                        .refused_coarsening
+                        .take()
+                        .filter(|refused| refused.mesh_revision == active.mesh_revision)
+                        .map_or_else(Vec::new, |refused| refused.elements);
+                    refused.extend(elements);
+                    refused.sort_unstable();
+                    refused.dedup();
+                    self.refused_coarsening = Some(RefusedCoarsening {
+                        mesh_revision: active.mesh_revision,
+                        elements: refused,
+                    });
+                }
                 self.state = Some(state);
             }
             self.pending = None;
@@ -730,9 +805,130 @@ impl AdaptationController {
     }
 }
 
+/// Whether every vertex of `state` has been left alone for its cooldown, so
+/// that the transaction which left it could move any of them.
+fn cooled(state: &MeshAdaptationState) -> bool {
+    state.last_modified.iter().all(|modified| {
+        state.generation.saturating_sub(*modified) >= AMR_TOPOLOGY_COOLDOWN_GENERATIONS
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An estimate asking to coarsen `elements`, well inside its target.
+    fn coarsening(elements: &[usize]) -> SolutionIndicatorReport {
+        SolutionIndicatorReport {
+            coarsen_candidates: elements.len(),
+            global_indicator: 0.01,
+            ..Default::default()
+        }
+    }
+
+    /// A mesh of `vertices` at `mesh_revision`, and a transaction on it that
+    /// changed nothing, run at `generation` on vertices last moved at
+    /// `last_modified`.
+    fn empty_transaction(
+        mesh_revision: u64,
+        generation: u64,
+        last_modified: Vec<u64>,
+    ) -> (TriMesh, MeshAdaptationResult) {
+        let mesh = TriMesh {
+            geometry_revision: 1,
+            mesh_revision,
+            vertices: Vec::new(),
+            triangles: Vec::new(),
+            boundary_edges: Vec::new(),
+            quality: MeshQuality {
+                minimum_angle_degrees: 30.0,
+                maximum_edge_length: 0.1,
+            },
+            requested_sizes: Vec::new(),
+        };
+        let mut state = MeshAdaptationState::from_mesh(&mesh);
+        state.generation = generation;
+        state.vertex_lineage = (0..last_modified.len() as u64).collect();
+        state.last_modified = last_modified;
+        let result = MeshAdaptationResult {
+            mesh: mesh.clone(),
+            state,
+            report: MeshAdaptationReport::default(),
+        };
+        (mesh, result)
+    }
+
+    #[test]
+    fn a_coarsening_the_mesher_refused_is_not_asked_for_again_on_its_mesh() {
+        let mut controller = AdaptationController {
+            coarsening: Some(vec![3, 5, 8, 13, 21]),
+            ..Default::default()
+        };
+        let (mesh, result) = empty_transaction(7, 4, vec![0, 1, 2]);
+        let (_, handed) = controller.adapted(result, Some(&mesh));
+        assert!(handed.is_none());
+        let direction = |controller: &AdaptationController, elements: &[usize], mesh_revision| {
+            controller.direction(&coarsening(elements), elements, mesh_revision, 0.12)
+        };
+        // The same elements, or some of them, on the same mesh: settled.
+        assert_eq!(
+            direction(&controller, &[3, 5, 8, 13, 21], 7),
+            AmrDecision::Hold
+        );
+        assert_eq!(
+            direction(&controller, &[3, 8, 13, 21], 7),
+            AmrDecision::Hold
+        );
+        // An element it did not ask for then may be the one that collapses.
+        assert_eq!(
+            direction(&controller, &[3, 5, 8, 13, 21, 34], 7),
+            AmrDecision::Coarsen
+        );
+        // Another mesh is another question.
+        assert_eq!(
+            direction(&controller, &[3, 5, 8, 13, 21], 9),
+            AmrDecision::Coarsen
+        );
+        // Refused again with a borderline element come and another gone,
+        // the mesh's refusals are all kept: the wobble between them holds.
+        controller.coarsening = Some(vec![3, 5, 8, 13, 34]);
+        let (mesh, result) = empty_transaction(7, 5, vec![0, 1, 2]);
+        controller.adapted(result, Some(&mesh));
+        assert_eq!(
+            direction(&controller, &[3, 5, 8, 13, 21], 7),
+            AmrDecision::Hold
+        );
+        assert_eq!(
+            direction(&controller, &[3, 5, 8, 13, 34], 7),
+            AmrDecision::Hold
+        );
+        // And a refinement is never held by it.
+        let refining = SolutionIndicatorReport {
+            limit_refine_candidates: 4,
+            ..coarsening(&[3, 5, 8, 13, 21])
+        };
+        assert_eq!(
+            controller.direction(&refining, &[3, 5, 8, 13, 21], 7, 0.12),
+            AmrDecision::Refine
+        );
+    }
+
+    #[test]
+    fn a_coarsening_refused_while_a_vertex_cooled_down_is_asked_again() {
+        let mut controller = AdaptationController {
+            coarsening: Some(vec![3, 5, 8, 13]),
+            ..Default::default()
+        };
+        // The vertex the last transaction moved, at generation 3, is still
+        // cooling down in the one at 4.
+        let (mesh, result) = empty_transaction(7, 4, vec![0, 3, 0]);
+        controller.adapted(result, Some(&mesh));
+        assert_eq!(controller.refused_coarsening, None);
+        assert_eq!(
+            controller.direction(&coarsening(&[3, 5, 8, 13]), &[3, 5, 8, 13], 7, 0.12),
+            AmrDecision::Coarsen
+        );
+    }
 
     #[test]
     fn a_first_estimate_reaches_as_far_as_the_cadence_at_the_ceiling() {

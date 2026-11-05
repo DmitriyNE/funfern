@@ -118,6 +118,27 @@ impl Run {
         }
     }
 
+    /// Struck by `pulse` where it stands, as the app strikes a running field.
+    pub fn strike(&mut self, prepared: &PreparedTopology, pulse: Pulse) -> Result<(), String> {
+        let increment = prepared
+            .canonical_operator
+            .node_points()
+            .iter()
+            .map(|point| pulse.at(*point))
+            .collect::<Vec<_>>();
+        let forcing = &prepared.canonical_forcing;
+        match (self, &prepared.canonical_temporal_operator) {
+            (Run::Fixed(state), _) => state
+                .apply_primary_pulse(&prepared.canonical_operator, forcing, &increment)
+                .map(|_| ()),
+            (Run::Temporal(state), Some(temporal)) => state
+                .apply_primary_pulse(temporal, forcing, &increment)
+                .map(|_| ()),
+            (Run::Temporal(_), None) => unreachable!("a temporal state on a fixed generation"),
+        }
+        .map_err(|error| error.to_string())
+    }
+
     pub fn step(&mut self, prepared: &PreparedTopology) -> Result<(), String> {
         let forcing = &prepared.canonical_forcing;
         match (self, &prepared.canonical_temporal_operator) {

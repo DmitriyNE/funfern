@@ -3,10 +3,10 @@
 use crate::adaptation::{
     AMR_ESTIMATE_SECONDS, AMR_ESTIMATE_STEPS, AdaptationController, AdaptationStep,
     AmrIndicatorError, AmrIndicatorJob, IndicatorSnapshots, PRESENTATION_QUIET_AMPLITUDE_RATIO,
-    adaptation_decision, highest_forcing, size_rule_refines, target_accuracy,
+    highest_forcing, size_rule_refines, target_accuracy,
 };
 #[cfg(test)]
-use crate::adaptation::{AmrDecision, DORMANT_ENERGY_RATIO, adaptation_field};
+use crate::adaptation::{AmrDecision, DORMANT_ENERGY_RATIO, adaptation_decision, adaptation_field};
 use crate::canonical_gpu::{
     CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuTemporalManifest,
     CanonicalGpuTransferPlan,

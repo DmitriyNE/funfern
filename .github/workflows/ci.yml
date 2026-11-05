@@ -218,6 +218,60 @@ jobs:
           FUNFERN_INVARIANTS_ALL: 1
         run: cargo test --release -p funfern-app --test invariants --locked -- --nocapture
 
+  # Nightly: AMR-03's long adaptive runs at full length beside the fine
+  # and the coarse run: eight experiments struck one after another, the
+  # packet in the reflecting box, the driven source and the parametric
+  # fiber for a minute, the fiber alone about an hour on an M1 Max. The gate
+  # runs the first three for 20-24 s, the adapted run alone
+  # (crates/funfern-app/tests/adaptation.rs).
+  adaptation-long-runs:
+    name: Adaptation, long runs
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" \
+            --profile minimal \
+            --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: AMR-03 at full length
+        env:
+          FUNFERN_AMR_LONG: 1
+        run: >-
+          cargo test --release -p funfern-app --test adaptation --locked --
+          --nocapture
+          one_experiment_after_another
+          a_settled_mesh_stops_asking
+          a_packet_in_a_reflecting_box
+
   # Nightly: PH-04, the first- and second-order walls' reflection against
   # their law at 0°, 45° and 75° on three meshes, held to steady state; about
   # 57 minutes on an M1 Max, 75° on the finest mesh alone 27, so longer here

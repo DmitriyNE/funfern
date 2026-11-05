@@ -594,7 +594,16 @@ impl Playground {
                             "Whole field {:.2}% · target {:.0}% · {}",
                             100.0 * report.global_indicator,
                             self.editor.document.presentation.adaptation.accuracy_percent,
-                            adaptation_decision(report, self.amr_target_accuracy()).label(),
+                            self.amr
+                                .direction(
+                                    report,
+                                    &result.coarsen_elements,
+                                    self.runtime
+                                        .active()
+                                        .map_or(0, |active| active.mesh.mesh_revision),
+                                    self.amr_target_accuracy(),
+                                )
+                                .label(),
                         ));
                     }
                     ui.small(format!(

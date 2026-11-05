@@ -1442,7 +1442,12 @@ mutation, in this order:
   accumulated phase error it does not see is left to the definition, with
   the user. The index that seemed to rise under refinement was read against
   the probes' recovered flux; against the solver's own it holds at 1.5 to
-  1.9, and AMR-02 landed with that bound (2026-11-05).
+  1.9, and AMR-02 landed with that bound (2026-11-05). AMR-03's study
+  (2026-11-05) found a settled mesh asking for a coarsening it cannot make
+  at every second estimate, forever, which 2026-10-03 had left as it was;
+  with the user, the controller now remembers the mesher's refusals on its
+  mesh. AMR-03 landed with one experiment after another, the settled source
+  and fiber and the packet in the reflecting box, at full length nightly.
 - **PH-19**, after C6.
 - **C7, the runtime on the device:** RT-03 on the host first, then RT-02,
   RT-04, RT-05, the adaptive loop's device half, held to statistics rather

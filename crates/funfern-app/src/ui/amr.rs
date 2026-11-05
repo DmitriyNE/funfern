@@ -86,6 +86,7 @@ impl Playground {
         self.amr_adaptation_completed = None;
         self.amr_adaptation_source = None;
         self.amr.pending = None;
+        self.amr.coarsening = None;
         self.amr_indicator_result = None;
         self.amr_shown_report = None;
         self.amr.coarsen_streak = 0;

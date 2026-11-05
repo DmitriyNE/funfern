@@ -1,0 +1,4 @@
+about: the controller forgets a coarsening the mesher could make none of, so a settled mesh asks for it again at every second estimate, forever
+test: cargo test --release -p funfern-app --test adaptation -- a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make
+expect: asks for an empty coarsening [0-9.]+ times a second
+needs: cpu
