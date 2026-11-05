@@ -1,0 +1,13 @@
+diff --git a/crates/funfern-core/src/volume_source.rs b/crates/funfern-core/src/volume_source.rs
+--- a/crates/funfern-core/src/volume_source.rs
++++ b/crates/funfern-core/src/volume_source.rs
+@@ -287,7 +287,8 @@
+                     reason: error.to_string(),
+                 }
+             })?;
+-            let contribution = density * area * MASS_WEIGHTS[local] * profile;
++            let contribution = area * MASS_WEIGHTS[local] * profile;
++            let _ = density;
+             if !contribution.is_finite() {
+                 return Err(VolumeSourceError::Evaluation {
+                     region: triangle.region,

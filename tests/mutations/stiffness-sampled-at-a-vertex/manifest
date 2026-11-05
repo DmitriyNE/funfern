@@ -1,0 +1,4 @@
+about: each element's stiffness samples take the coefficients at its first vertex, so a varying medium is stepped piecewise constant
+test: cargo test --release -p funfern-app --test manufactured -- a_heterogeneous_medium_converges_at_third_order
+expect: heterogeneous .*(orders|the field's error)
+needs: cpu

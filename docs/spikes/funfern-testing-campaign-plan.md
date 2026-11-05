@@ -1458,7 +1458,11 @@ mutation, in this order:
   as long. AMR-04 landed with the stage matrix, the adaptive sequences in
   lockstep with the protocol model, which takes adaptation's request as an
   input under Kani, and the halved source nightly.
-- **PH-19**, after C6.
+- **PH-19**, after C6. Landed on 2026-11-06: seven manufactured cases in all
+  three skins (a varying medium, an anisotropic one in a turned frame, mixed
+  walls, varying losses, a pump and a travelling modulation, a curved hole, a
+  Kerr law) and one through the app's own volume source, each converging at
+  third order in the field; the study found no defect in the scheme.
 - **C7, the runtime on the device:** RT-03 on the host first, then RT-02,
   RT-04, RT-05, the adaptive loop's device half, held to statistics rather
   than bits, and RT-01 last, the largest. Device means the production

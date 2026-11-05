@@ -1302,8 +1302,8 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   the same day: the suite hard-links every binary it runs into its log
   directory and checks the linked app for its driver, and the fixture
   wrapper links its binary too. Stage A0 is complete. Stages A1 to A3 and
-  milestone B followed, all but PH-19, the manufactured solutions (sections
-  4 to 6i of the plan). Milestone C's P1 invariants were planned on
+  milestone B followed (sections 4 to 6i of the plan), PH-19, the
+  manufactured solutions, last, on 2026-11-06 after stage C6. Milestone C's P1 invariants were planned on
   2026-10-31 (section 6j): IV-03, mesh renumbering, landed the same day in
   `crates/funfern-app/tests/invariants.rs`, with the point locator's fix it
   found, and IV-02, identifiers, and IV-01, superposition, the same day,

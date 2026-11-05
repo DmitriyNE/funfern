@@ -32706,3 +32706,101 @@ the device.
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs. No device
   run: the runtime's device path is unchanged.
+
+## 2026-11-06 — PH-19: manufactured solutions converge at third order in every skin
+
+- **Why.** PH-19 of the 11 October plan, milestone B's last fixture, after
+  stage C6 (campaign plan, section 6l): configurations with no closed form of
+  their own, a field chosen and its forcing derived. The core could already
+  carry such forcing, per-node weights times signals and per-node Dirichlet
+  data; nothing used it so.
+- **The construction.** `u* = φ sin(ωt + θ)`. In the canonical form the
+  source drives `Q̇ = −F(b) + S`, so `S = ∂_t P(u*) + γ_p P(u*) −
+  η ∇·(Rᵀ J b*)`, `b*` the periodic solution of `ḃ + γ_c b = η R∇u*` at each
+  point; `η Rᵀ J b* = A ∇φ T`. The slots are read as each model reads them,
+  from its own law: Mechanical's `ρ` and `k`, TM's `ε` and `1/μ`, TE's `μ`
+  and `1/ε`; the axis ratio `r` along the frame's x. A modulation or a Kerr
+  law makes `S` products of harmonics: each term is written as a weight over
+  space times a product of cosines, expanded by `cos a cos b = ½ cos(a + b)
+  + ½ cos(a − b)`, one source channel a harmonic, at `ω`, `ω ± Ω` and `3ω`.
+  Weights are lumped as the mass is; Dirichlet data node by node; a Neumann
+  side and an outgoing wall's remainder `h = A ∇ψ*·n + √(m a) u*` as boundary
+  loads, by five-point Gauss on each edge's quadratic trace. The rest is the
+  app's: the document (formula fields, the frame, loss channels, drives with
+  the complementary row's `inverted`, so that the scalar stiffness is
+  multiplied by its drive and `S` stays a finite sum), meshing, assembly, the
+  canonical compile and the production step, fixed or time-driven. Forcing
+  through authored volume sources cannot carry the general case: the compile
+  takes one source a region, one signal each.
+- **Independent checks before each run.** The hand derivation against the
+  residual the closed forms leave in the equations as written, fourth-order
+  central differences of `u*`, `b*` and the coefficients at `t`, at 140
+  points and times: 4e-13 to 4e-12 of the source's size, `b*` against its own
+  law 1e-12. The test's own lumped mass against the operator's to 1e-12 in
+  every skin, which confirmed TE's mass from the stiffness slot.
+- **Study** (`study_manufactured_solutions`, ignored), each case in each
+  skin at edges 0.2, 0.1 and 0.05, at a quarter of the app's step, 4 s.
+  The field's error at the nodes, mass-weighted, over its amplitude, fell at
+  third order everywhere (Mechanical; TM and TE alike):
+  - a medium varying in density and stiffness, reflecting walls: 4.7e-4,
+    6.0e-5, 7.6e-6; the flux at third order;
+  - a frame turned 0.5 rad, the axis ratio and stiffness varying in it,
+    pinned walls: 3.4e-4, 4.7e-5, 5.7e-6; the flux at 2.5, the pinned sides
+    taking the samples' superconvergence;
+  - `u*` pinned node by node on two sides, a Neumann side varying along it, a
+    first-order outgoing wall: 1.26e-4, 1.75e-5, 2.3e-6;
+  - electric and magnetic losses varying over the box: 1.3e-4, 1.7e-5,
+    2.3e-6; the flux, with a curl, at 1.95;
+  - a pump on the mass at 0.25 Hz and a modulation travelling at 0.18 Hz:
+    4.5e-4, 6.0e-5, 7.2e-6;
+  - a reflecting hole on the app's spline, the mesh graded along it, loaded
+    along the mesh's own chords: 1.7e-4, 2.2e-5, 2.6e-6;
+  - a Kerr law at unit amplitude, `χ = 0.3 + 0.1 sin(x) cos(y)`: 4.2e-4,
+    5.6e-5, 6.9e-6.
+- **Time.** Against a semidiscrete reference at a 32nd of the step, the
+  fourth-order step fell 7.6 and 4.9 times a halving and the leapfrog 2.5 and
+  2.9: under a source both are second order at a fixed time, the bounded
+  offset `funfern-fourth-order-step.md` records, the fourth-order step 5 to 6
+  times below the leapfrog at the app's steps. Not a finding.
+- **No defect in the scheme.** What did not converge was the harness, three
+  times:
+  - Simpson's rule on `g`'s nodal values for a boundary load: on `g N_i`,
+    `N_i` quadratic, it errs by `h³` an edge, `h²` along a side, and a
+    Neumann side fell to order 2.5. The load is `∫ g N_i` by Gauss.
+  - The kernel left out of the starting flux, as PH-01 does: with a loss
+    varying on the complementary row `b*` has a curl, its part in the
+    coupling's kernel is order one, and the varying loss couples it back to
+    the field: a plateau at 1.7e-3 on every mesh. A `b*` with a curl starts
+    whole.
+  - The leapfrog's step share taken of the fourth-order step's recommended
+    step, past its own bound.
+  - And one false alarm checked before it was raised: a TE volume source
+    weighted by the density slot would drive `ε/μ` off; `material_at` maps
+    through the skin, so it is weighted by `μ` as the mass is.
+- **Tests** (`crates/funfern-app/tests/manufactured.rs`), in the gate at
+  edges 0.2 and 0.1, about 50 s: `a_heterogeneous_medium_converges_at_third_order`,
+  `an_anisotropic_medium_in_a_turned_frame_converges`,
+  `mixed_boundaries_converge`, `losses_varying_in_space_converge`,
+  `modulated_coefficients_converge`, `a_curved_hole_converges`,
+  `a_kerr_law_converges`: the derivation within 1e-9, the field falling
+  `2^2.6` a halving, the flux `2^2.2` (`2^1.8` with a curl), the field at 0.1
+  within 1.5 times the study's largest. `an_authored_volume_source_drives_the_manufactured_field`
+  runs case 1 in Mechanical through the app's own volume source, a formula
+  profile and a harmonic the app integrates from zero: it converges, and
+  drives the field as the test's forcing does to 1e-9. Nightly, the new job
+  `manufactured-solutions` runs `manufactured_solutions_converge_on_the_finest_mesh`,
+  every case down to 0.05.
+- **Mutations**, each a defect a uniform medium cannot see, each caught by
+  its test: `stiffness-sampled-at-a-vertex`, `frame-angle-reversed`,
+  `outgoing-impedance-at-one-end`, `complementary-loss-at-a-vertex`,
+  `travelling-modulation-reversed`, `law-at-the-frame-origin`,
+  `volume-source-without-density`. The hole has none of its own. A first
+  Kerr mutation, `u²` read as `u|u|`, was equivalent: a scalar law is
+  evaluated radially, `P(r)` for `r = |u|`, the sign restored after, so the
+  multiplier never sees a negative argument; the case's `χ` now varies, and
+  its mutation evaluates the law at the frame's origin instead (the field
+  stands at 1.7e-2 on both meshes).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs. No device
+  run: PH-19 is the discretization layer, and no production code changed.

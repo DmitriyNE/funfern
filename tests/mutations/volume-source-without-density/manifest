@@ -1,0 +1,4 @@
+about: a volume source's weight leaves out the density, so a medium of varying density is driven as if it were uniform
+test: cargo test --release -p funfern-app --test manufactured -- an_authored_volume_source_drives_the_manufactured_field
+expect: authored .*(orders|the field's error)|the authored source drives
+needs: cpu

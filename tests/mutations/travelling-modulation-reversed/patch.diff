@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/material_law.rs b/crates/funfern-core/src/material_law.rs
+--- a/crates/funfern-core/src/material_law.rs
++++ b/crates/funfern-core/src/material_law.rs
+@@ -1845,7 +1845,7 @@
+             } => {
+                 let along =
+                     coordinates.x * angle_radians.cos() + coordinates.y * angle_radians.sin();
+-                let phase = reduce_phase(carrier_phase - wavenumber * along);
++                let phase = reduce_phase(carrier_phase + wavenumber * along);
+                 finite_positive_with_rate(
+                     1.0 + depth * phase.cos(),
+                     -depth * angular_frequency * phase.sin(),

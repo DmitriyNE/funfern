@@ -1,0 +1,4 @@
+about: each element's complementary loss is taken at its first vertex, so a loss that varies is applied piecewise constant
+test: cargo test --release -p funfern-app --test manufactured -- losses_varying_in_space_converge
+expect: lossy .*(orders|the field's error)
+needs: cpu

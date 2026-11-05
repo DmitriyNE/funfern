@@ -1,0 +1,4 @@
+about: a turned material frame rotates its tensor the other way, so an anisotropic medium's off-diagonal term has the wrong sign
+test: cargo test --release -p funfern-app --test manufactured -- an_anisotropic_medium_in_a_turned_frame_converges
+expect: anisotropic .*(orders|the field's error)
+needs: cpu

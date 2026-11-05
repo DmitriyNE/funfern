@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/canonical_temporal.rs b/crates/funfern-core/src/canonical_temporal.rs
+--- a/crates/funfern-core/src/canonical_temporal.rs
++++ b/crates/funfern-core/src/canonical_temporal.rs
+@@ -6757,7 +6757,7 @@
+         );
+     }
+     let law = law
+-        .evaluate_at(coordinates, &material.parameters)
++        .evaluate_at(region.frame.coordinates(region.frame.origin), &material.parameters)
+         .map_err(|error| WaveError::MaterialEvaluation {
+             material: material.name.clone(),
+             coefficient: "coefficient law",

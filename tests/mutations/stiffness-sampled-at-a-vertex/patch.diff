@@ -1,0 +1,12 @@
+diff --git a/crates/funfern-core/src/canonical_wave.rs b/crates/funfern-core/src/canonical_wave.rs
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -4836,7 +4836,7 @@
+                 + points[1] * barycentric[1]
+                 + points[2] * barycentric[2];
+             let (values, _, complementary_loss) =
+-                linear_material_sample(model, triangle.region, point)?;
++                linear_material_sample(model, triangle.region, points[0])?;
+             let complementary_inverse = rotate_tensor(values);
+             self.samples.push(LinearConstitutiveSample {
+                 element: element as u32,

@@ -1,0 +1,14 @@
+diff --git a/crates/funfern-core/src/wave_quadratic.rs b/crates/funfern-core/src/wave_quadratic.rs
+--- a/crates/funfern-core/src/wave_quadratic.rs
++++ b/crates/funfern-core/src/wave_quadratic.rs
+@@ -1706,8 +1706,8 @@
+             };
+             let node_coefficients = [
+                 coefficients.at(region, self.node_points[nodes[0]])?,
+-                coefficients.at(region, self.node_points[nodes[1]])?,
+-                coefficients.at(region, self.node_points[nodes[2]])?,
++                coefficients.at(region, self.node_points[nodes[0]])?,
++                coefficients.at(region, self.node_points[nodes[0]])?,
+             ];
+             let line_weights = [length / 6.0, length / 6.0, 2.0 * length / 3.0];
+             let normal = outer_normal(side);

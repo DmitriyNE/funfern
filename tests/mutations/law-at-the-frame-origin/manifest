@@ -1,0 +1,4 @@
+about: a coefficient law is evaluated at its frame's origin rather than at each point, so a Kerr coefficient that varies is applied everywhere at one value
+test: cargo test --release -p funfern-app --test manufactured -- a_kerr_law_converges
+expect: kerr .*(orders|the field's error)
+needs: cpu

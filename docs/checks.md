@@ -1031,6 +1031,55 @@ The far field's times, and the clock under them, late into a run.
 - **Mutations.** `clock-origin-summed-in-f32`,
   `handoff-candidate-packed-at-zero` and `far-field-stamps-summed-in-f32` each
   fail their late fixture.
+
+PH-19 holds the scheme to manufactured solutions, in
+`crates/funfern-app/tests/manufactured.rs`. A field `u* = φ sin(ωt + θ)` is
+chosen in closed form, and its forcing derived by hand from each skin's law in
+the canonical form: `S = ∂_t P(u*) + γ_p P(u*) − η ∇·(Rᵀ J b*)`, `b*` the
+periodic solution of `ḃ + γ_c b = η R∇u*` at each point, with the slots read
+as each model reads them (Mechanical's `ρ` and `k`, TM's `ε` and `1/μ`, TE's
+`μ` and `1/ε`). The forcing is built in the core's own types: a source channel
+for each harmonic, lumped as the mass is, Dirichlet data node by node, and
+boundary loads by Gauss on each edge's quadratic trace. The document,
+meshing, assembly, the canonical compile and the production step are the
+app's. Each test first holds its derivation within 1e-9 of the residual the
+closed forms leave in the equations, by finite differences, and its own lumped
+mass to the operator's to 1e-12. Seven cases, each in all three skins:
+
+| Case | Test | Edge 0.1, 0.05 | Field order |
+| --- | --- | --- | --- |
+| a medium varying in density and stiffness, reflecting walls | `a_heterogeneous_medium_converges_at_third_order` | 6.0e-5, 7.6e-6 | 2.9, 3.0 |
+| a frame turned 0.5 rad, the axis ratio and stiffness varying in it, pinned walls | `an_anisotropic_medium_in_a_turned_frame_converges` | 4.9e-5, 5.9e-6 | 2.85, 3.05 |
+| `u*` pinned node by node, a Neumann side varying along it, a first-order outgoing wall | `mixed_boundaries_converge` | 1.75e-5, 2.3e-6 | 2.85, 2.95 |
+| electric and magnetic losses varying over the box | `losses_varying_in_space_converge` | 1.9e-5, 2.3e-6 | 2.85, 3.0 |
+| a pump on the mass and a travelling modulation of the stiffness | `modulated_coefficients_converge` | 6.0e-5, 7.2e-6 | 2.9, 3.1 |
+| a reflecting spline hole, the mesh graded along it | `a_curved_hole_converges` | 2.2e-5, 2.6e-6 | 2.9, 3.1 |
+| a Kerr law on the primary row, `χ` from 0.2 to 0.4 over the box | `a_kerr_law_converges` | 5.6e-5, 6.9e-6 | 2.9, 3.0 |
+
+The errors are the field's at the nodes, mass-weighted, over its amplitude, the
+largest of the three skins. The gate runs edges 0.2 and 0.1, about 50 s; the
+nightly job `manufactured-solutions` adds 0.05
+(`manufactured_solutions_converge_on_the_finest_mesh`, ignored). The field's
+error must fall at least `2^2.6` a halving and stay within 1.5 times the
+study's largest. The flux's must fall `2^2.2` where `b*` is a gradient
+(2.4 to 3.1; 2.5 beside pinned walls, which take the samples'
+superconvergence) and `2^1.8` where a varying loss gives it a curl (1.95, the
+flux compared whole). `an_authored_volume_source_drives_the_manufactured_field`
+runs case 1 in Mechanical through the app's own volume source, a formula
+profile and a harmonic the app integrates from zero: it converges as case 1
+does, and drives the field as the forcing built in the test does to 1e-9.
+The forced fourth-order step is second order in time, as its spike
+documents, against a semidiscrete reference 7.6 and 4.9 times a halving,
+5 to 6 times under the leapfrog's at the app's steps. That study,
+`study_manufactured_solutions` (ignored, `PH19_CASE`, `PH19_TIME`), found no
+defect in the scheme. Its mutations, each one a uniform medium cannot see:
+`stiffness-sampled-at-a-vertex`, `frame-angle-reversed`,
+`outgoing-impedance-at-one-end`, `complementary-loss-at-a-vertex`,
+`travelling-modulation-reversed`, `law-at-the-frame-origin` (the Kerr
+coefficient evaluated once, at its frame's origin) and
+`volume-source-without-density`. The hole has none of its own: posed on the
+mesh's own chords, it holds the graded mesh and the natural condition along
+a curve, which none of these breaks alone.
 The half kicks that step replaced read the second-order wall at 1.10 of its
 law at the default step, an excess of their stepping, and are held to 15%
 for comparison; at normal incidence the two meshes' difference hides the

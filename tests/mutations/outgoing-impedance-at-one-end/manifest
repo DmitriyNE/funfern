@@ -1,0 +1,4 @@
+about: an outgoing wall's edge takes the impedance at its first node for all three, so a medium varying along the wall is absorbed at the wrong impedance
+test: cargo test --release -p funfern-app --test manufactured -- mixed_boundaries_converge
+expect: mixed .*(orders|the field's error)
+needs: cpu

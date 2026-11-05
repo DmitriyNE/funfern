@@ -1,0 +1,4 @@
+about: a travelling modulation runs against its wavevector
+test: cargo test --release -p funfern-app --test manufactured -- modulated_coefficients_converge
+expect: modulated .*(orders|the field's error)
+needs: cpu
