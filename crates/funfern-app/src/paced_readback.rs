@@ -78,6 +78,12 @@ pub(crate) struct PacedReadback {
 }
 
 impl PacedReadback {
+    /// The buffer read, for host tests that play the device.
+    #[cfg(test)]
+    pub(crate) fn source(&self) -> &Handle<ShaderBuffer> {
+        &self.buffer
+    }
+
     /// The whole buffer.
     pub(crate) fn buffer(buffer: Handle<ShaderBuffer>) -> Self {
         Self {

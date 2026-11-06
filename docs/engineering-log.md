@@ -32804,3 +32804,84 @@ the device.
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs. No device
   run: PH-19 is the discretization layer, and no production code changed.
+
+## 2026-11-06 — RT-03: late completions change nothing they may not
+
+- **Why.** C7's first item (campaign plan, section 6l): old readbacks,
+  handoff receipts or preparation results must not replace newer accepted
+  state. What there was: generation tags and token guards, and host tests of
+  each; but the sequences' device was the request's test transitions,
+  `deliver_readbacks` and `accept_handoff` among them, which wrote the
+  display by hand and copied the settle system's effects ("keep it in step"),
+  delivered for the current generation only, and ran no observer: the
+  harness never applied a frame's commands, so no readback entity existed.
+  Preparation and packing ran on the frame, every result at once.
+- **The test device** (`canonical_gpu/test_device.rs`, a child module for
+  the private tags). It keeps what the shaders keep of a run: the control
+  word's clock and event result (`commit_step`, `commit_event`, a staged
+  event committed with the first step), the accepted lane, a failure latched
+  in a status buffer, a handoff's receipt in its transfer buffer; its field is
+  the one the host packed. Each frame takes a copy of every readback with
+  room, three in flight as `paced_readback` allows, the bytes as they stood;
+  a frame's copies arrive together and frames in order, on the entity they
+  were taken for, despawned since or not, through the production observers,
+  then the settle systems. The request's test transitions are gone, and the
+  four runtime tests that used them (`a_pulse_or_switch_waits_for_a_busy_generation`,
+  `switches_on_two_materials_both_wait_for_a_busy_generation`,
+  `a_committed_mesh_starts_the_coarsening_confirmation_afresh`,
+  `a_rejected_handoff_keeps_the_accepted_step`) run on the device.
+- **The sequences.** The frames apply their commands. Readbacks, Handoff,
+  Event and Fault keep their meaning, everything in flight and a fresh frame
+  arriving; `Deliver` brings the oldest frame's alone, and `Admit`, `Process`
+  and `Latch` settle a handoff, an event or a failure whose news waits in a
+  copy. The model is told what arrived: a readback of the running generation,
+  a handoff or an event settled, a failure read. A copy of another generation
+  is no step, so the comparison holds that it changed nothing. After every
+  step, besides: the display never goes back a generation nor its clock within
+  one, the running generation's steps and processed events never go back nor
+  pass the device's, and a failure the host reads is one the device latched in
+  that generation. `late_preparations_agree_on_what_runs` plays the
+  preparation worker through the production `BackgroundPreparationWorker`'s
+  channels, its slices on the sequence's word; the host logs the result it
+  reads for the model as the frame's runner does. Splitting a frame's copies
+  across steps, which the first draft did for Event, is not what the device
+  does and parted the model for no defect; the seeds the old generator kept
+  replay other sequences now, their findings have focused tests, and they
+  were dropped.
+- **Study**, 2,000 sequences on each of the three machines: one part, the
+  harness's. A Fault's copies told the model "caught up" from `caught_up()`,
+  which reads a failed run as caught up, and a handoff admitted before the
+  host read the fault took that into its target; the model's input is the
+  count. Then no defect: every guard held. In 900 sequences the generator
+  brought about 300 copies of a replaced generation, 360 status copies of a
+  replaced status buffer, 14 receipts of a withdrawn handoff and 185
+  preparations finished for a replaced request. A source's copy landing after
+  its receipt has moved the display to the target takes a longer chain of
+  holds than it drew, and has a focused test.
+- **Turned away twice.** A late copy of a replaced generation never reaches
+  its observer: `clear` and the handoff's settle despawn the readbacks, and
+  the despawn is applied before the extraction that could deliver a copy.
+  The state and control readbacks compare its generation as well. So each
+  check alone holds, and the two mutations that dropped one, the control's or
+  the state's, were not detected and are not kept.
+- **Not drawn.** A snapshot is copied into a result slot of its own request,
+  which an install or a handoff replaces, and the host asks for one by wall
+  time, which a sequence cannot hold to its seed. A pack sends on a channel of
+  its own job, which goes with the job, and the model packs within the frame.
+  The probe recorders' rings: the traces cut a handoff's late records
+  (`a_handoff_takes_the_traces_back_to_its_snapshot`) and a restart drops
+  them (`a_restarted_run_records_from_its_own_clock`).
+- **Tests.** `a_sources_copies_after_its_handoff_change_nothing`,
+  `a_receipt_of_a_withdrawn_handoff_admits_nothing` (a replacement withdraws
+  it; Reset waits for the upload instead),
+  `a_status_from_before_a_cleared_failure_fails_nothing`,
+  `a_preparation_finished_for_a_replaced_request_is_dropped`; the three
+  machines at 64 sequences in the gate.
+- **Mutations**, each caught: `late-source-copy-unguarded` (the settle keeps
+  the source's readbacks and the control readback takes any generation),
+  `stale-preparation-taken`, `status-copy-kept-past-a-cleared-failure`.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs. No device
+  run: the production paths are unchanged, the request losing test-only
+  methods and the worker's drain a test-only note.

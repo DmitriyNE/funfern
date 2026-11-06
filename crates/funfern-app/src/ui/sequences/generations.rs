@@ -11,10 +11,15 @@
 //! work units, the device delivers readbacks, settles a handoff or a live
 //! event either way, or faults, and the user acts in between.
 //!
-//! The device is the request's test transitions (`deliver_readbacks`,
-//! `accept_handoff`, `reject_handoff`, `process_live_event`,
-//! `reject_live_event`, `fail`). Preparation advances by the units each frame
-//! is granted and packing happens on the frame, so the order is the
+//! The device is `canonical_gpu`'s test device: it writes what the shaders
+//! write into the buffers the readbacks map, each frame takes copies of them,
+//! and the copies arrive through the production observers and settle
+//! systems, on the entity they were taken for. A copy can arrive frames after
+//! it was taken, after a Reset, a replacement, a handoff or a cleared failure
+//! has made it another generation's (RT-03); the device can settle a handoff,
+//! a live event or a failure whose news waits in a copy. Preparation advances
+//! by the units each frame is granted, on the frame or on a worker the
+//! sequence plays, and packing happens on the frame, so the order is the
 //! sequence's alone.
 //!
 //! The harness keeps what it has watched the device come to run: the
@@ -34,17 +39,22 @@
 //! Kani checks for every sequence of steps to a bounded depth. Each step is
 //! given to it with the inputs the runtime met, from the runtime's
 //! `protocol_log` and from what an edit changed, and after each the two are
-//! compared field by field in the runtime's own tokens. Where they part,
-//! either the runtime has left the protocol the proofs are about or the model
-//! does not describe it; either way the proofs say nothing until it is
-//! settled.
+//! compared field by field in the runtime's own tokens. The device's steps
+//! are what its copies told the host: a readback of the running generation,
+//! a handoff or a live event settled, a failure read. A copy of another
+//! generation is no step, and the comparison then holds that it changed
+//! nothing. Where they part, either the runtime has left the protocol the
+//! proofs are about or the model does not describe it; either way the proofs
+//! say nothing until it is settled.
 
 use super::*;
-use crate::canonical_gpu::{CANONICAL_FAILURE_NON_FINITE, CanonicalGpuHandoffOutcome};
+use crate::canonical_gpu::CanonicalGpuHandoffOutcome;
+use crate::canonical_gpu::test_device::{self, Arrival, Kind, TestDevice};
 use crate::topology_editor::TopologyEditor;
-use crate::topology_runtime::{PreparedSolverUpdate, TopologyToken};
+use crate::topology_runtime::{PreparedSolverUpdate, TopologyPreparationJob, TopologyToken};
 use bevy::ecs::world::CommandQueue;
 use funfern_protocol as model;
+use std::sync::mpsc;
 
 /// One step of the interleaving.
 #[derive(Clone, Debug)]
@@ -52,15 +62,28 @@ enum Act {
     /// A host frame lending preparation that many slices; `None`, all it
     /// needs.
     Frame(Option<usize>),
-    /// A frame's readbacks from the device, with up to that many more of the
-    /// requested steps completed.
+    /// The device completes up to that many more of the requested steps,
+    /// and every copy in flight arrives, then a fresh one of each readback.
     Readbacks(u64),
-    /// The device settles a pending handoff, admitting the target or not.
+    /// The device settles a pending handoff, admitting the target or not,
+    /// and its copies arrive as [`Act::Readbacks`]' do.
     Handoff(bool),
-    /// The device settles a pending live event, taking it or refusing it.
+    /// The device settles a pending live event, taking it or refusing it,
+    /// and its copies arrive.
     Event(bool),
-    /// The run fails at its last accepted step.
+    /// The run fails at its last accepted step, and its copies arrive.
     Fault,
+    /// The oldest frame's copies arrive, the `nth` first.
+    Deliver(u8),
+    /// [`Act::Handoff`], the receipt left in the transfer buffer for a copy.
+    Admit(bool),
+    /// [`Act::Event`], the result left in the control word for a copy.
+    Process(bool),
+    /// [`Act::Fault`], the failure left in the status buffer for a copy.
+    Latch,
+    /// The played preparation worker works that many slices; `None`, all
+    /// its job needs.
+    Work(Option<usize>),
     /// The draft's validation finishes.
     Validate,
     /// Edit the `nth` material the `kind`th of four ways.
@@ -109,6 +132,11 @@ fn acts() -> BoxedStrategy<Act> {
         3 => settle().prop_map(Act::Handoff),
         3 => settle().prop_map(Act::Event),
         1 => Just(Act::Fault),
+        6 => any::<u8>().prop_map(Act::Deliver),
+        2 => settle().prop_map(Act::Admit),
+        2 => settle().prop_map(Act::Process),
+        1 => Just(Act::Latch),
+        2 => prop_oneof![Just(Some(1)), Just(Some(3)), Just(None)].prop_map(Act::Work),
         3 => Just(Act::Validate),
         3 => (any::<u8>(), any::<u8>()).prop_map(|(nth, kind)| Act::Material { nth, kind }),
         2 => any::<u8>().prop_map(Act::Nudge),
@@ -231,6 +259,87 @@ struct Session {
     /// Each adapted request, and the topology active when it was made: the
     /// generation it may publish over.
     adapted_from: Vec<(TopologyToken, Option<TopologyToken>)>,
+    /// The device, and the copies its readbacks have in flight.
+    device: TestDevice,
+    /// What the copies that arrived in this step told the host, as the
+    /// model's steps.
+    told: Vec<model::Step>,
+    /// The preparation worker, where the sequence plays it.
+    worker: Option<Worker>,
+    /// What the host had read when the last step ended.
+    read: Read,
+}
+
+/// What the host had read: the display's generation and its clock's step,
+/// and the running generation's steps and processed event.
+#[derive(Default)]
+struct Read {
+    display: u64,
+    clock: Option<(u64, u64)>,
+    counted: Option<(u64, u64, u32)>,
+}
+
+/// The preparation worker, played on the sequence's word: it takes the jobs
+/// the host submits and sends what the host reads, as
+/// `run_preparation_worker` does, working only the slices it is lent.
+struct Worker {
+    jobs: mpsc::Receiver<TopologyPreparationJob>,
+    events: mpsc::Sender<BackgroundPreparationEvent>,
+    job: Option<TopologyPreparationJob>,
+}
+
+impl Worker {
+    /// The host's end of the worker's channels, and the worker's.
+    fn connect() -> (BackgroundPreparationWorker, Self) {
+        let (job_sender, jobs) = mpsc::channel();
+        let (events, event_receiver) = mpsc::channel();
+        let host = BackgroundPreparationWorker {
+            sender: job_sender,
+            receiver: Mutex::new(event_receiver),
+            token: None,
+            phase: None,
+            detail: None,
+            timing: None,
+        };
+        (
+            host,
+            Self {
+                jobs,
+                events,
+                job: None,
+            },
+        )
+    }
+
+    /// Works `slices` of the newest job, taking any newer one between them
+    /// and reporting after each, as the worker does between its quanta.
+    fn work(&mut self, slices: usize) {
+        for _ in 0..slices {
+            while let Ok(newer) = self.jobs.try_recv() {
+                self.job = Some(newer);
+            }
+            let Some(job) = &mut self.job else {
+                return;
+            };
+            let token = job.token();
+            let event = match job.advance(4096) {
+                Some(result) => {
+                    self.job = None;
+                    BackgroundPreparationEvent::Finished {
+                        token,
+                        result: Box::new(result),
+                    }
+                }
+                None => BackgroundPreparationEvent::Progress {
+                    token,
+                    phase: job.phase(),
+                    detail: job.detail(),
+                    timing: job.timing(),
+                },
+            };
+            let _ = self.events.send(event);
+        }
+    }
 }
 
 /// What the model is told an edit changed, read before it.
@@ -299,6 +408,16 @@ impl Session {
         Self::opening(true)
     }
 
+    /// [`Self::start`] with preparation on a worker the sequence plays.
+    fn played() -> Self {
+        let mut session = Self::opening(false);
+        let (host, worker) = Worker::connect();
+        session.state.background_preparation = Some(host);
+        session.state.preparation_grant = None;
+        session.worker = Some(worker);
+        session
+    }
+
     fn opening(adaptive: bool) -> Self {
         let mut state = Playground {
             background_preparation: None,
@@ -313,6 +432,7 @@ impl Session {
             .unwrap();
         let mut world = World::new();
         world.init_resource::<Assets<ShaderBuffer>>();
+        test_device::connect(&mut world);
         let scenes = vec![state.editor.document.model.accepted.clone()];
         Self {
             state,
@@ -331,8 +451,78 @@ impl Session {
             adaptive,
             wave: WaveDisplay::default(),
             adapted_from: Vec::new(),
+            device: TestDevice::default(),
+            told: Vec::new(),
+            worker: None,
+            read: Read::default(),
         }
         .named()
+    }
+
+    /// Runs `f` on the world with the request, the display and the recorders
+    /// in it, where the observers and settle systems look for them.
+    fn in_world<R>(&mut self, f: impl FnOnce(&mut World, &mut TestDevice) -> R) -> R {
+        self.world
+            .insert_resource(std::mem::take(&mut self.request));
+        self.world
+            .insert_resource(std::mem::take(&mut self.display));
+        self.world
+            .insert_resource(std::mem::take(&mut self.recorders));
+        let result = f(&mut self.world, &mut self.device);
+        self.request = self.world.remove_resource().unwrap();
+        self.display = self.world.remove_resource().unwrap();
+        self.recorders = self.world.remove_resource().unwrap();
+        result
+    }
+
+    /// The copies `deliver` brings arrive, and the settle systems run after
+    /// them: what they told the host is kept as the model's steps.
+    fn arrive(&mut self, deliver: impl FnOnce(&mut World, &mut TestDevice) -> Vec<Arrival>) {
+        let failed = self.request.failed();
+        let handoff = self.request.handoff_outcome() == CanonicalGpuHandoffOutcome::Pending;
+        let event = self.request.live_event_pending();
+        let arrivals = self.in_world(|world, device| {
+            let arrivals = deliver(world, device);
+            TestDevice::settle(world);
+            arrivals
+        });
+        // A readback of the running generation; one of another changes
+        // nothing. Whether every step asked for has completed is the count's
+        // to say: `caught_up` also reads a failed run as caught up, which
+        // the model is told on its own, after this.
+        if arrivals
+            .iter()
+            .any(|arrival| arrival.current && matches!(arrival.kind, Kind::Control | Kind::State))
+        {
+            self.told.push(model::Step::Readbacks {
+                caught_up: self.request.stats().completed_steps() >= self.request.requested_steps(),
+            });
+        }
+        if handoff {
+            match self.request.handoff_outcome() {
+                CanonicalGpuHandoffOutcome::Accepted => {
+                    self.told.push(model::Step::Handoff { admit: true })
+                }
+                CanonicalGpuHandoffOutcome::Rejected(_) => {
+                    self.told.push(model::Step::Handoff { admit: false })
+                }
+                _ => {}
+            }
+        }
+        if event && !self.request.live_event_pending() {
+            self.told.push(model::Step::Settle {
+                take: self.request.stats().event_rejection() == 0,
+            });
+        }
+        if !failed && self.request.failed() {
+            self.told.push(model::Step::Fault);
+        }
+    }
+
+    /// The device does what `does` does, and then every copy in flight
+    /// arrives, and a frame's fresh copies after them.
+    fn answer(&mut self, does: impl FnOnce(&mut TestDevice, &World)) {
+        self.arrive(|world, device| device.answer(world, does));
     }
 
     /// The model told the scene's inputs by name, as at launch.
@@ -451,13 +641,18 @@ impl Session {
                         .any(|note| matches!(note, ProtocolNote::Adapted(_))),
                 })
             }
-            Act::Readbacks(_) => model::Step::Readbacks {
-                caught_up: self.request.caught_up(),
-            },
-            Act::Handoff(admit) => model::Step::Handoff { admit: *admit },
-            Act::Event(take) => model::Step::Settle { take: *take },
-            Act::Fault => model::Step::Fault,
-            Act::Adapt(_) => return None,
+            // The device's steps are what its copies told the host, kept as
+            // they arrived; the worker's are the frames that read them.
+            Act::Readbacks(_)
+            | Act::Handoff(_)
+            | Act::Event(_)
+            | Act::Fault
+            | Act::Deliver(_)
+            | Act::Admit(_)
+            | Act::Process(_)
+            | Act::Latch
+            | Act::Work(_)
+            | Act::Adapt(_) => return None,
             Act::Validate => model::Step::Validate { inputs },
             Act::Reset => model::Step::Reset,
             Act::Remesh => model::Step::Remesh,
@@ -537,7 +732,12 @@ impl Session {
                 .as_ref()
                 .map(|pack| pack.token),
             ready: state.runtime.ready().map(|ready| ready.bundle.token),
-            preparing: state.runtime.preparing_timing().is_some(),
+            // On the frame or on the worker; a job the worker holds that a
+            // newer request replaced is no longer the runtime's.
+            preparing: state.runtime.preparing_timing().is_some()
+                || state.background_preparation.as_ref().is_some_and(|worker| {
+                    worker.token.is_some() && worker.token == state.runtime.requested()
+                }),
             last_error: state.runtime.last_error().map(|error| error.token),
             request_stands: state
                 .coordinator
@@ -616,7 +816,9 @@ impl Session {
     fn conform(&mut self, act: &Act, was: Was) {
         let log = std::mem::take(&mut self.state.protocol_log);
         let next = self.model.next;
-        if let Some(step) = self.model_step(act, &was, &log) {
+        let told = std::mem::take(&mut self.told);
+        let own = self.model_step(act, &was, &log);
+        for step in told.into_iter().chain(own) {
             self.model.step(step);
             self.model.check();
         }
@@ -663,7 +865,10 @@ impl Session {
     }
 
     /// One host frame as the app's: validation's share, then the runtime,
-    /// and in an adaptive session the display and adaptation.
+    /// and in an adaptive session the display and adaptation; the commands
+    /// the frame gave are applied, and the device takes the frame's copies.
+    /// A played worker works its share beside the frame, before the host
+    /// reads it.
     fn frame(&mut self, grant: Option<usize>) {
         let Session {
             state,
@@ -674,12 +879,16 @@ impl Session {
             vector,
             adaptive,
             wave,
+            worker,
             ..
         } = self;
-        state.preparation_grant = Some(grant.unwrap_or(usize::MAX));
+        match worker {
+            Some(worker) => worker.work(grant.unwrap_or(usize::MAX)),
+            None => state.preparation_grant = Some(grant.unwrap_or(usize::MAX)),
+        }
         state.amr_grant = Some(grant.unwrap_or(usize::MAX));
         state.editor.validate_frame(12000);
-        world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+        let mut queue = world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
             let mut queue = CommandQueue::default();
             let mut commands = Commands::new(&mut queue, world);
             state.refresh_runtime(
@@ -691,7 +900,9 @@ impl Session {
                 &mut commands,
                 1.0 / 60.0,
             );
+            queue
         });
+        queue.apply(world);
         if *adaptive {
             state.display_fell_back |= refresh_canonical_wave_display(
                 state.runtime.active(),
@@ -703,13 +914,14 @@ impl Session {
             state.refresh_flux_cleanup(request, display);
             state.refresh_amr(request, display, wave);
         }
+        self.in_world(|world, device| device.take(world));
     }
 
     /// Hands the session a finished estimate of the running generation, as a
     /// full readback of it would have led to: a field struck by a narrow
     /// pulse at `centre` and stepped twice on the CPU, estimated by the
-    /// production job. The device's readbacks here carry no field, so the
-    /// session never estimates on its own.
+    /// production job. The device serves no full snapshot here, as the host
+    /// asks for one by wall time, so the session never estimates on its own.
     fn estimate_struck(&mut self, centre: Point2) {
         let state = &mut self.state;
         let Some(active) = state.runtime.active().cloned() else {
@@ -775,41 +987,26 @@ impl Session {
         let domain = self.state.editor.document.model.draft.geometry.domain;
         match act {
             Act::Frame(grant) => self.frame(*grant),
-            Act::Readbacks(steps) => self.request.deliver_readbacks(&mut self.display, *steps),
-            Act::Handoff(accept) => {
-                // The device admits a handoff by its handles, not by the
-                // host's outcome: guarded on the outcome, a withdrawal that
-                // set it and left the handles behind was never offered for
-                // admission, and "nothing was admitted" could not fail
-                // (VER-44 of the 2026-10-20 review).
-                if self.request.handoff_manifest().is_none() {
-                    return;
-                }
-                if *accept {
-                    let Session {
-                        world,
-                        request,
-                        display,
-                        ..
-                    } = self;
-                    world.resource_scope(|_, mut assets: Mut<Assets<ShaderBuffer>>| {
-                        request.accept_handoff(&mut assets, display);
-                    });
-                } else {
-                    self.request.reject_handoff(CANONICAL_FAILURE_NON_FINITE);
+            Act::Readbacks(steps) => self.answer(|device, world| device.advance(world, *steps)),
+            // The device admits a handoff by its handles, not by the host's
+            // outcome: guarded on the outcome, a withdrawal that set it and
+            // left the handles behind was never offered for admission, and
+            // "nothing was admitted" could not fail (VER-44 of the 2026-10-20
+            // review).
+            Act::Handoff(admit) => self.answer(|device, world| device.admit(world, *admit)),
+            Act::Event(take) => self.answer(|device, world| device.process(world, *take)),
+            Act::Fault => self.answer(|device, world| device.latch(world)),
+            Act::Deliver(nth) => {
+                self.arrive(|world, device| device.deliver_oldest(world, *nth as usize))
+            }
+            Act::Admit(admit) => self.in_world(|world, device| device.admit(world, *admit)),
+            Act::Process(take) => self.in_world(|world, device| device.process(world, *take)),
+            Act::Latch => self.in_world(|world, device| device.latch(world)),
+            Act::Work(slices) => {
+                if let Some(worker) = &mut self.worker {
+                    worker.work(slices.unwrap_or(usize::MAX));
                 }
             }
-            Act::Event(accept) => {
-                let Session { world, request, .. } = self;
-                world.resource_scope(|_, mut assets: Mut<Assets<ShaderBuffer>>| {
-                    if *accept {
-                        request.process_live_event(&mut assets);
-                    } else {
-                        request.reject_live_event(&mut assets, CANONICAL_FAILURE_NON_FINITE);
-                    }
-                });
-            }
-            Act::Fault => self.request.fail(CANONICAL_FAILURE_NON_FINITE),
             Act::Validate => settle(&mut self.state.editor),
             Act::Material { nth, kind } => {
                 let materials = &self.state.editor.document.model.draft.materials;
@@ -904,7 +1101,11 @@ impl Session {
             self.running = None;
         } else if generation != before.generation {
             match act {
-                Act::Handoff(true) => {
+                // Published as its receipt arrives, in whichever step brings
+                // it.
+                _ if !matches!(act, Act::Frame(_))
+                    && self.request.handoff_outcome() == CanonicalGpuHandoffOutcome::Accepted =>
+                {
                     let (token, awaited) = before
                         .uploading
                         .expect("the device published a handoff no upload waits for");
@@ -998,6 +1199,7 @@ impl Session {
         self.act(act);
         self.observe(act, before);
         self.check();
+        self.check_reads(act);
         if self.adaptive {
             self.observe_adaptation(act, &before_adaptation);
         }
@@ -1037,6 +1239,72 @@ impl Session {
                 "after {act:?} an adapted mesh published over another topology than it was adapted from"
             );
         }
+    }
+
+    /// RT-03: a copy arriving late tells the host nothing older than it
+    /// knows and nothing the device has not done. The display never goes back
+    /// a generation, nor its clock within one; the running generation's steps
+    /// and processed events never go back and never pass the device's; and a
+    /// failure the host reads is one the device latched in that generation.
+    fn check_reads(&mut self, act: &Act) {
+        let display = self.display.generation;
+        assert!(
+            display >= self.read.display,
+            "after {act:?} the display went back to generation {display} from {}",
+            self.read.display
+        );
+        self.read.display = display;
+        if let Some(clock) = self.display.clock {
+            if let Some((generation, steps)) = self.read.clock
+                && generation == display
+            {
+                assert!(
+                    clock.accepted_steps >= steps,
+                    "after {act:?} the display's clock went back from step {steps} to {}",
+                    clock.accepted_steps
+                );
+            }
+            self.read.clock = Some((display, clock.accepted_steps));
+        }
+        // A cleared generation's counters are fresh, and stand for none.
+        if self.request.running_node_count().is_none() {
+            self.read.counted = None;
+            return;
+        }
+        let stats = self.request.stats();
+        let counted = (
+            self.request.generation(),
+            stats.completed_steps(),
+            stats.processed_event(),
+        );
+        if let Some((generation, completed, processed)) = self.read.counted
+            && generation == counted.0
+        {
+            assert!(
+                counted.1 >= completed,
+                "after {act:?} the host's count went back from {completed} steps to {}",
+                counted.1
+            );
+            assert!(
+                counted.2 >= processed,
+                "after {act:?} the host's processed event went back from {processed} to {}",
+                counted.2
+            );
+        }
+        if let Some((completed, processed)) = self.device.done(&self.request) {
+            assert!(
+                counted.1 <= completed && counted.2 <= processed,
+                "after {act:?} the host reads {} steps and event {} where the device has done \
+                 {completed} and {processed}",
+                counted.1,
+                counted.2
+            );
+        }
+        assert!(
+            !self.request.failed() || self.device.failed(&self.request),
+            "after {act:?} the host reads a failure the running generation never latched"
+        );
+        self.read.counted = Some(counted);
     }
 
     fn check(&self) {
@@ -1280,6 +1548,37 @@ prop_state_machine! {
     })]
     #[test]
     fn the_host_and_the_device_agree_on_what_runs(sequential 1..120 => Generations);
+}
+
+/// RT-03: the same interleavings with preparation on a worker the sequence
+/// plays, whose result can come for a request a newer one has replaced.
+struct Played;
+
+impl StateMachineTest for Played {
+    type SystemUnderTest = Session;
+    type Reference = Generations;
+
+    fn init_test(_: &()) -> Session {
+        Session::played()
+    }
+
+    fn apply(mut session: Session, _: &(), act: Act) -> Session {
+        session.step(&act);
+        session
+    }
+
+    fn teardown(mut session: Session, _: ()) {
+        session.quiesce();
+    }
+}
+
+prop_state_machine! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        ..ProptestConfig::default()
+    })]
+    #[test]
+    fn late_preparations_agree_on_what_runs(sequential 1..120 => Played);
 }
 
 /// Found by the runtime sequences: a fault on a candidate just installed made
@@ -1573,6 +1872,157 @@ fn a_scene_opened_after_a_fault_takes_none_of_it() {
         "a second notice of the dropped generation's fault"
     );
     session.quiesce();
+}
+
+/// The running generation with an edit's handoff pending on the device, and
+/// no copy in flight.
+fn handing_off(session: &mut Session) {
+    session.quiesce();
+    for act in [
+        Act::Nudge(2),
+        Act::Validate,
+        Act::Frame(None),
+        Act::Readbacks(u64::MAX),
+        Act::Frame(None),
+        Act::Readbacks(0),
+    ] {
+        session.step(&act);
+    }
+    assert_eq!(
+        session.request.handoff_outcome(),
+        CanonicalGpuHandoffOutcome::Pending
+    );
+}
+
+/// RT-03: the source's copies taken after the device admitted a handoff, and
+/// arriving after the receipt published it. The display already shows the
+/// target, from the receipt; a copy of the source that took it back would
+/// paint the old mesh's field over the new one's nodes.
+#[test]
+fn a_sources_copies_after_its_handoff_change_nothing() {
+    let mut session = Session::start();
+    handing_off(&mut session);
+    let source = session.request.generation();
+    for act in [Act::Admit(true), Act::Frame(Some(0)), Act::Frame(Some(0))] {
+        session.step(&act);
+    }
+    // The first frame's copies bring the receipt, and the target publishes.
+    session.step(&Act::Deliver(0));
+    let target = session.request.generation();
+    assert_ne!(target, source, "the receipt published the target");
+    assert_eq!(session.display.generation, target);
+    let clock = session.display.clock.map(|clock| clock.accepted_steps);
+    // The second frame's are the source's, late.
+    session.step(&Act::Deliver(0));
+    assert_eq!(session.display.generation, target);
+    assert_eq!(
+        session.display.clock.map(|clock| clock.accepted_steps),
+        clock
+    );
+    session.quiesce();
+}
+
+/// RT-03: a receipt the device wrote for a handoff the host then withdrew,
+/// another scene opened in its place, arriving after the old scene was
+/// dropped. It admits nothing: nothing runs until the new scene installs.
+#[test]
+fn a_receipt_of_a_withdrawn_handoff_admits_nothing() {
+    let mut session = Session::start();
+    handing_off(&mut session);
+    let generation = session.request.generation();
+    for act in [
+        Act::Admit(true),
+        Act::Frame(Some(0)),
+        Act::Open(true),
+        Act::Frame(Some(0)),
+    ] {
+        session.step(&act);
+    }
+    assert_eq!(
+        session.request.handoff_outcome(),
+        CanonicalGpuHandoffOutcome::None,
+        "the replacement withdrew the handoff"
+    );
+    assert_eq!(
+        session.request.running_node_count(),
+        None,
+        "and dropped the run"
+    );
+    session.step(&Act::Deliver(0));
+    assert_eq!(session.request.generation(), generation);
+    assert_eq!(session.request.running_node_count(), None);
+    assert_eq!(
+        session.request.handoff_outcome(),
+        CanonicalGpuHandoffOutcome::None
+    );
+    session.quiesce();
+}
+
+/// RT-03: a status copy taken while the run stood failed, arriving after Run
+/// cleared the failure. The cleared status buffer was replaced; the copy of
+/// the old one fails nothing.
+#[test]
+fn a_status_from_before_a_cleared_failure_fails_nothing() {
+    let mut session = Session::start();
+    session.quiesce();
+    for act in [Act::Fault, Act::Frame(Some(0))] {
+        session.step(&act);
+    }
+    assert!(session.request.failed());
+    assert!(
+        session.state.coordinator.solver_fault.is_some(),
+        "paused for the fault"
+    );
+    // A frame's copies of the failed status, still on their way.
+    for act in [Act::Frame(Some(0)), Act::Run(true), Act::Frame(Some(0))] {
+        session.step(&act);
+    }
+    assert!(!session.request.failed(), "Run cleared the failure");
+    session.step(&Act::Deliver(0));
+    assert!(!session.request.failed());
+    session.quiesce();
+}
+
+/// RT-03: the worker finishes a preparation after an edit has asked for
+/// another, and the host reads it in the frame that asked. It is dropped, and
+/// the edit's preparation runs.
+#[test]
+fn a_preparation_finished_for_a_replaced_request_is_dropped() {
+    let mut session = Session::played();
+    session.quiesce();
+    for act in [
+        Act::Material { nth: 0, kind: 0 },
+        Act::Validate,
+        Act::Frame(Some(0)),
+        Act::Work(None),
+        Act::Material { nth: 1, kind: 0 },
+        Act::Validate,
+    ] {
+        session.step(&act);
+    }
+    let edit = session.state.editor.revision;
+    session.step(&Act::Frame(Some(0)));
+    assert!(
+        session.state.runtime.ready().is_none(),
+        "the replaced request's candidate was taken"
+    );
+    assert_eq!(
+        session
+            .state
+            .runtime
+            .requested()
+            .map(|token| token.document_revision),
+        Some(edit)
+    );
+    session.quiesce();
+    assert_eq!(
+        session
+            .state
+            .runtime
+            .active()
+            .map(|active| active.bundle.token.document_revision),
+        Some(edit)
+    );
 }
 
 mod adapting;

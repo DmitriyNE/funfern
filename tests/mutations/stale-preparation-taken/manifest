@@ -1,0 +1,4 @@
+about: a preparation the worker finishes for a request a newer one replaced becomes the ready candidate
+test: cargo test --release -p funfern-app --lib -- ui::sequences::generations::a_preparation_finished_for_a_replaced_request_is_dropped
+expect: part|was taken
+needs: cpu

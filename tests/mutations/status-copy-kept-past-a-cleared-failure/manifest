@@ -1,0 +1,4 @@
+about: clearing a failure leaves the failed status buffer's readback standing, so a copy of it still in flight fails the cleared run again
+test: cargo test --release -p funfern-app --lib -- ui::sequences::generations::a_status_from_before_a_cleared_failure_fails_nothing
+expect: never latched
+needs: cpu

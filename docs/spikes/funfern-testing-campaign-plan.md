@@ -1471,6 +1471,13 @@ mutation, in this order:
   the app's handlers, the decision log compiled into the fixtures binary,
   and its CPU reference replays the timeline the runtime accepted, not the
   one planned: a few seeds a pull request, more in the device suite.
+  RT-03 landed on 2026-11-06: the sequences' device is now a test device
+  that writes the shaders' words and delivers copies through the production
+  observers and settle systems, frames late if the sequence holds them, and
+  a third machine plays the preparation worker. 6,000 sequences found no
+  defect; four focused tests name the late orders, and a late copy of a
+  replaced generation turns out to be turned away twice, by its readback's
+  despawn and by the generation the state and control readbacks compare.
 - **C8, robustness:** the 5.2 edge cases, on the CPU and then the device;
   RT-06; RT-07 with 5.4, a debug count of live shader buffers, staging,
   readbacks, bind groups and jobs in the fixtures binary, not wgpu's own

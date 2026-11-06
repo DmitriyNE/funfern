@@ -419,19 +419,24 @@ A fourth machine (`ui/sequences/generations.rs`,
 `the_host_and_the_device_agree_on_what_runs`) runs the runtime itself under
 interleavings of host frames, device completions and user actions: edits, mesh
 edge and speed changes, Remesh, source edits, Reset, Run and Step, pulses,
-Switch, scenes opened, Undo and Redo, while the device delivers readbacks,
-admits or refuses a handoff, takes or refuses a live event, or faults. The
-device is the request's test transitions, preparation advances by the slices
-each frame is granted and packing happens on the frame, so the order is the
-sequence's alone. While nothing uploads, the host's active topology must be
+Switch, scenes opened, Undo and Redo, while the device completes steps,
+admits or refuses a handoff, takes or refuses a live event, or faults, and its
+readbacks arrive. The device is `canonical_gpu`'s test device: it writes what
+the shaders write into the buffers the readbacks map, each frame takes copies
+of them, at most three a readback in flight, and they arrive through the
+production observers and settle systems, a frame's together and frames in
+order, when the sequence says. Preparation advances by the slices each frame
+is granted and packing happens on the frame, so the order is the sequence's
+alone. While nothing uploads, the host's active topology must be
 the one the device runs, at the step it was packed for; a topology is only
 prepared from a scene the editor has held since its last replacement; a commit
 without a new generation must be one that needs none; and with the device fair
 at the end, the runtime must come to rest on the accepted revision or with an
 error naming it. Its twin, `the_host_and_the_device_agree_while_adaptation_asks`
 in `generations/adapting.rs`, starts each sequence from rest with adaptation
-on and draws estimates among the steps: the test device's readbacks carry no
-field, so an estimate is the production job's of a field struck in a cell and
+on and draws estimates among the steps: the test device serves no full
+snapshot, which the host asks for by wall time, so an estimate is the
+production job's of a field struck in a cell and
 stepped on the CPU, handed to the session as a full readback would have led to
 it, and the frames run adaptation after the runtime as the app's do. An
 adapted mesh must publish over the topology it was adapted from, and at rest
@@ -1765,6 +1770,44 @@ as many estimates as the last, from two to 32; the app's
 uploading" is not one: a candidate stays ready until its upload publishes, so
 "nothing ready" already holds it, in the app as in the model. The device's
 side of adaptation is C7's.
+
+RT-03, stale completions, is held on the host by the same machines. The test
+device's copies can arrive frames after they were taken: `Deliver` brings the
+oldest frame's, and `Admit`, `Process` and `Latch` settle a handoff, a live
+event or a failure whose news waits in a copy, so a copy taken of one
+generation lands after a Reset, a replacement, a handoff or a cleared failure
+has made it another's. The model is told what the copies said, a readback of
+the running generation, a handoff or an event settled, a failure read; a copy
+of another generation is no step, and the comparison then holds that it
+changed nothing. After every step, besides, the display never goes back a
+generation nor its clock within one, the running generation's steps and
+processed events never go back nor pass the device's, and a failure the host
+reads is one the device latched in that generation. A third machine,
+`late_preparations_agree_on_what_runs`, plays the preparation worker on the
+sequence's word through the production `BackgroundPreparationWorker`'s
+channels, so a preparation can finish for a request a newer one has replaced.
+In 900 sequences the generator brings some 300 copies of a replaced
+generation, 360 status copies of a replaced status buffer, 14 receipts of a
+withdrawn handoff and 185 preparations finished for a replaced request; a
+source's copy landing after its receipt has moved the display on takes a
+longer chain of holds than it draws, and has a focused test. The study, 2,000
+sequences a machine, found no defect: every guard held. The focused tests
+name the orders: `a_sources_copies_after_its_handoff_change_nothing`,
+`a_receipt_of_a_withdrawn_handoff_admits_nothing`,
+`a_status_from_before_a_cleared_failure_fails_nothing` and
+`a_preparation_finished_for_a_replaced_request_is_dropped`. Its mutations are
+`late-source-copy-unguarded`, `stale-preparation-taken` and
+`status-copy-kept-past-a-cleared-failure`. A late copy of a replaced
+generation is turned away twice: its readback is despawned, by `clear` and by
+the handoff's settle, before any copy can arrive, and the state and control
+readbacks also compare its generation. Either alone holds, so dropping one is
+no mutation; `late-source-copy-unguarded` drops both. A snapshot is copied
+into a result slot of its own request, which an install or a handoff
+replaces, and a pack sends on a channel of its own job, dropped with it, so a
+late one of either has nowhere to land; neither is drawn. Neither are the
+probe recorders' rings, whose late copies the traces cut at the handoff
+(`a_handoff_takes_the_traces_back_to_its_snapshot`) or drop with a restart
+(`a_restarted_run_records_from_its_own_clock`).
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

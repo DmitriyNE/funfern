@@ -1,0 +1,4 @@
+about: a handoff's settle leaves the source's readbacks standing and the control readback reads a copy of any generation, so a source's copy arriving after the handoff published takes the display back to the source
+test: cargo test --release -p funfern-app --lib -- ui::sequences::generations::a_sources_copies_after_its_handoff_change_nothing
+expect: the display went back
+needs: cpu

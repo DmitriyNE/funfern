@@ -154,10 +154,16 @@ impl Playground {
             if let Some(worker) = &mut self.background_preparation {
                 worker.observe(&event);
             }
-            if let BackgroundPreparationEvent::Finished { result, .. } = event
-                && let Some(Ok(_)) = self.runtime.finish_external_preparation(*result)
-            {
-                self.handoff_ready = Some(Instant::now());
+            if let BackgroundPreparationEvent::Finished { result, .. } = event {
+                let settled = self.runtime.finish_external_preparation(*result);
+                #[cfg(test)]
+                if let Some(settled) = &settled {
+                    self.protocol_log
+                        .push(ProtocolNote::Prepared(settled.is_ok()));
+                }
+                if let Some(Ok(_)) = settled {
+                    self.handoff_ready = Some(Instant::now());
+                }
             }
         }
 
@@ -1525,6 +1531,7 @@ pub(super) fn pulse_increment(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical_gpu::test_device::{self, TestDevice};
 
     /// RT-6 of the 2026-10-20 review: a Reset whose zero-state plan fails is
     /// reported, and is not left latched to recompile every frame and zero
@@ -1621,7 +1628,6 @@ mod tests {
         state.report_recorder_failure(true);
         assert!(!state.unseen_error && state.message.is_empty(), "said once");
     }
-    use crate::canonical_gpu::CANONICAL_FAILURE_NON_FINITE;
 
     /// Handover generations preserve the accepted-step total. Their first
     /// observation establishes a baseline instead of re-crediting the run;
@@ -1987,29 +1993,40 @@ mod tests {
     fn a_pulse_or_switch_waits_for_a_busy_generation() {
         let mut world = World::new();
         world.init_resource::<Assets<ShaderBuffer>>();
+        test_device::connect(&mut world);
+        let mut device = TestDevice::default();
         let mut request = CanonicalGpuRequest::default();
-        let display = CanonicalGpuDisplay::default();
+        let mut display = CanonicalGpuDisplay::default();
         let mut recorders = WaveGpuRequest::default();
         let vector = VectorOverlayDisplay::default();
-        let mut frame =
-            |state: &mut Playground, request: &mut CanonicalGpuRequest, processed: bool| {
-                world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
-                    if processed {
-                        request.process_live_event(&mut assets);
-                    }
-                    let mut queue = bevy::ecs::world::CommandQueue::default();
-                    let mut commands = Commands::new(&mut queue, world);
-                    state.refresh_runtime(
-                        request,
-                        &display,
-                        &mut recorders,
-                        &vector,
-                        &mut assets,
-                        &mut commands,
-                        1.0 / 60.0,
-                    );
+        let mut frame = |state: &mut Playground,
+                         request: &mut CanonicalGpuRequest,
+                         processed: bool| {
+            if processed {
+                test_device::lend(&mut world, request, &mut display, |world| {
+                    device.answer(world, |device, world| device.process(world, true));
+                    TestDevice::settle(world);
                 });
-            };
+            }
+            let mut queue = world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    &display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+                queue
+            });
+            queue.apply(&mut world);
+            test_device::lend(&mut world, request, &mut display, |world| {
+                device.take(world)
+            });
+        };
         let mut state = Playground::default();
         let material = state.editor.document.model.draft.materials[0].clone();
         let switch = law_presets()
@@ -2263,29 +2280,40 @@ mod tests {
     fn switches_on_two_materials_both_wait_for_a_busy_generation() {
         let mut world = World::new();
         world.init_resource::<Assets<ShaderBuffer>>();
+        test_device::connect(&mut world);
+        let mut device = TestDevice::default();
         let mut request = CanonicalGpuRequest::default();
-        let display = CanonicalGpuDisplay::default();
+        let mut display = CanonicalGpuDisplay::default();
         let mut recorders = WaveGpuRequest::default();
         let vector = VectorOverlayDisplay::default();
-        let mut frame =
-            |state: &mut Playground, request: &mut CanonicalGpuRequest, processed: bool| {
-                world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
-                    if processed {
-                        request.process_live_event(&mut assets);
-                    }
-                    let mut queue = bevy::ecs::world::CommandQueue::default();
-                    let mut commands = Commands::new(&mut queue, world);
-                    state.refresh_runtime(
-                        request,
-                        &display,
-                        &mut recorders,
-                        &vector,
-                        &mut assets,
-                        &mut commands,
-                        1.0 / 60.0,
-                    );
+        let mut frame = |state: &mut Playground,
+                         request: &mut CanonicalGpuRequest,
+                         processed: bool| {
+            if processed {
+                test_device::lend(&mut world, request, &mut display, |world| {
+                    device.answer(world, |device, world| device.process(world, true));
+                    TestDevice::settle(world);
                 });
-            };
+            }
+            let mut queue = world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    &display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+                queue
+            });
+            queue.apply(&mut world);
+            test_device::lend(&mut world, request, &mut display, |world| {
+                device.take(world)
+            });
+        };
         let mut state = Playground::default();
         let switch = law_presets()
             .iter()
@@ -2624,13 +2652,14 @@ mod tests {
     fn a_committed_mesh_starts_the_coarsening_confirmation_afresh() {
         fn frame(
             world: &mut World,
+            device: &mut TestDevice,
             state: &mut Playground,
             request: &mut CanonicalGpuRequest,
-            display: &CanonicalGpuDisplay,
+            display: &mut CanonicalGpuDisplay,
         ) {
             let mut recorders = WaveGpuRequest::default();
             let vector = VectorOverlayDisplay::default();
-            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+            let mut queue = world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
                 let mut queue = bevy::ecs::world::CommandQueue::default();
                 let mut commands = Commands::new(&mut queue, world);
                 state.refresh_runtime(
@@ -2642,10 +2671,15 @@ mod tests {
                     &mut commands,
                     1.0 / 60.0,
                 );
+                queue
             });
+            queue.apply(world);
+            test_device::lend(world, request, display, |world| device.take(world));
         }
         let mut world = World::new();
         world.init_resource::<Assets<ShaderBuffer>>();
+        test_device::connect(&mut world);
+        let mut device = TestDevice::default();
         let mut request = CanonicalGpuRequest::default();
         let mut display = CanonicalGpuDisplay::default();
         let mut state = with_baffles(&[]);
@@ -2654,7 +2688,13 @@ mod tests {
         state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
         state.coordinator.reset_requested = true;
         state.wave_running = false;
-        frame(&mut world, &mut state, &mut request, &display);
+        frame(
+            &mut world,
+            &mut device,
+            &mut state,
+            &mut request,
+            &mut display,
+        );
 
         // One estimate on the old mesh asked to coarsen; a finer mesh hands off.
         state.amr.coarsen_streak = 1;
@@ -2663,7 +2703,13 @@ mod tests {
             if state.coordinator.uploading.is_some() {
                 break;
             }
-            frame(&mut world, &mut state, &mut request, &display);
+            frame(
+                &mut world,
+                &mut device,
+                &mut state,
+                &mut request,
+                &mut display,
+            );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert_eq!(
@@ -2671,10 +2717,17 @@ mod tests {
             CanonicalGpuHandoffOutcome::Pending,
             "the handoff began"
         );
-        world.resource_scope(|_, mut assets: Mut<Assets<ShaderBuffer>>| {
-            request.accept_handoff(&mut assets, &mut display);
+        test_device::lend(&mut world, &mut request, &mut display, |world| {
+            device.answer(world, |device, world| device.admit(world, true));
+            TestDevice::settle(world);
         });
-        frame(&mut world, &mut state, &mut request, &display);
+        frame(
+            &mut world,
+            &mut device,
+            &mut state,
+            &mut request,
+            &mut display,
+        );
         assert!(
             state.coordinator.uploading.is_none(),
             "the mesh is committed"
@@ -2691,12 +2744,22 @@ mod tests {
     fn a_rejected_handoff_keeps_the_accepted_step() {
         let mut world = World::new();
         world.init_resource::<Assets<ShaderBuffer>>();
+        test_device::connect(&mut world);
+        let mut device = TestDevice::default();
         let mut request = CanonicalGpuRequest::default();
-        let display = CanonicalGpuDisplay::default();
+        let mut display = CanonicalGpuDisplay::default();
         let mut recorders = WaveGpuRequest::default();
         let vector = VectorOverlayDisplay::default();
-        let mut frame = |state: &mut Playground, request: &mut CanonicalGpuRequest| {
-            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+        let mut frame = |state: &mut Playground,
+                         request: &mut CanonicalGpuRequest,
+                         admitted: Option<bool>| {
+            if let Some(admit) = admitted {
+                test_device::lend(&mut world, request, &mut display, |world| {
+                    device.answer(world, |device, world| device.admit(world, admit));
+                    TestDevice::settle(world);
+                });
+            }
+            let mut queue = world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
                 let mut queue = bevy::ecs::world::CommandQueue::default();
                 let mut commands = Commands::new(&mut queue, world);
                 state.refresh_runtime(
@@ -2708,6 +2771,11 @@ mod tests {
                     &mut commands,
                     1.0 / 60.0,
                 );
+                queue
+            });
+            queue.apply(&mut world);
+            test_device::lend(&mut world, request, &mut display, |world| {
+                device.take(world)
             });
         };
 
@@ -2719,7 +2787,7 @@ mod tests {
         state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
         state.coordinator.reset_requested = true;
         state.wave_running = false;
-        frame(&mut state, &mut request);
+        frame(&mut state, &mut request, None);
         let step = state.coordinator.uploaded_time_step;
         assert!(step > 0.0);
 
@@ -2729,7 +2797,7 @@ mod tests {
             if state.coordinator.uploading.is_some() {
                 break;
             }
-            frame(&mut state, &mut request);
+            frame(&mut state, &mut request, None);
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let candidate = state
@@ -2752,13 +2820,12 @@ mod tests {
             "until the device publishes it, the accepted generation is stepping"
         );
 
-        request.reject_handoff(CANONICAL_FAILURE_NON_FINITE);
-        frame(&mut state, &mut request);
+        frame(&mut state, &mut request, Some(false));
         assert!(state.coordinator.uploading.is_none());
         assert_eq!(state.runtime.active().unwrap().bundle.token, accepted);
         assert_eq!(state.solver_time_step(), step);
 
-        frame(&mut state, &mut request);
+        frame(&mut state, &mut request, None);
         assert!(
             !state.preparation_in_progress()
                 && state
