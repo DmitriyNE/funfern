@@ -1,0 +1,13 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -8473,7 +8473,9 @@
+         pass.set_bind_group(0, &group.bind_group, &[]);
+     }
+     for offset in 0..pending {
+-        if group.encoded_local_step.saturating_add(1) >= handles.rebase_step_limit {
++        if offset == 0
++            && group.encoded_local_step.saturating_add(pending as u32) >= handles.rebase_step_limit
++        {
+             pass.set_pipeline(pipelines[22]);
+             pass.dispatch_workgroups(
+                 workgroups(

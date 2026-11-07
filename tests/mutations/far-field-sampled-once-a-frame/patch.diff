@@ -1,0 +1,10 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -8714,6 +8714,7 @@
+             Some(advance),
+             _,
+         )) = far_recorder
++            && offset + 1 == pending
+             && differencing_sample_due(recorder_step, handles.sample_stride, resident_filter)
+         {
+             // Four dispatches, so that every thread of the middle two reads

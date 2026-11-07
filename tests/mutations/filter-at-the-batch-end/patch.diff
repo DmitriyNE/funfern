@@ -1,0 +1,15 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -8642,7 +8642,11 @@
+         pass.dispatch_workgroups(1, 1, 1);
+         let step_after = group.encoded_steps + offset + 1;
+         let recorder_step = device_step(step_after);
+-        if resident_filter && step_after.is_multiple_of(GRID_SCALE_FILTER_CADENCE) {
++        if resident_filter
++            && offset + 1 == pending
++            && step_after / GRID_SCALE_FILTER_CADENCE
++                > group.encoded_steps / GRID_SCALE_FILTER_CADENCE
++        {
+             if handles.needs_accounting {
+                 // Per-step contributions live in a lane-paired scratch bank.
+                 // Consolidate them before the zero-duration event flips the

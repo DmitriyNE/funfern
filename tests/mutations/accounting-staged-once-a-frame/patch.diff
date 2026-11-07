@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -8634,7 +8634,7 @@
+             pass.set_pipeline(pipelines[11]);
+             pass.dispatch_workgroups(workgroups(handles.state_count), 1, 1);
+         }
+-        if handles.needs_accounting {
++        if handles.needs_accounting && offset + 1 == pending {
+             pass.set_pipeline(pipelines[24]);
+             pass.dispatch_workgroups(workgroups(handles.accounting_item_count), 1, 1);
+         }

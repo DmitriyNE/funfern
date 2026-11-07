@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -4558,7 +4558,7 @@
+     retired: u64,
+     unfenced: bool,
+ ) -> EncodedSteps {
+-    let asked = desired.saturating_sub(encoded).min(MAX_STEPS_PER_FRAME);
++    let asked = desired.saturating_sub(encoded);
+     if unfenced {
+         return EncodedSteps {
+             steps: asked,

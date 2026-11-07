@@ -48,7 +48,7 @@ freedom. Every fixture reads 6e-7 to 1.2e-6 on the M1 Max; 5e-6 leaves four time
 that, where the device examples' 3e-5 let a remesh that lost its component totals
 through. Negating b, reading the lanes a step old, or stepping the reference one
 step short each fails it. `cavity-batches` runs the cavity four times, its steps
-asked for one at a time, seven, 128 and all 256 a frame, and requires the
+asked for one at a time, seven, 32 and 64 a frame, and requires the
 accepted state at the endpoint to be the same bits each time, which it is: the
 device keeps its clock and control on the GPU, takes no host write while
 stepping and reduces in fixed-order trees. The 11,121 nodes leave a partial
@@ -1808,6 +1808,46 @@ late one of either has nowhere to land; neither is drawn. Neither are the
 probe recorders' rings, whose late copies the traces cut at the handoff
 (`a_handoff_takes_the_traces_back_to_its_snapshot`) or drop with a restart
 (`a_restarted_run_records_from_its_own_clock`).
+
+RT-02, batching, is held on the device by `batches`. A frame asks for at most
+64 steps and never more than leaves 64 asked past what the queue has retired;
+the render world encodes them, at most 256 a frame and, unless stepping is
+unfenced, never more than 64 past what the queue has retired. The frame's own
+backpressure is the tighter, so in the app every frame encodes what it asked
+and neither the ceiling nor the lead fence binds
+(`the_apps_frames_never_meet_the_encoders_bounds`); the device examples, which
+ask for a whole run at once, meet both. `steps_to_encode` is the encoder's
+arithmetic, and `a_frame_encodes_within_the_ceiling_and_the_fence` and
+`a_burst_is_encoded_in_full_under_either_bound` hold its bounds. `batches`
+opens five gallery scenes as the gallery does, adaptation off, and runs each
+320 steps from 100 before its epoch rebases, the far field's 640, since its
+first frame waits for its contour's history to span the retarded times, six
+ways: 1, 7, 32 and 64 steps a
+frame, and the whole run asked for in one frame, fenced and unfenced, which
+the fixture alone asks for, past the frame's ceiling. At the endpoint the
+accepted state, the material runtime, the force cache, the clock, the
+accounting, the event words and every recorder's ring must be the same bits in
+all six, a recorder counting only where its ring holds records (128 to 300
+probe records, 66 far-field frames), and each schedule must meet what it
+names: its frames asked for its
+batch and met no fence, the fence held the fenced burst back, and the ceiling
+split the unfenced one into 256 and 64. Between them the scenes take every
+branch the encoder steps by, which the fixture reads off the installed
+generation: the losses and the accounting, the material runtime and the
+integrated field, the secants and the field laws, the short-wave split, the
+trapezoid walls with their direct, swept, nonlinear and prescribed solves,
+both fourth-order forms, the grid filter, the rebase, and the point, line and
+area probes and the far field. Walls stepped by half kicks are the examples'
+alone. No gallery scene drives a side beside an outgoing one, so the double
+slit runs with its top side driven, as the inspector sets it, for the
+prescribed solve. The study ran all 45 gallery scenes so: every one ended on
+the same bits in all six. Its mutations are `accounting-staged-once-a-frame`,
+`filter-at-the-batch-end`, `rebase-checked-once-a-frame`,
+`point-probe-sampled-once-a-frame`, `far-field-sampled-once-a-frame` and
+`fence-never-binds` on the device, and `encode-cap-lifted` on the host. A
+fence counting against the readback's completed steps rather than the
+queue's retired ones is no mutation here: on the M1 Max the app's frames
+still never meet it.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

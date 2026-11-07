@@ -18,6 +18,7 @@
 //! asks for ([`E2eSteps`]): the app asks by the wall clock, and a comparison
 //! needs an exact endpoint.
 
+mod batches;
 #[path = "../../examples/support/check.rs"]
 mod check;
 pub(crate) mod far_field;
@@ -49,19 +50,29 @@ use std::collections::{BTreeSet, VecDeque};
 
 /// Where an end-to-end fixture holds the run: the steps a running frame asks
 /// for stop at `limit`, counted on the running generation, and are `batch` a
-/// frame where it names a number, in place of the frame's pacing. `most` is
-/// the most a frame has asked for since the fixture last cleared it.
+/// frame where it names a number, in place of the frame's pacing. Under
+/// `burst` one frame asks for every step to the stop at once, past the
+/// frame's ceiling and its backpressure, as the device examples ask. `most`
+/// is the most a frame has asked for since the fixture last cleared it.
 #[derive(Default)]
 pub(super) struct E2eSteps {
     pub(super) limit: Option<u64>,
     pub(super) batch: Option<u64>,
+    pub(super) burst: bool,
     pub(super) most: u64,
 }
 
 /// Where a fixture starts a fresh generation's clock, if it says: the epoch
 /// origin, and how many steps before the epoch's rebase. The app starts every
-/// fresh generation at zero; `far-field-late` starts 36 hours in.
-static FRESH_CLOCK: std::sync::Mutex<Option<(f64, u32)>> = std::sync::Mutex::new(None);
+/// fresh generation at zero; `far-field-late` starts 36 hours in, and
+/// `batches` at zero, with the origin as far before it as the epoch has run.
+static FRESH_CLOCK: std::sync::Mutex<Option<(FreshOrigin, u32)>> = std::sync::Mutex::new(None);
+
+#[derive(Clone, Copy)]
+enum FreshOrigin {
+    At(f64),
+    StartingAtZero,
+}
 
 /// The clock a fresh generation starts at: the fixture's, or zero.
 pub(crate) fn fresh_clock(
@@ -72,9 +83,15 @@ pub(crate) fn fresh_clock(
     let Some((origin, before)) = *FRESH_CLOCK.lock().unwrap() else {
         return Ok(clock);
     };
-    Ok(crate::canonical_gpu::CanonicalGpuClock {
-        epoch_origin_seconds: origin,
+    let clock = crate::canonical_gpu::CanonicalGpuClock {
         step_in_epoch: rebase_step_limit(time_step) - before,
+        ..clock
+    };
+    Ok(crate::canonical_gpu::CanonicalGpuClock {
+        epoch_origin_seconds: match origin {
+            FreshOrigin::At(origin) => origin,
+            FreshOrigin::StartingAtZero => -clock.local_seconds(),
+        },
         ..clock
     })
 }
@@ -90,6 +107,10 @@ pub(crate) fn add(app: &mut App) {
     let Some((name, seconds)) = requested() else {
         return;
     };
+    if name == "batches" {
+        batches::add(app, seconds);
+        return;
+    }
     let (fixture, batches) = match name.as_str() {
         "cavity" => (Fixture::Cavity, vec![None]),
         "cavity-batches" => (
@@ -2303,11 +2324,12 @@ fn advance(
             state.wave_running = true;
             // Every fresh generation starts at zero but this one's.
             *FRESH_CLOCK.lock().unwrap() = match driver.fixture {
-                Fixture::FarFieldLate => {
-                    Some((far_field::LATE_ORIGIN, far_field::LATE_STEPS_BEFORE_REBASE))
-                }
+                Fixture::FarFieldLate => Some((
+                    FreshOrigin::At(far_field::LATE_ORIGIN),
+                    far_field::LATE_STEPS_BEFORE_REBASE,
+                )),
                 Fixture::HandoffMemory(MemoryHandoff::RunningLate) => {
-                    Some((far_field::LATE_ORIGIN, 300))
+                    Some((FreshOrigin::At(far_field::LATE_ORIGIN), 300))
                 }
                 _ => None,
             };

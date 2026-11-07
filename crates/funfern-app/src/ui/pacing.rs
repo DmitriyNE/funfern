@@ -1434,6 +1434,45 @@ mod tests {
         assert_eq!(steps_with_gpu_backpressure(100, 200, 20), 0);
     }
 
+    /// RT-02: the app's own frames never meet the render world's lead fence
+    /// or its per-frame ceiling. A frame asks for no more than leaves
+    /// `MAX_STEPS_PER_FRAME` asked past what the queue has retired, and the
+    /// render world, reading a retirement no older, a frame's asks or two
+    /// behind, encodes everything asked within the fence's lead and the
+    /// ceiling. Only a request for many steps at once, the device examples',
+    /// meets either.
+    #[test]
+    fn the_apps_frames_never_meet_the_encoders_bounds() {
+        use crate::canonical_gpu::{MAX_ENCODED_STEP_LEAD, steps_to_encode};
+        use proptest::prelude::*;
+        const { assert!(MAX_STEPS_PER_FRAME <= MAX_ENCODED_STEP_LEAD) };
+        let frame = (
+            0..=MAX_STEPS_PER_FRAME,
+            any::<bool>(),
+            0u64..=100,
+            0u64..=100,
+        );
+        proptest!(|(frames in prop::collection::vec(frame, 1..200))| {
+            let (mut requested, mut encoded, mut retired) = (0_u64, 0_u64, 0_u64);
+            let mut extracted = 0;
+            for (batch, behind, before, after) in frames {
+                requested += steps_with_gpu_backpressure(retired, requested, batch);
+                // The render world encodes what was asked by this frame, or
+                // pipelined, by the last.
+                let desired = if behind { extracted } else { requested };
+                extracted = requested;
+                // The queue retires part of what it holds before the render
+                // world reads it, and more before the next frame asks.
+                retired += (encoded - retired) * before / 100;
+                let frame = steps_to_encode(desired, encoded, retired, false);
+                prop_assert!(!frame.fenced);
+                prop_assert_eq!(frame.steps, desired - encoded);
+                encoded += frame.steps;
+                retired += (encoded - retired) * after / 100;
+            }
+        });
+    }
+
     /// The windowed rate dips whenever a handoff withholds stepping inside its
     /// window, at every speed and including ones the solver reaches easily, so
     /// the note reads a held best rather than the raw measurement.

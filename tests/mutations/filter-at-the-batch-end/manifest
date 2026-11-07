@@ -1,0 +1,4 @@
+about: the resident grid filter runs at the end of a frame's batch that passed its cadence rather than at the step the cadence names, so the field depends on how the steps were batched
+test: scripts/e2e-fixture.sh batches
+expect: state[a-z, ]* apart
+needs: device

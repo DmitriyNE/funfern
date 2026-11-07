@@ -1101,11 +1101,17 @@ impl Playground {
                         steps,
                         ceiling_bound: false,
                     });
-                    let backpressured = steps_with_gpu_backpressure(
-                        request.stats().retired_steps(),
-                        request.requested_steps(),
-                        batch.steps,
-                    );
+                    // A fixture's burst asks for every step to its stop at
+                    // once, which only the endpoint below bounds.
+                    let backpressured = if self.e2e_steps.burst && self.e2e_steps.limit.is_some() {
+                        u64::MAX
+                    } else {
+                        steps_with_gpu_backpressure(
+                            request.stats().retired_steps(),
+                            request.requested_steps(),
+                            batch.steps,
+                        )
+                    };
                     // An end-to-end fixture's endpoint: the steps asked for
                     // stop there.
                     let admitted = self.e2e_steps.limit.map_or(backpressured, |limit| {

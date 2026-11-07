@@ -1,0 +1,4 @@
+about: a frame encodes every step asked for, past the per-frame ceiling, so a whole run asked for at once goes into one command buffer
+test: PROPTEST_DISABLE_FAILURE_PERSISTENCE=true cargo test --release -p funfern-app --lib -- canonical_gpu::tests::a_burst_is_encoded_in_full_under_either_bound
+expect: frame.steps <= MAX_STEPS_PER_FRAME
+needs: cpu

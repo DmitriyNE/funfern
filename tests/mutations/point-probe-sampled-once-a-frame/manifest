@@ -1,0 +1,4 @@
+about: the point probes sample only on a batch's last step, so a batch of several steps drops the samples due inside it
+test: scripts/e2e-fixture.sh batches
+expect: point probes apart
+needs: device

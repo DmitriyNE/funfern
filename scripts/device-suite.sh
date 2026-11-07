@@ -134,6 +134,7 @@ RUNS=(
   # The app itself, driven through its own handlers (src/ui/e2e.rs).
   'FUNFERN_E2E=cavity funfern-fixtures'
   'FUNFERN_E2E=cavity-batches funfern-fixtures'
+  'FUNFERN_E2E=batches funfern-fixtures'
   'FUNFERN_E2E=switch funfern-fixtures'
   'FUNFERN_E2E=handoff funfern-fixtures'
   'FUNFERN_E2E=handoff-driven funfern-fixtures'

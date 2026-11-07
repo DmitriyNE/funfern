@@ -1478,6 +1478,14 @@ mutation, in this order:
   defect; four focused tests name the late orders, and a late copy of a
   replaced generation turns out to be turned away twice, by its readback's
   despawn and by the generation the state and control readbacks compare.
+  RT-02 landed on 2026-11-07: the app's frames turn out never to meet the
+  render world's per-frame ceiling or its lead fence, their own backpressure
+  being the tighter, so only a whole run asked for at once, as the device
+  examples ask and the fixture now can, meets either. `batches` runs five
+  gallery scenes, which take every branch the encoder steps by between them,
+  in four frame batches and both bursts, from just before a rebase, to the
+  same bits in the state, the clock, the accounting and every recorder's
+  ring; the study ran all 45 gallery scenes so and found no defect.
 - **C8, robustness:** the 5.2 edge cases, on the CPU and then the device;
   RT-06; RT-07 with 5.4, a debug count of live shader buffers, staging,
   readbacks, bind groups and jobs in the fixtures binary, not wgpu's own

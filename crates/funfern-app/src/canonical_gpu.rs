@@ -4439,12 +4439,12 @@ pub const fn canonical_failure_description(reason: u32) -> &'static str {
 }
 // Large explicit validation requests are encoded in one command buffer. The
 // interactive caller still controls its much smaller per-frame request size.
-const MAX_STEPS_PER_FRAME: u64 = 256;
+pub(crate) const MAX_STEPS_PER_FRAME: u64 = 256;
 /// Bound CPU-encoded evolution against the steps the queue has retired. Without
 /// this fence the render world can keep feeding Metal while a large solve or a
 /// backgrounded window completes more slowly, building an unbounded queue of
 /// command buffers even though each individual frame is small.
-const MAX_ENCODED_STEP_LEAD: u64 = 64;
+pub(crate) const MAX_ENCODED_STEP_LEAD: u64 = 64;
 
 #[derive(Default)]
 pub struct CanonicalGpuStats {
@@ -4459,6 +4459,10 @@ pub struct CanonicalGpuStats {
     /// A probe or far-field recorder's pipeline failed for good, for the
     /// host to report; set by the render world.
     recorder_pipeline_failed: AtomicBool,
+    /// The most steps one frame encoded, and the frames the lead fence held
+    /// below the per-frame ceiling, for the batching fixture.
+    most_encoded: AtomicU64,
+    fenced_frames: AtomicU64,
 }
 
 impl CanonicalGpuStats {
@@ -4516,6 +4520,55 @@ impl CanonicalGpuStats {
 
     pub fn event_rejection(&self) -> u32 {
         self.event_rejection.load(Ordering::Relaxed)
+    }
+
+    /// The most steps one frame has encoded for this generation, and how
+    /// many frames the lead fence held below the per-frame ceiling: whether a
+    /// schedule met the encoder's bounds at all.
+    pub fn encoding_bounds(&self) -> (u64, u64) {
+        (
+            self.most_encoded.load(Ordering::Relaxed),
+            self.fenced_frames.load(Ordering::Relaxed),
+        )
+    }
+
+    fn note_encoded(&self, encoded: EncodedSteps) {
+        self.most_encoded
+            .fetch_max(encoded.steps, Ordering::Relaxed);
+        if encoded.fenced {
+            self.fenced_frames.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// What a frame encodes of the steps asked for, and whether the lead fence
+/// held it below what the per-frame ceiling allowed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EncodedSteps {
+    pub(crate) steps: u64,
+    pub(crate) fenced: bool,
+}
+
+/// The steps a frame encodes: those asked for and not yet encoded, at most
+/// `MAX_STEPS_PER_FRAME`, and unless stepping is unfenced no more than keeps
+/// `MAX_ENCODED_STEP_LEAD` encoded past what the queue has retired.
+pub(crate) fn steps_to_encode(
+    desired: u64,
+    encoded: u64,
+    retired: u64,
+    unfenced: bool,
+) -> EncodedSteps {
+    let asked = desired.saturating_sub(encoded).min(MAX_STEPS_PER_FRAME);
+    if unfenced {
+        return EncodedSteps {
+            steps: asked,
+            fenced: false,
+        };
+    }
+    let room = MAX_ENCODED_STEP_LEAD.saturating_sub(encoded.saturating_sub(retired));
+    EncodedSteps {
+        steps: asked.min(room),
+        fenced: room < asked,
     }
 }
 
@@ -5120,6 +5173,47 @@ impl CanonicalGpuRequest {
     /// keeps the fence, which is what stops it queueing unbounded work.
     pub fn set_unfenced_stepping(&mut self, enabled: bool) {
         self.unfenced_stepping = enabled;
+    }
+
+    /// The per-step branches the encoder and its shaders take for the
+    /// installed generation, by name: what the batching fixture's scenes must
+    /// cover between them.
+    pub(crate) fn step_branches(&self) -> Vec<&'static str> {
+        let Some(handles) = &self.buffers else {
+            return Vec::new();
+        };
+        let walls = handles.trace_count > 0;
+        let trapezoid = walls && handles.trapezoid_walls;
+        [
+            ("losses", handles.needs_loss_stages),
+            ("accounting", handles.needs_accounting),
+            ("material runtime", handles.material_runtime_count > 0),
+            ("integrated field", handles.integrated_count > 0),
+            ("sample secants", handles.sample_secants),
+            ("field laws", handles.field_laws),
+            ("short-wave split", handles.short_wave),
+            ("half-kick walls", walls && !trapezoid),
+            ("trapezoid walls", trapezoid),
+            ("direct wall solve", walls && handles.trace_direct),
+            (
+                "swept wall solve",
+                walls && !handles.trace_direct && handles.trace_sweeps > 0,
+            ),
+            ("nonlinear walls", walls && handles.nonlinear_trace),
+            ("prescribed walls", walls && handles.prescribed_trace),
+            (
+                "fourth-order drift",
+                handles.fourth_order && !handles.fourth_order_kick_form,
+            ),
+            ("fourth-order kick", handles.fourth_order_kick_form),
+            (
+                "grid filter",
+                self.grid_scale_filter && handles.grid_filter_admitted,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(name, taken)| taken.then_some(name))
+        .collect()
     }
 
     /// Gate O: reads the integrated field back every frame while `enabled`,
@@ -5876,6 +5970,16 @@ impl CanonicalGpuDisplay {
 
     /// Bit-exact accepted physical state plus the accepted force cache. This is
     /// intentionally narrow and exists for transaction rollback verification.
+    /// The bits of the accepted material runtime bank, from the same copy as
+    /// the state: each drive's phase and each Switch's state.
+    pub(crate) fn material_runtime_bits(&self) -> Vec<u32> {
+        self.raw_material_runtime
+            .iter()
+            .flat_map(|word| word.values.to_array())
+            .map(f32::to_bits)
+            .collect()
+    }
+
     pub fn accepted_storage_bits(&self) -> Vec<u32> {
         let mut result =
             Vec::with_capacity(self.node_count * 2 + self.sample_count * 2 + self.auxiliary.len());
@@ -8135,23 +8239,19 @@ fn compute_canonical_wave(
             .recorder_pipeline_failed
             .store(true, Ordering::Relaxed);
     }
-    let encoded_lead = group
-        .encoded_steps
-        .saturating_sub(request.stats.retired_steps());
     // Held, the frame still applies an event and samples the overlay, which
     // the recorders do not read.
     let pending = if recorders_compiling {
         0
     } else {
-        request
-            .desired_steps
-            .saturating_sub(group.encoded_steps)
-            .min(MAX_STEPS_PER_FRAME)
-            .min(if request.unfenced_stepping {
-                u64::MAX
-            } else {
-                MAX_ENCODED_STEP_LEAD.saturating_sub(encoded_lead)
-            })
+        let encoded = steps_to_encode(
+            request.desired_steps,
+            group.encoded_steps,
+            request.stats.retired_steps(),
+            request.unfenced_stepping,
+        );
+        request.stats.note_encoded(encoded);
+        encoded.steps
     };
     let live_event = request.live_event.as_ref().filter(|event| {
         event.serial != group.encoded_live_event
@@ -9118,6 +9218,69 @@ mod tests {
         assert_eq!(stats.retired_steps(), 40);
         stats.completed_steps.store(50, Ordering::Relaxed);
         assert_eq!(stats.retired_steps(), 50);
+    }
+
+    proptest::proptest! {
+        /// RT-02: a frame encodes no more than is asked and the per-frame
+        /// ceiling allows; unfenced that is all it is held to, and fenced it
+        /// never takes the lead past the fence's, nor further where it
+        /// started past it; and it names the fence exactly when the fence,
+        /// not what was asked or the ceiling, set the batch.
+        #[test]
+        fn a_frame_encodes_within_the_ceiling_and_the_fence(
+            asked in 0u64..2000,
+            encoded in 0u64..2000,
+            behind in 0u64..200,
+            unfenced: bool,
+        ) {
+            let retired = encoded.saturating_sub(behind);
+            let lead = encoded - retired;
+            let frame = steps_to_encode(encoded + asked, encoded, retired, unfenced);
+            let allowed = asked.min(MAX_STEPS_PER_FRAME);
+            proptest::prop_assert!(frame.steps <= allowed);
+            if unfenced {
+                proptest::prop_assert_eq!(frame, EncodedSteps { steps: allowed, fenced: false });
+            } else {
+                proptest::prop_assert!(lead + frame.steps <= MAX_ENCODED_STEP_LEAD.max(lead));
+                proptest::prop_assert_eq!(frame.fenced, frame.steps < allowed);
+                proptest::prop_assert_eq!(
+                    frame.steps,
+                    allowed.min(MAX_ENCODED_STEP_LEAD.saturating_sub(lead))
+                );
+            }
+        }
+
+        /// RT-02: a whole run asked for at once, as the device examples ask,
+        /// is encoded in full while the queue retires what it was given
+        /// `lag` frames before: unfenced a ceiling a frame, fenced the fence's
+        /// lead every `lag + 1` frames, never further ahead of the queue.
+        #[test]
+        fn a_burst_is_encoded_in_full_under_either_bound(
+            steps in 1u64..3000,
+            lag in 0usize..5,
+            unfenced: bool,
+        ) {
+            let mut encoded = 0;
+            let mut history = vec![0];
+            while encoded < steps {
+                let retired = history[history.len().saturating_sub(1 + lag)];
+                let frame = steps_to_encode(steps, encoded, retired, unfenced);
+                proptest::prop_assert!(frame.steps <= MAX_STEPS_PER_FRAME);
+                if !unfenced {
+                    proptest::prop_assert!(encoded + frame.steps - retired <= MAX_ENCODED_STEP_LEAD);
+                }
+                encoded += frame.steps;
+                history.push(encoded);
+            }
+            let frames = (history.len() - 1) as u64;
+            if unfenced {
+                proptest::prop_assert_eq!(frames, steps.div_ceil(MAX_STEPS_PER_FRAME));
+            } else {
+                proptest::prop_assert!(
+                    frames <= (lag as u64 + 1) * steps.div_ceil(MAX_ENCODED_STEP_LEAD)
+                );
+            }
+        }
     }
 
     /// Reported by the observables fixture on lavapipe: the point recorder's

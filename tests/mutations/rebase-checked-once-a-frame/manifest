@@ -1,0 +1,4 @@
+about: the epoch's rebase is decided once a frame, before a batch that would pass the limit, so a batch rebases the clock up to its length early
+test: scripts/e2e-fixture.sh batches
+expect: clock[a-z, ]* apart
+needs: device

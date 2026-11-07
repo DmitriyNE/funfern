@@ -48,6 +48,8 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // observers runs the cavity's 256 twice, the second time recording, paused
 // for a second and resized; superposition runs the walled cavity's 384 four
 // times, as long as four of the handoff-memory pages, and similarity twice.
+// batches runs five scenes six times each, on lavapipe about four times as
+// long as cavity-batches, whose page takes 745 s.
 const runLength = {
   "handoff-memory-running": 2,
   "handoff-memory-running-late": 2,
@@ -57,6 +59,7 @@ const runLength = {
   similarity: 2,
   "far-field": 3,
   "far-field-late": 2,
+  batches: 4,
 };
 // How the bundle is hosted: `isolated`, the test server sending the headers that
 // isolate the page; `pages`, as GitHub Pages serves the site - no headers, so the

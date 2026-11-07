@@ -1,0 +1,4 @@
+about: the accounting's per-step stage runs once a frame, on its batch's last step, so the books hold what each batch's last step put in or took out and differ with the batching
+test: scripts/e2e-fixture.sh batches
+expect: accounting[a-z, ]* apart
+needs: device

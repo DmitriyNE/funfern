@@ -1,0 +1,4 @@
+about: the far field samples its contour only on a batch's last step, so a batch of several steps drops the frames due inside it
+test: scripts/e2e-fixture.sh batches
+expect: far field apart
+needs: device

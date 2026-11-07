@@ -1,0 +1,4 @@
+about: the encoder steps unfenced whatever the request says, so a whole run asked for at once is encoded a ceiling a frame however far ahead of the queue
+test: scripts/e2e-fixture.sh batches
+expect: the fenced burst encoded up to [0-9]+ a frame
+needs: device

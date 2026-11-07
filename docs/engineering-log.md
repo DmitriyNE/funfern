@@ -32885,3 +32885,78 @@ the device.
   wasm checks, the browser shader compile and the protocol proofs. No device
   run: the production paths are unchanged, the request losing test-only
   methods and the worker's drain a test-only note.
+
+## 2026-11-07 — RT-02: the same steps in any schedule are the same bits
+
+- **Why.** C7's second item (campaign plan, section 6l). `cavity-batches`
+  held 1, 7, 32 and 64 steps a frame to the same bits on the reflecting
+  cavity alone: no loss, drive, wall, law or recorder, the grid filter off.
+  Nothing held the render world's per-frame ceiling of 256 steps, its lead
+  fence of 64 encoded past what the queue has retired, or stepping with the
+  fence lifted.
+- **The app's frames never meet either.** A frame asks for no more than
+  leaves 64 asked past what the queue has retired
+  (`steps_with_gpu_backpressure`), and the render world, reading a
+  retirement no older, encodes all it was asked. So in the app every frame
+  encodes what it asked, and only a request of many steps at once, the device
+  examples', meets the ceiling or the fence. The render system's arithmetic
+  moves, unchanged, into `steps_to_encode`, held by
+  `a_frame_encodes_within_the_ceiling_and_the_fence`,
+  `a_burst_is_encoded_in_full_under_either_bound` (unfenced in ⌈n/256⌉
+  frames, fenced 64 every lag + 1 frames, never further ahead) and
+  `the_apps_frames_never_meet_the_encoders_bounds` (the frames' asks against
+  a queue retiring at random, pipelined or not).
+- **The fixture** (`ui/e2e/batches.rs`, `FUNFERN_E2E=batches`). It opens
+  gallery scenes as the gallery does, adaptation off, and runs each 320
+  steps from 100 before its epoch rebases (`FreshOrigin::StartingAtZero`:
+  the run starts at time zero, the origin as far before it), six ways: 1, 7,
+  32 and 64 steps a frame, and the whole run asked for in one frame, fenced
+  and unfenced. The burst is the fixture's own (`E2eSteps::burst`, past the
+  frame's ceiling and backpressure), with the user, since the ceiling and the
+  fence bind only under it. At the endpoint the accepted state, the material
+  runtime bank, the force cache, the clock, the accounting, the event words
+  and every configured recorder's ring as the display decodes it must be the
+  same bits in all six. A schedule must meet what it names, read off two
+  counters the stats now keep (`encoding_bounds`: the most one frame
+  encoded, and the frames the fence held back): its frames asked for its
+  batch and met no fence, the fence held the fenced burst back, and the
+  ceiling split the unfenced one. `FUNFERN_E2E_SCENES` names other scenes,
+  or `all`; a deadline is a scene's.
+- **Study,** all 45 gallery scenes on the M1 Max: every one the same bits in
+  every part in all six. No defect. Between them they take every branch the
+  encoder steps by but two: walls stepped by half kicks, which the app never
+  steps by (the trapezoid rule is the default, the half kicks the examples'
+  comparison), and prescribed walls, since no scene drives a side beside an
+  outgoing one. A scene named with `+driven` has its top side set to a
+  driven Dirichlet law, as the inspector's picker sets it, and its trace then
+  holds prescribed nodes, solved by sweeps.
+- **Two harness corrections.** The far field's ring was empty at 320 steps
+  in both its scenes, so it compared nothing: its first frame waits for its
+  contour's history to span the retarded times. Its scene runs 640 steps, 66
+  frames. And a recorder's display keeps the last scene's records where the
+  next has none; a recorder counts as a branch taken only where its scene
+  configures it and its ring holds records.
+- **The scenes**, about 8,500 nodes each: Spatial soliton (field laws,
+  nonlinear walls, integrated field, line probes), Josephson line (the
+  fourth-order kick form, losses, point probes), Self-sustained emitter (the
+  short-wave split), Ring resonator (the direct wall solve, area probes) and
+  Double slit+driven (prescribed walls, the far field). The fixture fails if
+  they stop covering every branch, which it reads off the installed
+  generation (`step_branches`). 53 s on the M1 Max. In the lavapipe
+  container, before the far field ran longer, 754 s where `cavity-batches`
+  took 184 s, which CI's lavapipe runs in 43: about three minutes there.
+- **Mutations**, each caught: `accounting-staged-once-a-frame` (the
+  accounting apart), `filter-at-the-batch-end` (the state),
+  `rebase-checked-once-a-frame` (the clock), `point-probe-sampled-once-a-frame`
+  and `far-field-sampled-once-a-frame` (their rings), `fence-never-binds`
+  (the fenced burst's own check) and, on the host, `encode-cap-lifted`. The
+  fence counting the readback's completed steps rather than the queue's
+  retired ones was not caught: on the M1 Max the app's frames still never
+  meet it, and it is not kept.
+- **CI.** The device suite runs it, and so lavapipe on every push. The
+  browser nightly gives it a part of its own, `batches`, with a run length
+  of four: about an hour a page on SwiftShader by lavapipe's ratio.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs; the
+  device suite on the M1 Max.
