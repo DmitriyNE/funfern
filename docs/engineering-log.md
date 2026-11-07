@@ -32999,3 +32999,33 @@ the device.
   wasm checks, the browser shader compile and the protocol proofs; the app's
   fixtures on the M1 Max, and on lavapipe in the container the five that
   take a cleanup, `separator-mid-run` at b 6.9e-7 at its second handoff.
+
+## 2026-11-07 — The browser nightly's observers and baffle-move, on slow runners
+
+- **The failures.** Since it landed on 2026-11-02, `observers` failed every
+  night in the browser on SwiftShader, both hostings: "paused, the device
+  stepped on from 99 to 101", and on two nights "the vector overlay read
+  nothing back". `baffle-move` timed out served as Pages without the worker
+  pool on three nights. Natively, on lavapipe and on the M1 Max's SwiftShader
+  in Chrome they pass: the M1 runs SwiftShader too fast to show either.
+- **The pause, the fixture's.** It paused once the completed count reached
+  96 and required the count read halfway through the second to be the count
+  at its end. The steps asked for before the pause, up to 64 past what the
+  queue had retired, go on completing into it, and on CI's runners they had
+  not all been read back half a second in. Now the pause records what was
+  asked; through it the app must ask for none and the device complete none
+  past them, and its second is timed from when the device has done them.
+  `overlay-pass-takes-a-step` is still caught, by the pulse landing a step
+  late.
+- **The overlay, the fixture's.** Its first readback waits for its pipeline,
+  which SwiftShader compiles slowly, and the endpoint judged at once. The
+  observed run's endpoint now waits up to a minute for it.
+- **baffle-move.** 512 steps of 33,938 nodes took 22.5 of its 25 minutes
+  isolated on 2026-11-05; the browser runner gives it twice the deadline,
+  as it gives the other long pages.
+- **Checks.** `observers` on the M1 Max natively and on SwiftShader in
+  Chrome, where the pause began at 96 completed with 105 asked, and held at
+  105; the nightly is the slow runner.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs.

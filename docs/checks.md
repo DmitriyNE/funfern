@@ -126,7 +126,11 @@ whatever it does. The two endpoints must be the same bits, and each
 observer must show it took: the overlay's samples read back, the exposure's
 level, the readout window drawn with a sample, the recording's file
 written, the step count held through the pause, the viewport's size
-changed. Natively and in Chrome the endpoint is the same bits, one hash on
+changed. The pause's second is timed from when the device has done the
+steps asked for before it, which on a slow device go on completing into it,
+and through it the app asks for none and the device does none past them; the
+endpoint waits up to a minute for the overlay's first readback, whose
+pipeline a slow device may not have compiled by then. Natively and in Chrome the endpoint is the same bits, one hash on
 both. `superposition`, IV-01 on the device, runs the `handoff-memory`
 cavity, its bottom side a second-order outgoing wall and its top driven, to
 step 384 four times: struck at two points and driven, struck at the first

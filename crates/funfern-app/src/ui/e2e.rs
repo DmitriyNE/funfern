@@ -690,11 +690,14 @@ pub(crate) struct Driver {
 struct Observing {
     /// Whether the recording was asked for.
     recording_asked: bool,
-    /// When the pause began, and the device's step count halfway through it.
-    pause: Option<(Instant, Option<u64>)>,
-    /// The step the device held at through the pause's second half, once
-    /// the run went on.
+    /// The steps asked for when the pause began, and when the device had
+    /// completed them.
+    pause: Option<(u64, Option<Instant>)>,
+    /// The step the device held at through the pause, once the run went on.
     paused_at: Option<u64>,
+    /// When the endpoint began waiting for the vector overlay's first
+    /// readback.
+    overlay_wait: Option<Instant>,
     /// How long the recording ran and, natively, the frame slots it asked
     /// for, once stopped.
     recorded: Option<(std::time::Duration, Option<u64>)>,
@@ -1710,6 +1713,10 @@ const OBSERVED_POINT: Point2 = Point2 { x: 0.3, y: -0.2 };
 const PAUSE_AT: u64 = 96;
 const PAUSE_FOR: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long the observed run's endpoint waits for the vector overlay's first
+/// readback before it reads the overlay as having taken nothing.
+const OVERLAY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The step the observed run's recording stops and its window is resized
 /// and zoomed at, once it has reached it running, the window's new logical
 /// size, and the zoom. A window manager may refuse the resize, as a tiling
@@ -1771,31 +1778,42 @@ fn recording_written() -> Result<(), String> {
 /// each taken once the run has reached its step running. The pause must hold
 /// the device's step count through its second half, and all three must
 /// come before the endpoint.
+#[allow(clippy::too_many_arguments)]
 fn observe_mid_run(
     observing: &mut Observing,
     state: &mut Playground,
     windows: &mut Query<&mut Window, With<bevy::window::PrimaryWindow>>,
     context: Option<&egui::Context>,
     completed: u64,
+    asked: u64,
     endpoint: u64,
 ) -> Result<(), String> {
     match observing.pause {
         None if completed >= PAUSE_AT => {
             state.wave_running = false;
-            observing.pause = Some((Instant::now(), None));
+            observing.pause = Some((asked, None));
         }
-        Some((since, halfway)) if observing.paused_at.is_none() => {
-            let elapsed = since.elapsed();
-            match halfway {
-                None if elapsed >= PAUSE_FOR / 2 => {
-                    observing.pause = Some((since, Some(completed)));
+        // The steps asked for before the pause may still be completing: on
+        // SwiftShader in CI they were half a second into it, which read as
+        // stepping on (2026-11-07). Paused, the app asks for none, the device
+        // does none past them, and the second is timed from when it has done
+        // them.
+        Some((before, done)) if observing.paused_at.is_none() => {
+            if asked != before {
+                return Err(format!(
+                    "paused, the app asked for steps from {before} to {asked}"
+                ));
+            }
+            if completed > before {
+                return Err(format!(
+                    "paused, the device stepped on from {before} to {completed}"
+                ));
+            }
+            match done {
+                None if completed == before => {
+                    observing.pause = Some((before, Some(Instant::now())));
                 }
-                Some(halfway) if elapsed >= PAUSE_FOR => {
-                    if completed != halfway {
-                        return Err(format!(
-                            "paused, the device stepped on from {halfway} to {completed}"
-                        ));
-                    }
+                Some(done) if done.elapsed() >= PAUSE_FOR => {
                     observing.paused_at = Some(completed);
                     state.wave_running = true;
                 }
@@ -2664,6 +2682,7 @@ fn advance(
                     windows,
                     context,
                     completed,
+                    request.requested_steps().saturating_sub(driver.base),
                     target,
                 )
             {
@@ -3403,6 +3422,24 @@ fn advance(
                 && display.full_snapshot_completed_steps() == driver.base + endpoint;
             if !arrived {
                 request.request_full_state_readback();
+                driver.phase = Phase::Snapshot { reference, seen };
+                return None;
+            }
+            // The overlay's first readback waits for its pipeline, which
+            // SwiftShader in CI had not compiled by the endpoint (2026-11-07).
+            let overlay_read = overlay.generation == request.generation()
+                && !overlay.samples.is_empty()
+                && overlay.readbacks != 0;
+            if driver.fixture.observes()
+                && !driver.hashes.is_empty()
+                && !overlay_read
+                && driver
+                    .observing
+                    .overlay_wait
+                    .get_or_insert_with(Instant::now)
+                    .elapsed()
+                    < OVERLAY_WAIT
+            {
                 driver.phase = Phase::Snapshot { reference, seen };
                 return None;
             }
