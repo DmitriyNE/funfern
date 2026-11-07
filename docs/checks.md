@@ -39,7 +39,12 @@ holds. The f64 reference steps on the generation the app accepted, so on the
 same mesh. After a handoff it takes away the stationary flux the app's cleanup
 takes, once a full readback shows the maintenance serial the cleanup moved:
 the part is the same at every step, so wherever the snapshot falls the two
-read one field. The one thing the driver adds to the app is where a run stops, since
+read one field. It must fall on the generation the part was found on, so at
+each stop, an action's step or the endpoint, the held run first waits for the
+running generation's cleanup to land or be found to be none, and the
+reference takes it from a snapshot there; on a slow device it had landed
+mid-run and the reference took it after its own next handoff, from the next
+generation (`reference-ignores-a-settled-cleanup`). The one thing the driver adds to the app is where a run stops, since
 the app asks for steps by the wall clock. The process exits 0 when the fixture
 holds; the suite runs each. `cavity` strikes a closed reflecting box of the
 default medium, grid filter off, with one pulse at step 0 and compares Q and b

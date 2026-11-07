@@ -1,0 +1,12 @@
+--- a/crates/funfern-app/src/ui/e2e.rs
++++ b/crates/funfern-app/src/ui/e2e.rs
+@@ -3124,9 +3124,6 @@
+                 };
+                 return None;
+             }
+-            if let Err(error) = reference.follow_flux_cleanup(display) {
+-                return Some(Err(error));
+-            }
+             reference.settled = Some(stop);
+             driver.phase = Phase::Run { reference, next };
+             None

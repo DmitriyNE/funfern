@@ -1,0 +1,4 @@
+about: held at a stop, the fixture waits for the running generation's stationary flux to be taken away but its reference does not take it, so the reference takes it after its own next handoff, from the next generation, as it did on slow devices before 2026-11-07
+test: scripts/e2e-fixture.sh separator-mid-run
+expect: the device's handed state stands from the reference's beyond
+needs: device

@@ -756,6 +756,15 @@ enum Phase {
         next: usize,
         seen: u64,
     },
+    /// Held at the `next` action's step, or the endpoint, the run waits
+    /// for the running generation's stationary flux to be taken away or found
+    /// to be none, and then for a full snapshot, from which the reference
+    /// takes it too; `seen` once the snapshot is asked for.
+    Settling {
+        reference: Reference,
+        next: usize,
+        seen: Option<u64>,
+    },
     /// A full snapshot of the endpoint is asked for.
     Snapshot {
         reference: Reference,
@@ -798,6 +807,7 @@ impl Phase {
             Phase::Losing { .. } => "waiting for the app to stop after the device was lost",
             Phase::Departing { .. } => "waiting for the snapshot before the action",
             Phase::Carried { .. } => "waiting for the handoff's snapshot",
+            Phase::Settling { .. } => "waiting for the handoff's stationary flux to settle",
             Phase::Snapshot { .. } => "waiting for the endpoint's snapshot",
             Phase::Recorded { .. } => "waiting for the recording to be written",
             Phase::Observe { .. } => "waiting for the probes' last records",
@@ -893,6 +903,9 @@ struct Reference {
     /// maintenance moves it when it takes away the stationary flux a
     /// handoff left, and the reference follows.
     maintenance_seen: u32,
+    /// The stop, an action's step or the endpoint, at which the run last
+    /// waited for that to settle.
+    settled: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -2504,6 +2517,7 @@ fn advance(
                         twin,
                         far,
                         maintenance_seen: 0,
+                        settled: None,
                     },
                     next: 0,
                 };
@@ -2580,6 +2594,7 @@ fn advance(
                     twin: None,
                     far: None,
                     maintenance_seen: 0,
+                    settled: None,
                 },
                 processed: request.stats().processed_event(),
             };
@@ -2682,6 +2697,20 @@ fn advance(
             }
             if let Err(error) = reference.advance_to(target) {
                 return Some(Err(format!("the reference did not step: {error}")));
+            }
+            // The app takes a handoff's stationary flux away whenever its
+            // solve finishes, which on a slow device was mid-run: the
+            // reference then took it after its own next handoff, from the
+            // next generation (2026-11-07). Held at the stop, the run waits
+            // for it, so both sides take it from the generation it was found
+            // on before either hands its field on.
+            if reference.settled != Some(target) {
+                driver.phase = Phase::Settling {
+                    reference,
+                    next,
+                    seen: None,
+                };
+                return None;
             }
             let Some(&(_, action)) = actions.get(next) else {
                 let seen = display.full_readbacks;
@@ -3050,6 +3079,56 @@ fn advance(
                 reference,
                 next: next + 1,
             };
+            None
+        }
+        Phase::Settling {
+            mut reference,
+            next,
+            seen,
+        } => {
+            let generation = request.generation();
+            // A cleanup that landed stays recorded until a readback of a
+            // later step, which a held run never takes.
+            let unsettled = state.flux_cleanup.as_ref().is_some_and(|cleanup| {
+                cleanup.generation == generation
+                    && !matches!(
+                        cleanup.stage,
+                        super::flux_cleanup::FluxCleanupStage::Landed(_)
+                    )
+            });
+            let Some(seen) = seen.filter(|_| !unsettled) else {
+                let seen = (!unsettled).then(|| {
+                    request.request_full_state_readback();
+                    display.full_readbacks
+                });
+                driver.phase = Phase::Settling {
+                    reference,
+                    next,
+                    seen,
+                };
+                return None;
+            };
+            let stop = stop(next);
+            let arrived = display.full_readbacks > seen
+                && display.generation == generation
+                && display
+                    .full_snapshot_completed_steps()
+                    .saturating_sub(driver.base)
+                    == stop;
+            if !arrived {
+                request.request_full_state_readback();
+                driver.phase = Phase::Settling {
+                    reference,
+                    next,
+                    seen: Some(seen),
+                };
+                return None;
+            }
+            if let Err(error) = reference.follow_flux_cleanup(display) {
+                return Some(Err(error));
+            }
+            reference.settled = Some(stop);
+            driver.phase = Phase::Run { reference, next };
             None
         }
         Phase::Departing {

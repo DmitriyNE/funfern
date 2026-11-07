@@ -32960,3 +32960,42 @@ the device.
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs; the
   device suite on the M1 Max.
+
+## 2026-11-07 — The fixtures' reference takes a handoff's cleanup from the generation it was found on
+
+- **The failure.** From the push of `a80a6d4` on 2026-11-05, CI's lavapipe
+  job failed `separator-mid-run` on every push, and the nightly's SwiftShader
+  run with the same numbers: "at the handoff Q 5.582e-7, b 2.918e-4: the
+  device's handed state stands from the reference's beyond 5e-6", the second
+  handoff, the loop's deletion at step 192. The nightly's
+  `complementary-from-its-own-region-only-on-the-device`, whose test it is,
+  failed before its patch. On the M1 Max it passed.
+- **Reproduced** in the lavapipe container, the same numbers. At the second
+  handoff's snapshot the reference took away a stationary flux of 8.95e-8 of
+  the flux's energy, and √8.95e-8 = 3.0e-4 is the gap in b.
+- **The cause, the fixture's.** The app takes a handoff's stationary flux
+  away when its solve finishes, `a2b3013`, and the fixtures' reference
+  followed it, `9e82862`, only at a handoff's own snapshot and at the
+  endpoint, once a full readback showed the maintenance serial moved. On a
+  slow device the second generation's cleanup lands between steps 128 and
+  192; the reference then hands its own field on uncleaned at 192, sees the
+  serial moved at the handoff's snapshot and takes the third generation's
+  stationary part, which the device has not taken. On the M1 Max the GPU
+  finishes the run before the solve does, so in this fixture no cleanup ever
+  landed mid-run and the path was never taken. The app is right either way.
+- **Fix.** At each stop, an action's step or the endpoint, the held run
+  first waits for the running generation's cleanup to land or be found to be
+  none (`Phase::Settling`), and the reference takes it from a snapshot there,
+  on the generation it was found on, before either side hands its field on.
+  On the M1 Max five fixtures now take a cleanup, `remesh`, `neutral-remesh`,
+  `baffle-move`, `separator-mid-run` (two) and `handoff-memory-remesh`, from
+  5.9e-8 to 4.7e-2 of the flux's energy; `separator-mid-run` reads b 6.9e-7
+  at its second handoff. The 26 fixtures pass on the M1 Max.
+- **Mutation** `reference-ignores-a-settled-cleanup`: the run waits but the
+  reference does not take it, and on the M1 Max the fixture fails with CI's
+  own numbers, b 2.918e-4.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs; the app's
+  fixtures on the M1 Max, and on lavapipe in the container the five that
+  take a cleanup, `separator-mid-run` at b 6.9e-7 at its second handoff.
