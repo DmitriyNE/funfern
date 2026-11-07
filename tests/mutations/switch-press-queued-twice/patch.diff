@@ -1,0 +1,15 @@
+--- a/crates/funfern-app/src/ui/coordinator.rs
++++ b/crates/funfern-app/src/ui/coordinator.rs
+@@ -201,10 +201,8 @@
+     /// already waiting is not queued again: its button still shows the
+     /// direction it had, so a second press is the same request.
+     pub(super) fn queue_switch(&mut self, material: MaterialId) {
+-        if !self.pending_switches.contains(&material) {
+-            self.pending_switches.push_back(material);
+-            self.presses.push_back(Press::Switch);
+-        }
++        self.pending_switches.push_back(material);
++        self.presses.push_back(Press::Switch);
+     }
+ 
+     /// Queues a pulse placed at `point` in `region` for the next frame that

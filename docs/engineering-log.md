@@ -33029,3 +33029,69 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-07 — RT-04: every event lands once, in the order pressed
+
+- **Why.** C7's third item (campaign plan, section 6l): events neither
+  duplicated, omitted, nor applied to the wrong generation or time. What
+  there was: serials and the Switch, pulse and handoff fixtures, each holding
+  the run at the step it acts. Nothing fired many events at once, and
+  nothing recorded where an event landed: the device keeps the last serial it
+  processed and a count per kind.
+- **The timeline.** The render world records each event it encodes, its
+  serial, its kind and the accepted step it lands at, on the generation's
+  stats (`EncodedEvent`, `encoded_events`, the last 256). RT-01 will replay
+  the same.
+- **The fixtures.** `events` runs the cavity with its switchable disc,
+  struck at step 0 and held only at the endpoint, 384, and fires bursts into
+  it as it runs: three pulses and a Switch in one frame at step 48, a Switch,
+  two pulses and a Switch at 112, a pulse and a Switch at 200.
+  `events-handoff` adds a pulse, a Switch and a pulse in the frame the run
+  reaches 160, where the medium's permittivity is raised and the run goes on.
+  The driver matches each encoded event to what it fired, pulses first in
+  first out and each Switch the next direction, and the reference replays
+  the timeline: a pulse built on the generation it landed on, a Switch with
+  the direction the app sent, the handoff where the new generation's clock
+  says it landed. Each event must land once, the serials without a gap, on
+  the generation before the handoff or after, and in the order fired; at the
+  endpoint the reference stands within 5e-6. A Switch pressed while the
+  material's last waits is the same request, by the rule of 2026-10-07, and
+  is counted, not fired. `FUNFERN_E2E_SEED` draws the bursts instead.
+- **Study,** 20 seeds of each on the M1 Max: every event landed once, on its
+  generation, and the reference stood with the device, Q 5.1e-7 to 1.1e-6.
+  But in 28 of the 38 runs read, a pulse clicked after a Switch press landed
+  before it: pulses and presses waited in queues of their own and a frame
+  offered the pulses first.
+- **Fix, with the user.** The coordinator keeps the kind of each press
+  waiting in the order pressed (`presses`, `queue_pulse`, `take_pulse`,
+  `take_switch`), and a frame sends the one pressed first; the queues, the
+  merge rule and the busy retry are as they were.
+  `a_pulse_clicked_after_a_switch_press_waits_for_it`. The fixtures now
+  require the order fired. The protocol model sent a waiting pulse before a
+  waiting Switch too, and the runtime sequences parted from it on the first
+  gate: it now keeps the order as one bit a press waiting, set for a Switch,
+  `check` holding that the bits match the counts, under Kani with the rest.
+- **Open: one failure in 63 runs.** With the fix, the study's
+  `events-handoff` seed 8 stood 0.65 off at the endpoint, every event landed
+  once and in order, its last pulse two to five steps before the handoff at
+  step 174. Three reruns on the M1 Max and 20 runs on lavapipe in the
+  container, ten of seed 8, passed. No path that loses or doubles an event
+  was found: the upload waits for no event in flight, no event is sent while
+  one uploads, and the handoff is encoded after the frame's steps. A failing
+  run now reports the timeline, the generations, and the device's own handoff
+  snapshot step and outcome before it compares.
+- **Mutations**, each caught: `live-event-encoded-again`,
+  `busy-pulse-dropped`, `pulses-sent-newest-first` and
+  `switch-press-queued-twice` on lavapipe in the container, and
+  `pulses-offered-first` on the host. Studies and device mutation trials run
+  in the container from now on, the user said: a native run opens a window.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs. The
+  device suite on the M1 Max passed 119 of 122, the event fixtures among
+  them: `canonical_gpu_cavity_modes` ran past its 600 s in all three physics
+  models at a load of 17 from other work, where it took 76 s in the morning.
+  It waits on a readback at every sample. Run alone at the same load it
+  passed, in 244 s from the morning's binary and 348 s from this one, the
+  same figures to the digit; it sends no event, which is all RT-04 changed
+  in the encoder.

@@ -489,7 +489,7 @@ impl Playground {
             self.message = "Pulse must be inside an active subdomain".into();
             return;
         };
-        self.coordinator.pending_pulses.push_back((point, region));
+        self.coordinator.queue_pulse(point, region);
         self.message = format!("Pulse queued in region {}", region.0);
     }
 }

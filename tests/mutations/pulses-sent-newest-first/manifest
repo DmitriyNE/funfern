@@ -1,0 +1,4 @@
+about: queued pulses go to the device newest first, so a burst of clicks strikes in the reverse of the order clicked
+test: scripts/e2e-fixture.sh events
+expect: beyond 5e-6
+needs: device

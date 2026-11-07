@@ -1,0 +1,4 @@
+about: the encoder applies a live event again every frame until its readback says it was processed, so a pulse or Switch lands two or three times
+test: scripts/e2e-fixture.sh events
+expect: was encoded twice
+needs: device

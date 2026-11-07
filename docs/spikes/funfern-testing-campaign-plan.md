@@ -1486,6 +1486,16 @@ mutation, in this order:
   in four frame batches and both bursts, from just before a rebase, to the
   same bits in the state, the clock, the accounting and every recorder's
   ring; the study ran all 45 gallery scenes so and found no defect.
+  RT-04 landed on 2026-11-07: the render world records each event it encodes
+  and the step it lands at, and `events` and `events-handoff` fire bursts of
+  pulses and Switches into the switchable cavity, one beside an edit's
+  handoff with the run going on, and replay the timeline the device was given:
+  every event lands once, on its generation, and the reference stands with the
+  device. The study found a pulse clicked after a Switch press landing before
+  it in most bursts; with the user, presses now go in the order pressed. One
+  run in 63 stood 0.65 off with every event landed once and in order; it did
+  not come back, and the fixture now reports the timeline and the device's
+  handoff snapshot with any failure.
 - **C8, robustness:** the 5.2 edge cases, on the CPU and then the device;
   RT-06; RT-07 with 5.4, a debug count of live shader buffers, staging,
   readbacks, bind groups and jobs in the fixtures binary, not wgpu's own

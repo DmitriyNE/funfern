@@ -1,0 +1,22 @@
+--- a/crates/funfern-app/src/ui/coordinator.rs
++++ b/crates/funfern-app/src/ui/coordinator.rs
+@@ -221,7 +221,7 @@
+ 
+     /// The oldest pulse leaves the queue, sent or refused.
+     pub(super) fn take_pulse(&mut self) {
+-        self.pending_pulses.pop_front();
++        self.pending_pulses.pop_back();
+         self.forget_press(Press::Pulse);
+     }
+ 
+--- a/crates/funfern-app/src/ui/runtime.rs
++++ b/crates/funfern-app/src/ui/runtime.rs
+@@ -983,7 +983,7 @@
+             if let Some((position, region)) = (self.coordinator.uploading.is_none()
+                 && self.coordinator.source_commit.is_none()
+                 && self.coordinator.next_press() == Some(Press::Pulse))
+-            .then(|| self.coordinator.pending_pulses.front().copied())
++            .then(|| self.coordinator.pending_pulses.back().copied())
+             .flatten()
+             {
+                 let serial = self

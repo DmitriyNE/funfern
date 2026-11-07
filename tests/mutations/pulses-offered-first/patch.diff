@@ -1,0 +1,22 @@
+--- a/crates/funfern-app/src/ui/runtime.rs
++++ b/crates/funfern-app/src/ui/runtime.rs
+@@ -981,8 +981,7 @@
+             // before it was sent, the second of two quick clicks was lost.
+             // Pulses and Switch presses go in the order pressed.
+             if let Some((position, region)) = (self.coordinator.uploading.is_none()
+-                && self.coordinator.source_commit.is_none()
+-                && self.coordinator.next_press() == Some(Press::Pulse))
++                && self.coordinator.source_commit.is_none())
+             .then(|| self.coordinator.pending_pulses.front().copied())
+             .flatten()
+             {
+@@ -1028,8 +1027,7 @@
+             }
+             // A Switch press waits for a busy generation as a pulse does.
+             if let Some(material) = (self.coordinator.uploading.is_none()
+-                && self.coordinator.source_commit.is_none()
+-                && self.coordinator.next_press() == Some(Press::Switch))
++                && self.coordinator.source_commit.is_none())
+             .then(|| self.coordinator.pending_switches.front().copied())
+             .flatten()
+             {

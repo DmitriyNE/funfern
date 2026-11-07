@@ -1,0 +1,14 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -8296,9 +8296,8 @@
+         request.stats.note_encoded(encoded);
+         encoded.steps
+     };
+-    let live_event = request.live_event.as_ref().filter(|event| {
+-        event.serial != group.encoded_live_event
+-            && live_group
++    let live_event = request.live_event.as_ref().filter(|_| {
++        live_group
+                 .as_ref()
+                 .is_some_and(|group| group.revision == request.revision)
+     });

@@ -57,6 +57,11 @@ pub(super) struct Coordinator {
     /// the device, oldest first, each material once. A single slot kept only
     /// the last of two materials switched while the generation was busy.
     pub(super) pending_switches: VecDeque<MaterialId>,
+    /// The kind of each press still waiting, pulses and Switches together,
+    /// in the order pressed: the frame sends the one pressed first. Offering
+    /// the pulses first let a click land before a Switch pressed before it,
+    /// in most of RT-04's bursts (2026-11-07).
+    pub(super) presses: VecDeque<Press>,
 
     // What the running generation runs at.
     /// The step the device's generation runs at. Not the active operator's
@@ -96,6 +101,7 @@ impl Default for Coordinator {
             source_commit: None,
             pending_pulses: VecDeque::new(),
             pending_switches: VecDeque::new(),
+            presses: VecDeque::new(),
             uploaded_time_step: 0.0,
             switch_targets: BTreeMap::new(),
             canonical_event_serial: 0,
@@ -150,6 +156,7 @@ impl Coordinator {
         self.solver_fault = None;
         self.pending_pulses.clear();
         self.pending_switches.clear();
+        self.presses.clear();
     }
 
     /// Reset installed the active topology from zero at step `time_step`.
@@ -170,6 +177,7 @@ impl Coordinator {
         self.switch_targets.clear();
         self.pending_pulses.clear();
         self.pending_switches.clear();
+        self.presses.clear();
     }
 
     /// The device published the upload in flight: its step is the one
@@ -195,6 +203,44 @@ impl Coordinator {
     pub(super) fn queue_switch(&mut self, material: MaterialId) {
         if !self.pending_switches.contains(&material) {
             self.pending_switches.push_back(material);
+            self.presses.push_back(Press::Switch);
         }
     }
+
+    /// Queues a pulse placed at `point` in `region` for the next frame that
+    /// can send it.
+    pub(super) fn queue_pulse(&mut self, point: Point2, region: RegionId) {
+        self.pending_pulses.push_back((point, region));
+        self.presses.push_back(Press::Pulse);
+    }
+
+    /// The kind of the press waiting longest, which the frame sends first.
+    pub(super) fn next_press(&self) -> Option<Press> {
+        self.presses.front().copied()
+    }
+
+    /// The oldest pulse leaves the queue, sent or refused.
+    pub(super) fn take_pulse(&mut self) {
+        self.pending_pulses.pop_front();
+        self.forget_press(Press::Pulse);
+    }
+
+    /// The oldest Switch press leaves the queue, sent or refused.
+    pub(super) fn take_switch(&mut self) {
+        self.pending_switches.pop_front();
+        self.forget_press(Press::Switch);
+    }
+
+    fn forget_press(&mut self, kind: Press) {
+        if let Some(index) = self.presses.iter().position(|press| *press == kind) {
+            self.presses.remove(index);
+        }
+    }
+}
+
+/// What a press waiting for the device is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Press {
+    Pulse,
+    Switch,
 }

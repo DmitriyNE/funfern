@@ -1,6 +1,7 @@
 //! Driving the solver runtime: preparation phases, the handoff transaction,
 //! and the per-frame refresh that commits a candidate and advances the wave.
 
+use super::coordinator::Press;
 use crate::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuHandoffOutcome, CanonicalGpuLiveEvent,
     CanonicalGpuPlan, CanonicalGpuRequest, LiveEventRefusal, canonical_failure_description,
@@ -978,8 +979,10 @@ impl Playground {
             // A pulse leaves the queue once the device has it. A generation
             // busy with another event takes it a frame or two later; taken off
             // before it was sent, the second of two quick clicks was lost.
+            // Pulses and Switch presses go in the order pressed.
             if let Some((position, region)) = (self.coordinator.uploading.is_none()
-                && self.coordinator.source_commit.is_none())
+                && self.coordinator.source_commit.is_none()
+                && self.coordinator.next_press() == Some(Press::Pulse))
             .then(|| self.coordinator.pending_pulses.front().copied())
             .flatten()
             {
@@ -1013,11 +1016,11 @@ impl Playground {
                     Ok(()) => {
                         self.coordinator.canonical_event_serial = serial;
                         self.coordinator.experiment_mark = Some(serial);
-                        self.coordinator.pending_pulses.pop_front();
+                        self.coordinator.take_pulse();
                     }
                     Err(refusal) => {
                         if live_event_fallback(refusal.busy(), false) != LiveEventFallback::Retry {
-                            self.coordinator.pending_pulses.pop_front();
+                            self.coordinator.take_pulse();
                             self.message = refusal.to_string();
                         }
                     }
@@ -1025,18 +1028,19 @@ impl Playground {
             }
             // A Switch press waits for a busy generation as a pulse does.
             if let Some(material) = (self.coordinator.uploading.is_none()
-                && self.coordinator.source_commit.is_none())
+                && self.coordinator.source_commit.is_none()
+                && self.coordinator.next_press() == Some(Press::Switch))
             .then(|| self.coordinator.pending_switches.front().copied())
             .flatten()
             {
                 let active = active.clone();
                 match self.send_material_switch(&active, display, request, assets, material) {
                     Ok(()) => {
-                        self.coordinator.pending_switches.pop_front();
+                        self.coordinator.take_switch();
                     }
                     Err(refusal) => {
                         if live_event_fallback(refusal.busy(), false) != LiveEventFallback::Retry {
-                            self.coordinator.pending_switches.pop_front();
+                            self.coordinator.take_switch();
                             self.message = refusal.to_string();
                         }
                     }
@@ -2375,6 +2379,89 @@ mod tests {
         );
         assert_eq!(state.coordinator.switch_targets.get(&first.id), Some(&true));
         assert_eq!(state.coordinator.switch_targets.get(&second), Some(&true));
+    }
+
+    /// RT-04: a pulse clicked after a Switch press waits for it. The two
+    /// wait in queues of their own, and a frame offered the pulses first, so
+    /// in most of the event fixtures' bursts a click landed before a Switch
+    /// pressed before it (2026-11-07). They now go in the order pressed.
+    #[test]
+    fn a_pulse_clicked_after_a_switch_press_waits_for_it() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        test_device::connect(&mut world);
+        let mut device = TestDevice::default();
+        let mut request = CanonicalGpuRequest::default();
+        let mut display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame = |state: &mut Playground,
+                         request: &mut CanonicalGpuRequest,
+                         processed: bool| {
+            if processed {
+                test_device::lend(&mut world, request, &mut display, |world| {
+                    device.answer(world, |device, world| device.process(world, true));
+                    TestDevice::settle(world);
+                });
+            }
+            let mut queue = world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    &display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+                queue
+            });
+            queue.apply(&mut world);
+            test_device::lend(&mut world, request, &mut display, |world| {
+                device.take(world)
+            });
+        };
+        let mut state = Playground::default();
+        let switch = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Switchable medium" && preset.row == LawPresetRow::Mass)
+            .unwrap();
+        let medium = state.editor.document.model.draft.materials[0].clone();
+        state
+            .editor
+            .update_material(apply_law_preset(switch, &medium).unwrap())
+            .unwrap();
+        settle(&mut state.editor);
+        activate(&mut state);
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut state, &mut request, false);
+
+        state.place_pulse(Point2::new(-0.2, 0.1));
+        frame(&mut state, &mut request, false);
+        assert!(request.live_event_pending(), "the pulse holds the device");
+        state.queue_switch(medium.id);
+        state.place_pulse(Point2::new(0.3, -0.2));
+
+        frame(&mut state, &mut request, true);
+        assert!(
+            state.coordinator.pending_switches.is_empty()
+                && state.coordinator.pending_pulses.len() == 1,
+            "the Switch pressed first goes first: {} Switches and {} pulses wait",
+            state.coordinator.pending_switches.len(),
+            state.coordinator.pending_pulses.len()
+        );
+        frame(&mut state, &mut request, true);
+        assert!(
+            state.coordinator.pending_pulses.is_empty(),
+            "{}",
+            state.message
+        );
+        assert!(state.coordinator.presses.is_empty());
     }
 
     /// Reported: Reset replayed a waiting pulse. With one pulse sent and one

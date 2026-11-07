@@ -1,0 +1,4 @@
+about: a second Switch press while the first waits to be sent queues a second Switch, where its button still shows the old direction and the press is the same request
+test: scripts/e2e-fixture.sh events
+expect: a second press queued a second Switch
+needs: device

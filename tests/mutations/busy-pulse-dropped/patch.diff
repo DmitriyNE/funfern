@@ -1,0 +1,15 @@
+--- a/crates/funfern-app/src/ui/runtime.rs
++++ b/crates/funfern-app/src/ui/runtime.rs
+@@ -1019,10 +1019,8 @@
+                         self.coordinator.take_pulse();
+                     }
+                     Err(refusal) => {
+-                        if live_event_fallback(refusal.busy(), false) != LiveEventFallback::Retry {
+-                            self.coordinator.take_pulse();
+-                            self.message = refusal.to_string();
+-                        }
++                        self.coordinator.take_pulse();
++                        self.message = refusal.to_string();
+                     }
+                 }
+             }

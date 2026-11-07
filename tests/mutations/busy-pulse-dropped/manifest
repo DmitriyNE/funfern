@@ -1,0 +1,4 @@
+about: a pulse the device is too busy to take leaves the queue anyway, so of quick clicks only the first lands, as before 2026-10-07
+test: scripts/e2e-fixture.sh events
+expect: of [0-9]+ pulses and
+needs: device

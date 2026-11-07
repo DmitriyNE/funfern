@@ -4463,7 +4463,33 @@ pub struct CanonicalGpuStats {
     /// below the per-frame ceiling, for the batching fixture.
     most_encoded: AtomicU64,
     fenced_frames: AtomicU64,
+    /// The events the render world encoded for this generation, newest last,
+    /// the last [`ENCODED_EVENTS_KEPT`] of them: the timeline the device
+    /// was given, for the event fixtures to replay.
+    encoded_events: std::sync::Mutex<std::collections::VecDeque<EncodedEvent>>,
 }
+
+/// An event as the render world encoded it: its serial, its kind, and the
+/// accepted step it lands at, before the steps its frame encodes after it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EncodedEvent {
+    pub(crate) serial: u32,
+    pub(crate) kind: u32,
+    pub(crate) step: u64,
+}
+
+impl EncodedEvent {
+    pub(crate) fn is_pulse(&self) -> bool {
+        self.kind == EVENT_PRIMARY_PULSE
+    }
+
+    pub(crate) fn is_switch(&self) -> bool {
+        self.kind == EVENT_TEMPORAL_SWITCH
+    }
+}
+
+/// How many encoded events a generation's stats keep.
+const ENCODED_EVENTS_KEPT: usize = 256;
 
 impl CanonicalGpuStats {
     /// Whether a recorder's pipeline has failed for good, so that it records
@@ -4530,6 +4556,23 @@ impl CanonicalGpuStats {
             self.most_encoded.load(Ordering::Relaxed),
             self.fenced_frames.load(Ordering::Relaxed),
         )
+    }
+
+    /// The events the render world encoded for this generation, oldest first.
+    pub(crate) fn encoded_events(&self) -> Vec<EncodedEvent> {
+        self.encoded_events
+            .lock()
+            .map(|events| events.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    fn note_event(&self, event: EncodedEvent) {
+        if let Ok(mut events) = self.encoded_events.lock() {
+            if events.len() == ENCODED_EVENTS_KEPT {
+                events.pop_front();
+            }
+            events.push_back(event);
+        }
     }
 
     fn note_encoded(&self, encoded: EncodedSteps) {
@@ -8366,11 +8409,19 @@ fn compute_canonical_wave(
         }
         pass.set_pipeline(pipelines[21]);
         pass.dispatch_workgroups(1, 1, 1);
-        if is_live {
-            group.encoded_live_event = live_event.expect("selected live event").serial;
+        let serial = if is_live {
+            let serial = live_event.expect("selected live event").serial;
+            group.encoded_live_event = serial;
+            serial
         } else {
             group.encoded_event = true;
-        }
+            handles.event_serial
+        };
+        request.stats.note_event(EncodedEvent {
+            serial,
+            kind: event_kind,
+            step: group.encoded_steps,
+        });
         request
             .stats
             .dispatches

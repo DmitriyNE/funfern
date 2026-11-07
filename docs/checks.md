@@ -1858,6 +1858,35 @@ fence counting against the readback's completed steps rather than the
 queue's retired ones is no mutation here: on the M1 Max the app's frames
 still never meet it.
 
+RT-04, event ordering, is held on the device by `events` and
+`events-handoff`. The render world records each event it encodes, its
+serial, its kind and the accepted step it lands at, on the generation's
+stats (`encoded_events`): the timeline the device was given. The fixtures
+run the cavity with its switchable disc, struck at step 0 and held nowhere
+but the endpoint, 384, and fire bursts into it as it runs, pulses and Switch
+presses several to a frame: three pulses and a Switch at step 48, a Switch,
+two pulses and a Switch at 112, and in `events-handoff` a pulse, a Switch
+and a pulse in the frame the run reaches 160, where the medium's
+permittivity is raised and the run goes on, and a pulse and a Switch at 200.
+The app sends one event at a time; each must land once, every serial from
+the first fired to the last without a gap, a Switch pressed while the
+material's last waits being the same request (2026-10-07), on the generation
+before the handoff or the one after, and in the order fired, kinds together.
+The reference replays the timeline, each pulse built on the generation it
+landed on and each Switch with the direction the app sent, and hands off
+where the new generation's clock says the handoff landed; at the endpoint it
+must stand within 5e-6 of the device. `FUNFERN_E2E_SEED` draws the bursts
+instead. The study, 20 seeds of each fixture on the M1 Max, found every
+event landed once, on its generation, and the reference with the device,
+but a pulse clicked after a Switch press landing before it in most bursts:
+pulses and presses waited in queues of their own and a frame offered the
+pulses first. With the user they now go in the order pressed
+(`a_pulse_clicked_after_a_switch_press_waits_for_it`), and the protocol
+model sends them so, keeping the order one bit a press. Its mutations are
+`live-event-encoded-again`, `busy-pulse-dropped`, `pulses-sent-newest-first`
+and `switch-press-queued-twice` on the device, and `pulses-offered-first` on
+the host.
+
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
 catch it and the pattern its failure must match; the script applies each,

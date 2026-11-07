@@ -246,6 +246,11 @@ pub struct Protocol {
     pub fresh: bool,
     pub pulses: u8,
     pub switches: u8,
+    /// The kind of each press waiting, the oldest in the lowest bit, set for
+    /// a Switch: the frame sends the press made first, as the app does since
+    /// 2026-11-07. Beyond 64 waiting, which no sequence reaches, a press is
+    /// not kept.
+    pub presses: u64,
     /// A device failure the host has paused for.
     pub fault: bool,
     pub running: bool,
@@ -302,6 +307,7 @@ impl Default for Protocol {
             fresh: true,
             pulses: 0,
             switches: 0,
+            presses: 0,
             fault: false,
             running: true,
             stepping: false,
@@ -403,13 +409,13 @@ impl Protocol {
             Step::Run(on) => self.running = on,
             Step::StepOnce => self.stepping = true,
             Step::Pulse => {
-                if self.active.is_some() {
-                    self.pulses = self.pulses.saturating_add(1);
+                if self.active.is_some() && self.press(false) {
+                    self.pulses += 1;
                 }
             }
             Step::Switch { queued } => {
-                if queued {
-                    self.switches = self.switches.saturating_add(1);
+                if queued && self.press(true) {
+                    self.switches += 1;
                 }
             }
         }
@@ -518,6 +524,7 @@ impl Protocol {
             self.fault = false;
             self.pulses = 0;
             self.switches = 0;
+            self.presses = 0;
         }
         // A source patch the device has settled commits, or is refused.
         if let Some(token) = self.source_commit
@@ -738,23 +745,29 @@ impl Protocol {
             self.uploaded = Some(active);
             self.pulses = 0;
             self.switches = 0;
+            self.presses = 0;
         }
         if self.active.is_some() {
-            // A waiting pulse, then a waiting Switch, each taken by a device
-            // free for it and dropped by one that cannot take it at all.
+            // The press made first, a pulse or then a Switch, taken by a
+            // device free for it and dropped by one that cannot take it at
+            // all; a pulse taken leaves a Switch behind it to try.
             if self.uploading.is_none()
                 && self.source_commit.is_none()
                 && self.pulses > 0
+                && !self.oldest_is_switch()
                 && self.sent(frame.pulse, Event::Pulse)
             {
                 self.pulses -= 1;
+                self.presses >>= 1;
             }
             if self.uploading.is_none()
                 && self.source_commit.is_none()
                 && self.switches > 0
+                && self.oldest_is_switch()
                 && self.sent(frame.switch, Event::Switch)
             {
                 self.switches -= 1;
+                self.presses >>= 1;
             }
             // Steps, unless a packed candidate or a fresh upload holds them.
             let fresh_upload = self
@@ -848,6 +861,24 @@ impl Protocol {
 
     /// Offers a pulse or a Switch press, and answers whether it leaves the
     /// queue: taken, or refused by a generation that cannot take it at all.
+    /// Keeps a press at the back of the order, a Switch's bit set; false
+    /// where 64 wait already.
+    fn press(&mut self, switch: bool) -> bool {
+        let waiting = u32::from(self.pulses) + u32::from(self.switches);
+        if waiting >= 64 {
+            return false;
+        }
+        if switch {
+            self.presses |= 1 << waiting;
+        }
+        true
+    }
+
+    /// Whether the press waiting longest is a Switch.
+    fn oldest_is_switch(&self) -> bool {
+        self.presses & 1 == 1
+    }
+
     fn sent(&mut self, built: bool, event: Event) -> bool {
         match self.queue(built, event) {
             Queued::Taken => true,
@@ -859,6 +890,14 @@ impl Protocol {
 
     /// What every reachable state keeps.
     pub fn check(&self) {
+        // The order holds one bit a press waiting, set for each Switch.
+        let waiting = u32::from(self.pulses) + u32::from(self.switches);
+        assert!(
+            waiting <= 64
+                && (waiting == 64 || self.presses >> waiting == 0)
+                && self.presses.count_ones() == u32::from(self.switches),
+            "the presses' order does not hold the presses waiting"
+        );
         // A replacement waits for its frame to drop what ran.
         if !self.drop
             && self.uploading.is_none()

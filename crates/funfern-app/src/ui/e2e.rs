@@ -143,6 +143,8 @@ pub(crate) fn add(app: &mut App) {
         "observables" => (Fixture::Observables, vec![None, None]),
         "far-field" => (Fixture::FarField, vec![None, None]),
         "far-field-late" => (Fixture::FarFieldLate, vec![None]),
+        "events" => (Fixture::Events, vec![None]),
+        "events-handoff" => (Fixture::EventsHandoff, vec![None]),
         _ => {
             let failure = format!("no fixture named {name:?}");
             report(&format!("e2e: {failure}"));
@@ -166,6 +168,10 @@ pub(crate) fn add(app: &mut App) {
         observing: Observing::default(),
         endpoints: Vec::new(),
         time_steps: Vec::new(),
+        events: Events {
+            bursts: fixture.bursts().into(),
+            ..Events::default()
+        },
         deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(120)),
     })
     .add_systems(EguiPrimaryContextPass, drive.before(frame))
@@ -333,6 +339,17 @@ enum Fixture {
     /// compiler that folded a two-part difference back into one f32 would
     /// read times f32's spacing at 36 hours off, 1.6e-2 s.
     FarFieldLate,
+    /// RT-04: the cavity with the switchable disc, struck at step 0 and run
+    /// to step 384 held nowhere else, [`Fixture::bursts`] fired into it as it
+    /// runs, several pulses and Switches in one frame. The app sends them
+    /// one at a time; every one must land once, in the order fired, and the
+    /// reference, which replays the timeline the device was given, must
+    /// stand with the device at the endpoint.
+    Events,
+    /// `Events` with the medium's permittivity raised at step 160 and the
+    /// run going on, bursts fired beside it: each event lands once, on the
+    /// generation before the handoff or the one after.
+    EventsHandoff,
 }
 
 /// How [`Fixture::HandoffMemory`] hands the running field over at step 192.
@@ -398,6 +415,107 @@ const SEPARATED_MESH: &str = "8a6e5526c63c5d41/5927bf38c673576e";
 /// (`MAX_STEPS_PER_FRAME`), and the most. Half the run and the whole run, as
 /// it was, both ran 64 a frame.
 const BATCHES: [u64; 4] = [1, 7, 32, 64];
+
+/// The event fixtures' endpoint, and the step `events-handoff` edits at.
+const EVENTS_ENDPOINT: u64 = 384;
+const EVENTS_EDIT: u64 = 160;
+
+/// What an event fixture fires as the run goes on: a pulse at one of
+/// [`BURST_POINTS`], or the scene's Switch pressed.
+#[derive(Clone, Copy, Debug)]
+enum Burst {
+    Pulse(usize),
+    Switch,
+}
+
+/// Where a burst's pulses strike, as fractions of the domain.
+const BURST_POINTS: [(f64, f64); 4] = [(0.25, 0.3), (0.7, 0.65), (0.5, 0.2), (0.35, 0.75)];
+
+/// The event fixtures' bursts: three pulses and a Switch in one frame; a
+/// Switch, two pulses and a Switch in another; where the fixture edits, a
+/// pulse, a Switch and a pulse in the frame the edit's step is reached; and
+/// a pulse and a Switch after.
+const EVENT_BURSTS: &[(u64, &[Burst])] = &[
+    (
+        48,
+        &[
+            Burst::Pulse(0),
+            Burst::Pulse(1),
+            Burst::Switch,
+            Burst::Pulse(2),
+        ],
+    ),
+    (
+        112,
+        &[
+            Burst::Switch,
+            Burst::Pulse(3),
+            Burst::Pulse(0),
+            Burst::Switch,
+        ],
+    ),
+    (
+        EVENTS_EDIT,
+        &[Burst::Pulse(1), Burst::Switch, Burst::Pulse(2)],
+    ),
+    (200, &[Burst::Pulse(3), Burst::Switch]),
+];
+
+/// Bursts drawn from `seed`, for the event fixtures' study: two to four, at
+/// steps from 16 to the endpoint's last 64, of one to five events each, two
+/// pulses to every Switch.
+#[cfg(not(target_arch = "wasm32"))]
+fn seeded_bursts(seed: u64) -> Vec<(u64, Vec<Burst>)> {
+    let mut state = seed;
+    let mut next = |bound: u64| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) % bound
+    };
+    let mut bursts = Vec::new();
+    for _ in 0..2 + next(3) {
+        let step = 16 + next(EVENTS_ENDPOINT - 80);
+        let mut events = Vec::new();
+        for _ in 0..1 + next(5) {
+            events.push(if next(3) == 0 {
+                Burst::Switch
+            } else {
+                Burst::Pulse(next(BURST_POINTS.len() as u64) as usize)
+            });
+        }
+        bursts.push((step, events));
+    }
+    bursts.sort_by_key(|(step, _)| *step);
+    bursts
+}
+
+/// What an event the fixture fired was, as the reference replays it.
+#[derive(Clone, Copy, Debug)]
+enum Fired {
+    Pulse {
+        position: Point2,
+        region: RegionId,
+        amplitude: f64,
+        width: f64,
+    },
+    Switch {
+        material: MaterialId,
+        target: bool,
+        ramp: f64,
+    },
+}
+
+/// An event of the timeline the device was given: the generation and the
+/// accepted step it landed at, what it was, and where it stood in the order
+/// the fixture fired them, pulses and Switches together.
+#[derive(Clone, Copy, Debug)]
+struct Landed {
+    generation: u64,
+    step: u64,
+    fired: Fired,
+    order: usize,
+}
 
 /// What a fixture does at a step it holds the run at.
 #[derive(Clone, Copy, Debug)]
@@ -468,6 +586,8 @@ impl Fixture {
             Fixture::Rejection => (&[], 4096),
             Fixture::Observables => (&[], observables::OBSERVED_STEPS),
             Fixture::FarField | Fixture::FarFieldLate => (&[], far_field::FAR_FIELD_STEPS),
+            Fixture::Events => (&[], EVENTS_ENDPOINT),
+            Fixture::EventsHandoff => (&[(EVENTS_EDIT, Action::Edit)], EVENTS_ENDPOINT),
         }
     }
 
@@ -479,7 +599,32 @@ impl Fixture {
         !matches!(
             self,
             Fixture::HandoffMemory(MemoryHandoff::Running | MemoryHandoff::RunningLate)
+                | Fixture::EventsHandoff
         )
+    }
+
+    /// The bursts the fixture fires as the run goes on, each at the first
+    /// frame its step has completed by: none but for the event fixtures,
+    /// whose bursts are [`EVENT_BURSTS`] or, natively, drawn from
+    /// `FUNFERN_E2E_SEED`.
+    fn bursts(self) -> Vec<(u64, Vec<Burst>)> {
+        let edit = match self {
+            Fixture::Events => None,
+            Fixture::EventsHandoff => Some(EVENTS_EDIT),
+            _ => return Vec::new(),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(seed) = std::env::var("FUNFERN_E2E_SEED")
+            .ok()
+            .and_then(|seed| seed.parse::<u64>().ok())
+        {
+            return seeded_bursts(seed);
+        }
+        EVENT_BURSTS
+            .iter()
+            .filter(|(step, _)| edit.is_some() || *step != EVENTS_EDIT)
+            .map(|(step, events)| (*step, events.to_vec()))
+            .collect()
     }
 
     /// Whether the handed state is read at the handoff's own step, before
@@ -613,7 +758,9 @@ impl Fixture {
     /// The mesh the fixture's document must be built on.
     fn mesh(self) -> &'static str {
         match self {
-            Fixture::Switch | Fixture::HandoffDriven => DISC_MESH,
+            Fixture::Switch | Fixture::HandoffDriven | Fixture::Events | Fixture::EventsHandoff => {
+                DISC_MESH
+            }
             Fixture::Observables => CHANNEL_MESH,
             Fixture::FarField | Fixture::FarFieldLate => HOLE_MESH,
             Fixture::NeutralRemesh => PARTED_MESH,
@@ -649,7 +796,7 @@ impl Fixture {
                 MemoryHandoff::Running | MemoryHandoff::RunningLate | MemoryHandoff::Flux,
             ) => (wall_document(false), None),
             Fixture::HandoffMemory(_) => (wall_document(true), None),
-            Fixture::Switch => {
+            Fixture::Switch | Fixture::Events | Fixture::EventsHandoff => {
                 let (document, material) = switch_document();
                 (document, Some(material))
             }
@@ -682,7 +829,333 @@ pub(crate) struct Driver {
     endpoints: Vec<[Vec<f32>; 3]>,
     /// The step each of those runs took.
     time_steps: Vec<f64>,
+    /// The event fixtures' timeline: what they fire and what the device
+    /// was given.
+    events: Events,
     deadline: Instant,
+}
+
+/// What an event fixture has fired and what the device was given of it.
+#[derive(Default)]
+struct Events {
+    /// The bursts still to fire, the next first.
+    bursts: VecDeque<(u64, Vec<Burst>)>,
+    /// The pulses fired, in the order fired, with where each stood among
+    /// all the events fired; where each Switch that queued stood; and how
+    /// many presses were the same request as one still waiting.
+    pulses: Vec<(Fired, usize)>,
+    switches: Vec<usize>,
+    merged: usize,
+    /// How many of each have landed, and where the last Switch headed.
+    pulses_landed: usize,
+    switches_landed: usize,
+    heading: bool,
+    /// The serial the timeline starts after: the run's own pulse is the
+    /// reference's from the start. None until the run starts.
+    from: Option<u32>,
+    /// Each generation's stats, whose encoded events make the timeline.
+    generations: Vec<(u64, Arc<crate::canonical_gpu::CanonicalGpuStats>)>,
+    /// The timeline so far, by serial.
+    timeline: BTreeMap<u32, Landed>,
+}
+
+impl Events {
+    /// Whether everything has been fired and nothing waits to be sent or
+    /// to be taken: what landed then is all that will, and the endpoint
+    /// counts it.
+    fn settled(&self, state: &Playground, request: &CanonicalGpuRequest) -> bool {
+        self.bursts.is_empty()
+            && state.coordinator.pending_pulses.is_empty()
+            && state.coordinator.pending_switches.is_empty()
+            && !request.live_event_pending()
+    }
+}
+
+/// Whether every event the fixture fired landed once, the serials the app
+/// gave them without a gap, and the reference replayed them all: the
+/// timeline, for the summary.
+fn landed_once(events: &Events, reference: &Reference, from: u32) -> Result<String, String> {
+    if events.pulses_landed != events.pulses.len()
+        || events.switches_landed != events.switches.len()
+    {
+        return Err(format!(
+            "{} of {} pulses and {} of {} Switches landed",
+            events.pulses_landed,
+            events.pulses.len(),
+            events.switches_landed,
+            events.switches.len()
+        ));
+    }
+    // Pulses and Switch presses go in the order pressed, kinds together:
+    // offered the pulses first, a click landed before a Switch pressed
+    // before it (2026-11-07).
+    let mut latest: Option<(u32, usize)> = None;
+    for (&serial, landed) in &events.timeline {
+        if let Some((earlier, order)) = latest
+            && order > landed.order
+        {
+            return Err(format!(
+                "event {serial}, fired {}th, landed after event {earlier}, fired {}th",
+                landed.order + 1,
+                order + 1
+            ));
+        }
+        latest = Some((serial, landed.order));
+    }
+    let serials = events.timeline.keys().copied().collect::<Vec<_>>();
+    if serials
+        .iter()
+        .copied()
+        .ne(from + 1..from + 1 + serials.len() as u32)
+    {
+        return Err(format!(
+            "the events' serials run {serials:?}, not on from {}",
+            from + 1
+        ));
+    }
+    if serials
+        .last()
+        .is_some_and(|last| reference.replayed != *last)
+    {
+        return Err(format!(
+            "the reference replayed the events to serial {}, not {:?}",
+            reference.replayed,
+            serials.last()
+        ));
+    }
+    let first = events
+        .generations
+        .first()
+        .map_or(0, |(generation, _)| *generation);
+    let steps = |pulse: bool| {
+        events
+            .timeline
+            .values()
+            .filter(|landed| matches!(landed.fired, Fired::Pulse { .. }) == pulse)
+            .map(|landed| {
+                format!(
+                    "{}{}",
+                    landed.step,
+                    if landed.generation == first { "" } else { "'" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    Ok(format!(
+        "; {} events landed once each, in the order fired: pulses at {}, Switches at {}{}{}",
+        serials.len(),
+        steps(true),
+        steps(false),
+        if events.merged > 0 {
+            format!(
+                ", {} presses the same request as one waiting",
+                events.merged
+            )
+        } else {
+            String::new()
+        },
+        if events.generations.len() > 1 {
+            " (' on the edited generation)"
+        } else {
+            ""
+        }
+    ))
+}
+
+/// Fires the event fixture's bursts that are due, and reads what the device
+/// was given into the timeline, which the reference replays: each event the
+/// render world encoded, by serial, matched to what was fired in the order
+/// fired, a pulse to the next pulse and a Switch to the next Switch.
+fn follow_events(
+    driver: &mut Driver,
+    state: &mut Playground,
+    request: &CanonicalGpuRequest,
+) -> Result<(), String> {
+    let Some(from) = driver.events.from else {
+        return Ok(());
+    };
+    let events = &mut driver.events;
+    let completed = request
+        .stats()
+        .completed_steps()
+        .saturating_sub(driver.base);
+    while events
+        .bursts
+        .front()
+        .is_some_and(|(step, _)| completed >= *step)
+    {
+        let (_, burst) = events.bursts.pop_front().expect("a burst is due");
+        let domain = state.editor.document.model.accepted.geometry.domain;
+        for fired in burst {
+            match fired {
+                Burst::Pulse(index) => {
+                    let (x, y) = BURST_POINTS[index];
+                    let point = Point2::new(
+                        domain.min_x + x * domain.width(),
+                        domain.min_y + y * domain.height(),
+                    );
+                    let queued = state.coordinator.pending_pulses.len();
+                    state.place_pulse(point);
+                    let Some(&(position, region)) = state
+                        .coordinator
+                        .pending_pulses
+                        .back()
+                        .filter(|_| state.coordinator.pending_pulses.len() == queued + 1)
+                    else {
+                        return Err(format!("a burst's pulse was not queued: {}", state.message));
+                    };
+                    let order = events.pulses.len() + events.switches.len();
+                    events.pulses.push((
+                        Fired::Pulse {
+                            position,
+                            region,
+                            amplitude: f64::from(state.pulse_amplitude),
+                            width: f64::from(state.pulse_width),
+                        },
+                        order,
+                    ));
+                }
+                // A press while the material's last waits to be sent is the
+                // same request (2026-10-07): its button still shows the old
+                // direction.
+                Burst::Switch => {
+                    let waiting = driver.material.is_some_and(|material| {
+                        state.coordinator.pending_switches.contains(&material)
+                    });
+                    let queued = state.coordinator.pending_switches.len();
+                    state.request_material_switch();
+                    if waiting {
+                        if state.coordinator.pending_switches.len() != queued {
+                            return Err("a second press queued a second Switch".into());
+                        }
+                        events.merged += 1;
+                    } else if state.coordinator.pending_switches.len() != queued + 1 {
+                        return Err(format!(
+                            "a burst's Switch was not queued: {}",
+                            state.message
+                        ));
+                    } else {
+                        events
+                            .switches
+                            .push(events.pulses.len() + events.switches.len());
+                    }
+                }
+            }
+        }
+    }
+    let generation = request.generation();
+    if !events
+        .generations
+        .iter()
+        .any(|(seen, _)| *seen == generation)
+    {
+        events
+            .generations
+            .push((generation, Arc::clone(request.stats())));
+    }
+    let mut encoded = Vec::new();
+    for (generation, stats) in &events.generations {
+        let log = stats.encoded_events();
+        for event in &log {
+            if log
+                .iter()
+                .filter(|other| other.serial == event.serial)
+                .count()
+                > 1
+            {
+                return Err(format!(
+                    "event {} was encoded twice on generation {generation}",
+                    event.serial
+                ));
+            }
+            if event.serial > from {
+                encoded.push((*generation, *event));
+            }
+        }
+    }
+    encoded.sort_by_key(|(_, event)| event.serial);
+    for (generation, event) in encoded {
+        if let Some(landed) = events.timeline.get(&event.serial) {
+            if (landed.generation, landed.step) != (generation, event.step) {
+                return Err(format!(
+                    "event {} landed twice, on generation {} at step {} and on {generation} \
+                     at step {}",
+                    event.serial, landed.generation, landed.step, event.step
+                ));
+            }
+            continue;
+        }
+        let (fired, order) = if event.is_pulse() {
+            let Some(fired) = events.pulses.get(events.pulses_landed).copied() else {
+                return Err(format!(
+                    "a pulse the fixture never fired landed at step {}",
+                    event.step
+                ));
+            };
+            events.pulses_landed += 1;
+            fired
+        } else if event.is_switch() {
+            let Some(&order) = events.switches.get(events.switches_landed) else {
+                return Err(format!(
+                    "a Switch the fixture never pressed landed at step {}",
+                    event.step
+                ));
+            };
+            let Some(material) = driver.material else {
+                return Err("a Switch with no material to throw".into());
+            };
+            let Some(ramp) = state
+                .editor
+                .document
+                .model
+                .accepted
+                .materials
+                .iter()
+                .find(|found| found.id == material)
+                .map(|found| found.switch_ramp)
+            else {
+                return Err("the switched material is gone".into());
+            };
+            events.switches_landed += 1;
+            events.heading = !events.heading;
+            (
+                Fired::Switch {
+                    material,
+                    target: events.heading,
+                    ramp,
+                },
+                order,
+            )
+        } else {
+            return Err(format!(
+                "an event of kind {} the fixture never fired landed at step {}",
+                event.kind, event.step
+            ));
+        };
+        if let Some((&last, landed)) = events.timeline.last_key_value()
+            && (landed.generation, landed.step) > (generation, event.step)
+        {
+            return Err(format!(
+                "event {} landed at step {} on generation {generation}, before event {last} \
+                 at step {} on {}",
+                event.serial, event.step, landed.step, landed.generation
+            ));
+        }
+        events.timeline.insert(
+            event.serial,
+            Landed {
+                generation,
+                step: event.step,
+                fired,
+                order,
+            },
+        );
+    }
+    if let Some(reference) = driver.phase.reference_mut() {
+        reference.timeline.clone_from(&driver.events.timeline);
+    }
+    Ok(())
 }
 
 /// What [`Fixture::Observers`]' observed run has seen of its observers.
@@ -800,6 +1273,26 @@ enum Phase {
 }
 
 impl Phase {
+    /// The reference the phase carries, if it carries one.
+    fn reference_mut(&mut self) -> Option<&mut Reference> {
+        match self {
+            Phase::Pulse { reference, .. }
+            | Phase::Run { reference, .. }
+            | Phase::Act { reference, .. }
+            | Phase::Departing { reference, .. }
+            | Phase::Carried { reference, .. }
+            | Phase::Settling { reference, .. }
+            | Phase::Snapshot { reference, .. }
+            | Phase::Observe { reference, .. }
+            | Phase::Refused { reference, .. } => Some(reference),
+            Phase::Open
+            | Phase::Install
+            | Phase::Losing { .. }
+            | Phase::Recorded { .. }
+            | Phase::Done => None,
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Phase::Open => "opening the document",
@@ -909,6 +1402,11 @@ struct Reference {
     /// The stop, an action's step or the endpoint, at which the run last
     /// waited for that to settle.
     settled: Option<u64>,
+    /// The generation the reference stands on, and the events the device
+    /// was given that it replays, by serial, the last it replayed.
+    generation: u64,
+    timeline: BTreeMap<u32, Landed>,
+    replayed: u32,
 }
 
 #[derive(Clone)]
@@ -1064,7 +1562,64 @@ impl Reference {
         Ok(())
     }
 
+    /// Applies the events of the timeline that land where the reference
+    /// stands, on its generation at its step. An event of its generation it
+    /// has stepped past, or of one it has left, was never replayed; one of a
+    /// later generation waits for the handoff.
+    fn replay_events(&mut self) -> Result<(), String> {
+        while let Some((&serial, &landed)) = self.timeline.range(self.replayed + 1..).next() {
+            if landed.generation != self.generation {
+                if landed.generation < self.generation {
+                    return Err(format!(
+                        "event {serial} landed on generation {} at step {}, which the \
+                         reference had left",
+                        landed.generation, landed.step
+                    ));
+                }
+                return Ok(());
+            }
+            if landed.step > self.steps {
+                return Ok(());
+            }
+            if landed.step < self.steps {
+                return Err(format!(
+                    "event {serial} landed at step {}, behind the reference at {}",
+                    landed.step, self.steps
+                ));
+            }
+            match landed.fired {
+                Fired::Pulse {
+                    position,
+                    region,
+                    amplitude,
+                    width,
+                } => {
+                    let increment =
+                        pulse_increment(&self.active, position, region, amplitude, width)?;
+                    self.state.pulse(&self.active, &increment)?;
+                }
+                Fired::Switch {
+                    material,
+                    target,
+                    ramp,
+                } => {
+                    let State::Temporal(temporal) = &mut self.state else {
+                        return Err("a Switch on a fixed generation".into());
+                    };
+                    let time = temporal.time();
+                    temporal
+                        .runtime_mut()
+                        .begin_switch(material, target, time, ramp)
+                        .map_err(|error| format!("the reference did not switch: {error}"))?;
+                }
+            }
+            self.replayed = serial;
+        }
+        Ok(())
+    }
+
     fn advance_to(&mut self, step: u64) -> Result<(), String> {
+        self.replay_events()?;
         while self.steps < step {
             self.state.step(&self.active)?;
             if let Some((active, control)) = &mut self.control {
@@ -1081,6 +1636,7 @@ impl Reference {
                 far.observe(self.steps + 1, self.state.time(), self.state.primary());
             }
             self.steps += 1;
+            self.replay_events()?;
         }
         Ok(())
     }
@@ -1104,17 +1660,22 @@ fn drive(
     }
     let fixture = driver.fixture;
     let context = contexts.ctx_mut().ok().cloned();
-    let run = match advance(
-        &mut driver,
-        &mut state,
-        &mut request,
-        &display,
-        &overlay,
-        &mut windows,
-        context.as_ref(),
-        stopped.as_deref(),
-        &mut lose,
-    ) {
+    let followed = follow_events(&mut driver, &mut state, &request);
+    let advanced = match followed {
+        Ok(()) => advance(
+            &mut driver,
+            &mut state,
+            &mut request,
+            &display,
+            &overlay,
+            &mut windows,
+            context.as_ref(),
+            stopped.as_deref(),
+            &mut lose,
+        ),
+        Err(failure) => Some(Err(failure)),
+    };
+    let run = match advanced {
         Some(run) => run,
         None if Instant::now() >= driver.deadline => Err(format!(
             "did not finish in time, at {}",
@@ -2536,6 +3097,9 @@ fn advance(
                         far,
                         maintenance_seen: 0,
                         settled: None,
+                        generation: request.generation(),
+                        timeline: BTreeMap::new(),
+                        replayed: 0,
                     },
                     next: 0,
                 };
@@ -2613,6 +3177,9 @@ fn advance(
                     far: None,
                     maintenance_seen: 0,
                     settled: None,
+                    generation: request.generation(),
+                    timeline: BTreeMap::new(),
+                    replayed: 0,
                 },
                 processed: request.stats().processed_event(),
             };
@@ -2645,6 +3212,14 @@ fn advance(
             state.e2e_steps.limit = Some(driver.base + stop(0));
             state.e2e_steps.batch = driver.batches.front().copied().flatten();
             state.e2e_steps.most = 0;
+            let mut reference = reference;
+            // The events fired from here on are the timeline's; the run's
+            // own pulse the reference took at the start.
+            if !driver.events.bursts.is_empty() {
+                let from = request.stats().processed_event();
+                driver.events.from = Some(from);
+                reference.replayed = from;
+            }
             driver.phase = Phase::Run { reference, next: 0 };
             None
         }
@@ -3064,6 +3639,7 @@ fn advance(
                             reference.state = handed;
                             reference.carry = carry;
                             reference.active = target;
+                            reference.generation = request.generation();
                             if let Some(carry) = carry {
                                 report(&format!(
                                     "e2e {:?}: the wall's memory carried at {:.4} s, energy {:.3e} \
@@ -3107,14 +3683,17 @@ fn advance(
         } => {
             let generation = request.generation();
             // A cleanup that landed stays recorded until a readback of a
-            // later step, which a held run never takes.
+            // later step, which a held run never takes. At the endpoint an
+            // event fixture's events land, all of them, first.
             let unsettled = state.flux_cleanup.as_ref().is_some_and(|cleanup| {
                 cleanup.generation == generation
                     && !matches!(
                         cleanup.stage,
                         super::flux_cleanup::FluxCleanupStage::Landed(_)
                     )
-            });
+            }) || (driver.events.from.is_some()
+                && next == actions.len()
+                && !driver.events.settled(state, request));
             let Some(seen) = seen.filter(|_| !unsettled) else {
                 let seen = (!unsettled).then(|| {
                     request.request_full_state_readback();
@@ -3145,6 +3724,11 @@ fn advance(
             }
             if let Err(error) = reference.follow_flux_cleanup(display) {
                 return Some(Err(error));
+            }
+            // Events that landed at the stop itself, while the run held.
+            reference.timeline.clone_from(&driver.events.timeline);
+            if let Err(error) = reference.advance_to(stop) {
+                return Some(Err(format!("the reference did not step: {error}")));
             }
             reference.settled = Some(stop);
             driver.phase = Phase::Run { reference, next };
@@ -3446,8 +4030,57 @@ fn advance(
             if let Err(error) = reference.follow_flux_cleanup(display) {
                 return Some(Err(error));
             }
+            let timeline = match driver.events.from {
+                Some(from) => {
+                    // What the device was given, whatever the verdict, and
+                    // where the device itself took the handoff's snapshot: a
+                    // failure seen once in 63 runs (2026-11-07) stood 0.65
+                    // off with every event landed once and in order.
+                    report(&format!(
+                        "e2e {:?}: generations {:?}, the device's handoff snapshot at {:?}, \
+                         its outcome {:?}",
+                        driver.fixture,
+                        driver
+                            .events
+                            .generations
+                            .iter()
+                            .map(|(generation, _)| *generation)
+                            .collect::<Vec<_>>(),
+                        request
+                            .handed_over_at()
+                            .map(|step| step.saturating_sub(driver.base)),
+                        request.handoff_outcome()
+                    ));
+                    report(&format!(
+                        "e2e {:?}: timeline {}",
+                        driver.fixture,
+                        driver
+                            .events
+                            .timeline
+                            .iter()
+                            .map(|(serial, landed)| format!(
+                                "{serial}:{}@{}g{}#{}",
+                                if matches!(landed.fired, Fired::Pulse { .. }) {
+                                    "P"
+                                } else {
+                                    "S"
+                                },
+                                landed.step,
+                                landed.generation,
+                                landed.order + 1
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ));
+                    match landed_once(&driver.events, &reference, from) {
+                        Ok(timeline) => timeline,
+                        Err(failure) => return Some(Err(failure)),
+                    }
+                }
+                None => String::new(),
+            };
             let run = compare(&reference, display, driver.fixture, endpoint).map(|summary| Run {
-                summary,
+                summary: summary + &timeline,
                 hash: hash(&display.accepted_storage_bits()),
             });
             if matches!(driver.fixture, Fixture::Superposition | Fixture::Similarity) {

@@ -1,0 +1,4 @@
+about: a frame offers the waiting pulses before the waiting Switch presses, as before 2026-11-07, so a click lands before a Switch pressed before it
+test: cargo test --release -p funfern-app --lib -- a_pulse_clicked_after_a_switch_press_waits_for_it
+expect: the Switch pressed first goes first
+needs: cpu
