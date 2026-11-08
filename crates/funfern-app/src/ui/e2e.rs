@@ -23,6 +23,7 @@ mod batches;
 mod check;
 pub(crate) mod far_field;
 mod observables;
+mod rollback;
 
 use super::runtime::pulse_increment;
 use super::*;
@@ -54,12 +55,15 @@ use std::collections::{BTreeSet, VecDeque};
 /// `burst` one frame asks for every step to the stop at once, past the
 /// frame's ceiling and its backpressure, as the device examples ask. `most`
 /// is the most a frame has asked for since the fixture last cleared it.
+/// `fail_handoff` names a state word the next handoff's candidate fails its
+/// validation at, as a device fault would, and is taken by that handoff.
 #[derive(Default)]
 pub(super) struct E2eSteps {
     pub(super) limit: Option<u64>,
     pub(super) batch: Option<u64>,
     pub(super) burst: bool,
     pub(super) most: u64,
+    pub(super) fail_handoff: Option<u32>,
 }
 
 /// Where a fixture starts a fresh generation's clock, if it says: the epoch
@@ -109,6 +113,10 @@ pub(crate) fn add(app: &mut App) {
     };
     if name == "batches" {
         batches::add(app, seconds);
+        return;
+    }
+    if let Some(fixture) = rollback::RollbackFixture::named(&name) {
+        rollback::add(app, fixture, seconds);
         return;
     }
     let (fixture, batches) = match name.as_str() {
@@ -310,7 +318,10 @@ enum Fixture {
     /// driven at its resonance until the field reaches the bound: the device
     /// must refuse the step the reference refuses, the app pause on it with
     /// the last accepted state kept, and Run retry it to the same refusal
-    /// without moving a stored bit.
+    /// without moving a stored bit. Then the bound raised to
+    /// [`CORRECTED_BOUND`] must hand the accepted state on from the refused
+    /// step, and Run take it [`CORRECTED_STEPS`] further, as the reference
+    /// does: the retry that succeeds.
     Rejection,
     /// The cavity, its own GPU device destroyed at step 128 of 256, after a
     /// change to the document the autosave had not yet written: rendering
@@ -1269,6 +1280,23 @@ enum Phase {
         first: Option<(u64, String)>,
         retried: bool,
     },
+    /// The refused run's bound raised: the edit's generation, which takes
+    /// the field from the refused step, is waited for.
+    Corrected {
+        reference: Reference,
+        step: u64,
+        summary: String,
+        generation: u64,
+        carried: Option<Carried>,
+    },
+    /// The corrected run goes on to [`CORRECTED_STEPS`] past the refused
+    /// step, where a full snapshot is asked for, `seen` once asked.
+    Recovering {
+        reference: Reference,
+        step: u64,
+        summary: String,
+        seen: Option<u64>,
+    },
     Done,
 }
 
@@ -1284,7 +1312,9 @@ impl Phase {
             | Phase::Settling { reference, .. }
             | Phase::Snapshot { reference, .. }
             | Phase::Observe { reference, .. }
-            | Phase::Refused { reference, .. } => Some(reference),
+            | Phase::Refused { reference, .. }
+            | Phase::Corrected { reference, .. }
+            | Phase::Recovering { reference, .. } => Some(reference),
             Phase::Open
             | Phase::Install
             | Phase::Losing { .. }
@@ -1308,6 +1338,8 @@ impl Phase {
             Phase::Recorded { .. } => "waiting for the recording to be written",
             Phase::Observe { .. } => "waiting for the probes' last records",
             Phase::Refused { .. } => "waiting for the app to pause on the refusal",
+            Phase::Corrected { .. } => "waiting for the corrected generation",
+            Phase::Recovering { .. } => "running the corrected generation",
             Phase::Done => "done",
         }
     }
@@ -1521,6 +1553,28 @@ impl State {
 }
 
 impl Reference {
+    /// The reference at the run's start, `state` on `active`, the
+    /// generation the device runs it on.
+    fn starting(active: Arc<PreparedTopology>, state: State, generation: u64) -> Self {
+        Reference {
+            active,
+            state,
+            control: None,
+            steps: 0,
+            carry: None,
+            departed: None,
+            sides: None,
+            unedited: None,
+            twin: None,
+            far: None,
+            maintenance_seen: 0,
+            settled: None,
+            generation,
+            timeline: BTreeMap::new(),
+            replayed: 0,
+        }
+    }
+
     /// Steps the reference, and the control, to the accepted step `step`.
     /// Takes away the stationary flux the device's cleanup took after the
     /// last handoff, once a full readback shows the maintenance serial it
@@ -1587,35 +1641,39 @@ impl Reference {
                     landed.step, self.steps
                 ));
             }
-            match landed.fired {
-                Fired::Pulse {
-                    position,
-                    region,
-                    amplitude,
-                    width,
-                } => {
-                    let increment =
-                        pulse_increment(&self.active, position, region, amplitude, width)?;
-                    self.state.pulse(&self.active, &increment)?;
-                }
-                Fired::Switch {
-                    material,
-                    target,
-                    ramp,
-                } => {
-                    let State::Temporal(temporal) = &mut self.state else {
-                        return Err("a Switch on a fixed generation".into());
-                    };
-                    let time = temporal.time();
-                    temporal
-                        .runtime_mut()
-                        .begin_switch(material, target, time, ramp)
-                        .map_err(|error| format!("the reference did not switch: {error}"))?;
-                }
-            }
+            self.take(landed.fired)?;
             self.replayed = serial;
         }
         Ok(())
+    }
+
+    /// Takes an event the device took, where the reference stands.
+    fn take(&mut self, fired: Fired) -> Result<(), String> {
+        match fired {
+            Fired::Pulse {
+                position,
+                region,
+                amplitude,
+                width,
+            } => {
+                let increment = pulse_increment(&self.active, position, region, amplitude, width)?;
+                self.state.pulse(&self.active, &increment)
+            }
+            Fired::Switch {
+                material,
+                target,
+                ramp,
+            } => {
+                let State::Temporal(temporal) = &mut self.state else {
+                    return Err("a Switch on a fixed generation".into());
+                };
+                let time = temporal.time();
+                temporal
+                    .runtime_mut()
+                    .begin_switch(material, target, time, ramp)
+                    .map_err(|error| format!("the reference did not switch: {error}"))
+            }
+        }
     }
 
     fn advance_to(&mut self, step: u64) -> Result<(), String> {
@@ -1817,6 +1875,12 @@ fn rejection_document() -> TopologyDocument {
 /// resonance as it grows.
 const REJECTION_DRIVE: f64 = 10.0;
 const REJECTION_BOUND: f64 = 0.2;
+
+/// The bound the rejection fixture raises its medium's to once the run has
+/// refused, above the 0.45 the drive reaches by step 4096, and how far the
+/// corrected run then goes.
+const CORRECTED_BOUND: f64 = 0.6;
+const CORRECTED_STEPS: u64 = 256;
 
 /// The cavity with a disc of the switchable medium preset on its mass row,
 /// near enough the pulse for its wave to reach the disc by the Switch.
@@ -3085,21 +3149,9 @@ fn advance(
                 state.e2e_steps.most = 0;
                 driver.phase = Phase::Run {
                     reference: Reference {
-                        active,
-                        state: reference,
-                        control: None,
-                        steps: 0,
-                        carry: None,
-                        departed: None,
-                        sides: None,
-                        unedited: None,
                         twin,
                         far,
-                        maintenance_seen: 0,
-                        settled: None,
-                        generation: request.generation(),
-                        timeline: BTreeMap::new(),
-                        replayed: 0,
+                        ..Reference::starting(active, reference, request.generation())
                     },
                     next: 0,
                 };
@@ -3164,23 +3216,7 @@ fn advance(
                 mesh_hashes(&active.mesh)
             ));
             driver.phase = Phase::Pulse {
-                reference: Reference {
-                    active,
-                    state: reference,
-                    control: None,
-                    steps: 0,
-                    carry: None,
-                    departed: None,
-                    sides: None,
-                    unedited: None,
-                    twin: None,
-                    far: None,
-                    maintenance_seen: 0,
-                    settled: None,
-                    generation: request.generation(),
-                    timeline: BTreeMap::new(),
-                    replayed: 0,
-                },
+                reference: Reference::starting(active, reference, request.generation()),
                 processed: request.stats().processed_event(),
             };
             None
@@ -3416,28 +3452,8 @@ fn advance(
             carried,
         } => {
             let (step, action) = actions[next];
-            let carried = carried.or_else(|| {
-                state
-                    .runtime
-                    .ready()
-                    .filter(|candidate| {
-                        candidate.bundle.token.document_revision == state.editor.revision
-                    })
-                    .and_then(|candidate| {
-                        Some(Carried {
-                            maps: candidate.canonical_transfer.clone()?,
-                            interpolation: candidate.transfer.clone(),
-                        })
-                    })
-            });
-            // The generation published for the edit: of the document's
-            // revision, nothing uploading, and on the display.
-            let published = state.runtime.active().cloned().filter(|active| {
-                active.bundle.token.document_revision == state.editor.revision
-                    && state.coordinator.uploading.is_none()
-                    && request.generation() != generation
-                    && display.generation == request.generation()
-            });
+            let carried = carried.or_else(|| carried_now(state));
+            let published = published(state, request, display, generation);
             let waiting = match action {
                 Action::Switch => {
                     request.stats().processed_event() == processed
@@ -4295,23 +4311,214 @@ fn advance(
                     };
                     None
                 }
-                Some((first, summary)) => Some(if hash == first {
-                    Ok(Run {
+                Some((first, _)) if hash != first => Some(Err(format!(
+                    "the retry moved the stored state: {first:016x} to {hash:016x}"
+                ))),
+                Some((_, summary)) => {
+                    // The bound raised, as the material's row does on Apply.
+                    let corrected = state
+                        .editor
+                        .document
+                        .model
+                        .draft
+                        .material(DEFAULT_MATERIAL)
+                        .cloned()
+                        .ok_or_else(|| "the default medium is gone".to_owned())
+                        .and_then(|mut medium| match &mut medium.mass_law.field {
+                            FieldLaw::Polynomial {
+                                amplitude_bound, ..
+                            } => {
+                                *amplitude_bound = Some(ScalarField::constant(CORRECTED_BOUND));
+                                Ok(medium)
+                            }
+                            _ => Err("the medium has no bound to raise".to_owned()),
+                        })
+                        .and_then(|medium| state.editor.update_material(medium));
+                    if let Err(error) = corrected {
+                        return Some(Err(format!("the bound was not raised: {error}")));
+                    }
+                    driver.phase = Phase::Corrected {
+                        reference,
+                        step,
                         summary: format!(
                             "{summary}; Run retried the step to the same refusal, the stored \
                              state the same bits"
                         ),
-                        hash,
-                    })
-                } else {
-                    Err(format!(
-                        "the retry moved the stored state: {first:016x} to {hash:016x}"
-                    ))
-                }),
+                        generation: request.generation(),
+                        carried: None,
+                    };
+                    None
+                }
             }
+        }
+        Phase::Corrected {
+            mut reference,
+            step,
+            summary,
+            generation,
+            carried,
+        } => {
+            let carried = carried.or_else(|| carried_now(state));
+            let Some(target) = published(state, request, display, generation) else {
+                if let Some(error) = state
+                    .runtime
+                    .last_error()
+                    .filter(|error| error.token.document_revision == state.editor.revision)
+                {
+                    return Some(Err(format!("the raised bound was not taken: {error}")));
+                }
+                driver.phase = Phase::Corrected {
+                    reference,
+                    step,
+                    summary,
+                    generation,
+                    carried,
+                };
+                return None;
+            };
+            // The paused run's accepted state, the refused step's, is what
+            // the edit hands on: the failure the app cleared never touched it.
+            if request.handoff_outcome() != CanonicalGpuHandoffOutcome::Accepted
+                || request.handed_over_at() != Some(driver.base + step)
+            {
+                return Some(Err(format!(
+                    "the raised bound's generation came by {:?} from step {:?}, not a handoff from \
+                     the refused step {step}",
+                    request.handoff_outcome(),
+                    request
+                        .handed_over_at()
+                        .map(|at| at.saturating_sub(driver.base))
+                )));
+            }
+            let Some(carried) = carried else {
+                return Some(Err(
+                    "the edit's candidate was never seen with its maps".into()
+                ));
+            };
+            match hand_off(
+                &reference,
+                &target,
+                &carried,
+                state.coordinator.uploaded_time_step,
+                display.runtime_serials,
+            ) {
+                Ok((handed, carry, target)) => {
+                    reference.state = handed;
+                    reference.carry = carry;
+                    reference.active = target;
+                    reference.generation = request.generation();
+                }
+                Err(error) => {
+                    return Some(Err(format!("the reference was not handed off: {error}")));
+                }
+            }
+            // Run, as the toolbar's button.
+            state.wave_running = true;
+            state.e2e_steps.limit = Some(driver.base + step + CORRECTED_STEPS);
+            driver.phase = Phase::Recovering {
+                reference,
+                step,
+                summary,
+                seen: None,
+            };
+            None
+        }
+        Phase::Recovering {
+            mut reference,
+            step,
+            summary,
+            seen,
+        } => {
+            let end = step + CORRECTED_STEPS;
+            let completed = request
+                .stats()
+                .completed_steps()
+                .saturating_sub(driver.base);
+            let code = request.stats().failure();
+            if code != 0 {
+                return Some(Err(format!(
+                    "the raised bound's generation refused after step {completed} (failure code \
+                     {code})"
+                )));
+            }
+            if completed > end {
+                return Some(Err(format!(
+                    "the run went past its stop at {end}, to {completed}"
+                )));
+            }
+            let arrived = seen.is_some_and(|seen| {
+                display.full_readbacks > seen
+                    && display.generation == request.generation()
+                    && display.full_snapshot_completed_steps() == driver.base + end
+            });
+            if completed < end || !arrived {
+                let seen = seen.or_else(|| {
+                    (completed == end).then(|| {
+                        request.request_full_state_readback();
+                        display.full_readbacks
+                    })
+                });
+                if seen.is_some() {
+                    request.request_full_state_readback();
+                }
+                driver.phase = Phase::Recovering {
+                    reference,
+                    step,
+                    summary,
+                    seen,
+                };
+                return None;
+            }
+            if let Err(error) = reference.advance_to(end) {
+                return Some(Err(format!("the reference did not step: {error}")));
+            }
+            if let Err(error) = reference.follow_flux_cleanup(display) {
+                return Some(Err(error));
+            }
+            Some(
+                compare(&reference, display, driver.fixture, end).map(|compared| Run {
+                    summary: format!(
+                        "{summary}; the bound raised to {CORRECTED_BOUND}, the app handed the \
+                         accepted state on from step {step} and ran it on: {compared}"
+                    ),
+                    hash: hash(&display.accepted_storage_bits()),
+                }),
+            )
         }
         Phase::Done => None,
     }
+}
+
+/// The maps the candidate prepared for the document's revision carries, for
+/// the reference's handoff, once it is ready: the runtime drops it once its
+/// generation is published.
+fn carried_now(state: &Playground) -> Option<Carried> {
+    state
+        .runtime
+        .ready()
+        .filter(|candidate| candidate.bundle.token.document_revision == state.editor.revision)
+        .and_then(|candidate| {
+            Some(Carried {
+                maps: candidate.canonical_transfer.clone()?,
+                interpolation: candidate.transfer.clone(),
+            })
+        })
+}
+
+/// The generation published for an edit, once it is: of the document's
+/// revision, nothing uploading, past `generation`, and on the display.
+fn published(
+    state: &Playground,
+    request: &CanonicalGpuRequest,
+    display: &CanonicalGpuDisplay,
+    generation: u64,
+) -> Option<Arc<PreparedTopology>> {
+    state.runtime.active().cloned().filter(|active| {
+        active.bundle.token.document_revision == state.editor.revision
+            && state.coordinator.uploading.is_none()
+            && request.generation() != generation
+            && display.generation == request.generation()
+    })
 }
 
 /// The reference's state carried onto `target` as the device carries the

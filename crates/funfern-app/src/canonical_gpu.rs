@@ -5361,6 +5361,19 @@ impl CanonicalGpuRequest {
             .map(|handles| handles.node_count as usize)
     }
 
+    /// Answers the live event in flight as the device would, refused with
+    /// `failure` or taken with 0, and frees its slot as the render world
+    /// does, for host tests that have neither.
+    #[cfg(test)]
+    pub fn answer_live_event(&mut self, failure: u32) {
+        let event = self.live_event.take().expect("a live event in flight");
+        self.stats
+            .processed_event
+            .store(event.serial, Ordering::Relaxed);
+        self.stats.event_rejection.store(failure, Ordering::Relaxed);
+        self.revision = self.revision.wrapping_add(1).max(1);
+    }
+
     pub fn queue_live_event(
         &mut self,
         assets: &mut Assets<ShaderBuffer>,

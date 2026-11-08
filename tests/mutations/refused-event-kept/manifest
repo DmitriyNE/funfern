@@ -1,0 +1,4 @@
+about: a live event the device refuses still takes the candidate slot as accepted, so a refused pulse, Switch or source move stays in the run once it steps on
+test: scripts/e2e-fixture.sh rollback
+expect: after 256 steps.*beyond 5e-6
+needs: device

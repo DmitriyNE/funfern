@@ -1,0 +1,4 @@
+about: a Switch the device refuses keeps its direction, so the button shows the material headed where it is not and the next press sends it where it already is, as before 2026-11-08
+test: cargo test --release -p funfern-app --lib -- a_refused_switch_puts_its_direction_back
+expect: the first Switch refused
+needs: cpu

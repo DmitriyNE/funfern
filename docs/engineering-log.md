@@ -33095,3 +33095,78 @@ the device.
   passed, in 244 s from the morning's binary and 348 s from this one, the
   same figures to the digit; it sends no event, which is all RT-04 changed
   in the encoder.
+
+## 2026-11-08 — RT-05: a refusal leaves the bits alone, and the retry lands
+
+- **Why.** C7's fourth item (campaign plan, section 6l): a handoff's or a
+  live event's rejection in the app, and a retry that succeeds. What there
+  was: `rejection`, whose device refuses a step and whose Run retries it to
+  the same refusal, and the rollback examples on Metal; the fault hooks were
+  the examples' alone.
+- **The fixtures.** `rollback` runs the switchable cavity driven by its
+  point source and holds it at steps 64, 128 and 192. At each it arms a
+  fault on the running generation (`inject_failure`, as the examples do) and
+  fires a pulse, the Switch or a move of the source through the app's own
+  handlers. The device must refuse it: the stored state, the Switch bank, the
+  clock and the event serials the same bits after, the run at the step held,
+  the app saying so in its diagnostics with the warning lit, and its Switch
+  button heading where the device holds the material. The fault goes, the
+  same act again must land, and at 256 the reference stands within 5e-6.
+  `rollback-handoff` makes the struck cavity's next candidate fail its
+  validation on the device (`E2eSteps::fail_handoff`, through
+  `stage_failure_injection` at the upload): an edit of its medium with the
+  run held at 128, the stored state then the same bits, and one with the
+  run going on from 192, refused within a few steps, the running generation
+  then standing with a reference that never saw the edit. Remesh, the app's
+  way to ask again for a revision it could not take, must hand each edit off
+  at the step held. `rejection` goes on past its refusal: the bound raised
+  to 0.6, the app clears the failure before the upload and hands the
+  accepted state on from step 788, and at 1044 the reference, which raised
+  the bound there too, stands Q 1.0e-6 off. `FUNFERN_E2E_SEED` draws the
+  stops, the order of the acts and the fault's state word.
+- **Not staged: a fault while a handoff waits.** The plan had the running
+  generation failing while its handoff is pending, which withdraws it. On
+  the device it cannot be staged to happen: the app withdraws only if it
+  reads the fault before the device admits the candidate, and the two arrive
+  in readbacks of the same frame in either order. It stays with the host's
+  sequences (`a_fault_while_a_handoff_waits_withdraws_it`,
+  `a_receipt_of_a_withdrawn_handoff_admits_nothing`) and the protocol model.
+- **Study,** 20 seeds of each on lavapipe in the container, then
+  `rejection` twice: all 42 runs passed. Every refusal left the stored bits
+  alone and every retry landed, endpoints Q 4.2e-7 to 6.3e-7 for `rollback`
+  and 1.1e-6 to 1.9e-6 for `rollback-handoff`; a handoff refused with the
+  run going on was refused 10 to 13 steps after the edit, the running
+  generation then 3.8e-7 to 1.2e-6 from the run without it. `rejection` ended
+  on the same bits both times. But after every refused Switch, 20 of 20, the
+  app showed the material headed for its alternate where the device held it
+  at its own law: the coordinator records the direction it sends and never
+  learned of the refusal, so the next press would have sent the material
+  where it already was.
+- **Fix, with the user.** The coordinator keeps the Switch last sent until
+  the device answers it (`switch_sent`, `PendingSwitch`), and a refusal puts
+  back the direction recorded before it, or none, which reads the device's
+  bank (`switch_answered`), each frame before any press goes out. The device
+  takes one event at a time and reports each before the next is sent, so no
+  refusal goes unanswered. The other choice, forgetting the direction and
+  reading the bank at once, could read a snapshot from before an earlier
+  Switch the device took. `a_refused_switch_puts_its_direction_back`, with
+  `CanonicalGpuRequest::answer_live_event` answering for the device in host
+  tests.
+- **Mutations**, each caught: `refused-event-kept`,
+  `event-refusal-unreported`, `refused-source-committed`,
+  `refused-candidate-kept` and `failure-kept-before-corrective-handoff` on
+  lavapipe in the container, and `refused-switch-kept` on the host.
+  `refused-event-kept`, a refused event's candidate taken as accepted, is
+  caught at the endpoint, Q 0.21 off, not at the refusal: a refusal
+  publishes no snapshot, so the lane it took shows only once the run steps
+  on. `switch-thrown-twice`'s patch is rewritten against the Switch's new
+  lines; its defect is the same.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs. The
+  device suite on the M1 Max passed 122 of 124, the new fixtures and
+  `rejection` among them: `canonical_gpu_cavity_modes` ran past its 600 s in
+  the mechanical and TM models and took 512 s in TE, at a load of 9 from
+  Spotlight and media analysis, as on 2026-11-07. In the device code this
+  change adds only a host test's answer to a live event, so the example runs
+  the same code it ran then.

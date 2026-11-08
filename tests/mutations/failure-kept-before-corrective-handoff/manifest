@@ -1,0 +1,4 @@
+about: an edit made on a paused, failed run is handed off with the failure still latched, so the device rejects the corrected generation as its own failure
+test: scripts/e2e-fixture.sh rejection
+expect: the raised bound was not taken
+needs: device

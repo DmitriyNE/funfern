@@ -47,6 +47,11 @@ pub(super) struct Coordinator {
     pub(super) gpu_upload_preparation: Option<GpuUploadPreparation>,
     pub(super) uploading: Option<Uploading>,
     pub(super) source_commit: Option<PendingSourceCommit>,
+    /// The Switch last sent, until the device answers it. A refused one
+    /// leaves the medium where it was, so the direction recorded before it
+    /// goes back: kept, the button showed the refused direction and the next
+    /// press went where the medium already was (RT-05, 2026-11-08).
+    pub(super) switch_sent: Option<PendingSwitch>,
 
     // What waits for the device.
     /// Pulses placed and not yet taken by the device, oldest first. One
@@ -99,6 +104,7 @@ impl Default for Coordinator {
             gpu_upload_preparation: None,
             uploading: None,
             source_commit: None,
+            switch_sent: None,
             pending_pulses: VecDeque::new(),
             pending_switches: VecDeque::new(),
             presses: VecDeque::new(),
@@ -148,6 +154,7 @@ impl Coordinator {
         self.retimed = None;
         self.uploading = None;
         self.source_commit = None;
+        self.switch_sent = None;
         self.gpu_upload_preparation = None;
         self.uploaded_time_step = 0.0;
         self.canonical_event_serial = 0;
@@ -175,6 +182,7 @@ impl Coordinator {
         self.canonical_event_observed = 0;
         self.experiment_mark = None;
         self.switch_targets.clear();
+        self.switch_sent = None;
         self.pending_pulses.clear();
         self.pending_switches.clear();
         self.presses.clear();
@@ -195,6 +203,28 @@ impl Coordinator {
         self.canonical_event_observed = 0;
         self.experiment_mark = None;
         self.switch_targets.clear();
+        self.switch_sent = None;
+    }
+
+    /// The device answered events up to `processed`, the last of them with
+    /// `rejection`: a refused Switch puts back the direction recorded before
+    /// it. The device takes one event at a time and reports each, so no
+    /// Switch goes unanswered.
+    pub(super) fn switch_answered(&mut self, processed: u32, rejection: u32) {
+        if self
+            .switch_sent
+            .as_ref()
+            .is_none_or(|sent| processed < sent.serial)
+        {
+            return;
+        }
+        let sent = self.switch_sent.take().unwrap();
+        if processed == sent.serial && rejection != 0 {
+            match sent.before {
+                Some(heading) => self.switch_targets.insert(sent.material, heading),
+                None => self.switch_targets.remove(&sent.material),
+            };
+        }
     }
 
     /// Queues a Switch press for the next frame that can send it. A material

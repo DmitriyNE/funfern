@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/canonical_wave.wgsl
++++ b/crates/funfern-app/src/canonical_wave.wgsl
+@@ -260,7 +260,7 @@
+ // An event refused, or a filter not taken: the accepted lane stays, and the
+ // candidate's totals go back to the accepted ones, which hold its bank.
+ fn refuse_event() {
+-    control.event.z = accepted_slot() | BANK_FOLDED;
++    control.event.z = (accepted_slot() ^ 1u) | BANK_FOLDED;
+     control.candidate_accounting_a = control.accepted_accounting_a;
+     control.candidate_accounting_b = control.accepted_accounting_b;
+     control.candidate_accounting_c = control.accepted_accounting_c;

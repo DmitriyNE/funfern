@@ -1,0 +1,12 @@
+--- a/crates/funfern-app/src/ui/runtime.rs
++++ b/crates/funfern-app/src/ui/runtime.rs
+@@ -709,9 +709,6 @@
+             // status would otherwise reject the new generation as its own.
+             // Cleared first, the failure sends again the live event it
+             // stranded, which the upload then waits for.
+-            if request.failed() && request.clear_failure(assets, commands).is_ok() {
+-                self.coordinator.solver_fault = None;
+-            }
+         }
+         // A handoff and a live event share the target's bind groups and its
+         // clock: the upload begins with no live event in flight.

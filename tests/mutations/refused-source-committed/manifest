@@ -1,0 +1,4 @@
+about: a source move commits whatever the device answered, so the document holds a source position the device refused
+test: scripts/e2e-fixture.sh rollback
+expect: committed the source's move the device refused
+needs: device

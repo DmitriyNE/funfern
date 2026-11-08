@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/ui/runtime.rs
++++ b/crates/funfern-app/src/ui/runtime.rs
+@@ -419,7 +419,7 @@
+         }
+         let pending = self.coordinator.source_commit.take().unwrap();
+         self.coordinator.canonical_event_observed = processed;
+-        let rejection = request.stats().event_rejection();
++        let rejection = 0;
+         if rejection != 0 {
+             self.runtime.reject_ready(
+                 pending.token,

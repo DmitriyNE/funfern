@@ -1,0 +1,4 @@
+about: a pulse or Switch the device refuses goes unreported: no diagnostics line, no warning, and the press seems simply lost
+test: scripts/e2e-fixture.sh rollback
+expect: did not say the device refused the
+needs: device

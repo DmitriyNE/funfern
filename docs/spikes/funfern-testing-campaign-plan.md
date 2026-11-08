@@ -1496,6 +1496,16 @@ mutation, in this order:
   run in 63 stood 0.65 off with every event landed once and in order; it did
   not come back, and the fixture now reports the timeline and the device's
   handoff snapshot with any failure.
+  RT-05 landed on 2026-11-08: `rollback` arms a fault on the running
+  generation and fires a pulse, the Switch and a move of the source through
+  the app's handlers, and `rollback-handoff` makes an edit's candidate fail
+  its validation, once held and once with the run going on: every refusal
+  leaves the stored bits alone, the app says so, and the retry lands.
+  `rejection` goes on past its refusal with a corrective edit. The study
+  found the app's Switch still headed the refused way; with the user, a
+  refusal now puts back the direction recorded before it. A fault while a
+  handoff waits stays with the host's sequences: on the device it turns on
+  the order of two readbacks of one frame.
 - **C8, robustness:** the 5.2 edge cases, on the CPU and then the device;
   RT-06; RT-07 with 5.4, a debug count of live shader buffers, staging,
   readbacks, bind groups and jobs in the fixtures binary, not wgpu's own

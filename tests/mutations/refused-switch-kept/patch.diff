@@ -1,0 +1,14 @@
+--- a/crates/funfern-app/src/ui/runtime.rs
++++ b/crates/funfern-app/src/ui/runtime.rs
+@@ -480,11 +480,6 @@
+             self.display_material_runtime = Some(runtime);
+         }
+         self.finish_source_commit(request);
+-        // Before any press goes out, so that it reads where the medium is.
+-        self.coordinator.switch_answered(
+-            request.stats().processed_event(),
+-            request.stats().event_rejection(),
+-        );
+         self.supervise_solver_fault(request, assets, commands);
+         self.refresh_switch_states(display, request);
+         // Starting another preparation mid-upload clears `runtime.ready`, and

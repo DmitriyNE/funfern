@@ -441,6 +441,14 @@ struct PendingSourceCommit {
     serial: u32,
 }
 
+/// A Switch the device has yet to answer, and the direction recorded for its
+/// material before it was sent.
+struct PendingSwitch {
+    serial: u32,
+    material: MaterialId,
+    before: Option<bool>,
+}
+
 /// What the runtime decided at the points the protocol model takes as inputs,
 /// for the tests that run the model beside it (`funfern-protocol`).
 #[cfg(test)]

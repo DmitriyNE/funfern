@@ -190,7 +190,10 @@ refuses the step after 788 with the inverse-domain status, as the reference
 refuses it; the app pauses on its own, the accepted state reads Q `7.3e-7`
 against the reference's step 788, and Run - which clears the failure - retries
 the step to the same refusal with the stored state the same bits. A reference a
-step short, or a retry that moves one bit, fails it.
+step short, or a retry that moves one bit, fails it. The way on is an edit:
+the fixture raises the bound to 0.6, and the app, which clears the failure
+before the upload, hands the accepted state on from step 788 and runs it to
+1044, Q `1.0e-6` from a reference that raised the bound there too.
 
 CI has no GPU, but it runs these fixtures on Mesa's software Vulkan, lavapipe,
 under a virtual X server: the job `Device fixtures on software Vulkan` builds
@@ -1886,6 +1889,38 @@ model sends them so, keeping the order one bit a press. Its mutations are
 `live-event-encoded-again`, `busy-pulse-dropped`, `pulses-sent-newest-first`
 and `switch-press-queued-twice` on the device, and `pulses-offered-first` on
 the host.
+
+RT-05, failure and rollback, is held on the device by `rollback`,
+`rollback-handoff` and `rejection`'s corrective edit. `rollback` runs the
+switchable cavity driven by its point source and holds it at steps 64, 128
+and 192. At each it arms a fault on the running generation, as the device
+examples do (`inject_failure`), and fires a pulse, the Switch or a move of
+the source through the app's own handlers. The device must refuse the event:
+the stored state, the Switch bank, the clock and the event serials the same
+bits after as before, the app saying so in its diagnostics with the warning
+lit, and its Switch button heading where the device holds the material. The
+fault then goes, the same act again must land, and at 256 the reference
+stands within 5e-6. `rollback-handoff` edits the struck cavity's medium with
+the next candidate made to fail its validation on the device
+(`E2eSteps::fail_handoff`): with the run held at 128, the stored state then
+the same bits, and with the run going on from 192, the running generation
+then standing with a reference that never saw the edit. Remesh must then
+hand each edit off at the step held. `FUNFERN_E2E_SEED` draws the stops, the
+order and the fault's state word. The study, 20 seeds of each on lavapipe,
+found every refusal left the bits alone and every retry landed, but after a
+refused Switch the app showed the material headed for its alternate where
+the device held it at its own law, and the next press sent it where it
+already was. With the user, the coordinator keeps the Switch last sent until
+the device answers it, and a refusal puts back the direction recorded
+before it (`a_refused_switch_puts_its_direction_back`). A fault of the
+running generation while a handoff waits, which withdraws it, stays with the
+host's sequences (`a_fault_while_a_handoff_waits_withdraws_it`): on the
+device, whether the app sees the fault before the device admits the
+candidate turns on the order of two readbacks of one frame. Its mutations
+are `refused-event-kept`, `event-refusal-unreported`,
+`refused-source-committed`, `refused-candidate-kept` and
+`failure-kept-before-corrective-handoff` on the device, and
+`refused-switch-kept` on the host.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

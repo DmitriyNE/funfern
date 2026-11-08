@@ -3,8 +3,9 @@
 
 use super::coordinator::Press;
 use crate::canonical_gpu::{
-    CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuHandoffOutcome, CanonicalGpuLiveEvent,
-    CanonicalGpuPlan, CanonicalGpuRequest, LiveEventRefusal, canonical_failure_description,
+    CANONICAL_FAILURE_NON_FINITE, CanonicalGpuClock, CanonicalGpuDisplay,
+    CanonicalGpuHandoffOutcome, CanonicalGpuLiveEvent, CanonicalGpuPlan, CanonicalGpuRequest,
+    LiveEventRefusal, canonical_failure_description,
 };
 use crate::drawn_pacing::PacingNote;
 use crate::gpu_frame_timer::GpuFrameReading;
@@ -479,6 +480,11 @@ impl Playground {
             self.display_material_runtime = Some(runtime);
         }
         self.finish_source_commit(request);
+        // Before any press goes out, so that it reads where the medium is.
+        self.coordinator.switch_answered(
+            request.stats().processed_event(),
+            request.stats().event_rejection(),
+        );
         self.supervise_solver_fault(request, assets, commands);
         self.refresh_switch_states(display, request);
         // Starting another preparation mid-upload clears `runtime.ready`, and
@@ -721,10 +727,18 @@ impl Playground {
                 .expect("the candidate checked ready above");
             let mut handed_off = false;
             let mut installed_origin = 0.0;
-            let upload = job.result.take().unwrap().and_then(|prepared| {
+            let fail_handoff = &mut self.e2e_steps.fail_handoff;
+            let upload = job.result.take().unwrap().and_then(|mut prepared| {
                 request.admit(&prepared.plan, prepared.transfer.as_ref())?;
                 if let Some(transfer) = prepared.transfer {
                     handed_off = true;
+                    // A fixture's fault: the device refuses this candidate.
+                    if let Some(word) = fail_handoff.take() {
+                        prepared
+                            .plan
+                            .stage_failure_injection(CANONICAL_FAILURE_NON_FINITE, word)
+                            .map_err(|error| format!("{error:?}"))?;
+                    }
                     request
                         .begin_handoff(assets, commands, prepared.plan, transfer)
                         .map_err(str::to_owned)
@@ -1419,7 +1433,12 @@ impl Playground {
         request.queue_live_event(assets, event.map_err(LiveEventRefusal::Refused)?)?;
         self.coordinator.canonical_event_serial = serial;
         self.coordinator.experiment_mark = Some(serial);
-        self.coordinator.switch_targets.insert(material, !heading);
+        let before = self.coordinator.switch_targets.insert(material, !heading);
+        self.coordinator.switch_sent = Some(PendingSwitch {
+            serial,
+            material,
+            before,
+        });
         Ok(())
     }
 
@@ -1764,6 +1783,97 @@ mod tests {
             Some(0.0),
             "the reset medium reads as at its base"
         );
+    }
+
+    /// A Switch the device refuses leaves the medium where it was, so the
+    /// direction recorded before it comes back: the button shows where the
+    /// medium is headed and the next press heads away from there. Kept, the
+    /// refused direction showed, and the next press sent the medium where it
+    /// already was (RT-05, 2026-11-08).
+    #[test]
+    fn a_refused_switch_puts_its_direction_back() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut request = CanonicalGpuRequest::default();
+        let display = CanonicalGpuDisplay::default();
+        let mut recorders = WaveGpuRequest::default();
+        let vector = VectorOverlayDisplay::default();
+        let mut frame = |state: &mut Playground, request: &mut CanonicalGpuRequest| {
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_runtime(
+                    request,
+                    &display,
+                    &mut recorders,
+                    &vector,
+                    &mut assets,
+                    &mut commands,
+                    1.0 / 60.0,
+                );
+            });
+        };
+
+        let mut state = Playground::default();
+        let material = state.editor.document.model.draft.materials[0].clone();
+        let switch = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Switchable medium" && preset.row == LawPresetRow::Mass)
+            .unwrap();
+        state
+            .editor
+            .update_material(apply_law_preset(switch, &material).unwrap())
+            .unwrap();
+        settle(&mut state.editor);
+        activate(&mut state);
+        state.coordinator.requested_revision = Some(state.editor.revision);
+        state.coordinator.requested_edge = state.editor.document.presentation.mesh_edge;
+        state.coordinator.reset_requested = true;
+        state.wave_running = false;
+        frame(&mut state, &mut request);
+        let heading =
+            |state: &Playground| state.coordinator.switch_targets.get(&material.id).copied();
+
+        state.request_material_switch();
+        frame(&mut state, &mut request);
+        assert_eq!(heading(&state), Some(true));
+        request.answer_live_event(CANONICAL_FAILURE_NON_FINITE);
+        frame(&mut state, &mut request);
+        assert_eq!(
+            heading(&state),
+            None,
+            "the first Switch refused, the medium reads as the device holds it"
+        );
+
+        state.request_material_switch();
+        frame(&mut state, &mut request);
+        assert_eq!(
+            heading(&state),
+            Some(true),
+            "the press after the refused one heads for the alternate"
+        );
+        request.answer_live_event(0);
+        state.request_material_switch();
+        frame(&mut state, &mut request);
+        assert_eq!(heading(&state), Some(false));
+        request.answer_live_event(CANONICAL_FAILURE_NON_FINITE);
+        frame(&mut state, &mut request);
+        assert_eq!(
+            heading(&state),
+            Some(true),
+            "the refused Switch back to the base leaves the medium headed for its alternate"
+        );
+
+        state.request_material_switch();
+        frame(&mut state, &mut request);
+        assert_eq!(
+            heading(&state),
+            Some(false),
+            "the next press heads back for the base"
+        );
+        request.answer_live_event(0);
+        frame(&mut state, &mut request);
+        assert_eq!(heading(&state), Some(false));
     }
 
     /// Reported: Reset restarted the solver's step counter but kept the AMR

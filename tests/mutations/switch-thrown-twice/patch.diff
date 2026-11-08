@@ -1,7 +1,6 @@
-diff --git a/crates/funfern-app/src/ui/runtime.rs b/crates/funfern-app/src/ui/runtime.rs
 --- a/crates/funfern-app/src/ui/runtime.rs
 +++ b/crates/funfern-app/src/ui/runtime.rs
-@@ -1396,8 +1396,17 @@ impl Playground {
+@@ -1431,7 +1431,16 @@
          #[cfg(test)]
          self.protocol_log.push(ProtocolNote::Switch(event.is_ok()));
          request.queue_live_event(assets, event.map_err(LiveEventRefusal::Refused)?)?;
@@ -17,6 +16,5 @@ diff --git a/crates/funfern-app/src/ui/runtime.rs b/crates/funfern-app/src/ui/ru
 +        request.queue_live_event(assets, again.map_err(LiveEventRefusal::Refused)?)?;
 +        self.coordinator.canonical_event_serial = serial.saturating_add(1);
          self.coordinator.experiment_mark = Some(serial);
-         self.coordinator.switch_targets.insert(material, !heading);
-         Ok(())
-     }
+         let before = self.coordinator.switch_targets.insert(material, !heading);
+         self.coordinator.switch_sent = Some(PendingSwitch {

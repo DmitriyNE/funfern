@@ -1,0 +1,10 @@
+--- a/crates/funfern-app/src/ui/runtime.rs
++++ b/crates/funfern-app/src/ui/runtime.rs
+@@ -836,7 +836,6 @@
+             };
+             if let Some(failure) = failure {
+                 let token = upload.token;
+-                self.runtime.reject_ready(token, failure.clone());
+                 self.message = failure;
+                 self.unseen_error = true;
+                 self.coordinator.uploading = None;

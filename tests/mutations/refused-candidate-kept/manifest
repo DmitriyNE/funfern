@@ -1,0 +1,4 @@
+about: a candidate the device refused stays ready, so the app hands the refused edit off again at once instead of waiting for the next edit or Remesh
+test: scripts/e2e-fixture.sh rollback-handoff
+expect: the refused edit's generation was installed
+needs: device
