@@ -1,0 +1,10 @@
+--- a/crates/funfern-app/src/ui/amr.rs
++++ b/crates/funfern-app/src/ui/amr.rs
+@@ -386,7 +386,6 @@
+             || canonical.previous_complementary_flux.len()
+                 != active.canonical_operator.complementary_degrees_of_freedom()
+             || canonical.previous_auxiliary.len() != canonical.auxiliary.len()
+-            || canonical.full_readback_at != canonical.readbacks
+         {
+             self.amr_status = "waiting for aligned readback".into();
+             return;

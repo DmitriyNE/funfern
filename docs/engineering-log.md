@@ -33170,3 +33170,110 @@ the device.
   Spotlight and media analysis, as on 2026-11-07. In the device code this
   change adds only a host test's answer to a live event, so the example runs
   the same code it ran then.
+
+## 2026-11-09 — The adaptive loop on the device, and the reach restores however few
+
+- **Why.** C7's fifth item (campaign plan, section 6l): the adaptive loop's
+  device half. AMR-01 to AMR-04 closed the loop on runs stepped on the CPU,
+  each mesh changing at the instant of its estimate. In the app the estimate
+  reads the device's f32 readbacks no sooner than 0.75 s of wall time after
+  the last, the transaction runs on the worker, the mesh it makes is
+  prepared, packed and handed off while the run goes on, changing the step,
+  and each handoff's stationary flux is taken away after it. No fixture ran
+  with adaptation on.
+- **The fixtures**, `ui/e2e/adaptive.rs`. `adaptive` clicks the app's pulse
+  at AMR-01's ring's place in the default box, adaptation and the grid
+  filter as a new document has them, 0.04 wide, and runs 8 s at the default
+  speed; `adaptive-slow` clicks the default 0.06 at a tenth of it. An f64
+  reference follows every generation on a thread of its own, so that the
+  frames keep the app's pace: handed off at the step the new generation's
+  clock names (`accepted_steps - step_in_epoch`) through the maps its
+  candidate was seen ready with, its stationary flux taken away at the step
+  the device's log records it encoded (`EncodedEvent::is_flux_cleanup`), the
+  filter at the device's strength on its absolute cadence. It stands with
+  every full snapshot it reaches, estimates every state the app estimated
+  with the controller as the frame that started it left it, and every eight
+  steps reads the field on AMR-01's 64 by 64 lattice against the mesh it
+  runs on. `FUNFERN_E2E_TRUTH` (a study's) runs the fine and the coarse box
+  beside it on the CPU.
+- **Study,** 20 runs of `adaptive` and 11 of `adaptive-slow` on lavapipe in
+  the container, one of each on Metal. The device side held everywhere:
+  every snapshot's Q, b and wall memory within 2.4e-6 of the most each held,
+  Q and b within 1.2e-5 of themselves while the field held its floor's share
+  of its peak, the app's estimates of the device's copies within 4.2e-6 of
+  the reference's and deciding alike, each mesh landing at most 0.46 of the
+  cycle its estimate's reach was drawn for after it (0.24 on lavapipe), the
+  clock within 3e-7. The wall memory read against itself reads 5.9e-5 the
+  most, at 0.7 s as it first gathers; it is held against its largest. What
+  the loop did is another matter:
+  - **The narrower ring is past AMR-01.** The default 0.06 never refines at
+    full speed on the device, its estimate 0.09 to 0.11 against 0.12, so
+    `adaptive` clicks 0.04, which refines as it reaches the walls. AMR-01's
+    bounds fail for it on every device and on the CPU harness too: peaks of
+    5,809 triangles on Metal, 13,300 to 14,330 on lavapipe and 7,828 on the
+    CPU; dormant past 8 s on Metal, at 7.1 to 7.8 s on lavapipe and 6.8 s
+    on the CPU; a handoff while the field held 1 to 3% of its peak losing
+    2.5%, 1.3 to 1.85% and 1.5% of its energy. With the user, `adaptive`
+    holds bounds measured here: refined past 1.3 authored meshes, under
+    0.35 of the fine one, no handoff gaining energy or losing more than 3%,
+    dormancy and coarsening back read; `adaptive-slow` keeps AMR-01's.
+  - **A slower device refines more.** Estimates are paced by the wall
+    clock: lavapipe, at about an eighth of the speed ceiling, estimates every
+    0.25 to 0.5 s of simulated time where Metal estimates every 0.75, and
+    chases the draining ring through 11 refinements where Metal makes 3.
+    With the user, left as designed and listed under plan.md's "Worth
+    checking sometime".
+  - **The reach restored nothing under four.** In 5 of 11 slow runs a
+    drained leftover stood on an element past 1.25 authored edges. In the
+    one read closely, at 1.01 of the presence floor on an element 1.42 times
+    the authored edge near a corner, the reach had asked for it and one more
+    back (`l2` at 2.964 s, the leftover there at 3.000), and a limit refined
+    only from four candidates. With the user, the indicator
+    counts the reach's own candidates apart (`reach_refine_candidates`), and
+    `adaptation_decision` restores them however few; the wavelength floor
+    and the largest element allowed keep their four.
+    `the_reach_restores_its_elements_however_few`,
+    `a_wavelength_finer_than_the_reach_owns_its_elements`. AMR-01 to AMR-04
+    hold with it, and a slow run makes as many handoffs as before (54 to
+    67). It did not end the exposures: in 3 of 10 slow runs after it a
+    leftover read 1.00 to 1.03 of the floor on elements 1.25 to 1.42
+    authored edges, where the reach, which holds an element by its own
+    average density, and the lattice's points part. With the user, the
+    fixture counts the field there from twice the floor, and plan.md lists
+    it.
+  - **Coarsenings just above the floor gain a little.** While the slow ring
+    held 1 to 2% of its peak, a coarsening's carry gained 3e-7 to 3.3e-6 of
+    its energy in 6 runs of 21, before the reach's fix as after, past
+    AMR-01's 1e-6: plan.md's dormant coarsening, a step above the floor.
+    With the user, the slow case allows 1e-5.
+  - **The harness filtered at the scalar wave's strength.** `tests/support`'s
+    `Run::filter` took `GRID_SCALE_FILTER_STRENGTH`, 1.5, since a2b3013
+    (2026-11-03), where the device filters at
+    `CANONICAL_GRID_FILTER_STRENGTH`, 1.0. With the user, it takes the
+    device's: AMR-01 to AMR-04 hold, but the packet in the reflecting box,
+    drained by the filter alone, first coarsens at 29.3 s where it did at 20,
+    and the gate runs it 32 s where it ran 24; nightly it ends at 2,878
+    triangles.
+- **Re-study,** after the fix, 10 runs of each on lavapipe: `adaptive`
+  passes all ten, peaks of 13,307 to 14,331 triangles, handoffs while held
+  losing 1.36 to 1.52%; `adaptive-slow`'s ten read within the bounds then
+  agreed, dormant at 4.31 to 4.34 s and down to 0.42 to 0.43 of its peak.
+- **Mutations,** tried on lavapipe in the container:
+  `estimate-reads-unaligned-readbacks` (the estimate's lanes from two copies)
+  is detected, the estimates parting by 8.5e-2 and deciding otherwise at
+  1.06 s; `adapted-handoff-left-uncleaned` is detected, the mesh climbing to
+  35,639 triangles on the stationary flux it never sheds, as AMR-01 first
+  found it on the CPU; `reach-restoration-needs-four` on the host. The
+  planned `estimate-before-the-new-mesh-steps` is equivalent here and
+  dropped: with the run going on, a new generation's first full readback
+  always stamps a step past its handoff, and the host's
+  `a_new_mesh_is_estimated_only_once_it_has_stepped` holds the held case.
+- **CI.** Both fixtures are in the device suite's list, so every pull
+  request runs them on lavapipe, which in the container take about 3 and 7
+  minutes, about four times CI's; the browser nightly leaves them out, their
+  reference stepping inside the page's frames there.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs; the device
+  suite 126 of 126 on the M1 Max, `adaptive` in 10 s and `adaptive-slow` in
+  82 s.

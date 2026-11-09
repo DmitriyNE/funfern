@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/ui/runtime.rs
++++ b/crates/funfern-app/src/ui/runtime.rs
+@@ -863,7 +863,7 @@
+                         // A fresh field started from rest holds no stationary
+                         // flux; a handoff's carry may.
+                         self.drop_flux_cleanup();
+-                        if !upload.fresh {
++                        if !upload.fresh && !active.adapted {
+                             self.flux_cleanup =
+                                 FluxCleanup::after_handoff(&active, request.generation());
+                         }

@@ -1,0 +1,4 @@
+about: the reach restores an element it asks back only when four ask, so one to three coarsened as the field was away wait while a leftover stands on them
+test: cargo test --release -p funfern-app --lib -- adaptation::tests::the_reach_restores_its_elements_however_few
+expect: left: Hold
+needs: cpu

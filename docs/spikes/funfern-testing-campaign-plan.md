@@ -1506,6 +1506,20 @@ mutation, in this order:
   refusal now puts back the direction recorded before it. A fault while a
   handoff waits stays with the host's sequences: on the device it turns on
   the order of two readbacks of one frame.
+  The adaptive loop's device half landed on 2026-11-09: `adaptive` and
+  `adaptive-slow` run the app's adaptation as it ships, a ring clicked in the
+  default box at full speed and at a tenth, with an f64 reference following
+  every generation on a thread of its own. Every snapshot stands with the
+  reference, the app's estimates of the device's copies agree with the
+  reference's, and each mesh lands within the cycle its reach was drawn for.
+  The study found the reach restoring nothing under four elements, which
+  left a drained leftover on a coarsened element in five slow runs of
+  eleven; with the user it now restores however few. The narrower ring the
+  full-speed case needs to refine is past AMR-01's bounds on the CPU too,
+  and holds bounds measured on the device; a slower device estimates more
+  often per simulated second and refines further, left as designed; and the
+  CPU harness, which filtered at the scalar wave's strength, now filters at
+  the device's.
 - **C8, robustness:** the 5.2 edge cases, on the CPU and then the device;
   RT-06; RT-07 with 5.4, a debug count of live shader buffers, staging,
   readbacks, bind groups and jobs in the fixtures binary, not wgpu's own

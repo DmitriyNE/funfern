@@ -1,0 +1,4 @@
+about: the estimate reads a full snapshot whose primary lanes a later primary-only readback has replaced, so the field and the state a step earlier it pairs come from different copies
+test: scripts/e2e-fixture.sh adaptive
+expect: part from the reference.s beyond
+needs: device

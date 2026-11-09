@@ -1,0 +1,4 @@
+about: an adapted mesh is handed off without the stationary flux its carry leaves taken away, which the estimate reads as error that never leaves, so the mesh refines and never comes back
+test: scripts/e2e-fixture.sh adaptive
+expect: the mesh passed 0.35 of the fine one
+needs: device

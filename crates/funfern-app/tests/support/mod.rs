@@ -11,8 +11,8 @@ use funfern_app::canonical_gpu::CanonicalGpuRuntimeTransfer;
 use funfern_app::topology_editor::{TopologyAcceptance, TopologyDocument, TopologyEditor};
 use funfern_app::topology_runtime::{PreparedCanonicalTransfer, PreparedTopology, TopologyRuntime};
 use funfern_core::{
-    CanonicalHandoffMaps, CanonicalPointStencil, CanonicalStationaryFluxJob,
-    CanonicalTemporalWaveState, CanonicalWaveState, DomainRect, GRID_SCALE_FILTER_STRENGTH,
+    CANONICAL_GRID_FILTER_STRENGTH, CanonicalHandoffMaps, CanonicalPointStencil,
+    CanonicalStationaryFluxJob, CanonicalTemporalWaveState, CanonicalWaveState, DomainRect,
     MeshingOptions, Point2, QuadraticPointStencil,
 };
 use std::sync::Arc;
@@ -155,7 +155,8 @@ impl Run {
 
     /// The grid-scale filter applied once, as the app applies it every
     /// [`funfern_core::GRID_SCALE_FILTER_CADENCE`] steps with the filter on,
-    /// as a new document has it.
+    /// as a new document has it, at the device's strength. The scalar wave's
+    /// 1.5 stood here until 2026-11-09, half again what the app applies.
     pub fn filter(&mut self, prepared: &PreparedTopology) -> Result<(), String> {
         let forcing = &prepared.canonical_forcing;
         match (self, &prepared.canonical_temporal_operator) {
@@ -163,11 +164,11 @@ impl Run {
                 .apply_grid_filter(
                     &prepared.canonical_operator,
                     forcing,
-                    GRID_SCALE_FILTER_STRENGTH,
+                    CANONICAL_GRID_FILTER_STRENGTH,
                 )
                 .map(|_| ()),
             (Run::Temporal(state), Some(temporal)) => state
-                .apply_grid_filter_with_forcing(temporal, forcing, GRID_SCALE_FILTER_STRENGTH)
+                .apply_grid_filter_with_forcing(temporal, forcing, CANONICAL_GRID_FILTER_STRENGTH)
                 .map(|_| ()),
             (Run::Temporal(_), None) => unreachable!("a temporal state on a fixed generation"),
         }

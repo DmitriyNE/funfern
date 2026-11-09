@@ -1738,9 +1738,12 @@ controller's test of the rule below holds it. The app's
 `a_coarsening_the_mesher_refused_is_not_asked_for_again_on_its_mesh` and
 `a_coarsening_refused_while_a_vertex_cooled_down_is_asked_again` hold the
 rule. `a_packet_in_a_reflecting_box_keeps_its_total_as_the_mesh_follows_it`
-runs the packet in the box with reflecting walls, 24 s in the gate and 60 s
+runs the packet in the box with reflecting walls, 32 s in the gate and 60 s
 nightly: its primary total within 1e-9 at every estimate, a coarsening as it
-spreads and fades, and no reversal over the second half. The study,
+spreads and fades, and no reversal over the second half. The grid filter is
+all that drains the box, and since the harness filters at the device's
+strength (2026-11-09) the first coarsening comes at 29.3 s, where at the
+scalar wave's 1.5 it came at 20. The study,
 `study_long_adaptation` (ignored, `LONG_CASE` picks a case), also had the
 ring alone in the reflecting box, which never adapts: its estimate reads
 9.8% at most against the 12% target, and the field fills the box, which it
@@ -1921,6 +1924,52 @@ are `refused-event-kept`, `event-refusal-unreported`,
 `refused-source-committed`, `refused-candidate-kept` and
 `failure-kept-before-corrective-handoff` on the device, and
 `refused-switch-kept` on the host.
+
+The adaptive loop's device half is held by `adaptive` and `adaptive-slow`
+(`ui/e2e/adaptive.rs`). Each clicks the app's pulse at AMR-01's ring's
+place in the default box, adaptation and the grid filter as a new document
+has them, and runs 8 s as the app paces it: `adaptive` at the default speed,
+0.04 wide, which the authored mesh does not hold, so that the mesh refines
+as the ring reaches the walls and each handoff changes the step;
+`adaptive-slow` at a tenth of the speed, the default 0.06, where the
+coarsening behind the ring and the reach restoring elements ahead of it
+hand off while the field is loud. An f64 reference follows every generation
+on a thread of its own, handed off at the step the new generation's clock
+names through the maps its candidate was prepared with, its stationary flux
+taken away at the step the device's log records, the filter on the device's
+cadence. Every full snapshot it reaches must stand within 1e-5 of the most
+Q, b and the wall's pole states held over the run, and Q and b within 3e-5
+of themselves while the field holds 1% of its peak energy (2.4e-6 and
+1.2e-5 the most measured; the wall's memory, read against itself, reads
+5.9e-5 as it first gathers). Every estimate the app takes of the device's
+copy must read within 1e-4 of the reference's of its own state and decide
+the same (4.2e-6 the most). Each mesh must land within the cycle its estimate's reach
+was drawn for (0.46 of it on Metal, 0.24 on lavapipe), and the field, read
+on a 64 by 64 lattice every eight steps, may never stand at twice 1% of its
+largest mean density on an element past 1.25 authored edges: the reach
+holds elements by their own average density, the lattice reads points, and
+at the floor itself the two part (1.00 to 1.03 of it, in 3 slow runs of 10).
+`adaptive` must refine past 1.3 authored meshes and stay under 0.35 of the
+fine one, and no handoff while the field holds its floor may gain energy or
+lose more than 3%: the narrower ring is past AMR-01's bounds on the CPU too
+(7,828 triangles, a handoff losing 1.5%, dormant at 6.8 s), and peaks at
+13,300 to 14,330 triangles on lavapipe, 5,809 on Metal. `adaptive-slow`
+keeps AMR-01's quarter and 1%, may gain 1e-5 at a coarsening just above the
+floor (3.3e-6 the most), and must go dormant (4.3 s) and come down to four
+fifths of its peak (0.42) with quiet regions past the authored size. The
+study found the reach restoring nothing under four elements, which left a
+leftover standing on a coarsened element: it now restores however few
+(`the_reach_restores_its_elements_however_few`, and in the core
+`a_wavelength_finer_than_the_reach_owns_its_elements`). Its mutations are
+`estimate-reads-unaligned-readbacks`, under which the app's estimates part
+from the reference's by 8e-2 and decide otherwise, and
+`adapted-handoff-left-uncleaned`, under which the estimate reads the carry's
+stationary flux as error and the mesh climbs to 35,639 triangles, on the
+device, and `reach-restoration-needs-four` on the host. Estimating a mesh
+before it has stepped is not one: with the run going on, the first readback
+of a new generation always stamps a step past its handoff, and
+`a_new_mesh_is_estimated_only_once_it_has_stepped` holds it. Natively and on lavapipe only: in the browser the reference
+would step inside the page's frames.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

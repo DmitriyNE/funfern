@@ -1801,6 +1801,26 @@ is next touched.
   level nothing shows it and dormancy has stopped the estimate reading it,
   but a gain can lift the field back over the dormant floor for a while, or
   gather enough that the reach restores an element (2026-11-04, 2026-11-05).
+  Just above the floor too: the `adaptive-slow` fixture's coarsenings while
+  the ring held 1 to 2% of its peak gained 3e-7 to 3.3e-6 of its energy in 6
+  runs of 21 on lavapipe, past AMR-01's 1e-6; the fixture allows 1e-5
+  (2026-11-09).
+- The reach holds an element by its own average density, against 1% of the
+  experiment's peak spread over the box, while AMR-01 and the device fixtures
+  read where the field is at lattice points. At the floor the two part: with
+  the reach restoring however few elements, a drained leftover still read
+  1.00 to 1.03 of the floor on elements 1.25 to 1.42 authored edges, near the
+  box's corners, in 3 `adaptive-slow` runs of 10. The fixture counts the
+  field on such an element from twice the floor (2026-11-09).
+- Adaptation estimates no sooner than 0.75 s of wall time after the last, so
+  a device that runs under the speed ceiling estimates more often per
+  simulated second and refines further for the same field. The 0.04 ring at
+  full speed, as `adaptive` clicks it, peaks at 13,300 to 14,330 triangles
+  on lavapipe, at about an eighth of the ceiling and estimating every 0.25
+  to 0.5 s of simulated time, and at 5,809 on Metal, estimating every 0.75;
+  the slow device then steps the finer mesh slower still. A floor in
+  simulated time under the wall-clock gap would make the two adapt alike,
+  later in wall time on the slow one (2026-11-09).
 
 ## Working practice
 

@@ -4486,6 +4486,11 @@ impl EncodedEvent {
     pub(crate) fn is_switch(&self) -> bool {
         self.kind == EVENT_TEMPORAL_SWITCH
     }
+
+    /// Whether it takes away the stationary flux a handoff left.
+    pub(crate) fn is_flux_cleanup(&self) -> bool {
+        self.kind == EVENT_FLUX_MAINTENANCE
+    }
 }
 
 /// How many encoded events a generation's stats keep.

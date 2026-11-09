@@ -118,8 +118,17 @@ pub fn target_accuracy(settings: AdaptationSettings) -> f64 {
 /// the estimate is substantially below it. That deadband, plus choosing only
 /// one direction per transaction, prevents a moving wave from making the same
 /// patch alternate between splitting and collapsing.
+///
+/// A limit refines once four elements ask, so that a floor a few elements
+/// brush against does not hand off a mesh for each. The field's reach is the
+/// exception: an element coarsened while the field was away, and asked back
+/// to the authored size as it comes, is restored however few there are. Held
+/// to four, one to three such elements waited, and a leftover gathering there
+/// stood on elements 1.4 times the authored size, in four of ten slow runs on
+/// the device (2026-11-09).
 pub fn adaptation_decision(report: &SolutionIndicatorReport, target_accuracy: f64) -> AmrDecision {
     if report.limit_refine_candidates >= 4
+        || report.reach_refine_candidates > 0
         || (report.error_refine_candidates >= 4 && report.global_indicator > target_accuracy)
     {
         AmrDecision::Refine
@@ -1029,6 +1038,28 @@ mod tests {
         assert_eq!(held_after(&mut controller, 30), 2);
         controller.mark_experiment();
         assert_eq!(held_after(&mut controller, 31), 2);
+    }
+
+    #[test]
+    fn the_reach_restores_its_elements_however_few() {
+        for few in 1..4 {
+            // The reach's own, at the size rule's authority.
+            let reach = SolutionIndicatorReport {
+                refine_candidates: few,
+                limit_refine_candidates: few,
+                reach_refine_candidates: few,
+                global_indicator: 0.02,
+                ..Default::default()
+            };
+            assert_eq!(adaptation_decision(&reach, 0.12), AmrDecision::Refine);
+            assert!(size_rule_refines(&reach, 0.12));
+            // A wavelength floor as few elements brush against waits for four.
+            let floor = SolutionIndicatorReport {
+                reach_refine_candidates: 0,
+                ..reach
+            };
+            assert_eq!(adaptation_decision(&floor, 0.12), AmrDecision::Hold);
+        }
     }
 
     #[test]

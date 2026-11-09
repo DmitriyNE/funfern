@@ -2577,12 +2577,14 @@ fn a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make() {
 
 /// AMR-03: the packet in the reflecting box, refined once as it starts and
 /// coarsened back as it spreads and fades, keeps its primary total: nothing
-/// leaves the box, and no handoff may take any. 24 s in the gate, past its
-/// first coarsening at 20 s; 60 s nightly, from 3,384 triangles at its peak
-/// to 2,874.
+/// leaves the box, and no handoff may take any. 32 s in the gate, past its
+/// first coarsening at 29.3 s; 60 s nightly, from 3,384 triangles at its
+/// peak to 2,878. The grid filter is all that drains the box: at the
+/// scalar wave's strength, which the harness filtered at until 2026-11-09,
+/// the first coarsening came at 20 s and the nightly ended at 2,874.
 #[test]
 fn a_packet_in_a_reflecting_box_keeps_its_total_as_the_mesh_follows_it() {
-    let (_, duration, looped) = long_run("cavity-packet", 24.0);
+    let (_, duration, looped) = long_run("cavity-packet", 32.0);
     let readings = &looped.readings;
     let first = readings[0].total;
     for reading in readings {

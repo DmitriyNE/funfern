@@ -18,6 +18,7 @@
 //! asks for ([`E2eSteps`]): the app asks by the wall clock, and a comparison
 //! needs an exact endpoint.
 
+mod adaptive;
 mod batches;
 #[path = "../../examples/support/check.rs"]
 mod check;
@@ -113,6 +114,10 @@ pub(crate) fn add(app: &mut App) {
     };
     if name == "batches" {
         batches::add(app, seconds);
+        return;
+    }
+    if let Some(fixture) = adaptive::AdaptiveFixture::named(&name) {
+        adaptive::add(app, fixture, seconds);
         return;
     }
     if let Some(fixture) = rollback::RollbackFixture::named(&name) {

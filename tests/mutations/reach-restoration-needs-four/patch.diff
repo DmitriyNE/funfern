@@ -1,0 +1,10 @@
+--- a/crates/funfern-app/src/adaptation.rs
++++ b/crates/funfern-app/src/adaptation.rs
+@@ -128,7 +128,6 @@
+ /// the device (2026-11-09).
+ pub fn adaptation_decision(report: &SolutionIndicatorReport, target_accuracy: f64) -> AmrDecision {
+     if report.limit_refine_candidates >= 4
+-        || report.reach_refine_candidates > 0
+         || (report.error_refine_candidates >= 4 && report.global_indicator > target_accuracy)
+     {
+         AmrDecision::Refine

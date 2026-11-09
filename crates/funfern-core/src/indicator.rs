@@ -806,6 +806,10 @@ pub struct SolutionIndicatorReport {
     /// element allowed. The constraint owns an element when it and the error
     /// estimate both bind; no accuracy target answers for these.
     pub limit_refine_candidates: usize,
+    /// Of `limit_refine_candidates`, the ones the field's reach binds: an
+    /// element coarsened while the field was away, which the reach asks back
+    /// to the authored size as the field comes.
+    pub reach_refine_candidates: usize,
     pub coarsen_candidates: usize,
     pub recovery_contribution: f64,
     pub displacement_recovery_contribution: f64,
@@ -864,6 +868,7 @@ impl Default for SolutionIndicatorReport {
             refine_candidates: 0,
             error_refine_candidates: 0,
             limit_refine_candidates: 0,
+            reach_refine_candidates: 0,
             coarsen_candidates: 0,
             recovery_contribution: 0.0,
             displacement_recovery_contribution: 0.0,
@@ -1189,6 +1194,9 @@ pub struct SolutionIndicatorJob {
     /// and a limit can bind at once; the limit must win that classification or
     /// a satisfied global accuracy target can suppress a mandatory refinement.
     limit_bound: Vec<bool>,
+    /// Of those, whether the limit is the field's reach rather than the
+    /// wavelength or the largest element allowed.
+    reach_bound: Vec<bool>,
     /// The limits' targets without the estimate's, graded beside `targets`.
     limit_targets: Vec<f64>,
     total_energy: f64,
@@ -1261,6 +1269,7 @@ impl SolutionIndicatorJob {
             indicators: vec![0.0; count],
             targets: vec![0.0; count],
             limit_bound: vec![false; count],
+            reach_bound: vec![false; count],
             limit_targets: vec![0.0; count],
             total_energy: 0.0,
             total_area: 0.0,
@@ -2425,6 +2434,9 @@ impl SolutionIndicatorJob {
             .unwrap_or(largest)
             .clamp(self.options.minimum_edge_length, largest);
         self.limit_bound[index] = estimate.edge > 1.05 * limit_target;
+        self.reach_bound[index] = self.limit_bound[index]
+            && largest < self.options.maximum_edge_length
+            && limit_target >= largest;
         let target = error_target.min(limit_target);
         self.indicators[index] = indicator;
         self.targets[index] = target;
@@ -2521,6 +2533,9 @@ impl SolutionIndicatorJob {
                 // accuracy gate with it.
                 if self.limit_bound[index] {
                     self.report.limit_refine_candidates += 1;
+                    if self.reach_bound[index] {
+                        self.report.reach_refine_candidates += 1;
+                    }
                 } else {
                     self.report.error_refine_candidates += 1;
                 }
@@ -3918,6 +3933,7 @@ mod tests {
         assert!((result.report.smallest_wavelength_target - 0.02).abs() < 1.0e-12);
         assert_eq!(result.report.refine_candidates, 2);
         assert_eq!(result.report.limit_refine_candidates, 2);
+        assert_eq!(result.report.reach_refine_candidates, 0);
         assert_eq!(result.report.error_refine_candidates, 0);
     }
 
@@ -4243,9 +4259,38 @@ mod tests {
         );
         assert_eq!(free.report.limit_refine_candidates, 0);
         assert!(held.report.limit_refine_candidates > 0, "{:?}", held.report);
+        // Each of them the reach's, which the decision restores however few.
+        assert_eq!(
+            held.report.reach_refine_candidates,
+            held.report.limit_refine_candidates
+        );
         // A refinement the limits alone ask for splits only what the reach
         // holds: its field leaves the far side at the largest allowed.
         assert!(held.report.limit_refine_candidates < setup.0.triangles.len());
+    }
+
+    #[test]
+    fn a_wavelength_finer_than_the_reach_owns_its_elements() {
+        let mut setup = bump_setup();
+        let free = estimate_with(&setup, None);
+        let reach = FieldReach {
+            horizon: 0.3,
+            speed_factor: 1.0,
+            authored_edge: 0.06,
+            holding_energy: 1.0e-2 * free.report.total_energy,
+        };
+        // A forced wave of 0.025 at five elements a wavelength asks for 0.025,
+        // finer than the reach's 0.06 everywhere: the floor binds, not the
+        // reach, and keeps its own threshold.
+        setup.4.forcing_frequency_hz = 8.0;
+        setup.4.elements_per_wavelength = 5.0;
+        let forced = estimate_with(&setup, Some(reach));
+        assert!(
+            forced.report.limit_refine_candidates > 0,
+            "{:?}",
+            forced.report
+        );
+        assert_eq!(forced.report.reach_refine_candidates, 0);
     }
 
     #[test]
