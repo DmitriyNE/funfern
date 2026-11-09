@@ -158,7 +158,6 @@ impl Playground {
             }
             if let BackgroundPreparationEvent::Finished { result, .. } = event {
                 let settled = self.runtime.finish_external_preparation(*result);
-                #[cfg(test)]
                 if let Some(settled) = &settled {
                     self.protocol_log
                         .push(ProtocolNote::Prepared(settled.is_ok()));
@@ -274,9 +273,8 @@ impl Playground {
             fresh,
             require_solver_handoff,
         ) {
-            Ok(_token) => {
-                #[cfg(test)]
-                self.protocol_log.push(ProtocolNote::Requested(_token));
+            Ok(token) => {
+                self.protocol_log.push(ProtocolNote::Requested(token));
                 self.coordinator.requested(
                     self.editor.revision,
                     PreparedInputs::of(&self.editor.document),
@@ -297,9 +295,10 @@ impl Playground {
         }
     }
     /// Packs `candidate` for the device off the frame, and in tests that ask
-    /// for it on the frame, so that when the device sees it is theirs to say.
+    /// for it on the frame or when they say, so that when the device sees it
+    /// is theirs to say.
     fn dispatch_pack(
-        &self,
+        &mut self,
         sender: mpsc::Sender<Result<PreparedGpuUpload, String>>,
         candidate: PreparedTopology,
         active: Option<Arc<PreparedTopology>>,
@@ -307,6 +306,18 @@ impl Playground {
         runtime_serials: [u32; 4],
     ) {
         let running_time = self.simulated_time();
+        #[cfg(test)]
+        if let Some(held) = &mut self.held_packs {
+            held.push(HeldPack {
+                sender,
+                candidate,
+                active,
+                time_step,
+                running_time,
+                runtime_serials,
+            });
+            return;
+        }
         #[cfg(test)]
         if self.pack_inline {
             let _ = sender.send(compile_gpu_upload(
@@ -563,7 +574,6 @@ impl Playground {
                 PreparedSolverUpdate::FullHandoff => Update::Full,
             };
             let same_step = self.same_time_step(&candidate);
-            #[cfg(test)]
             self.protocol_log
                 .push(ProtocolNote::Carry { same_step, update });
             let mut needs_gpu_pack = false;
@@ -615,7 +625,6 @@ impl Playground {
                                 }
                                 .map_err(|error| format!("{error:?}"))
                             });
-                        #[cfg(test)]
                         self.protocol_log.push(ProtocolNote::Patch {
                             built: event.is_ok(),
                             packable: candidate.canonical_transfer.is_some(),
@@ -673,6 +682,7 @@ impl Playground {
                 Ok(result) => {
                     job.result = Some(result);
                     self.handoff_packed = Some(Instant::now());
+                    self.protocol_log.push(ProtocolNote::Packed);
                     #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
                     crate::set_browser_gpu_pack_status("finished");
                 }
@@ -680,6 +690,7 @@ impl Playground {
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     job.result = Some(Err("Canonical GPU packing worker stopped".into()));
                     self.handoff_packed = Some(Instant::now());
+                    self.protocol_log.push(ProtocolNote::Packed);
                 }
             }
         }
@@ -748,7 +759,6 @@ impl Playground {
                     Ok(())
                 }
             });
-            #[cfg(test)]
             self.protocol_log.push(ProtocolNote::Begin {
                 install: !handed_off,
                 ok: upload.is_ok(),
@@ -866,6 +876,9 @@ impl Playground {
                         if !upload.fresh {
                             self.flux_cleanup =
                                 FluxCleanup::after_handoff(&active, request.generation());
+                            if self.flux_cleanup.is_some() {
+                                self.protocol_log.push(ProtocolNote::CleanupDue);
+                            }
                         }
                         if let Some(worker) = &mut self.background_amr {
                             worker.cancel_kind(BackgroundAmrKind::Indicator);
@@ -1021,7 +1034,6 @@ impl Playground {
                     )
                     .map_err(|error| format!("{error:?}"))
                 });
-                #[cfg(test)]
                 self.protocol_log.push(ProtocolNote::Pulse(built.is_ok()));
                 match built
                     .map_err(LiveEventRefusal::Refused)
@@ -1060,10 +1072,7 @@ impl Playground {
                     }
                 }
             }
-            // A handoff's stationary flux waits behind the user's own events.
-            if self.coordinator.pending_switches.is_empty()
-                && let Some(active) = self.runtime.active().cloned()
-            {
+            if let Some(active) = self.runtime.active().cloned() {
                 self.send_flux_cleanup(&active, request, assets);
             }
             // Drain once the packed candidate is ready so begin_handoff gets a
@@ -1383,7 +1392,6 @@ impl Playground {
         material: MaterialId,
     ) -> Result<(), LiveEventRefusal> {
         let Some(temporal) = &active.canonical_temporal_operator else {
-            #[cfg(test)]
             self.protocol_log.push(ProtocolNote::Switch(false));
             return Err("This medium has no Switch to throw".into());
         };
@@ -1398,7 +1406,6 @@ impl Playground {
             .find(|candidate| candidate.id == material)
             .map(|found| found.switch_ramp)
         else {
-            #[cfg(test)]
             self.protocol_log.push(ProtocolNote::Switch(false));
             return Ok(());
         };
@@ -1415,7 +1422,6 @@ impl Playground {
                     .map(|record| record.switch().target_blend() >= 0.5)
             });
         let Some(heading) = heading else {
-            #[cfg(test)]
             self.protocol_log.push(ProtocolNote::Switch(false));
             return Err("This material has no Switch in the running generation".into());
         };
@@ -1428,7 +1434,6 @@ impl Playground {
         let event =
             CanonicalGpuLiveEvent::temporal_switch_in(&runtime, material, !heading, ramp, serial)
                 .map_err(|error| format!("{error:?}"));
-        #[cfg(test)]
         self.protocol_log.push(ProtocolNote::Switch(event.is_ok()));
         request.queue_live_event(assets, event.map_err(LiveEventRefusal::Refused)?)?;
         self.coordinator.canonical_event_serial = serial;

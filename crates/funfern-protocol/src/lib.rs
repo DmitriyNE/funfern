@@ -31,9 +31,9 @@
 pub mod decisions;
 
 use decisions::{
-    FaultSeen, LiveEventFallback, RequestSeen, Route, Settlement, Supervision, Update, UploadSeen,
-    carry, live_event_fallback, request_due, settle_upload, standing, starts_from_zero,
-    steps_withheld, supervise_fault, upload_may_begin,
+    CleanupSeen, FaultSeen, LiveEventFallback, RequestSeen, Route, Settlement, Supervision, Update,
+    UploadSeen, carry, cleanup_may_send, live_event_fallback, request_due, settle_upload, standing,
+    starts_from_zero, steps_withheld, supervise_fault, upload_may_begin,
 };
 
 /// A candidate, named by the order of its request.
@@ -91,6 +91,27 @@ pub enum Event {
     Pulse,
     Switch,
     Patch(Token),
+    /// The flux maintenance that takes a handoff's stationary flux away.
+    Cleanup,
+}
+
+/// What the solve for a handoff's stationary flux comes to in a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(kani, derive(kani::Arbitrary))]
+pub enum Solve {
+    NotYet,
+    /// A part past the solve's own tolerance: the event to send.
+    Found,
+    /// None past it, or the solve failed: nothing is sent.
+    Nothing,
+}
+
+/// A handoff's stationary flux to take away, for the generation the handoff
+/// published as, and whether its solve has found the event to send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cleanup {
+    pub generation: u8,
+    pub found: bool,
 }
 
 /// What happens to the frame's inputs that the app computes.
@@ -106,6 +127,9 @@ pub struct Frame {
     pub prepared: Prepared,
     /// What a candidate ready for the device is found to be.
     pub carried: Carried,
+    /// The pack in flight has come back from its worker by this frame's look,
+    /// which may be the frame that sent it.
+    pub packed: bool,
     /// A packed candidate installs rather than hands off, its medium having
     /// started or stopped being driven.
     pub install: bool,
@@ -123,6 +147,13 @@ pub struct Frame {
     /// Adaptation finished a transaction that changed the mesh, and asks for
     /// the running topology on it once the runtime's blocks are done.
     pub adapted: bool,
+    /// A candidate published this frame runs a flux that neither moves with
+    /// a runtime nor loses energy, so a handoff's carry onto it may have left
+    /// a stationary part to take away.
+    pub cleans: bool,
+    /// What the solve for the stationary part comes to, after the runtime's
+    /// blocks.
+    pub cleanup: Solve,
 }
 
 /// One step of the interleaving.
@@ -230,6 +261,8 @@ pub struct Protocol {
     pub preparing: Option<Token>,
     pub ready: Option<Token>,
     pub packed: Option<Token>,
+    /// The pack has come back from its worker.
+    pub pack_back: bool,
     pub uploading: Option<Upload>,
     pub source_commit: Option<Token>,
     pub active: Option<Token>,
@@ -253,6 +286,8 @@ pub struct Protocol {
     pub presses: u64,
     /// A device failure the host has paused for.
     pub fault: bool,
+    /// The last handoff's stationary flux, until its event is sent.
+    pub cleanup: Option<Cleanup>,
     pub running: bool,
     pub stepping: bool,
     /// The mesh edge, named by value, and the one the latest request was
@@ -295,6 +330,7 @@ impl Default for Protocol {
             preparing: None,
             ready: None,
             packed: None,
+            pack_back: false,
             uploading: None,
             source_commit: None,
             active: None,
@@ -309,6 +345,7 @@ impl Default for Protocol {
             switches: 0,
             presses: 0,
             fault: false,
+            cleanup: None,
             running: true,
             stepping: false,
             edge: 0,
@@ -458,12 +495,42 @@ impl Protocol {
     }
 
     /// One host frame: validation's share, the blocks of `refresh_runtime`
-    /// in its order, and then adaptation's, `refresh_amr`.
+    /// in its order, the stationary flux's, `refresh_flux_cleanup`, and then
+    /// adaptation's, `refresh_amr`.
     fn frame(&mut self, frame: Frame) {
         self.refresh_runtime(frame);
+        self.refresh_cleanup(frame.cleanup);
         if frame.adapted {
             self.adapt();
         }
+    }
+
+    /// `refresh_flux_cleanup`: a cleanup of a generation the device no longer
+    /// runs goes, and the solve for one answers.
+    fn refresh_cleanup(&mut self, solve: Solve) {
+        let Some(cleanup) = self.cleanup else {
+            return;
+        };
+        if cleanup.generation != self.generation {
+            self.cleanup = None;
+        } else if !cleanup.found {
+            match solve {
+                Solve::NotYet => {}
+                Solve::Found => {
+                    self.cleanup = Some(Cleanup {
+                        found: true,
+                        ..cleanup
+                    })
+                }
+                Solve::Nothing => self.cleanup = None,
+            }
+        }
+    }
+
+    /// No candidate packed.
+    fn unpack(&mut self) {
+        self.packed = None;
+        self.pack_back = false;
     }
 
     /// `refresh_amr` asking for the active topology on an adapted mesh: not
@@ -518,7 +585,7 @@ impl Protocol {
             self.last_error = None;
             self.uploading = None;
             self.source_commit = None;
-            self.packed = None;
+            self.unpack();
             self.uploaded = None;
             self.retimed = None;
             self.fault = false;
@@ -595,7 +662,7 @@ impl Protocol {
             }
         }
         if self.packed.is_some() && self.packed != self.ready {
-            self.packed = None;
+            self.unpack();
         }
         // A ready candidate is carried.
         if self.uploading.is_none()
@@ -627,16 +694,23 @@ impl Protocol {
                 Route::Pack => self.packed = Some(token),
             }
         }
-        // A packed candidate begins its upload once the device has caught up
-        // and has no live event in flight. A failed device is cleared first:
-        // a corrective edit hands off from the accepted state, and the event
-        // the failure stranded is sent again, which the upload then waits for.
+        // The pack comes back from its worker, in the frame that sent it or
+        // a later one.
+        if self.packed.is_some() && frame.packed {
+            self.pack_back = true;
+        }
+        // A packed candidate begins its upload once it is back, the device
+        // has caught up and has no live event in flight. A failed device is
+        // cleared first: a corrective edit hands off from the accepted state,
+        // and the event the failure stranded is sent again, which the upload
+        // then waits for.
         if self.uploading.is_none()
             && !self.behind()
+            && self.pack_back
             && let Some(token) = self.packed
         {
             if self.ready != Some(token) {
-                self.packed = None;
+                self.unpack();
                 return;
             }
             if let Some(device) = &mut self.device
@@ -649,7 +723,7 @@ impl Protocol {
                 self.stranded = false;
             }
             if upload_may_begin(true, self.event.is_some()) {
-                self.packed = None;
+                self.unpack();
                 let install = self.fresh_tokens[token as usize % TOKENS]
                     || self.active.is_none()
                     || frame.install;
@@ -714,6 +788,13 @@ impl Protocol {
                     if self.requested == Some(upload.token) && self.ready == Some(upload.token) {
                         self.ready = None;
                         self.active = Some(upload.token);
+                        // A handoff's carry may leave a stationary flux; a
+                        // field started from rest holds none.
+                        let fresh = self.fresh_tokens[upload.token as usize % TOKENS];
+                        self.cleanup = (frame.cleans && !fresh).then_some(Cleanup {
+                            generation: self.generation,
+                            found: false,
+                        });
                     }
                 }
                 Settlement::Wait => {}
@@ -740,7 +821,8 @@ impl Protocol {
             self.patched = None;
             // A pack waiting for the device was made against the run Reset
             // clears; the candidate is packed again.
-            self.packed = None;
+            self.unpack();
+            self.cleanup = None;
             self.reset = false;
             self.uploaded = Some(active);
             self.pulses = 0;
@@ -769,12 +851,26 @@ impl Protocol {
                 self.switches -= 1;
                 self.presses >>= 1;
             }
-            // Steps, unless a packed candidate or a fresh upload holds them.
+            // A handoff's stationary flux waits behind the user's own events.
+            // Refused, it is given up.
+            if let Some(cleanup) = self.cleanup
+                && cleanup.found
+                && cleanup_may_send(CleanupSeen {
+                    current: cleanup.generation == self.generation,
+                    transacting: self.uploading.is_some() || self.source_commit.is_some(),
+                    pressed: self.pulses > 0 || self.switches > 0,
+                })
+                && self.queue(true, Event::Cleanup) != Queued::Busy
+            {
+                self.cleanup = None;
+            }
+            // Steps, unless a packed candidate back from its worker or a
+            // fresh upload holds them.
             let fresh_upload = self
                 .uploading
                 .is_some_and(|upload| self.fresh_tokens[upload.token as usize % TOKENS]);
             let withheld = steps_withheld(
-                self.uploading.is_none() && self.packed.is_some(),
+                self.uploading.is_none() && self.packed.is_some() && self.pack_back,
                 fresh_upload,
             );
             if !withheld
@@ -943,6 +1039,10 @@ impl Protocol {
             self.packed.is_none() || self.uploading.is_none(),
             "a candidate packed while another uploads"
         );
+        assert!(
+            !self.pack_back || self.packed.is_some(),
+            "a pack back with none packed"
+        );
         if let Some(token) = self.source_commit {
             assert!(self.uploading.is_none(), "a source commit during an upload");
             assert!(
@@ -964,6 +1064,7 @@ impl Protocol {
             || self.uploading.is_some()
             || self.packed.is_some()
             || self.source_commit.is_some()
+            || self.cleanup.is_some()
             || self.preparing.is_some()
             || self.ready.is_some()
             || self.pulses > 0
@@ -996,16 +1097,19 @@ impl Protocol {
             })
     }
 
-    /// The fair suffix: validation finishes, every frame prepares and carries
-    /// what it can, the device completes and admits what it is given, and a
-    /// paused run is resumed, as its message asks. Answers whether it came to
+    /// The fair suffix: validation finishes, every frame prepares, packs and
+    /// carries what it can, the device completes and admits what it is
+    /// given, a stationary flux is found, and a paused run is resumed, as its
+    /// message asks. A candidate is found to be `carried`, and one published
+    /// leaves a stationary flux where `cleans`. Answers whether it came to
     /// rest within `rounds`.
-    pub fn settle(&mut self, rounds: usize, carried: Carried) -> bool {
+    pub fn settle(&mut self, rounds: usize, carried: Carried, cleans: bool) -> bool {
         let fair = Frame {
             validated: true,
             inputs: self.inputs,
             prepared: Prepared::Done,
             carried,
+            packed: true,
             install: false,
             begun: true,
             pulse: true,
@@ -1013,6 +1117,8 @@ impl Protocol {
             behind: false,
             retime: false,
             adapted: false,
+            cleans,
+            cleanup: Solve::Found,
         };
         for _ in 0..rounds {
             if self.fault || self.failed() {
@@ -1061,7 +1167,7 @@ mod tests {
                 validates: valid,
                 ..Protocol::default()
             };
-            assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
+            assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
             assert!(protocol.active.is_some());
         }
     }
@@ -1074,6 +1180,7 @@ mod tests {
             inputs: 1,
             prepared: Prepared::Done,
             carried: Carried::WHOLE,
+            packed: true,
             install: false,
             begun: true,
             pulse: true,
@@ -1081,6 +1188,8 @@ mod tests {
             behind,
             retime: false,
             adapted: false,
+            cleans: true,
+            cleanup: Solve::Found,
         }
     }
 
@@ -1091,7 +1200,7 @@ mod tests {
     #[test]
     fn a_handoff_never_begins_with_a_live_event_in_flight() {
         let mut protocol = Protocol::default();
-        assert!(protocol.settle(8, Carried::WHOLE));
+        assert!(protocol.settle(8, Carried::WHOLE, true));
         for step in [
             // The run asks for steps the device has not done.
             Step::Frame(Frame {
@@ -1116,7 +1225,7 @@ mod tests {
             protocol.step(step);
             protocol.check();
         }
-        assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
+        assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
     }
 
     /// RT-3 of the 2026-10-20 review: a pulse in flight when the run fails is
@@ -1127,13 +1236,13 @@ mod tests {
     #[test]
     fn an_event_stranded_by_a_fault_settles_once_the_run_resumes() {
         let mut protocol = Protocol::default();
-        assert!(protocol.settle(8, Carried::WHOLE));
+        assert!(protocol.settle(8, Carried::WHOLE, true));
         for step in [Step::Pulse, Step::Frame(frame(false)), Step::Fault] {
             protocol.step(step);
             protocol.check();
         }
         assert!(protocol.stranded, "the fault strands the pulse in flight");
-        assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
+        assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
     }
 
     /// RT-11 of the 2026-10-20 review: a retimed candidate refused leaves the
@@ -1143,7 +1252,7 @@ mod tests {
     #[test]
     fn a_refused_retime_is_not_asked_again() {
         let mut protocol = Protocol::default();
-        assert!(protocol.settle(8, Carried::WHOLE));
+        assert!(protocol.settle(8, Carried::WHOLE, true));
         let requests = protocol.next;
         let refused = Frame {
             retime: true,
@@ -1173,7 +1282,7 @@ mod tests {
     #[test]
     fn an_adaptation_leaves_a_failed_edit_standing() {
         let mut protocol = Protocol::default();
-        assert!(protocol.settle(8, Carried::WHOLE));
+        assert!(protocol.settle(8, Carried::WHOLE, true));
         let running = protocol.active.unwrap();
         protocol.step(Step::Edit {
             inputs: 1,
@@ -1190,7 +1299,7 @@ mod tests {
             ..frame(false)
         }));
         assert_eq!(protocol.next, requests + 1, "adaptation asked");
-        assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
+        assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
         let active = protocol.active.unwrap();
         assert_ne!(active, running);
         assert_eq!(protocol.revision_of(active), protocol.revision_of(running));
@@ -1203,7 +1312,7 @@ mod tests {
     #[test]
     fn an_adaptation_while_the_draft_is_invalid_asks_for_nothing_after_it() {
         let mut protocol = Protocol::default();
-        assert!(protocol.settle(8, Carried::WHOLE));
+        assert!(protocol.settle(8, Carried::WHOLE, true));
         protocol.step(Step::Edit {
             inputs: 0,
             valid: false,
@@ -1216,15 +1325,96 @@ mod tests {
             adapted: true,
             ..frame(false)
         }));
-        assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
+        assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
         assert_eq!(protocol.next, requests + 1, "nothing asked again");
+    }
+
+    /// RT-01: the app packs on a worker, and the pack comes back frames after
+    /// the frame that sent it. Until then the run steps on, and the upload
+    /// begins once it is back.
+    #[test]
+    fn a_pack_back_late_begins_its_upload_then() {
+        let mut protocol = Protocol::default();
+        assert!(protocol.settle(8, Carried::WHOLE, false));
+        let away = Frame {
+            packed: false,
+            ..frame(true)
+        };
+        protocol.step(Step::Edit {
+            inputs: 1,
+            valid: true,
+        });
+        for _ in 0..3 {
+            protocol.step(Step::Frame(away));
+            protocol.check();
+            assert!(protocol.packed.is_some() && protocol.uploading.is_none());
+            assert!(protocol.behind(), "the steps were withheld");
+            protocol.step(Step::Readbacks { caught_up: true });
+        }
+        protocol.step(Step::Frame(frame(false)));
+        protocol.check();
+        assert!(protocol.uploading.is_some(), "back, it uploads");
+        assert!(protocol.settle(8, Carried::WHOLE, false), "{protocol:#?}");
+    }
+
+    /// RT-01: a handoff's stationary flux, once found, is sent behind the
+    /// presses waiting, and an upload waits for its event as for any.
+    #[test]
+    fn a_stationary_flux_waits_behind_presses_and_holds_an_upload() {
+        let mut protocol = Protocol::default();
+        assert!(protocol.settle(8, Carried::WHOLE, true));
+        protocol.step(Step::Edit {
+            inputs: 1,
+            valid: true,
+        });
+        for step in [
+            Step::Frame(frame(false)),
+            Step::Handoff { admit: true },
+            Step::Frame(Frame {
+                cleanup: Solve::NotYet,
+                ..frame(false)
+            }),
+        ] {
+            protocol.step(step);
+            protocol.check();
+        }
+        let generation = protocol.generation;
+        assert_eq!(
+            protocol.cleanup,
+            Some(Cleanup {
+                generation,
+                found: false
+            })
+        );
+        protocol.step(Step::Pulse);
+        protocol.step(Step::Frame(frame(false)));
+        assert_eq!(protocol.event, Some(Event::Pulse), "the pulse goes first");
+        assert!(protocol.cleanup.is_some_and(|cleanup| cleanup.found));
+        protocol.step(Step::Settle { take: true });
+        protocol.step(Step::Frame(frame(false)));
+        assert_eq!(protocol.event, Some(Event::Cleanup));
+        assert_eq!(protocol.cleanup, None);
+        protocol.step(Step::Edit {
+            inputs: 2,
+            valid: true,
+        });
+        protocol.step(Step::Frame(frame(false)));
+        protocol.check();
+        assert!(
+            protocol.packed.is_some() && protocol.uploading.is_none(),
+            "the edit's pack waits for the event"
+        );
+        protocol.step(Step::Settle { take: true });
+        protocol.step(Step::Frame(frame(false)));
+        assert!(protocol.uploading.is_some());
+        assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
     }
 
     /// An edit, a Reset and a fault on the way all come to rest.
     #[test]
     fn edits_resets_and_faults_come_to_rest() {
         let mut protocol = Protocol::default();
-        assert!(protocol.settle(8, Carried::WHOLE));
+        assert!(protocol.settle(8, Carried::WHOLE, true));
         for step in [
             Step::Edit {
                 inputs: 1,
@@ -1237,6 +1427,6 @@ mod tests {
             protocol.step(step);
             protocol.check();
         }
-        assert!(protocol.settle(8, Carried::WHOLE), "{protocol:#?}");
+        assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
     }
 }

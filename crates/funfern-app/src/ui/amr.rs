@@ -275,9 +275,8 @@ impl Playground {
                         .runtime
                         .request_adapted_carrying(mesh, !self.amr.dormant_transaction)
                     {
-                        Ok(_token) => {
-                            #[cfg(test)]
-                            self.protocol_log.push(ProtocolNote::Adapted(_token));
+                        Ok(token) => {
+                            self.protocol_log.push(ProtocolNote::Adapted(token));
                             self.amr_status = "preparing adaptive handoff".into();
                             self.amr_error = None;
                             self.begin_handoff_timeline();

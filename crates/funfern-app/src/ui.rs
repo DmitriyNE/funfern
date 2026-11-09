@@ -450,8 +450,8 @@ struct PendingSwitch {
 }
 
 /// What the runtime decided at the points the protocol model takes as inputs,
-/// for the tests that run the model beside it (`funfern-protocol`).
-#[cfg(test)]
+/// for what runs the model beside it (`funfern-protocol`): the runtime's
+/// sequences, and the fixture that runs it beside the app on a device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProtocolNote {
     Requested(TopologyToken),
@@ -485,6 +485,38 @@ enum ProtocolNote {
     FluxCleanup(bool),
     /// The speed no longer asks for the running step: requested again.
     Retimed,
+    /// A pack came back from its worker.
+    Packed,
+    /// A handoff published onto a generation whose stationary flux is taken
+    /// away.
+    CleanupDue,
+    /// The solve for that flux found a part to take away, or none.
+    CleanupSolved(bool),
+}
+
+/// The runtime's [`ProtocolNote`]s, kept only where something reads them: one
+/// build serves the app and its fixtures, and the app keeps none.
+#[derive(Default)]
+struct ProtocolLog(Option<Vec<ProtocolNote>>);
+
+impl ProtocolLog {
+    /// A log that keeps what it is told.
+    #[cfg(test)]
+    fn kept() -> Self {
+        Self(Some(Vec::new()))
+    }
+
+    fn push(&mut self, note: ProtocolNote) {
+        if let Some(notes) = &mut self.0 {
+            notes.push(note);
+        }
+    }
+
+    /// What it was told since the last take.
+    #[cfg(test)]
+    fn take(&mut self) -> Vec<ProtocolNote> {
+        self.0.as_mut().map(std::mem::take).unwrap_or_default()
+    }
 }
 
 /// What a preparation reads of the document: the accepted scene and what
@@ -593,6 +625,32 @@ struct GpuUploadPreparation {
     time_step: f64,
     receiver: Mutex<Receiver<Result<PreparedGpuUpload, String>>>,
     result: Option<Result<PreparedGpuUpload, String>>,
+}
+
+/// A pack a test holds back until it makes it (`Playground::held_packs`).
+#[cfg(test)]
+struct HeldPack {
+    sender: std::sync::mpsc::Sender<Result<PreparedGpuUpload, String>>,
+    candidate: PreparedTopology,
+    active: Option<Arc<PreparedTopology>>,
+    time_step: f64,
+    running_time: f64,
+    runtime_serials: [u32; 4],
+}
+
+#[cfg(test)]
+impl HeldPack {
+    /// Packs it, and sends the pack to the frame waiting for it, if one
+    /// still does.
+    fn release(self) {
+        let _ = self.sender.send(workers::compile_gpu_upload(
+            self.candidate,
+            self.active,
+            self.time_step,
+            self.running_time,
+            self.runtime_serials,
+        ));
+    }
 }
 
 /// What the probe buffers on the GPU were last built for. The topology names

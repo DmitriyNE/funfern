@@ -1,7 +1,7 @@
 --- a/crates/funfern-app/src/ui/runtime.rs
 +++ b/crates/funfern-app/src/ui/runtime.rs
-@@ -1431,7 +1431,16 @@
-         #[cfg(test)]
+@@ -1436,7 +1436,16 @@
+                 .map_err(|error| format!("{error:?}"));
          self.protocol_log.push(ProtocolNote::Switch(event.is_ok()));
          request.queue_live_event(assets, event.map_err(LiveEventRefusal::Refused)?)?;
 -        self.coordinator.canonical_event_serial = serial;

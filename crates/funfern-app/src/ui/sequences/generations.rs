@@ -19,8 +19,10 @@
 //! has made it another generation's (RT-03); the device can settle a handoff,
 //! a live event or a failure whose news waits in a copy. Preparation advances
 //! by the units each frame is granted, on the frame or on a worker the
-//! sequence plays, and packing happens on the frame, so the order is the
-//! sequence's alone.
+//! sequence plays, and packing happens on the frame or, where the sequence
+//! plays the worker, when it says, so the order is the sequence's alone. The
+//! solve for the stationary flux a handoff leaves answers when the sequence
+//! says too, since the device serves no full snapshot to start it.
 //!
 //! The harness keeps what it has watched the device come to run: the
 //! generation and the host token it carries, from the upload or Reset that
@@ -84,6 +86,12 @@ enum Act {
     /// The played preparation worker works that many slices; `None`, all
     /// its job needs.
     Work(Option<usize>),
+    /// The oldest pack held back is made and sent to the frame waiting for
+    /// it, if one still does; every one, if `all`.
+    Pack(bool),
+    /// The solve for the stationary flux the last handoff left answers: a
+    /// part found to take away, or none.
+    Clean(bool),
     /// The draft's validation finishes.
     Validate,
     /// Edit the `nth` material the `kind`th of four ways.
@@ -137,6 +145,8 @@ fn acts() -> BoxedStrategy<Act> {
         2 => settle().prop_map(Act::Process),
         1 => Just(Act::Latch),
         2 => prop_oneof![Just(Some(1)), Just(Some(3)), Just(None)].prop_map(Act::Work),
+        3 => any::<bool>().prop_map(Act::Pack),
+        2 => prop_oneof![3 => Just(true), 1 => Just(false)].prop_map(Act::Clean),
         3 => Just(Act::Validate),
         3 => (any::<u8>(), any::<u8>()).prop_map(|(nth, kind)| Act::Material { nth, kind }),
         2 => any::<u8>().prop_map(Act::Nudge),
@@ -168,22 +178,31 @@ fn scene(other: bool, adaptive: bool) -> TopologyDocument {
 /// switchable material, the point source on, adaptation off. `other` moves
 /// the subdomain and coarsens the mesh, for a replacement that differs.
 fn fixture(other: bool) -> TopologyDocument {
+    fixture_of(other, true)
+}
+
+/// [`fixture`], its subdomain's medium switchable or left linear: a fixed,
+/// lossless generation, onto which a handoff's carry leaves a stationary
+/// flux to take away.
+fn fixture_of(other: bool, switchable: bool) -> TopologyDocument {
     let mut editor = TopologyEditor::default();
-    let switchable = editor.add_material().unwrap();
-    let material = editor
-        .document
-        .model
-        .draft
-        .material(switchable)
-        .unwrap()
-        .clone();
-    let switch = law_presets()
-        .iter()
-        .find(|preset| preset.name == "Switchable medium" && preset.row == LawPresetRow::Mass)
-        .unwrap();
-    editor
-        .update_material(apply_law_preset(switch, &material).unwrap())
-        .unwrap();
+    let subdomain = editor.add_material().unwrap();
+    if switchable {
+        let material = editor
+            .document
+            .model
+            .draft
+            .material(subdomain)
+            .unwrap()
+            .clone();
+        let switch = law_presets()
+            .iter()
+            .find(|preset| preset.name == "Switchable medium" && preset.row == LawPresetRow::Mass)
+            .unwrap();
+        editor
+            .update_material(apply_law_preset(switch, &material).unwrap())
+            .unwrap();
+    }
     let centre = if other {
         Point2::new(0.35, -0.25)
     } else {
@@ -193,7 +212,7 @@ fn fixture(other: bool) -> TopologyDocument {
         .create_closed_curve(
             PeriodicCubicSpline::rounded(centre, 0.25),
             ClosedCurvePurpose::Subdomain {
-                material: switchable,
+                material: subdomain,
             },
         )
         .unwrap();
@@ -362,6 +381,7 @@ struct Projection {
     uploading: Option<(TopologyToken, u8)>,
     source_commit: Option<TopologyToken>,
     packed: Option<TopologyToken>,
+    pack_back: bool,
     ready: Option<TopologyToken>,
     preparing: bool,
     last_error: Option<TopologyToken>,
@@ -372,6 +392,7 @@ struct Projection {
     pulses: usize,
     switches: usize,
     fault: bool,
+    cleanup: Option<(u8, bool)>,
     running: bool,
     stepping: bool,
     generation: u8,
@@ -408,28 +429,36 @@ impl Session {
         Self::opening(true)
     }
 
-    /// [`Self::start`] with preparation on a worker the sequence plays.
+    /// [`Self::start`] with preparation on a worker the sequence plays, and
+    /// each pack made when it says, as the app's packing worker answers
+    /// frames later. Its scene opens fixed, so that its handoffs leave a
+    /// stationary flux to take away until an edit makes the medium
+    /// switchable.
     fn played() -> Self {
-        let mut session = Self::opening(false);
+        let mut session = Self::opening_with(fixture_of(false, false), false);
         let (host, worker) = Worker::connect();
         session.state.background_preparation = Some(host);
         session.state.preparation_grant = None;
+        session.state.held_packs = Some(Vec::new());
         session.worker = Some(worker);
         session
     }
 
     fn opening(adaptive: bool) -> Self {
+        Self::opening_with(scene(false, adaptive), adaptive)
+    }
+
+    fn opening_with(document: TopologyDocument, adaptive: bool) -> Self {
         let mut state = Playground {
             background_preparation: None,
             background_amr: None,
             preparation_grant: Some(usize::MAX),
             amr_grant: Some(usize::MAX),
             pack_inline: true,
+            protocol_log: ProtocolLog::kept(),
             ..Playground::default()
         };
-        state
-            .set_document(scene(false, adaptive), false, true)
-            .unwrap();
+        state.set_document(document, false, true).unwrap();
         let mut world = World::new();
         world.init_resource::<Assets<ShaderBuffer>>();
         test_device::connect(&mut world);
@@ -618,6 +647,7 @@ impl Session {
                         built: patch.is_none_or(|(built, _)| built),
                         packable: patch.is_none_or(|(_, packable)| packable),
                     },
+                    packed: log.contains(&ProtocolNote::Packed),
                     install: begin.is_some_and(|(install, _)| install),
                     begun: begin.is_none_or(|(_, ok)| ok),
                     pulse: log
@@ -639,6 +669,15 @@ impl Session {
                     adapted: log
                         .iter()
                         .any(|note| matches!(note, ProtocolNote::Adapted(_))),
+                    cleans: log.contains(&ProtocolNote::CleanupDue),
+                    cleanup: log
+                        .iter()
+                        .find_map(|note| match *note {
+                            ProtocolNote::CleanupSolved(true) => Some(model::Solve::Found),
+                            ProtocolNote::CleanupSolved(false) => Some(model::Solve::Nothing),
+                            _ => None,
+                        })
+                        .unwrap_or(model::Solve::NotYet),
                 })
             }
             // The device's steps are what its copies told the host, kept as
@@ -652,6 +691,8 @@ impl Session {
             | Act::Process(_)
             | Act::Latch
             | Act::Work(_)
+            | Act::Pack(_)
+            | Act::Clean(_)
             | Act::Adapt(_) => return None,
             Act::Validate => model::Step::Validate { inputs },
             Act::Reset => model::Step::Reset,
@@ -731,6 +772,11 @@ impl Session {
                 .gpu_upload_preparation
                 .as_ref()
                 .map(|pack| pack.token),
+            pack_back: state
+                .coordinator
+                .gpu_upload_preparation
+                .as_ref()
+                .is_some_and(|pack| pack.result.is_some()),
             ready: state.runtime.ready().map(|ready| ready.bundle.token),
             // On the frame or on the worker; a job the worker holds that a
             // newer request replaced is no longer the runtime's.
@@ -750,6 +796,16 @@ impl Session {
             pulses: state.coordinator.pending_pulses.len(),
             switches: state.coordinator.pending_switches.len(),
             fault: state.coordinator.solver_fault.is_some(),
+            // Once sent, its event is the device's, and the protocol has
+            // done with it.
+            cleanup: state.flux_cleanup.as_ref().and_then(|cleanup| {
+                match cleanup.stage {
+                    FluxCleanupStage::Due | FluxCleanupStage::Solving => Some(false),
+                    FluxCleanupStage::Found(_) => Some(true),
+                    FluxCleanupStage::Sent(_) | FluxCleanupStage::Landed(_) => None,
+                }
+                .map(|found| (cleanup.generation as u8, found))
+            }),
             running: state.wave_running,
             stepping: state.wave_step,
             generation: self.request.generation() as u8,
@@ -781,6 +837,7 @@ impl Session {
                 .map(|upload| (self.real(upload.token), upload.generation)),
             source_commit: model.source_commit.map(|token| self.real(token)),
             packed: model.packed.map(|token| self.real(token)),
+            pack_back: model.pack_back,
             ready: model.ready.map(|token| self.real(token)),
             preparing: model.preparing.is_some(),
             last_error: model.last_error.map(|token| self.real(token)),
@@ -791,6 +848,9 @@ impl Session {
             pulses: model.pulses as usize,
             switches: model.switches as usize,
             fault: model.fault,
+            cleanup: model
+                .cleanup
+                .map(|cleanup| (cleanup.generation, cleanup.found)),
             running: model.running,
             stepping: model.stepping,
             generation: model.generation,
@@ -814,7 +874,7 @@ impl Session {
     /// state: where they part, either the runtime left the protocol the
     /// proofs are about or the model does not describe it.
     fn conform(&mut self, act: &Act, was: Was) {
-        let log = std::mem::take(&mut self.state.protocol_log);
+        let log = self.state.protocol_log.take();
         let next = self.model.next;
         let told = std::mem::take(&mut self.told);
         let own = self.model_step(act, &was, &log);
@@ -911,7 +971,9 @@ impl Session {
                 state.display_material_runtime.as_ref(),
                 wave,
             );
-            state.refresh_flux_cleanup(request, display);
+        }
+        state.refresh_flux_cleanup(request, display);
+        if *adaptive {
             state.refresh_amr(request, display, wave);
         }
         self.in_world(|world, device| device.take(world));
@@ -983,6 +1045,33 @@ impl Session {
         });
     }
 
+    /// The solve for the stationary flux the last handoff left answers, as
+    /// a full readback of its generation would have let it: a part found to
+    /// take away, or none. The device serves no full snapshot here, so the
+    /// solve never starts by itself.
+    fn solve_cleanup(&mut self, found: bool) {
+        let state = &mut self.state;
+        let (Some(cleanup), Some(active)) = (&mut state.flux_cleanup, state.runtime.active())
+        else {
+            return;
+        };
+        if !matches!(
+            cleanup.stage,
+            FluxCleanupStage::Due | FluxCleanupStage::Solving
+        ) {
+            return;
+        }
+        let samples = active.canonical_operator.complementary_degrees_of_freedom();
+        cleanup.stage = FluxCleanupStage::Solving;
+        state.flux_cleanup_job = None;
+        state.flux_cleanup_completed = Some(Ok(CanonicalStationaryFlux {
+            stationary: vec![Point2::new(1.0e-3, 0.0); samples],
+            energy: if found { 1.0e-3 } else { 0.0 },
+            flux_energy: 1.0,
+            iterations: 0,
+        }));
+    }
+
     fn act(&mut self, act: &Act) {
         let domain = self.state.editor.document.model.draft.geometry.domain;
         match act {
@@ -1007,6 +1096,15 @@ impl Session {
                     worker.work(slices.unwrap_or(usize::MAX));
                 }
             }
+            Act::Pack(all) => {
+                if let Some(held) = &mut self.state.held_packs {
+                    let packs = if *all { held.len() } else { held.len().min(1) };
+                    for pack in held.drain(..packs) {
+                        pack.release();
+                    }
+                }
+            }
+            Act::Clean(found) => self.solve_cleanup(*found),
             Act::Validate => settle(&mut self.state.editor),
             Act::Material { nth, kind } => {
                 let materials = &self.state.editor.document.model.draft.materials;
@@ -1195,7 +1293,7 @@ impl Session {
         let before = self.before();
         let was = self.was();
         self.state.notices.clear();
-        self.state.protocol_log.clear();
+        self.state.protocol_log.take();
         self.act(act);
         self.observe(act, before);
         self.check();
@@ -1356,6 +1454,15 @@ impl Session {
             ("a drop", state.coordinator.drop_requested),
             ("an upload", state.coordinator.uploading.is_some()),
             ("a pack", state.coordinator.gpu_upload_preparation.is_some()),
+            (
+                "a handoff's stationary flux",
+                state.flux_cleanup.as_ref().is_some_and(|cleanup| {
+                    !matches!(
+                        cleanup.stage,
+                        FluxCleanupStage::Sent(_) | FluxCleanupStage::Landed(_)
+                    )
+                }),
+            ),
             ("a source commit", state.coordinator.source_commit.is_some()),
             ("a preparation", state.preparation_in_progress()),
             ("a candidate", state.runtime.ready().is_some()),
@@ -1473,12 +1580,17 @@ impl Session {
     }
 
     /// Preparation and the device fair from here: each round validates, lends
-    /// preparation all it needs, completes every step asked for, takes
+    /// preparation all it needs, makes every pack held back, finds the
+    /// stationary flux a handoff left, completes every step asked for, takes
     /// whatever the device is offered, and presses Run on a failed run, as
     /// its message asks.
     fn quiesce(&mut self) {
         let round = [
             Act::Validate,
+            Act::Pack(true),
+            Act::Clean(true),
+            Act::Frame(None),
+            Act::Pack(true),
             Act::Frame(None),
             Act::Readbacks(u64::MAX),
             Act::Handoff(true),

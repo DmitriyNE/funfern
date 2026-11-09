@@ -67,14 +67,17 @@ pub struct Playground {
     /// thread, for tests that decide when the device sees it.
     #[cfg(test)]
     pub(super) pack_inline: bool,
+    /// Holds each pack back until the test makes it, where it is some, for
+    /// tests that decide in which frame a pack comes back.
+    #[cfg(test)]
+    pub(super) held_packs: Option<Vec<HeldPack>>,
     /// Makes Reset's zero-state plan fail, for the test of what follows: no
     /// plan the suite builds fails, so only a defect makes one.
     #[cfg(test)]
     pub(super) reset_plan_fails: bool,
-    /// What the runtime decided, for the tests that run the protocol model
+    /// What the runtime decided, where something runs the protocol model
     /// beside it.
-    #[cfg(test)]
-    pub(super) protocol_log: Vec<ProtocolNote>,
+    pub(super) protocol_log: ProtocolLog,
     /// Where an end-to-end fixture holds the run.
     pub(super) e2e_steps: e2e::E2eSteps,
     pub(super) selection: TopologySelection,
@@ -426,9 +429,10 @@ impl Default for Playground {
             #[cfg(test)]
             pack_inline: false,
             #[cfg(test)]
-            reset_plan_fails: false,
+            held_packs: None,
             #[cfg(test)]
-            protocol_log: Vec::new(),
+            reset_plan_fails: false,
+            protocol_log: ProtocolLog::default(),
             e2e_steps: e2e::E2eSteps::default(),
             selection: TopologySelection::None,
             inspector: Some(InspectorPanel::Edit),

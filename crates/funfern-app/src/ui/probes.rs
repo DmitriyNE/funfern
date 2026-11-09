@@ -732,7 +732,6 @@ impl Playground {
                 return;
             }
             self.coordinator.retimed = Some(asked);
-            #[cfg(test)]
             self.protocol_log.push(ProtocolNote::Retimed);
             self.coordinator.requested_revision = None;
         } else {

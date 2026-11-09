@@ -251,6 +251,27 @@ pub fn supervise_fault(seen: FaultSeen) -> Supervision {
     }
 }
 
+/// What the host sees, in a frame, of a handoff's stationary flux found and
+/// waiting to be taken away.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CleanupSeen {
+    /// It was found for the generation the device runs.
+    pub current: bool,
+    /// An upload or a source commit is in flight.
+    pub transacting: bool,
+    /// A pulse or a Switch press waits.
+    pub pressed: bool,
+}
+
+/// Whether the flux maintenance that takes a handoff's stationary flux away
+/// is offered to the device: only on the generation it was found for, whose
+/// flux it is, and behind the user's own events and any transaction, which
+/// may yet replace that generation. Being inert, the part is the same at
+/// whatever step the event lands.
+pub const fn cleanup_may_send(seen: CleanupSeen) -> bool {
+    seen.current && !seen.transacting && !seen.pressed
+}
+
 /// What to do with a live event the running generation would not take.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiveEventFallback {

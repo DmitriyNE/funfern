@@ -37,5 +37,5 @@ fn the_fair_suffix_brings_any_state_to_rest() {
     for _ in 0..PREFIX {
         protocol.step(kani::any());
     }
-    assert!(protocol.settle(ROUNDS, kani::any()));
+    assert!(protocol.settle(ROUNDS, kani::any(), kani::any()));
 }

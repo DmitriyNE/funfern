@@ -21,6 +21,7 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use funfern_core::*;
+use funfern_protocol::decisions::{CleanupSeen, cleanup_may_send};
 use std::sync::Arc;
 
 use super::*;
@@ -179,6 +180,7 @@ impl Playground {
             match CanonicalStationaryFluxJob::new(Arc::clone(&active.canonical_operator), flux) {
                 Ok(job) => job,
                 Err(error) => {
+                    self.protocol_log.push(ProtocolNote::CleanupSolved(false));
                     self.flux_cleanup_failed(error.to_string());
                     return;
                 }
@@ -220,23 +222,28 @@ impl Playground {
             return;
         };
         match result {
-            Ok(found) => {
-                if found.energy > FLUX_CLEANUP_FLOOR * found.flux_energy {
-                    let increment = found.stationary.iter().map(|value| *value * -1.0).collect();
-                    if let Some(cleanup) = &mut self.flux_cleanup {
-                        cleanup.stage = FluxCleanupStage::Found(increment);
-                    }
-                } else {
-                    self.flux_cleanup = None;
+            Ok(found) if found.energy > FLUX_CLEANUP_FLOOR * found.flux_energy => {
+                self.protocol_log.push(ProtocolNote::CleanupSolved(true));
+                let increment = found.stationary.iter().map(|value| *value * -1.0).collect();
+                if let Some(cleanup) = &mut self.flux_cleanup {
+                    cleanup.stage = FluxCleanupStage::Found(increment);
                 }
             }
-            Err(error) => self.flux_cleanup_failed(error.to_string()),
+            Ok(_) => {
+                self.protocol_log.push(ProtocolNote::CleanupSolved(false));
+                self.flux_cleanup = None;
+            }
+            Err(error) => {
+                self.protocol_log.push(ProtocolNote::CleanupSolved(false));
+                self.flux_cleanup_failed(error.to_string());
+            }
         }
     }
 
     /// Sends the stationary flux's increment, found for the running
     /// generation, as a flux maintenance, once the device is free of the
-    /// edits and pulses it waits behind.
+    /// edits, pulses and Switch presses it waits behind
+    /// ([`cleanup_may_send`]).
     pub(super) fn send_flux_cleanup(
         &mut self,
         active: &PreparedTopology,
@@ -250,11 +257,13 @@ impl Playground {
         else {
             return;
         };
-        if *generation != request.generation()
-            || self.coordinator.uploading.is_some()
-            || self.coordinator.source_commit.is_some()
-            || !self.coordinator.pending_pulses.is_empty()
-        {
+        if !cleanup_may_send(CleanupSeen {
+            current: *generation == request.generation(),
+            transacting: self.coordinator.uploading.is_some()
+                || self.coordinator.source_commit.is_some(),
+            pressed: !self.coordinator.pending_pulses.is_empty()
+                || !self.coordinator.pending_switches.is_empty(),
+        }) {
             return;
         }
         let serial = self
@@ -267,7 +276,6 @@ impl Playground {
             CanonicalGpuLiveEvent::flux_maintenance(&active.canonical_operator, increment, serial)
                 .map_err(|error| LiveEventRefusal::Refused(format!("{error:?}")))
                 .and_then(|event| request.queue_live_event(assets, event));
-        #[cfg(test)]
         self.protocol_log
             .push(ProtocolNote::FluxCleanup(event.is_ok()));
         match event {
@@ -422,6 +430,7 @@ mod tests {
     fn a_handoffs_stationary_flux_is_found_from_its_readback_and_holds_estimates_back() {
         let mut state = Playground {
             editor: TopologyEditor::default(),
+            protocol_log: ProtocolLog::kept(),
             ..Playground::default()
         };
         let active = activate(&mut state);
@@ -479,7 +488,7 @@ mod tests {
         let mut assets = Assets::<ShaderBuffer>::default();
         state.send_flux_cleanup(&active, &mut request, &mut assets);
         assert_eq!(
-            state.protocol_log.last(),
+            state.protocol_log.take().last(),
             Some(&ProtocolNote::FluxCleanup(false))
         );
         assert!(state.flux_cleanup.is_none());

@@ -469,14 +469,23 @@ and preparation bring it to rest within nine rounds. Adaptation is a frame's
 input: after the runtime's blocks, unless paused or while anything is
 prepared, carried or uploaded, it asks for the running topology on a mesh of
 its own, at that topology's revision and on what it read, leaving the
-document's request and a failure of it alone. The model's device, like
+document's request and a failure of it alone. Packing is an input too: the
+app packs on a worker, and the pack comes back in the frame that sent it or a
+later one, the upload beginning, and the steps held back for it, only once it
+has. So is the solve for the stationary flux a handoff's carry leaves on a
+generation whose flux neither moves with a runtime nor loses energy: found,
+its flux maintenance goes on the generation it was found for, behind the
+presses waiting and any transaction, and holds the device's one live event as
+any event does; a Reset, or a generation it was not found for, drops it. The
+model's device, like
 the real one, processes nothing once it has failed: an event still in flight
 is stranded until clearing the failure sends it again. Its unit tests walk the
 two sequences the 2026-10-20 review found the model could not reach, a pulse
-sent while a packed candidate waits and a pulse stranded by a fault, and
+sent while a packed candidate waits and a pulse stranded by a fault,
 AMR-04's two, an adaptation after an edit failed and one while the draft is
-invalid, neither of which asks for anything again. It takes about four and
-three-quarter minutes; CI runs it in a job of its own, with
+invalid, neither of which asks for anything again, and RT-01's two, a pack
+back frames late and a stationary flux waiting behind a pulse and holding an
+upload back. It takes about seven minutes; CI runs it in a job of its own, with
 Kani 0.67.0, and Pages deploys only once it has passed. The runtime machine
 runs the model in lockstep with the real runtime and compares the two after
 every step, so the proofs speak about the app's runtime only while that
@@ -488,9 +497,10 @@ the document as it stands takes a new request and whether that starts the
 field from zero, how a ready candidate is carried - in place, by a live patch
 or as a whole generation - how an upload in flight settles, when the steps a
 frame asks for are held back, whether a packed candidate's upload may begin,
-what the host does about a failure of the running generation, and what
+what the host does about a failure of the running generation, what
 becomes of a live event - a source patch, a pulse, a Switch press - the
-running generation would not take.
+running generation would not take, and whether a handoff's stationary flux is
+sent.
 
 The automated tests cover spline evaluation/derivatives, seam insertion, exact predicates,
 constrained topology, concave and multiple holes, driven and absorbing internal spans,
@@ -1823,6 +1833,20 @@ late one of either has nowhere to land; neither is drawn. Neither are the
 probe recorders' rings, whose late copies the traces cut at the handoff
 (`a_handoff_takes_the_traces_back_to_its_snapshot`) or drop with a restart
 (`a_restarted_run_records_from_its_own_clock`).
+
+RT-01, asynchronous fuzzing, begins on the host. Its device half runs the
+model beside the real app, which does two things the machines did on the
+frame: it packs on a worker, and it solves for a handoff's stationary flux
+from a full readback, which the test device never serves. The model now takes
+both as inputs, and the runtime's notes of a pack come back, a cleanup due and
+its solve's answer are what it is told. The played machine holds every pack
+back until the sequence makes it (`Pack`), and its scene opens with the
+subdomain's medium linear, so that its handoffs leave a stationary flux until
+an edit makes it switchable; `Clean` answers the solve. Every frame of every
+machine takes the cleanup's step, as the app's frames do. In 500 sequences
+the played machine brings some 115 packs back after the frame that sent them
+and 50 stationary fluxes found and sent. 2,000 sequences a machine, and 2,000
+more of the played one on its fixed scene, found no defect.
 
 RT-02, batching, is held on the device by `batches`. A frame asks for at most
 64 steps and never more than leaves 64 asked past what the queue has retired;

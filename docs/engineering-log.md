@@ -33277,3 +33277,57 @@ the device.
   wasm checks, the browser shader compile and the protocol proofs; the device
   suite 126 of 126 on the M1 Max, `adaptive` in 10 s and `adaptive-slow` in
   82 s.
+
+## 2026-11-09 — RT-01's host half: the model packs off the frame and takes the stationary flux away
+
+- **Why.** C7's last item (campaign plan, section 6l), RT-01: random actions
+  through the production runtime on a device, the protocol model run beside
+  it. The runtime machines run the model in lockstep with the runtime on a
+  test device, and two things the app does off the frame they did on it.
+  The app packs a candidate on a worker (`dispatch_gpu_upload_preparation`),
+  whose pack comes back frames later; the machines packed on the frame
+  (`pack_inline`), and the model began the upload, and held the steps back
+  for it, in the frame that packed. And the app takes away the stationary
+  flux a handoff's carry leaves (2026-11-03) by a flux maintenance found from
+  the generation's first full readback; the test device serves none, so in
+  the machines a cleanup never left `Due`, and the model had no such event.
+  On a device the two would part at the first slow pack or the first cleanup.
+- **The model** takes both as inputs. A frame is told whether the pack in
+  flight has come back (`Frame::packed`), and the upload begins, and the
+  steps are held back for it, only once it has (`pack_back`). A candidate
+  published onto a generation whose flux neither moves with a runtime nor
+  loses energy leaves a stationary flux to take away, unless it started from
+  rest (`Frame::cleans`); its solve answers after the runtime's blocks
+  (`Frame::cleanup`, as `refresh_flux_cleanup` runs), and once found its
+  event goes on the generation it was found for, behind the presses waiting
+  and any upload or source commit, and holds the device's one live event
+  (`Event::Cleanup`). A Reset, or a generation it was not found for, drops
+  it; a refusal gives it up. The send rule is `decisions::cleanup_may_send`,
+  which `send_flux_cleanup` now calls too. `a_pack_back_late_begins_its_upload_then`,
+  `a_stationary_flux_waits_behind_presses_and_holds_an_upload`. The proofs
+  hold: the fair suffix in 356 s and every reachable state in 75 s, where
+  they took about four minutes and one.
+- **The decision log** (`ProtocolNote`) is kept at run time rather than in
+  test builds only (`ProtocolLog`, kept by nothing in the app), so that the
+  fixture can read it, with three notes more: a pack come back
+  (`Packed`), a cleanup due (`CleanupDue`) and its solve's answer
+  (`CleanupSolved`).
+- **The machines.** The played machine holds every pack back until the
+  sequence makes it (`Pack`, `HeldPack`), and opens with its subdomain's
+  medium linear, so that its handoffs leave a stationary flux until an edit
+  makes it switchable; `Clean` answers the solve; every frame takes the
+  cleanup's step, as the app's do. In 500 sequences the played machine
+  brings some 115 packs back after the frame that sent them and 50
+  stationary fluxes found and sent, where on the switchable scene it had
+  brought 15.
+- **Study:** 2,000 sequences on each of the three machines, and 2,000 more
+  of the played one on its fixed scene: no defect.
+- **Mutations.** `adapted-handoff-left-uncleaned`,
+  `flux-cleanup-adds-the-stationary-part` and `switch-thrown-twice` are
+  written again against the lines the notes moved, the same mutations.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs. Not the
+  device suite: the runtime's changes are notes pushed into a log the app
+  does not keep and the cleanup's send rule moved as it was; the fixture,
+  which changes the readback path, will run it.

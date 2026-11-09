@@ -1520,6 +1520,14 @@ mutation, in this order:
   often per simulated second and refines further, left as designed; and the
   CPU harness, which filtered at the scalar wave's strength, now filters at
   the device's.
+  RT-01's host half landed on 2026-11-09: the protocol model now takes what
+  the app does off the frame and the runtime machines had done on it, a pack
+  coming back from its worker frames later and the solve for a handoff's
+  stationary flux, whose event it sends behind the presses and transactions
+  waiting (`cleanup_may_send`, shared with the app); the runtime's decision
+  log is kept at run time, so that the fixture can read it, and the played
+  machine holds its packs back and opens on a fixed medium. The proofs hold,
+  and 8,000 sequences found no defect.
 - **C8, robustness:** the 5.2 edge cases, on the CPU and then the device;
   RT-06; RT-07 with 5.4, a debug count of live shader buffers, staging,
   readbacks, bind groups and jobs in the fixtures binary, not wgpu's own
