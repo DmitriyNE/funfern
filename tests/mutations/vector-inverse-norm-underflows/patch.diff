@@ -1,0 +1,22 @@
+--- a/crates/funfern-core/src/canonical_temporal.rs
++++ b/crates/funfern-core/src/canonical_temporal.rs
+@@ -7116,16 +7116,9 @@
+     coefficient: TemporalCoefficientSample,
+     runtime: &CanonicalMaterialRuntimeState,
+ ) -> Result<Point2, WaveError> {
+-    let mut magnitude = flux.norm();
+-    // Below 1e-154 the square underflows, and a flux of 1e-200 had no
+-    // field at all (C8.1, 2026-11-10); past 1e154 it overflows. There the
+-    // norm is taken over the larger component; elsewhere it keeps its bits.
+-    if !(magnitude >= f64::MIN_POSITIVE.sqrt() && magnitude.is_finite()) {
+-        let scale = flux.x.abs().max(flux.y.abs());
+-        if scale == 0.0 {
+-            return Ok(Point2::default());
+-        }
+-        magnitude = scale * Point2::new(flux.x / scale, flux.y / scale).norm();
++    let magnitude = flux.norm();
++    if magnitude == 0.0 {
++        return Ok(Point2::default());
+     }
+     let terms = [term];
+     let radius = ConstitutiveSite::new(&terms)

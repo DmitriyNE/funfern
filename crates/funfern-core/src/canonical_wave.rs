@@ -2798,8 +2798,25 @@ impl CanonicalWaveState {
             .zip(operator.primary_mass())
             .map(|(field, mass)| field * mass)
             .collect::<Vec<_>>();
+        // A pulse the state cannot hold, its energy past the largest float,
+        // is refused with the state it had, as the temporal state's is:
+        // until C8.1 (2026-11-10) it kept the flux it was refused for.
+        let kept = self.primary_flux.clone();
+        let landed = self.land_primary_pulse(operator, forcing, &integrated);
+        if landed.is_err() {
+            self.primary_flux = kept;
+        }
+        landed
+    }
+
+    fn land_primary_pulse(
+        &mut self,
+        operator: &CanonicalWaveOperator,
+        forcing: &CanonicalForcing,
+        integrated: &[f64],
+    ) -> Result<CanonicalStepAccounting, WaveError> {
         let mut accounting = CanonicalStepAccounting {
-            source_work: self.apply_primary_increment(operator, &integrated)?,
+            source_work: self.apply_primary_increment(operator, integrated)?,
             ..CanonicalStepAccounting::default()
         };
         accounting.prescribed_exchange = self.enforce_prescribed(operator, forcing, self.time())?;

@@ -1,0 +1,4 @@
+about: the cleanup tolerance tightens with the axis ratio past 1e4, asking a solve at 1e6 for more than it reaches within its limit on a fine mesh
+test: cargo test --release -p funfern-app --test edge_cases -- --exact the_cleanup_tightens_with_the_axis_ratio
+expect: tolerance [0-9.e-]+ at axis ratio 1e6
+needs: cpu

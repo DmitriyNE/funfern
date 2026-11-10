@@ -1,0 +1,4 @@
+about: a stiffness law's vector inverse takes the flux's norm as the root of its square, which a flux below 1e-154 underflows to none
+test: cargo test --release -p funfern-app --test edge_cases -- --exact a_pulse_too_small_to_square_keeps_its_shape
+expect: focusing Kerr on the stiffness: [0-9.e-]+ from its shape
+needs: cpu

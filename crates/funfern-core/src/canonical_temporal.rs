@@ -6094,19 +6094,24 @@ type ActiveLossCoefficients = (Vec<f64>, Vec<f64>, Vec<f64>);
 /// Bernoulli equation `ẏ = −2(β + k y) y`, whose solution keeps `Q`'s sign.
 /// A van der Pol node has `β < 0` (gain below threshold) and `k > 0`.
 fn bernoulli_map(flux: f64, beta: f64, k: f64, duration: f64) -> f64 {
-    let y = flux * flux;
     // The rate over the duration either way: read as `|β|·τ`, every
     // backward map took the guard and dropped `β` (NUM-14 of the 2026-10-20
     // review).
-    let next = if (beta * duration).abs() < 1.0e-12 {
-        y / (1.0 + 2.0 * k * y * duration)
+    let grown = if (beta * duration).abs() < 1.0e-12 {
+        2.0 * duration
     } else {
-        let decay = (-2.0 * beta * duration).exp();
         // `1 − e^{−2βτ}` over `β`, formed without cancellation.
-        let grown = -(-2.0 * beta * duration).exp_m1() / beta;
-        y * decay / (1.0 + k * y * grown)
+        -(-2.0 * beta * duration).exp_m1() / beta
     };
-    flux.signum() * next.max(0.0).sqrt()
+    // `Q e^{−βτ}/√(1 + kQ²g)`, a multiplier on `Q` as the device forms it.
+    // Formed in `y = Q²`, a flux below 1e-154 squared to nothing and the
+    // map took it to zero (C8.1, 2026-11-10).
+    let denominator = 1.0 + k * flux * flux * grown;
+    if denominator < 0.0 || denominator.is_nan() {
+        // Past where a backward map blows up, as the square's form held it.
+        return flux.signum() * 0.0;
+    }
+    flux * ((-beta * duration).exp() / denominator.sqrt())
 }
 
 /// The field the walls read at a state at `time`: `U` of the flux each node
@@ -7111,9 +7116,16 @@ fn radial_inverse(
     coefficient: TemporalCoefficientSample,
     runtime: &CanonicalMaterialRuntimeState,
 ) -> Result<Point2, WaveError> {
-    let magnitude = flux.norm();
-    if magnitude == 0.0 {
-        return Ok(Point2::default());
+    let mut magnitude = flux.norm();
+    // Below 1e-154 the square underflows, and a flux of 1e-200 had no
+    // field at all (C8.1, 2026-11-10); past 1e154 it overflows. There the
+    // norm is taken over the larger component; elsewhere it keeps its bits.
+    if !(magnitude >= f64::MIN_POSITIVE.sqrt() && magnitude.is_finite()) {
+        let scale = flux.x.abs().max(flux.y.abs());
+        if scale == 0.0 {
+            return Ok(Point2::default());
+        }
+        magnitude = scale * Point2::new(flux.x / scale, flux.y / scale).norm();
     }
     let terms = [term];
     let radius = ConstitutiveSite::new(&terms)

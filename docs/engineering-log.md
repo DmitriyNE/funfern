@@ -33434,3 +33434,91 @@ the device.
   wasm checks, the browser shader compile and the protocol proofs, and
   `scripts/device-suite.sh`: 138 of 138 on the M1 Max
   (`target/device-suite/20261110-120732`).
+
+## 2026-11-11 — C8.1: the edge cases on the CPU, and the cleanup on anisotropic media
+
+- **Why.** C8's first item (campaign plan, section 6l): the 11 October
+  plan's section 5.2 on the CPU, a valid case run finite and keeping what
+  its law keeps, an invalid one refused with the state it had.
+- **Study** (`tests/edge_cases.rs`, kept ignored, and `manufactured`'s new
+  cases), 2026-11-10:
+  - Ceiling: every step past either integrator's ceiling is refused with
+    the state's bits kept. A leapfrog state can be built just past its own
+    ceiling, the constructor checking the fourth-order one; its first step
+    is refused.
+  - Small steps down to 1e-6 of the recommended one converge to round-off,
+    with no drift.
+  - Amplitudes from zero through the subnormals to 1e300: every law keeps
+    its shape to 1e-13 up to its bound and is refused past it, but for the
+    four below.
+  - Contrast: inclusions up to 1e6, in impedance and in speed, run and
+    clean up within the old limit. Axis ratios 1 to 1e6: see below.
+  - Geometry: angles of 18° and more, the meshed area within 1e-10 of the
+    authored one; the editor joins curves closer than 2e-4, by design.
+  - Empty resources: all 216 combinations prepare, compile their device
+    plan and step, with no zero-sized buffer.
+  - Cancellation: the primary flux's total holds to round-off over 4 s.
+  - `manufactured`: contrast 1e2 and 1e4, axis ratios 8 and 32 and holes
+    1e-2 and 1e-3 off a wall all converge; the EM flux at contrast 1e4 at
+    order 2 where the others reach 2.6, steep coefficients not yet in the
+    asymptotic range.
+- **Found, in the app.** The cleanup's solve for a handoff's stationary
+  flux ran out of its `20√n + 1000` iterations on anisotropic media (axis
+  ratio 16 at edge 0.05, 64 at 0.1) and on graded meshes (a channel 3e-4
+  wide), and said "Wave state contains a non-finite value": after every
+  handoff the diagnostics reported a defect. Jacobi absorbs contrast but
+  not anisotropy within an element, nor grading. Uncapped, the count ran
+  to 2.1 times the node count at 1e-6. And at that tolerance the box at
+  axis ratios 1e4 to 1e6 left 1e-7 to 5e-5 of a potential's flux read as
+  stationary. With the user:
+  - the solve is allowed `max(20√n + 1000, 4n)` and, past it, fails with
+    `WaveError::NotConverged`, naming the solve and its limit;
+  - its tolerance is `1e-6` over the root of the medium's largest axis
+    ratio (the root of its tensor's eigenvalue ratio), tightened no further
+    than at 1e4. Edges 0.1, 0.05 and 0.025 (87,451 nodes): at 1e4 2e-13,
+    4e-14 and 7e-14 left, in 2.73n at 0.05 and 3.30n at 0.025. At 1e6 the
+    run's own rounding holds 4.8e-10 and 1.4e-10 stationary at any
+    tolerance from `3e-9` to `1e-10`; tightened to `1e-9` the solve needed
+    2.73n and 3.32n, and outgrew 4n at 0.025 (16 minutes); stopped at
+    `1e-8` it took 2.74n there and left 3e-8. With the user, the tightening
+    stops at 1e4, and the iterations rising with refinement are under Worth
+    checking sometime: a preconditioner along the medium's frame would cut
+    them.
+- **Found, in the CPU reference** (the device already formed each right):
+  - a stiffness law's vector inverse took the flux's norm as the root of
+    its square, which underflows below 1e-154: a flux of 1e-200 had no
+    field. The norm now comes from the components over the larger where the
+    square underflows or overflows, and keeps its bits elsewhere;
+    `Point2::norm` stays, for the mesher's determinism;
+  - van der Pol's map was formed in `Q²` and took a flux below 1e-154 to
+    zero; it is now a multiplier on `Q`, as the device forms it;
+  - sine-Gordon's potential `1 − cos r` was 9e-5 off at 1e-6 and zero below
+    1e-8, the energy reading 31% off at tiny amplitudes; it is now
+    `2 sin²(r/2)`;
+  - the fixed state's pulse added its flux and validated after, so a pulse
+    refused for an energy past the largest float kept its flux; the flux
+    is now put back, as the temporal state does.
+- **Checks** (`edge_cases`, about 4 s): the cleanup on axis ratio 64 and the
+  3e-4 channel at edge 0.1, at most 1e-11 of a potential's flux read as
+  stationary (4.0e-14 in 4,301 iterations, 4.4e-12 in 4,979, past the old
+  2,500 and 2,980); at axis ratio 1e4 at most 1e-11 (5.1e-13) and the
+  tolerance at 1e6 that of 1e4; stiffness Kerr and van der Pol at 1e-200
+  within 1e-12 of their shapes at 1e-100 (2e-15, 1e-15); sine-Gordon's
+  potential within 1e-13 of its series from 1e-3 to 1e-100; a refused
+  pulse leaving the fixed state's bits alone.
+- **Mutations**, each failing its check: `cleanup-capped-at-the-nodes-root`
+  (did not converge within 2,500), `cleanup-tolerance-ignores-the-axis-ratio`
+  (2.3e-8), `cleanup-tolerance-tightens-without-end` (`1e-9` at 1e6),
+  `vector-inverse-norm-underflows` (1.5 from its shape),
+  `van-der-pol-map-squares-the-flux` (1.0), `sine-gordon-potential-one-minus-cos`
+  (1.6e-11 off at 1e-3) and `fixed-pulse-kept-when-refused`.
+- **Passed on.** The temporal clock adds its steps one at a time: started at
+  1e6 s it is 7e-8 s off after 2,000 steps (C8.3). Gaps of 2e-4 to 1e-3
+  shrink the step to 0.007 of the box's (C8.5's pacing).
+- **Not done.** `apply_complementary_increment` on the fixed state adds
+  its increment and validates after, as the pulse did; outside what was
+  agreed, it is reported to the user.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs. No device
+  suite: the shaders, the device path and the runtime are unchanged.

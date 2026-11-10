@@ -2048,6 +2048,36 @@ of a new generation always stamps a step past its handoff, and
 `a_new_mesh_is_estimated_only_once_it_has_stepped` holds it. Natively and on lavapipe only: in the browser the reference
 would step inside the page's frames.
 
+`edge_cases` holds what C8.1 found of the 11 October plan's section 5.2 on
+the CPU; its studies stay ignored beside the checks and print what they
+measure. The cleanup's solve for a handoff's stationary flux must read a
+potential's flux, which holds none, as at most 1e-11 stationary on the box
+at axis ratio 64 and around a channel 3e-4 wide
+(`the_cleanup_converges_on_anisotropic_media_and_graded_meshes`): 4,301
+and 4,979 iterations, where it was allowed 2,500 and 2,980 and failed past
+them as a non-finite state. It is now allowed four times the node count
+and names its limit past it. Its tolerance tightens with the root of the
+medium's largest axis ratio up to 1e4, where a potential's flux must read
+at most 1e-11 stationary (5.1e-13; 2.3e-8 at the isotropic tolerance), and
+no further (`the_cleanup_tightens_with_the_axis_ratio`): at 1e6 on 87,451
+nodes the solve to `1e-9` outgrew four times the node count. A stiffness
+law's vector inverse and van der Pol's map struck at 1e-200 must keep the
+shape of their runs at 1e-100 to 1e-12
+(`a_pulse_too_small_to_square_keeps_its_shape`; the CPU reference took
+either flux for none), sine-Gordon's potential must keep its series to
+1e-13 from 1e-3 down to 1e-100
+(`sine_gordons_potential_keeps_its_digits_at_small_amplitudes`), and a
+pulse the fixed state cannot hold must be refused with its bits unchanged
+(`a_refused_pulse_leaves_the_state_alone`). `manufactured`'s study gained
+inclusions of contrast 1e2 and 1e4, axis ratios 8 and 32 and holes 1e-2
+and 1e-3 off a wall; each converges, the EM flux at contrast 1e4 at order
+2 where the others reach 2.6. Its mutations, on the host:
+`cleanup-capped-at-the-nodes-root`,
+`cleanup-tolerance-ignores-the-axis-ratio`,
+`cleanup-tolerance-tightens-without-end`,
+`vector-inverse-norm-underflows`, `van-der-pol-map-squares-the-flux`,
+`sine-gordon-potential-one-minus-cos` and `fixed-pulse-kept-when-refused`.
+
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
 catch it and the pattern its failure must match; the script applies each,

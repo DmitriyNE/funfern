@@ -1,0 +1,11 @@
+--- a/crates/funfern-core/src/canonical_stationary.rs
++++ b/crates/funfern-core/src/canonical_stationary.rs
+@@ -140,7 +140,7 @@
+             product: vec![0.0; nodes],
+             residual_dot: 0.0,
+             force_norm: 0.0,
+-            tolerance: STATIONARY_FLUX_TOLERANCE / axis_ratio.min(TIGHTENED_TO_AXIS_RATIO).sqrt(),
++            tolerance: STATIONARY_FLUX_TOLERANCE + 0.0 * axis_ratio.min(TIGHTENED_TO_AXIS_RATIO),
+             iterations: 0,
+             limit,
+         })

@@ -1,0 +1,4 @@
+about: sine-Gordon's potential is formed as 1 - cos r, which cancels at small amplitudes
+test: cargo test --release -p funfern-app --test edge_cases -- --exact sine_gordons_potential_keeps_its_digits_at_small_amplitudes
+expect: at [0-9.e-]+: [0-9.e-]+ against
+needs: cpu

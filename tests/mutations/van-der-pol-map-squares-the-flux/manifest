@@ -1,0 +1,4 @@
+about: van der Pol's map is formed in the flux's square, which takes a flux below 1e-154 to zero
+test: cargo test --release -p funfern-app --test edge_cases -- --exact a_pulse_too_small_to_square_keeps_its_shape
+expect: van der Pol: [0-9.e-]+ from its shape
+needs: cpu

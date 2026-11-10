@@ -1,0 +1,13 @@
+--- a/crates/funfern-core/src/canonical_wave.rs
++++ b/crates/funfern-core/src/canonical_wave.rs
+@@ -2803,9 +2803,7 @@
+         // until C8.1 (2026-11-10) it kept the flux it was refused for.
+         let kept = self.primary_flux.clone();
+         let landed = self.land_primary_pulse(operator, forcing, &integrated);
+-        if landed.is_err() {
+-            self.primary_flux = kept;
+-        }
++        drop(kept);
+         landed
+     }
+ 

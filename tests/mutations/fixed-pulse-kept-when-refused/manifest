@@ -1,0 +1,4 @@
+about: the fixed state keeps the flux of a pulse it refused
+test: cargo test --release -p funfern-app --test edge_cases -- --exact a_refused_pulse_leaves_the_state_alone
+expect: the refused pulse changed the state
+needs: cpu

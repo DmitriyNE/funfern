@@ -256,6 +256,60 @@ const ANISOTROPIC: Medium = Medium {
     magnetic_loss: None,
 };
 
+/// C8.1's media past PH-19's: density and stiffness graded smoothly over a
+/// contrast of `e^L`, `e^{L(1 + sin(1.3x + 0.4y))/2}` and `e^{L(1 +
+/// cos(0.9x − 1.1y))/2}`, the density's spanning all of it over the box.
+macro_rules! contrasted {
+    ($l:literal) => {
+        Medium {
+            frame: MaterialFrame::world(),
+            density: FrameField {
+                formula: concat!(
+                    "exp(",
+                    stringify!($l),
+                    " * (0.5 + 0.5 * sin(1.3 * x + 0.4 * y)))"
+                ),
+                value: |x, y| ($l * (0.5 + 0.5 * (1.3 * x + 0.4 * y).sin())).exp(),
+                gradient: |x, y| {
+                    let v = ($l * (0.5 + 0.5 * (1.3 * x + 0.4 * y).sin())).exp();
+                    let d = v * $l * 0.5 * (1.3 * x + 0.4 * y).cos();
+                    (1.3 * d, 0.4 * d)
+                },
+            },
+            stiffness: FrameField {
+                formula: concat!(
+                    "exp(",
+                    stringify!($l),
+                    " * (0.5 + 0.5 * cos(0.9 * x - 1.1 * y)))"
+                ),
+                value: |x, y| ($l * (0.5 + 0.5 * (0.9 * x - 1.1 * y).cos())).exp(),
+                gradient: |x, y| {
+                    let v = ($l * (0.5 + 0.5 * (0.9 * x - 1.1 * y).cos())).exp();
+                    let d = -v * $l * 0.5 * (0.9 * x - 1.1 * y).sin();
+                    (0.9 * d, -1.1 * d)
+                },
+            },
+            axis_ratio: FrameField::constant("1", |_, _| 1.0),
+            electric_loss: None,
+            magnetic_loss: None,
+        }
+    };
+}
+
+/// Case 2's medium at a larger axis ratio, `r + 0.3 x²`.
+macro_rules! stretched {
+    ($r:literal) => {
+        Medium {
+            axis_ratio: FrameField {
+                formula: concat!(stringify!($r), " + 0.3 * x^2"),
+                value: |x, _| $r + 0.3 * x * x,
+                gradient: |x, _| (0.6 * x, 0.0),
+            },
+            ..ANISOTROPIC
+        }
+    };
+}
+
 impl Medium {
     /// `field` and its world gradient at `p`.
     fn at(&self, field: FrameField, p: Point2) -> (f64, Point2) {
@@ -1413,6 +1467,46 @@ fn cases(skin: PhysicsModel) -> Vec<(&'static str, Harmonic)> {
         (
             "outgoing",
             harmonic(HETEROGENEOUS, GENERIC_SHAPE, [Side::Outgoing; 4]),
+        ),
+        (
+            "contrast-100",
+            harmonic(
+                contrasted!(4.605170185988092),
+                COSINE_SHAPE,
+                [Side::Natural; 4],
+            ),
+        ),
+        (
+            "contrast-10000",
+            harmonic(
+                contrasted!(9.210340371976184),
+                COSINE_SHAPE,
+                [Side::Natural; 4],
+            ),
+        ),
+        (
+            "axis-8",
+            harmonic(stretched!(8.0), SINE_SHAPE, [Side::Pinned; 4]),
+        ),
+        (
+            "axis-32",
+            harmonic(stretched!(32.0), SINE_SHAPE, [Side::Pinned; 4]),
+        ),
+        // The hole's curve stands 0.902 of its radius out at its controls:
+        // these leave 1e-2 and 1e-3 to the top wall.
+        (
+            "hole-gap-1e-2",
+            Harmonic {
+                hole: Some((Point2::new(0.2, 0.7 - 0.902_369 * 0.35 - 1.0e-2), 0.35)),
+                ..harmonic(HETEROGENEOUS, GENERIC_SHAPE, [Side::Pinned; 4])
+            },
+        ),
+        (
+            "hole-gap-1e-3",
+            Harmonic {
+                hole: Some((Point2::new(0.2, 0.7 - 0.902_369 * 0.35 - 1.0e-3), 0.35)),
+                ..harmonic(HETEROGENEOUS, GENERIC_SHAPE, [Side::Pinned; 4])
+            },
         ),
     ]
 }

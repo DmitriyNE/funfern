@@ -1,0 +1,11 @@
+--- a/crates/funfern-core/src/canonical_stationary.rs
++++ b/crates/funfern-core/src/canonical_stationary.rs
+@@ -120,7 +120,7 @@
+         // 0.05 and 3.30 at 0.025, 87,451 nodes. Four times it bounds every
+         // mesh measured; a finer one at that ratio may pass it, as Jacobi
+         // preconditioning does nothing for anisotropy.
+-        let limit = (20 * (nodes as f64).sqrt().ceil() as usize + 1_000).max(4 * nodes);
++        let limit = 20 * (nodes as f64).sqrt().ceil() as usize + 1_000;
+         // A medium's axis ratio is the root of its tensor's eigenvalue ratio.
+         let axis_ratio = operator
+             .constitutive_samples()

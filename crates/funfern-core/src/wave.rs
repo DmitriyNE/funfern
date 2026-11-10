@@ -1021,6 +1021,13 @@ pub enum WaveError {
         maximum: f64,
     },
     InvalidState,
+    /// An iterative solve that ran out of iterations, named with its limit:
+    /// read as `InvalidState`, a cleanup that only needed more iterations
+    /// said the state was not finite (C8.1, 2026-11-10).
+    NotConverged {
+        solve: &'static str,
+        limit: usize,
+    },
     SizeMismatch {
         expected: usize,
         actual: usize,
@@ -1051,6 +1058,9 @@ impl std::fmt::Display for WaveError {
                 "Time step {requested:.6} exceeds the conservative maximum {maximum:.6}"
             ),
             Self::InvalidState => write!(f, "Wave state contains a non-finite value"),
+            Self::NotConverged { solve, limit } => {
+                write!(f, "the {solve} did not converge within {limit} iterations")
+            }
             Self::SizeMismatch { expected, actual } => {
                 write!(f, "Expected {expected} nodal values, received {actual}")
             }

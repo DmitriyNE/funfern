@@ -1,0 +1,18 @@
+--- a/crates/funfern-core/src/canonical_temporal.rs
++++ b/crates/funfern-core/src/canonical_temporal.rs
+@@ -6106,12 +6106,9 @@
+     // `Q e^{−βτ}/√(1 + kQ²g)`, a multiplier on `Q` as the device forms it.
+     // Formed in `y = Q²`, a flux below 1e-154 squared to nothing and the
+     // map took it to zero (C8.1, 2026-11-10).
+-    let denominator = 1.0 + k * flux * flux * grown;
+-    if denominator < 0.0 || denominator.is_nan() {
+-        // Past where a backward map blows up, as the square's form held it.
+-        return flux.signum() * 0.0;
+-    }
+-    flux * ((-beta * duration).exp() / denominator.sqrt())
++    let y = flux * flux;
++    let next = y * (-2.0 * beta * duration).exp() / (1.0 + k * y * grown);
++    flux.signum() * next.max(0.0).sqrt()
+ }
+ 
+ /// The field the walls read at a state at `time`: `U` of the flux each node

@@ -1821,6 +1821,14 @@ is next touched.
   the slow device then steps the finer mesh slower still. A floor in
   simulated time under the wall-clock gap would make the two adapt alike,
   later in wall time on the slow one (2026-11-09).
+- The cleanup's solve for a handoff's stationary flux is preconditioned by
+  its diagonal, which does nothing for anisotropy: on the box at axis ratio
+  1e4 it took 2.73 times the node count at edge 0.05 and 3.30 at 0.025
+  (87,451 nodes, 12 minutes on the worker), rising as the mesh refines. It
+  is allowed four times; a finer mesh at such a ratio may pass that, and
+  the diagnostics would say the stationary flux could not be taken away. A
+  preconditioner that follows the medium's frame would cut the count and
+  the time (C8.1, 2026-11-10).
 
 ## Working practice
 

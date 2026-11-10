@@ -1542,6 +1542,24 @@ mutation, in this order:
   RT-06; RT-07 with 5.4, a debug count of live shader buffers, staging,
   readbacks, bind groups and jobs in the fixtures binary, not wgpu's own
   counters; RT-08.
+  C8.1, the edge cases on the CPU, landed on 2026-11-11: `edge_cases` runs
+  steps at and past each integrator's ceiling and down to 1e-6 of it, every
+  law from zero through the subnormals to past its bound, inclusions of
+  contrast up to 1e6 and the box at axis ratios up to 1e6, holes down to
+  1e-6 off a wall and off each other, 216 combinations of empty resources,
+  and sums that cancel; `manufactured` gained contrasted, stretched and
+  narrow-gap cases. The study found the cleanup's solve for a handoff's
+  stationary flux running out of iterations on anisotropic media (axis
+  ratio 16 at edge 0.05) and on graded meshes, and calling it a non-finite
+  state; with the user it is allowed four times the node count, names its
+  limit past it, and tightens its tolerance with the axis ratio up to 1e4.
+  The CPU reference took a flux below 1e-154 for none in a stiffness law's
+  vector inverse and in van der Pol's map, read sine-Gordon's potential as
+  zero below 1e-8, and kept a refused pulse's flux in the fixed state; each
+  now forms what the device forms, and the pulse is refused with the state
+  it had. Passed on: the temporal clock adds its steps one at a time, 7e-8 s
+  off after 2,000 steps from 1e6 s (C8.3), and gaps of 2e-4 to 1e-3 shrink
+  the step to 0.007 of the box's (C8.5's pacing).
 - **C9, long runs:** 5.3's gaps, an adaptive run among them.
 
 ## 7. Infrastructure

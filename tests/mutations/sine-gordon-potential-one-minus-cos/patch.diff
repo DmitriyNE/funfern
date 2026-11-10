@@ -1,0 +1,14 @@
+--- a/crates/funfern-core/src/material_law.rs
++++ b/crates/funfern-core/src/material_law.rs
+@@ -1198,10 +1198,7 @@
+             // `1 − cos r` as `2 sin²(r/2)`, as the device forms it: the
+             // difference was 9e-5 off at r = 1e-6 and zero below 1e-8
+             // (C8.1, 2026-11-10).
+-            Self::SineGordon { omega0 } => {
+-                let half = (0.5 * r).sin();
+-                2.0 * omega0 * omega0 * half * half
+-            }
++            Self::SineGordon { omega0 } => omega0 * omega0 * (1.0 - r.cos()),
+             Self::Phi4 { lambda, .. } => 0.25 * lambda * (r * r - 1.0).powi(2),
+         }
+     }

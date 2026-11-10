@@ -1,0 +1,4 @@
+about: the cleanup solve is allowed twenty times the node count's root and 1,000 iterations, which an anisotropic medium or a graded mesh outgrows
+test: cargo test --release -p funfern-app --test edge_cases -- --exact the_cleanup_converges_on_anisotropic_media_and_graded_meshes
+expect: did not converge within [0-9]+ iterations
+needs: cpu

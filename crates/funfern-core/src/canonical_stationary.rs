@@ -17,7 +17,7 @@
 //! `2e-12`. This job takes the same operator, `C^T W J C`, through
 //! Jacobi-preconditioned conjugate gradients in slices of one element each.
 
-use crate::{CanonicalWaveOperator, Point2, WaveError};
+use crate::{CanonicalWaveOperator, Point2, SymmetricTensor2, WaveError};
 use std::sync::Arc;
 
 /// Where the solve stops: the residual of the potential's equation against
@@ -28,7 +28,23 @@ use std::sync::Arc;
 /// taken away after a handoff, it moved the box's field 4e-7 off its course
 /// over 400 steps, under the f32 device's own departure from the f64
 /// reference.
+///
+/// That is an isotropic medium's. What a residual leaves behind is bounded
+/// by its square times the operator's condition number, which anisotropy
+/// multiplies: at `1e-6` the box at axis ratios of 1e4 to 1e6, a tensor's
+/// eigenvalues 1e8 to 1e12 apart, left 1e-7 to 5e-5 of a potential's flux
+/// behind as stationary (C8.1, 2026-11-10). A job divides this by the root
+/// of the largest axis ratio its medium has, up to `TIGHTENED_TO_AXIS_RATIO`.
+/// At 1e4 the box then left 2e-13 at edge 0.1 and 7e-14 at 0.025.
 pub const STATIONARY_FLUX_TOLERANCE: f64 = 1.0e-6;
+
+/// The axis ratio past which the tolerance tightens no further. At 1e6 the
+/// box held 4.8e-10 of its flux stationary at edge 0.1 and 1.4e-10 at 0.05
+/// at any tolerance from `3e-9` to `1e-10`, a stationary part the run's own
+/// rounding made rather than the solve's; at edge 0.025 `1e-9` did not
+/// converge in four times the node count, where `1e-8` took 2.74 times it
+/// and left 3e-8 (C8.1, 2026-11-10).
+const TIGHTENED_TO_AXIS_RATIO: f64 = 1.0e4;
 
 /// What a [`CanonicalStationaryFluxJob`] found.
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +94,7 @@ pub struct CanonicalStationaryFluxJob {
     product: Vec<f64>,
     residual_dot: f64,
     force_norm: f64,
+    tolerance: f64,
     iterations: usize,
     limit: usize,
 }
@@ -92,8 +109,25 @@ impl CanonicalStationaryFluxJob {
         let nodes = operator.degrees_of_freedom();
         // Conjugate gradients take some square root of the condition number,
         // which grows as the mesh's node count does: 1,665 iterations on
-        // 136,131 nodes. Twenty of that root and a floor are far past it.
-        let limit = 20 * (nodes as f64).sqrt().ceil() as usize + 1_000;
+        // 136,131 nodes. Twenty of that root and a floor are far past it on
+        // an isotropic medium and an even mesh, but not on an anisotropic
+        // one or a graded one: the box at axis ratio 64 took 4,233 on 5,485
+        // nodes, at 1e4 45,279 on 21,931, and a channel 3e-4 wide past the
+        // root's 2,980 (C8.1, 2026-11-10). Past a few hundred, the count
+        // runs to a few times the node count, where conjugate gradients in
+        // exact arithmetic would have finished: at the tolerance anisotropy
+        // tightens to, the box at axis ratio 1e4 took 2.73 times it at edge
+        // 0.05 and 3.30 at 0.025, 87,451 nodes. Four times it bounds every
+        // mesh measured; a finer one at that ratio may pass it, as Jacobi
+        // preconditioning does nothing for anisotropy.
+        let limit = (20 * (nodes as f64).sqrt().ceil() as usize + 1_000).max(4 * nodes);
+        // A medium's axis ratio is the root of its tensor's eigenvalue ratio.
+        let axis_ratio = operator
+            .constitutive_samples()
+            .iter()
+            .map(|sample| eigenvalue_ratio(sample.complementary_inverse))
+            .fold(1.0, f64::max)
+            .sqrt();
         Ok(Self {
             operator,
             flux,
@@ -106,6 +140,7 @@ impl CanonicalStationaryFluxJob {
             product: vec![0.0; nodes],
             residual_dot: 0.0,
             force_norm: 0.0,
+            tolerance: STATIONARY_FLUX_TOLERANCE / axis_ratio.min(TIGHTENED_TO_AXIS_RATIO).sqrt(),
             iterations: 0,
             limit,
         })
@@ -113,6 +148,16 @@ impl CanonicalStationaryFluxJob {
 
     pub fn phase(&self) -> &'static str {
         self.phase.label()
+    }
+
+    /// The residual the solve stops at, against the flux's force.
+    pub fn tolerance(&self) -> f64 {
+        self.tolerance
+    }
+
+    /// The iterations the solve may take.
+    pub fn limit(&self) -> usize {
+        self.limit
     }
 
     pub fn advance(&mut self, budget: usize) -> Option<Result<CanonicalStationaryFlux, WaveError>> {
@@ -233,12 +278,15 @@ impl CanonicalStationaryFluxJob {
         if !remaining.is_finite() {
             return Err(WaveError::InvalidState);
         }
-        if remaining <= STATIONARY_FLUX_TOLERANCE * self.force_norm {
+        if remaining <= self.tolerance * self.force_norm {
             self.phase = Phase::Finish;
             return Ok(());
         }
         if self.iterations >= self.limit {
-            return Err(WaveError::InvalidState);
+            return Err(WaveError::NotConverged {
+                solve: "solve for the flux's potential",
+                limit: self.limit,
+            });
         }
         self.precondition();
         let next = dot(&self.residual, &self.preconditioned);
@@ -301,6 +349,14 @@ impl CanonicalStationaryFluxJob {
 }
 
 const SAMPLES: usize = 6;
+
+/// A symmetric positive tensor's largest eigenvalue over its smallest, as
+/// the largest's square over the determinant, which has no cancellation:
+/// exactly 1 for an isotropic one.
+fn eigenvalue_ratio(tensor: SymmetricTensor2) -> f64 {
+    let largest = tensor.eigenvalues()[1];
+    (largest * largest / tensor.determinant()).max(1.0)
+}
 
 fn dot(left: &[f64], right: &[f64]) -> f64 {
     left.iter()

@@ -1,0 +1,4 @@
+about: the cleanup solve stops at 1e-6 of the flux's force on any medium, which at axis ratio 1e4 reads part of a potential's flux as stationary
+test: cargo test --release -p funfern-app --test edge_cases -- --exact the_cleanup_tightens_with_the_axis_ratio
+expect: of a potential's flux read as stationary
+needs: cpu
