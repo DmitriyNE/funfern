@@ -141,6 +141,22 @@ RUNS=(
   'FUNFERN_E2E=rollback-handoff funfern-fixtures'
   'FUNFERN_E2E=adaptive funfern-fixtures'
   'FUNFERN_E2E=adaptive-slow funfern-fixtures'
+  # RT-01's fuzzing, a seed a run: random actions through the app's
+  # handlers, the protocol model in lockstep beside it, the f64 reference
+  # on the timeline the device accepted. CI's lavapipe job runs the first
+  # three.
+  'FUNFERN_E2E=interleaved-1 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-2 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-3 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-4 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-5 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-6 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-7 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-8 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-9 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-10 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-11 funfern-fixtures'
+  'FUNFERN_E2E=interleaved-12 funfern-fixtures'
   'FUNFERN_E2E=switch funfern-fixtures'
   'FUNFERN_E2E=handoff funfern-fixtures'
   'FUNFERN_E2E=handoff-driven funfern-fixtures'

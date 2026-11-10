@@ -33331,3 +33331,106 @@ the device.
   device suite: the runtime's changes are notes pushed into a log the app
   does not keep and the cleanup's send rule moved as it was; the fixture,
   which changes the readback path, will run it.
+
+## 2026-11-10 — RT-01's device half: `interleaved`, and a flux maintenance's force in the cache
+
+- **Why.** C7's last item (campaign plan, section 6l): random actions
+  through the production runtime on a device, the protocol model run beside
+  it, the reference following the timeline the device accepted. The host
+  half (2026-11-09) made the model take what the app does off the frame.
+- **The fixture** (`ui/e2e/interleaved.rs`), `interleaved-<seed>`. It opens
+  the runtime machines' scene, the disc's medium switchable or linear by the
+  seed, adaptation on in about half, and fires 48 actions drawn from the seed
+  through the app's handlers, none to 34 frames apart, while the run goes on
+  as the app paces it: material edits, a drag of the disc, the mesh edge,
+  Remesh, the speed, the source moved, switched or retuned, Reset, Run and
+  Step, pulses, the Switch, another scene opened, Undo and Redo, a fault
+  armed on the running generation and the next handoff made to fail.
+  - The model steps beside the app in lockstep (`ui/lockstep.rs`, which the
+    runtime machines moved onto), told the runtime's decision log, what each
+    action changed and what the device's copies told the host: a readback
+    copied (`CanonicalGpuDisplay::copies`, and `controls` where the status
+    came with it; `readbacks` also moves on a handoff's receipt), a handoff
+    admitted or refused, a live event settled, a failure. After every step
+    the two must stand in one state, in the app's tokens.
+  - An f64 reference follows on a thread of its own: each generation from
+    rest or handed the field at the step its clock names, each event the
+    device took at the step it encoded it at, in the order encoded, the
+    filter on the device's cadence. A source patch rewrites the drives as
+    the device does, the carrier running on from the phase it reached and
+    stepped by as much as the authored phase stepped, the integrated rate
+    continuous (`CanonicalForcing::replaced_on`,
+    `a_channel_carried_with_new_parameters_keeps_its_carrier_and_its_rate`).
+    A cleanup takes the increment the app sent, as the device took it, and
+    the reference's own solve says how far that stood.
+  - After the last action Run is pressed, again if a fault armed while
+    paused lands after it, and the run must come to rest, running the
+    accepted revision or with an error naming it, the model at rest too.
+  - A failure writes the actions, the model's steps, what the reference was
+    told and every comparison, with its generation and step, to
+    `target/interleaved-<seed>.log`.
+- **Found on the host first.** The adaptive machine, under the cleanup the
+  host half added: a stationary flux found while the run had failed was
+  offered to the device, refused, and given up as a defect's. With the
+  user, it waits for the failure to clear and goes once Run clears it
+  (`cleanup_may_send` reads `failed`;
+  `a_stationary_flux_found_on_a_failed_run_waits_for_it_to_clear`, in the
+  model and the app's sequences). Its seed is kept under
+  `proptest-regressions/ui/sequences/generations/adapting.txt`.
+- **Found on the device, in the model.** A generation just installed showed
+  its field before its status: the model readied the device on any copy.
+  A copy now readies it only with the status (`Step::Readbacks { control }`,
+  `a_picture_without_its_status_readies_nothing`).
+- **Found on the device, in the device.** Seeds 6 and 8 read the wall's pole
+  states 4.6e-4 and 1.8e-4 of their peak from the reference, from the step a
+  cleanup landed on, Q and b within 1e-6. The poles are small on the
+  fixture's short generations (1e-5): the gap was 2e-9, the size of Q's own.
+  The reference taking the app's increment, as the device took it, instead
+  of its own solve, left seed 6 where it was and seed 8 at 2.1e-5. The
+  cause: on a lossless generation the device keeps each node's
+  force in a cache the steps update (`drift`) rather than gather, and only a
+  handoff gathers it again. A flux maintenance added its increment to `b`
+  and left the cache alone, the stationary part pushing nothing; but the
+  app's solve stops at 1e-6 of the flux's force, and what it leaves beside
+  the stationary part pushes, in the CPU reference, and on the device never
+  did for the rest of the generation. A reference cancelling each
+  increment's force with a constant source read 4.6e-7 and 2.7e-7. With the
+  user, the event stage adds the increment's force to the cache
+  (`increment_force`), as the grid filter adds its correction's.
+  `canonical_gpu_live_events` now adds a thousandth of the field's energy
+  that pushes beside its stationary tenth: Q 1.4e-2 and b 3.1e-2 from the
+  reference before, 3.2e-7 and 6.4e-7 after on lavapipe, 3.2e-7 and 6.6e-7
+  on Metal.
+- **The fixture's own, fixed on the way.** A fault armed while the run was
+  paused landed after the last Run and left it paused for good; Run is
+  pressed again, and a pause or a failure is no rest. A second fault armed
+  on a failed device wiped its failure, the hook replacing the status
+  record; one is armed at a time, and none on a failed device. A pulse sent
+  in the frame a generation started afresh, its serial counting again from
+  one, was missed; a send is now an event waiting where none waited. An
+  endpoint taken on a field at rest read NaN.
+- **Study.** 30 seeds on lavapipe, each 20 to 60 s: all hold. Every
+  snapshot within 9.4e-7 of the peak and 2.8e-6 of itself, the clock within
+  1.2e-7, a cleanup's increment within 5.6e-6 of the flux from the
+  reference's own. The device took 117 pulses, 38 Switches, 50 source
+  weight patches, 22 cleanups and one drive patch, with 28 faults and 41
+  refused handoffs. Metal, the device suite's twelve, 3 to 6 s each:
+  8.4e-7 and 1.4e-6, a cleanup's increment 1.6e-6. Bounds, `adaptive`'s:
+  1e-5 of the peak and 3e-5 of itself, and 5e-5 for a cleanup.
+- **Suites.** `interleaved-1` to `-12` in the device suite, the first three
+  in every pull request's lavapipe job; the browser spec leaves them out, as
+  `adaptive`'s, its reference stepping inside the page's frames.
+- **Host.** The proofs hold, the fair suffix in 411 s and every reachable
+  state in 81 s; 2,000 sequences on each of the three machines found no
+  defect (419 s).
+- **Mutations.** `upload-begins-behind-the-device` (an upload begins while
+  the device is behind; seeds 1 to 3 part from the model within 10 s),
+  `flux-maintenance-misses-the-force-cache` (`canonical_gpu_live_events`)
+  and `cleanup-sent-to-a-failed-run` (the protocol's test).
+- **Not done.** A drive patch is rare in the draws (one in 27 seeds; seed
+  26 took three when run again); the browser.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs, and
+  `scripts/device-suite.sh`: 138 of 138 on the M1 Max
+  (`target/device-suite/20261110-120732`).

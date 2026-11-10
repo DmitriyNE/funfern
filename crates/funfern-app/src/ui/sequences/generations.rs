@@ -49,6 +49,7 @@
 //! proofs are about or the model does not describe it; either way the proofs
 //! say nothing until it is settled.
 
+use super::super::lockstep::{Heard, Lockstep, Told, Was};
 use super::*;
 use crate::canonical_gpu::CanonicalGpuHandoffOutcome;
 use crate::canonical_gpu::test_device::{self, Arrival, Kind, TestDevice};
@@ -259,16 +260,8 @@ struct Session {
     /// come to run.
     accepted_revision: u64,
     /// The protocol model, stepped beside the runtime with the inputs it
-    /// met, and the model's token for each real request.
-    model: model::Protocol,
-    /// The real token each of the model's requests produced, by the model's
-    /// token. Two requests that change neither the document nor the mesh
-    /// produce one real token, and the runtime cannot tell them apart.
-    tokens: Vec<TopologyToken>,
-    /// What a preparation reads, each content met so far, by the name the
-    /// model knows it as; the same for mesh edges.
-    inputs: Vec<PreparedInputs>,
-    edges: Vec<f64>,
+    /// met.
+    lockstep: Lockstep,
     /// Whether the scenes adapt, and the frames run adaptation after the
     /// runtime as the app's do.
     adaptive: bool,
@@ -361,52 +354,6 @@ impl Worker {
     }
 }
 
-/// What the model is told an edit changed, read before it.
-struct Was {
-    revision: u64,
-    acceptance: TopologyAcceptance,
-    mesh_edge: f64,
-    pulses: usize,
-    switches: usize,
-    history: (usize, usize),
-    undo_replaces: bool,
-    redo_replaces: bool,
-}
-
-/// The state the model and the runtime are compared on, with tokens as the
-/// runtime knows them.
-#[derive(Debug, PartialEq)]
-struct Projection {
-    active: Option<TopologyToken>,
-    uploading: Option<(TopologyToken, u8)>,
-    source_commit: Option<TopologyToken>,
-    packed: Option<TopologyToken>,
-    pack_back: bool,
-    ready: Option<TopologyToken>,
-    preparing: bool,
-    last_error: Option<TopologyToken>,
-    request_stands: bool,
-    reset: bool,
-    remesh: bool,
-    drop: bool,
-    pulses: usize,
-    switches: usize,
-    fault: bool,
-    cleanup: Option<(u8, bool)>,
-    running: bool,
-    stepping: bool,
-    generation: u8,
-    installed: bool,
-    carries: Option<TopologyToken>,
-    ready_status: bool,
-    failed: bool,
-    behind: bool,
-    handoff: bool,
-    refused: bool,
-    event: bool,
-    display: u8,
-}
-
 /// What a step is judged against, read before it.
 struct Before {
     generation: u64,
@@ -463,6 +410,7 @@ impl Session {
         world.init_resource::<Assets<ShaderBuffer>>();
         test_device::connect(&mut world);
         let scenes = vec![state.editor.document.model.accepted.clone()];
+        let lockstep = Lockstep::opened(&state);
         Self {
             state,
             world,
@@ -473,10 +421,7 @@ impl Session {
             running: None,
             scenes,
             accepted_revision: 0,
-            model: model::Protocol::default(),
-            tokens: Vec::new(),
-            inputs: Vec::new(),
-            edges: Vec::new(),
+            lockstep,
             adaptive,
             wave: WaveDisplay::default(),
             adapted_from: Vec::new(),
@@ -485,7 +430,6 @@ impl Session {
             worker: None,
             read: Read::default(),
         }
-        .named()
     }
 
     /// Runs `f` on the world with the request, the display and the recorders
@@ -505,8 +449,13 @@ impl Session {
     }
 
     /// The copies `deliver` brings arrive, and the settle systems run after
-    /// them: what they told the host is kept as the model's steps.
+    /// them: what they told the host is kept as the model's steps, as the
+    /// host's counters read it (`Heard`), which is all the `interleaved`
+    /// fixture has on a device. What the copies were says the same, but for
+    /// a copy of the running generation whose readback was replaced while
+    /// it was in flight, which no observer reads.
     fn arrive(&mut self, deliver: impl FnOnce(&mut World, &mut TestDevice) -> Vec<Arrival>) {
+        let heard = Heard::now(&self.request, &self.display);
         let failed = self.request.failed();
         let handoff = self.request.handoff_outcome() == CanonicalGpuHandoffOutcome::Pending;
         let event = self.request.live_event_pending();
@@ -515,37 +464,24 @@ impl Session {
             TestDevice::settle(world);
             arrivals
         });
+        let read = heard.since(&self.request, &self.display);
         // A readback of the running generation; one of another changes
-        // nothing. Whether every step asked for has completed is the count's
-        // to say: `caught_up` also reads a failed run as caught up, which
-        // the model is told on its own, after this.
-        if arrivals
+        // nothing.
+        let copied = arrivals
             .iter()
-            .any(|arrival| arrival.current && matches!(arrival.kind, Kind::Control | Kind::State))
-        {
-            self.told.push(model::Step::Readbacks {
-                caught_up: self.request.stats().completed_steps() >= self.request.requested_steps(),
-            });
-        }
-        if handoff {
-            match self.request.handoff_outcome() {
-                CanonicalGpuHandoffOutcome::Accepted => {
-                    self.told.push(model::Step::Handoff { admit: true })
-                }
-                CanonicalGpuHandoffOutcome::Rejected(_) => {
-                    self.told.push(model::Step::Handoff { admit: false })
-                }
-                _ => {}
-            }
-        }
-        if event && !self.request.live_event_pending() {
-            self.told.push(model::Step::Settle {
-                take: self.request.stats().event_rejection() == 0,
-            });
-        }
-        if !failed && self.request.failed() {
-            self.told.push(model::Step::Fault);
-        }
+            .any(|arrival| arrival.current && matches!(arrival.kind, Kind::Control | Kind::State));
+        let settled = |step: &model::Step| match step {
+            model::Step::Readbacks { .. } => copied,
+            model::Step::Handoff { .. } => handoff,
+            model::Step::Settle { .. } => event,
+            model::Step::Fault => !failed,
+            _ => false,
+        };
+        assert!(
+            read.iter().all(settled),
+            "the host's counters read {read:?}, which the copies that arrived do not account for"
+        );
+        self.told.extend(read);
     }
 
     /// The device does what `does` does, and then every copy in flight
@@ -554,134 +490,14 @@ impl Session {
         self.arrive(|world, device| device.answer(world, does));
     }
 
-    /// The model told the scene's inputs by name, as at launch.
-    fn named(mut self) -> Self {
-        self.model.inputs = self.inputs_name();
-        self.model.edge = self.edge_name();
-        self
-    }
-
-    /// The model's name for the mesh edge now.
-    fn edge_name(&mut self) -> u8 {
-        let edge = self.state.editor.document.presentation.mesh_edge;
-        let index = match self.edges.iter().position(|known| *known == edge) {
-            Some(index) => index,
-            None => {
-                self.edges.push(edge);
-                self.edges.len() - 1
-            }
-        };
-        index as u8
-    }
-
-    /// The model's name for what a preparation reads of the document now.
-    fn inputs_name(&mut self) -> u8 {
-        let document = &self.state.editor.document;
-        let index = match self.inputs.iter().position(|known| known.read(document)) {
-            Some(index) => index,
-            None => {
-                self.inputs.push(PreparedInputs::of(document));
-                self.inputs.len() - 1
-            }
-        };
-        index as u8
-    }
-
-    fn was(&self) -> Was {
-        let document = &self.state.editor.document;
-        Was {
-            revision: self.state.editor.revision,
-            acceptance: self.state.editor.acceptance,
-            mesh_edge: document.presentation.mesh_edge,
-            pulses: self.state.coordinator.pending_pulses.len(),
-            switches: self.state.coordinator.pending_switches.len(),
-            history: self.state.editor.history_len(),
-            undo_replaces: self.state.editor.undo_replaces_scene(),
-            redo_replaces: self.state.editor.redo_replaces_scene(),
-        }
-    }
-
-    /// The real token the model's `token` names.
-    fn real(&self, token: model::Token) -> TopologyToken {
-        self.tokens[token as usize]
-    }
-
-    /// Whether the draft as it stands would validate.
-    fn draft_valid(&self) -> bool {
-        self.state.editor.document.model.draft.compile(0).is_ok()
-    }
-
-    /// The model's step for `act`, with the inputs the runtime met.
+    /// The model's step for `act`, with the inputs the runtime met. The
+    /// device's steps are what its copies told the host, kept as they
+    /// arrived; the worker's are the frames that read them.
     fn model_step(&mut self, act: &Act, was: &Was, log: &[ProtocolNote]) -> Option<model::Step> {
-        let inputs = self.inputs_name();
-        let state = &self.state;
-        Some(match act {
+        let told = match act {
             Act::Frame(_) => {
-                let carry = log.iter().find_map(|note| match *note {
-                    ProtocolNote::Carry { same_step, update } => Some((same_step, update)),
-                    _ => None,
-                });
-                let patch = log.iter().find_map(|note| match *note {
-                    ProtocolNote::Patch { built, packable } => Some((built, packable)),
-                    _ => None,
-                });
-                let begin = log.iter().find_map(|note| match *note {
-                    ProtocolNote::Begin { install, ok } => Some((install, ok)),
-                    _ => None,
-                });
-                model::Step::Frame(model::Frame {
-                    validated: was.acceptance == TopologyAcceptance::Pending
-                        && state.editor.acceptance != TopologyAcceptance::Pending,
-                    inputs,
-                    prepared: log
-                        .iter()
-                        .find_map(|note| match *note {
-                            ProtocolNote::Prepared(true) => Some(model::Prepared::Done),
-                            ProtocolNote::Prepared(false) => Some(model::Prepared::Failed),
-                            _ => None,
-                        })
-                        .unwrap_or(model::Prepared::NotYet),
-                    carried: model::Carried {
-                        update: carry.map_or(model::decisions::Update::Full, |(_, update)| update),
-                        same_step: carry.is_some_and(|(same_step, _)| same_step),
-                        built: patch.is_none_or(|(built, _)| built),
-                        packable: patch.is_none_or(|(_, packable)| packable),
-                    },
-                    packed: log.contains(&ProtocolNote::Packed),
-                    install: begin.is_some_and(|(install, _)| install),
-                    begun: begin.is_none_or(|(_, ok)| ok),
-                    pulse: log
-                        .iter()
-                        .find_map(|note| match *note {
-                            ProtocolNote::Pulse(built) => Some(built),
-                            _ => None,
-                        })
-                        .unwrap_or(true),
-                    switch: log
-                        .iter()
-                        .find_map(|note| match *note {
-                            ProtocolNote::Switch(built) => Some(built),
-                            _ => None,
-                        })
-                        .unwrap_or(true),
-                    behind: !self.request.caught_up(),
-                    retime: log.contains(&ProtocolNote::Retimed),
-                    adapted: log
-                        .iter()
-                        .any(|note| matches!(note, ProtocolNote::Adapted(_))),
-                    cleans: log.contains(&ProtocolNote::CleanupDue),
-                    cleanup: log
-                        .iter()
-                        .find_map(|note| match *note {
-                            ProtocolNote::CleanupSolved(true) => Some(model::Solve::Found),
-                            ProtocolNote::CleanupSolved(false) => Some(model::Solve::Nothing),
-                            _ => None,
-                        })
-                        .unwrap_or(model::Solve::NotYet),
-                })
+                return Some(self.lockstep.frame(&self.state, &self.request, was, log));
             }
-            // The device's steps are what its copies told the host, kept as
-            // they arrived; the worker's are the frames that read them.
             Act::Readbacks(_)
             | Act::Handoff(_)
             | Act::Event(_)
@@ -694,180 +510,21 @@ impl Session {
             | Act::Pack(_)
             | Act::Clean(_)
             | Act::Adapt(_) => return None,
-            Act::Validate => model::Step::Validate { inputs },
-            Act::Reset => model::Step::Reset,
-            Act::Remesh => model::Step::Remesh,
-            Act::Run(on) => model::Step::Run(*on),
-            Act::Step => model::Step::StepOnce,
-            Act::Pulse(_) => {
-                if state.coordinator.pending_pulses.len() <= was.pulses {
-                    return None;
-                }
-                model::Step::Pulse
-            }
-            Act::Switch => model::Step::Switch {
-                queued: state.coordinator.pending_switches.len() > was.switches,
-            },
-            Act::Edge(_) => {
-                if state.editor.document.presentation.mesh_edge == was.mesh_edge {
-                    return None;
-                }
-                let edge = self.edge_name();
-                model::Step::Edge { edge }
-            }
-            // The speed reaches the model through the frames that retime,
-            // and asks for a retime again.
-            Act::Speed(_) => model::Step::Speed,
-            Act::Material { .. }
-            | Act::Nudge(_)
-            | Act::Source { .. }
-            | Act::Open(_)
-            | Act::Undo
-            | Act::Redo => {
-                // A scene opened replaces this one, and so does a step of the
-                // history that crosses a replacement.
-                let moved = state.editor.history_len() != was.history;
-                let replaced = match act {
-                    Act::Open(_) => true,
-                    Act::Undo => moved && was.undo_replaces,
-                    Act::Redo => moved && was.redo_replaces,
-                    _ => false,
-                };
-                if replaced {
-                    let edge = self.edge_name();
-                    model::Step::Replace {
-                        inputs,
-                        edge,
-                        valid: self.draft_valid(),
-                    }
-                } else if state.editor.revision != was.revision {
-                    model::Step::Edit {
-                        inputs,
-                        valid: self.draft_valid(),
-                    }
-                } else {
-                    return None;
-                }
-            }
-        })
-    }
-
-    /// The runtime in the model's terms.
-    fn projection(&self) -> Projection {
-        let state = &self.state;
-        Projection {
-            active: state.runtime.active().map(|active| active.bundle.token),
-            uploading: state
-                .coordinator
-                .uploading
-                .as_ref()
-                .map(|upload| (upload.token, upload.generation as u8)),
-            source_commit: state
-                .coordinator
-                .source_commit
-                .as_ref()
-                .map(|commit| commit.token),
-            packed: state
-                .coordinator
-                .gpu_upload_preparation
-                .as_ref()
-                .map(|pack| pack.token),
-            pack_back: state
-                .coordinator
-                .gpu_upload_preparation
-                .as_ref()
-                .is_some_and(|pack| pack.result.is_some()),
-            ready: state.runtime.ready().map(|ready| ready.bundle.token),
-            // On the frame or on the worker; a job the worker holds that a
-            // newer request replaced is no longer the runtime's.
-            preparing: state.runtime.preparing_timing().is_some()
-                || state.background_preparation.as_ref().is_some_and(|worker| {
-                    worker.token.is_some() && worker.token == state.runtime.requested()
-                }),
-            last_error: state.runtime.last_error().map(|error| error.token),
-            request_stands: state
-                .coordinator
-                .requested_inputs
-                .as_ref()
-                .is_some_and(|inputs| inputs.read(&state.editor.document)),
-            reset: state.coordinator.reset_requested,
-            remesh: state.coordinator.remesh_requested,
-            drop: state.coordinator.drop_requested,
-            pulses: state.coordinator.pending_pulses.len(),
-            switches: state.coordinator.pending_switches.len(),
-            fault: state.coordinator.solver_fault.is_some(),
-            // Once sent, its event is the device's, and the protocol has
-            // done with it.
-            cleanup: state.flux_cleanup.as_ref().and_then(|cleanup| {
-                match cleanup.stage {
-                    FluxCleanupStage::Due | FluxCleanupStage::Solving => Some(false),
-                    FluxCleanupStage::Found(_) => Some(true),
-                    FluxCleanupStage::Sent(_) | FluxCleanupStage::Landed(_) => None,
-                }
-                .map(|found| (cleanup.generation as u8, found))
-            }),
-            running: state.wave_running,
-            stepping: state.wave_step,
-            generation: self.request.generation() as u8,
-            installed: self.request.running_node_count().is_some(),
-            carries: self
-                .running
-                .filter(|_| self.request.running_node_count().is_some())
-                .map(|(_, token)| token),
-            ready_status: self.request.ready(),
-            failed: self.request.failed(),
-            behind: !self.request.caught_up(),
-            handoff: self.request.handoff_outcome() == CanonicalGpuHandoffOutcome::Pending,
-            refused: matches!(
-                self.request.handoff_outcome(),
-                CanonicalGpuHandoffOutcome::Rejected(_)
-            ),
-            event: self.request.live_event_pending(),
-            display: self.display.generation as u8,
-        }
-    }
-
-    /// The model's state in the same terms.
-    fn modelled(&self) -> Projection {
-        let model = &self.model;
-        Projection {
-            active: model.active.map(|token| self.real(token)),
-            uploading: model
-                .uploading
-                .map(|upload| (self.real(upload.token), upload.generation)),
-            source_commit: model.source_commit.map(|token| self.real(token)),
-            packed: model.packed.map(|token| self.real(token)),
-            pack_back: model.pack_back,
-            ready: model.ready.map(|token| self.real(token)),
-            preparing: model.preparing.is_some(),
-            last_error: model.last_error.map(|token| self.real(token)),
-            request_stands: model.requested_inputs == Some(model.inputs),
-            reset: model.reset,
-            remesh: model.remesh,
-            drop: model.drop,
-            pulses: model.pulses as usize,
-            switches: model.switches as usize,
-            fault: model.fault,
-            cleanup: model
-                .cleanup
-                .map(|cleanup| (cleanup.generation, cleanup.found)),
-            running: model.running,
-            stepping: model.stepping,
-            generation: model.generation,
-            installed: model.device.is_some(),
-            carries: model.device.map(|device| self.real(device.token)),
-            ready_status: model
-                .device
-                .is_some_and(|device| device.ready && !device.failed),
-            failed: model.failed(),
-            behind: model
-                .device
-                .is_some_and(|device| !device.caught_up && !device.failed),
-            handoff: model.handoff.is_some(),
-            refused: model.refused,
-            event: model.event.is_some(),
-            display: model.display,
-        }
+            Act::Validate => Told::Validate,
+            Act::Reset => Told::Reset,
+            Act::Remesh => Told::Remesh,
+            Act::Run(on) => Told::Run(*on),
+            Act::Step => Told::Step,
+            Act::Pulse(_) => Told::Pulse,
+            Act::Switch => Told::Switch,
+            Act::Edge(_) => Told::Edge,
+            Act::Speed(_) => Told::Speed,
+            Act::Material { .. } | Act::Nudge(_) | Act::Source { .. } => Told::Edit,
+            Act::Open(_) => Told::Open,
+            Act::Undo => Told::Undo,
+            Act::Redo => Told::Redo,
+        };
+        self.lockstep.told(told, &self.state, was)
     }
 
     /// Steps the model as the runtime stepped and holds the two to one
@@ -875,34 +532,19 @@ impl Session {
     /// proofs are about or the model does not describe it.
     fn conform(&mut self, act: &Act, was: Was) {
         let log = self.state.protocol_log.take();
-        let next = self.model.next;
         let told = std::mem::take(&mut self.told);
         let own = self.model_step(act, &was, &log);
-        for step in told.into_iter().chain(own) {
-            self.model.step(step);
-            self.model.check();
+        let steps = told.into_iter().chain(own).collect::<Vec<_>>();
+        if let Err(failure) = self.lockstep.conform(
+            &steps,
+            &log,
+            &self.state,
+            &self.request,
+            &self.display,
+            self.running,
+        ) {
+            panic!("after {act:?}: {failure}");
         }
-        // A frame may request twice: an edit's candidate committed in place,
-        // and then adaptation's.
-        let requested = log
-            .iter()
-            .filter_map(|note| match *note {
-                ProtocolNote::Requested(real) | ProtocolNote::Adapted(real) => Some(real),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            usize::from(self.model.next - next),
-            requested.len(),
-            "after {act:?} the runtime requested {requested:?} and the model {} times",
-            self.model.next - next
-        );
-        self.tokens.extend(requested);
-        assert_eq!(
-            self.projection(),
-            self.modelled(),
-            "after {act:?} the runtime and the protocol model part"
-        );
     }
 
     fn before(&self) -> Before {
@@ -1291,7 +933,7 @@ impl Session {
             .active()
             .map(|active| active.bundle.token);
         let before = self.before();
-        let was = self.was();
+        let was = Was::of(&self.state);
         self.state.notices.clear();
         self.state.protocol_log.take();
         self.act(act);
@@ -1693,6 +1335,46 @@ prop_state_machine! {
     fn late_preparations_agree_on_what_runs(sequential 1..120 => Played);
 }
 
+/// Found by the adaptive sequences (RT-01): a run failing after a handoff
+/// onto a fixed medium, its stationary flux found, sent the flux's event to
+/// the failed generation, which refused it; the host gave it up and reported
+/// a defect, and the flux stayed. It waits for the failure to clear, and
+/// goes once Run clears it.
+#[test]
+fn a_stationary_flux_found_on_a_failed_run_waits_for_it_to_clear() {
+    let mut session = Session::adapting();
+    session.quiesce();
+    for act in [
+        Act::Material { nth: 13, kind: 3 },
+        Act::Fault,
+        Act::Frame(Some(0)),
+        Act::Frame(Some(0)),
+        Act::Frame(None),
+        Act::Handoff(true),
+        Act::Frame(Some(0)),
+        Act::Frame(Some(0)),
+        Act::Clean(true),
+        Act::Fault,
+        Act::Frame(Some(0)),
+        Act::Frame(Some(0)),
+    ] {
+        session.step(&act);
+    }
+    assert_eq!(session.state.amr_error, None);
+    assert!(
+        session
+            .state
+            .flux_cleanup
+            .as_ref()
+            .is_some_and(|cleanup| matches!(
+                cleanup.stage,
+                super::super::flux_cleanup::FluxCleanupStage::Found(_)
+            )),
+        "the found flux waits for the failure to clear"
+    );
+    session.quiesce();
+}
+
 /// Found by the runtime sequences: a fault on a candidate just installed made
 /// the host reject it and keep its old topology, which the install had already
 /// replaced on the device, and the host paced the candidate's step for a
@@ -1852,7 +1534,7 @@ fn a_frame_backpressure_clamps_is_not_quiet() {
 fn a_refused_retime_is_not_asked_again() {
     let mut session = Session::start();
     session.quiesce();
-    let before = session.model.next;
+    let before = session.lockstep.model.next;
     session.step(&Act::Speed(0));
     for _ in 0..4 {
         for act in [
@@ -1866,7 +1548,7 @@ fn a_refused_retime_is_not_asked_again() {
         }
     }
     assert_eq!(
-        session.model.next,
+        session.lockstep.model.next,
         before + 1,
         "the refused retime is asked once"
     );
@@ -1876,7 +1558,7 @@ fn a_refused_retime_is_not_asked_again() {
     session.step(&Act::Speed(0));
     session.quiesce();
     assert!(
-        session.model.next > before + 1,
+        session.lockstep.model.next > before + 1,
         "a speed met and left asks again"
     );
 }

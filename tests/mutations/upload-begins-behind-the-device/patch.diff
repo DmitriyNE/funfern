@@ -1,0 +1,10 @@
+--- a/crates/funfern-app/src/ui/runtime.rs	2026-11-10 11:27:01
++++ b/crates/funfern-app/src/ui/runtime.rs	2026-11-10 11:27:01
+@@ -695,7 +695,6 @@
+             }
+         }
+         let packed_waits = self.coordinator.uploading.is_none()
+-            && request.caught_up()
+             && self
+                 .coordinator
+                 .gpu_upload_preparation

@@ -162,9 +162,13 @@ pub struct Frame {
 pub enum Step {
     Frame(Frame),
     /// The device's readbacks for a frame; `caught_up` is whether every step
-    /// asked for has completed.
+    /// asked for has completed, and `control` whether its status came among
+    /// them. A picture of the field can come without the status: the two are
+    /// readbacks of their own, and a generation just installed has shown its
+    /// field a frame before its status read ready (RT-01, 2026-11-10).
     Readbacks {
         caught_up: bool,
+        control: bool,
     },
     /// The device settles a pending handoff.
     Handoff {
@@ -366,10 +370,10 @@ impl Protocol {
     pub fn step(&mut self, step: Step) {
         match step {
             Step::Frame(frame) => self.frame(frame),
-            Step::Readbacks { caught_up } => {
+            Step::Readbacks { caught_up, control } => {
                 if let Some(device) = &mut self.device {
                     if !device.failed {
-                        device.ready = true;
+                        device.ready |= control;
                         device.caught_up = caught_up;
                     }
                     self.display = self.generation;
@@ -851,14 +855,15 @@ impl Protocol {
                 self.switches -= 1;
                 self.presses >>= 1;
             }
-            // A handoff's stationary flux waits behind the user's own events.
-            // Refused, it is given up.
+            // A handoff's stationary flux waits behind the user's own events,
+            // and for a failure to clear. Refused, it is given up.
             if let Some(cleanup) = self.cleanup
                 && cleanup.found
                 && cleanup_may_send(CleanupSeen {
                     current: cleanup.generation == self.generation,
                     transacting: self.uploading.is_some() || self.source_commit.is_some(),
                     pressed: self.pulses > 0 || self.switches > 0,
+                    failed: self.failed(),
                 })
                 && self.queue(true, Event::Cleanup) != Queued::Busy
             {
@@ -1129,7 +1134,10 @@ impl Protocol {
                     inputs: self.inputs,
                 },
                 Step::Frame(fair),
-                Step::Readbacks { caught_up: true },
+                Step::Readbacks {
+                    caught_up: true,
+                    control: true,
+                },
                 Step::Handoff { admit: true },
                 Step::Settle { take: true },
                 Step::Frame(fair),
@@ -1215,7 +1223,10 @@ mod tests {
             // Prepared and packed; the device behind, so the upload waits,
             // and the pulse goes.
             Step::Frame(frame(true)),
-            Step::Readbacks { caught_up: true },
+            Step::Readbacks {
+                caught_up: true,
+                control: true,
+            },
             // The device has caught up: the upload may begin.
             Step::Frame(frame(false)),
             Step::Handoff { admit: true },
@@ -1262,7 +1273,10 @@ mod tests {
         for _ in 0..4 {
             for step in [
                 Step::Frame(refused),
-                Step::Readbacks { caught_up: true },
+                Step::Readbacks {
+                    caught_up: true,
+                    control: true,
+                },
                 Step::Frame(refused),
             ] {
                 protocol.step(step);
@@ -1349,7 +1363,10 @@ mod tests {
             protocol.check();
             assert!(protocol.packed.is_some() && protocol.uploading.is_none());
             assert!(protocol.behind(), "the steps were withheld");
-            protocol.step(Step::Readbacks { caught_up: true });
+            protocol.step(Step::Readbacks {
+                caught_up: true,
+                control: true,
+            });
         }
         protocol.step(Step::Frame(frame(false)));
         protocol.check();
@@ -1408,6 +1425,73 @@ mod tests {
         protocol.step(Step::Frame(frame(false)));
         assert!(protocol.uploading.is_some());
         assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
+    }
+
+    /// RT-01: a stationary flux found while the run has failed waits for the
+    /// failure to clear, rather than being refused and given up.
+    #[test]
+    fn a_stationary_flux_found_on_a_failed_run_waits_for_it_to_clear() {
+        let mut protocol = Protocol::default();
+        assert!(protocol.settle(8, Carried::WHOLE, true));
+        protocol.step(Step::Edit {
+            inputs: 1,
+            valid: true,
+        });
+        for step in [
+            Step::Frame(frame(false)),
+            Step::Handoff { admit: true },
+            Step::Frame(Frame {
+                cleanup: Solve::NotYet,
+                ..frame(false)
+            }),
+            Step::Frame(frame(false)),
+            Step::Fault,
+            Step::Frame(frame(false)),
+            Step::Frame(frame(false)),
+        ] {
+            protocol.step(step);
+            protocol.check();
+        }
+        assert!(protocol.fault, "the failure paused the run");
+        assert!(
+            protocol.cleanup.is_some_and(|cleanup| cleanup.found) && protocol.event.is_none(),
+            "the found flux waits"
+        );
+        protocol.step(Step::Run(true));
+        protocol.step(Step::Frame(frame(false)));
+        assert_eq!(
+            protocol.event,
+            Some(Event::Cleanup),
+            "Run clears it, and it goes"
+        );
+        assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
+    }
+
+    /// RT-01: a generation just installed shows its field before its status
+    /// reads ready, and nothing publishes on the picture alone.
+    #[test]
+    fn a_picture_without_its_status_readies_nothing() {
+        let mut protocol = Protocol::default();
+        assert!(protocol.settle(8, Carried::WHOLE, false));
+        protocol.step(Step::Reset);
+        protocol.step(Step::Frame(frame(false)));
+        protocol.check();
+        protocol.step(Step::Readbacks {
+            caught_up: true,
+            control: false,
+        });
+        protocol.check();
+        assert_eq!(protocol.display, protocol.generation, "the picture shows");
+        assert!(
+            protocol.device.is_some_and(|device| !device.ready),
+            "the status has not read ready"
+        );
+        protocol.step(Step::Readbacks {
+            caught_up: true,
+            control: true,
+        });
+        assert!(protocol.device.is_some_and(|device| device.ready));
+        assert!(protocol.settle(8, Carried::WHOLE, false), "{protocol:#?}");
     }
 
     /// An edit, a Reset and a fault on the way all come to rest.

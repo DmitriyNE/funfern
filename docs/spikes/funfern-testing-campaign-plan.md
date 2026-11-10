@@ -1528,6 +1528,16 @@ mutation, in this order:
   log is kept at run time, so that the fixture can read it, and the played
   machine holds its packs back and opens on a fixed medium. The proofs hold,
   and 8,000 sequences found no defect.
+  RT-01's device half landed on 2026-11-10, and with it C7: `interleaved`
+  fires 48 seeded actions through the app's handlers on the device, the
+  model in lockstep beside it and an f64 reference replaying the timeline
+  the device accepted; twelve seeds in the device suite, three on lavapipe
+  in every pull request, none in the browser. The study, 30 seeds on
+  lavapipe and two on Metal, found the device's force cache missing what a
+  flux maintenance's increment pushes beyond its stationary part; with the
+  user, the event now adds it. The host's adaptive sequences found a
+  cleanup offered to a failed run and given up; with the user it waits for
+  Run.
 - **C8, robustness:** the 5.2 edge cases, on the CPU and then the device;
   RT-06; RT-07 with 5.4, a debug count of live shader buffers, staging,
   readbacks, bind groups and jobs in the fixtures binary, not wgpu's own

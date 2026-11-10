@@ -1,0 +1,11 @@
+--- a/crates/funfern-protocol/src/decisions.rs	2026-11-10 11:00:45
++++ b/crates/funfern-protocol/src/decisions.rs	2026-11-10 11:00:45
+@@ -274,7 +274,7 @@
+ /// reported as a defect's, and the part stayed until the next handoff's
+ /// cleanup took it (RT-01, 2026-11-10).
+ pub const fn cleanup_may_send(seen: CleanupSeen) -> bool {
+-    seen.current && !seen.transacting && !seen.pressed && !seen.failed
++    seen.current && !seen.transacting && !seen.pressed
+ }
+ 
+ /// What to do with a live event the running generation would not take.

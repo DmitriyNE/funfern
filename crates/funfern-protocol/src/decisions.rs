@@ -261,15 +261,20 @@ pub struct CleanupSeen {
     pub transacting: bool,
     /// A pulse or a Switch press waits.
     pub pressed: bool,
+    /// The running generation has failed.
+    pub failed: bool,
 }
 
 /// Whether the flux maintenance that takes a handoff's stationary flux away
 /// is offered to the device: only on the generation it was found for, whose
 /// flux it is, and behind the user's own events and any transaction, which
 /// may yet replace that generation. Being inert, the part is the same at
-/// whatever step the event lands.
+/// whatever step the event lands, so it waits out a failure too, which a
+/// failed generation would refuse it for: refused, it was given up and
+/// reported as a defect's, and the part stayed until the next handoff's
+/// cleanup took it (RT-01, 2026-11-10).
 pub const fn cleanup_may_send(seen: CleanupSeen) -> bool {
-    seen.current && !seen.transacting && !seen.pressed
+    seen.current && !seen.transacting && !seen.pressed && !seen.failed
 }
 
 /// What to do with a live event the running generation would not take.

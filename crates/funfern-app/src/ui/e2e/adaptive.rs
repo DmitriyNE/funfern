@@ -178,7 +178,7 @@ type Lattice = Vec<(f64, Point2)>;
 type TruthReading = (usize, Lattice, Lattice);
 
 /// Each part's worst error and the time of it.
-type Worst = [(f64, f64); 3];
+pub(super) type Worst = [(f64, f64); 3];
 
 /// What the driver tells the follower, in the device's order.
 enum Note {
@@ -224,19 +224,19 @@ enum Note {
 }
 
 /// A full snapshot as the device copied it.
-struct Snapshot {
-    generation: u64,
-    step: u64,
-    primary: Vec<f32>,
-    complementary: Vec<[f32; 2]>,
-    history: Vec<f32>,
+pub(super) struct Snapshot {
+    pub(super) generation: u64,
+    pub(super) step: u64,
+    pub(super) primary: Vec<f32>,
+    pub(super) complementary: Vec<[f32; 2]>,
+    pub(super) history: Vec<f32>,
     /// The device's time at the snapshot's step, where its clock shares the
     /// snapshot's epoch.
-    seconds: Option<f64>,
+    pub(super) seconds: Option<f64>,
 }
 
 impl Snapshot {
-    fn of(display: &CanonicalGpuDisplay, epoch: Epoch) -> Self {
+    pub(super) fn of(display: &CanonicalGpuDisplay, epoch: Epoch) -> Self {
         let step = display.full_snapshot_completed_steps();
         Snapshot {
             generation: display.generation,
@@ -298,11 +298,11 @@ struct Followed {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Compared {
-    time: f64,
+pub(super) struct Compared {
+    pub(super) time: f64,
     /// Whether the field held its error floor's share of its peak energy.
-    held: bool,
-    parts: [[f64; 2]; 3],
+    pub(super) held: bool,
+    pub(super) parts: [[f64; 2]; 3],
 }
 
 /// The comparisons read two ways: each part's worst distance over the most
@@ -337,7 +337,7 @@ fn replay_errors(comparisons: &[Compared]) -> (Worst, Worst, usize) {
 
 /// Whether `error` is worse than `worst`: past it, or a NaN, the worst there
 /// is.
-fn past(error: f64, worst: f64) -> bool {
+pub(super) fn past(error: f64, worst: f64) -> bool {
     !matches!(
         error.partial_cmp(&worst),
         Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
@@ -363,10 +363,10 @@ struct Carry {
 /// The step a generation's clock starts at, the time it starts at, and its
 /// step.
 #[derive(Clone, Copy, Debug)]
-struct Epoch {
-    step: u64,
-    origin: f64,
-    time_step: f64,
+pub(super) struct Epoch {
+    pub(super) step: u64,
+    pub(super) origin: f64,
+    pub(super) time_step: f64,
 }
 
 impl Epoch {
@@ -1597,6 +1597,7 @@ impl Follower {
                     &carried,
                     time_step,
                     runtime_serials,
+                    None,
                 )
                 .map_err(|error| format!("the handoff at step {step}: {error}"))?;
                 track.reference.state = handed;

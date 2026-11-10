@@ -1,0 +1,18 @@
+--- a/crates/funfern-app/src/canonical_wave.wgsl	2026-11-10 11:00:45
++++ b/crates/funfern-app/src/canonical_wave.wgsl	2026-11-10 11:00:45
+@@ -1928,15 +1928,6 @@
+             if !finite_scalar(fraction) || fraction < 0.0 || fraction > 1.0 {
+                 reject(STATUS_LAYOUT);
+             }
+-        } else if operation == 9u && use_force_cache() {
+-            // The cache moves by the increment's force, as it moves by the
+-            // grid filter's correction. A stationary part pushes no node,
+-            // but what a solve leaves beside it does, as the reference's
+-            // gathered force has it; missed, the cache stood apart from the
+-            // flux for the rest of the generation (RT-01, 2026-11-10).
+-            let next_force = accepted_force(i) + increment_force(i);
+-            set_candidate_force(i, next_force);
+-            if !finite_scalar(next_force) { reject(STATUS_NON_FINITE); }
+         }
+     } else if operation == 3u && i < control.counts_a.x + control.counts_a.y {
+         let sample = i - complementary_offset();

@@ -23,6 +23,7 @@ mod batches;
 #[path = "../../examples/support/check.rs"]
 mod check;
 pub(crate) mod far_field;
+mod interleaved;
 mod observables;
 mod rollback;
 
@@ -114,6 +115,18 @@ pub(crate) fn add(app: &mut App) {
     };
     if name == "batches" {
         batches::add(app, seconds);
+        return;
+    }
+    // RT-01's fuzzing: `interleaved-<seed>` as the suites name it, or
+    // `interleaved`, its seed from FUNFERN_E2E_SEED, for a study.
+    if let Some(seed) =
+        name.strip_prefix("interleaved")
+            .and_then(|seed| match seed.strip_prefix('-') {
+                Some(seed) => seed.parse::<u64>().ok().map(Some),
+                None => seed.is_empty().then_some(None),
+            })
+    {
+        interleaved::add(app, seed, seconds);
         return;
     }
     if let Some(fixture) = adaptive::AdaptiveFixture::named(&name) {
@@ -3654,6 +3667,7 @@ fn advance(
                         &carried,
                         state.coordinator.uploaded_time_step,
                         display.runtime_serials,
+                        None,
                     );
                     match handed {
                         Ok((handed, carry, target)) => {
@@ -4406,6 +4420,7 @@ fn advance(
                 &carried,
                 state.coordinator.uploaded_time_step,
                 display.runtime_serials,
+                None,
             ) {
                 Ok((handed, carry, target)) => {
                     reference.state = handed;
@@ -4543,22 +4558,34 @@ fn published(
 /// no fixture with a wall is driven. Either way the target runs its forcing
 /// as the device runs it from the handoff (`CanonicalForcing::handed_on`):
 /// a harmonic channel the handoff starts begins at rest there, and one it
-/// carries runs on as it ran. The generation returned carries that forcing,
-/// for the reference to step on.
+/// carries runs on as it ran. Given the forcing the running generation was
+/// authored with, `authored`, one carried with new parameters takes them
+/// with its carrier and rate running on (`CanonicalForcing::replaced_on`).
+/// The generation returned carries that forcing, for the reference to step
+/// on.
 fn hand_off(
     reference: &Reference,
     target: &PreparedTopology,
     carried: &Carried,
     time_step: f64,
     runtime_serials: [u32; 4],
+    authored: Option<&funfern_core::CanonicalForcing>,
 ) -> Result<(State, Option<MemoryCarry>, Arc<PreparedTopology>), String> {
     let source = &reference.active;
     let mut handed_target = target.clone();
+    let time = reference.state.time();
     handed_target.canonical_forcing = Arc::new(
-        target
-            .canonical_forcing
-            .handed_on(&source.canonical_forcing, reference.state.time())
-            .map_err(|error| error.to_string())?,
+        match authored {
+            Some(authored) => {
+                target
+                    .canonical_forcing
+                    .replaced_on(&source.canonical_forcing, authored, time)
+            }
+            None => target
+                .canonical_forcing
+                .handed_on(&source.canonical_forcing, time),
+        }
+        .map_err(|error| error.to_string())?,
     );
     let target = Arc::new(handed_target);
     let maps = &carried.maps;

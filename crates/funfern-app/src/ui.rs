@@ -63,6 +63,7 @@ mod input;
 mod inspectors;
 mod law_editor;
 mod line_plot;
+mod lockstep;
 mod material_session;
 mod materials;
 mod pacing;
@@ -501,7 +502,6 @@ struct ProtocolLog(Option<Vec<ProtocolNote>>);
 
 impl ProtocolLog {
     /// A log that keeps what it is told.
-    #[cfg(test)]
     fn kept() -> Self {
         Self(Some(Vec::new()))
     }
@@ -513,7 +513,6 @@ impl ProtocolLog {
     }
 
     /// What it was told since the last take.
-    #[cfg(test)]
     fn take(&mut self) -> Vec<ProtocolNote> {
         self.0.as_mut().map(std::mem::take).unwrap_or_default()
     }

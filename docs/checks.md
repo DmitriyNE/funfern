@@ -1848,6 +1848,59 @@ the played machine brings some 115 packs back after the frame that sent them
 and 50 stationary fluxes found and sent. 2,000 sequences a machine, and 2,000
 more of the played one on its fixed scene, found no defect.
 
+RT-01's device half is `interleaved` (`ui/e2e/interleaved.rs`), one seed a
+run: `interleaved-<seed>`, twelve in the device suite and the first three on
+lavapipe in every pull request. It opens the runtime machines' scene, the
+disc's medium switchable or linear by the seed, adaptation on in about half,
+and fires 48 actions drawn from the seed through the app's handlers, none to
+34 frames apart, while the run goes on as the app paces it: material edits,
+a drag of the disc, the mesh edge, Remesh, the speed, the source moved,
+switched or retuned, Reset, Run and Step, pulses, the Switch, another scene
+opened, Undo and Redo, a fault armed on the running generation and the next
+handoff made to fail. Three things judge it. The protocol model steps beside
+the app in lockstep (`ui/lockstep.rs`, which the runtime machines share),
+told what the runtime logged it decided, what each action changed, and what
+the device's copies told the host: a readback copied
+(`CanonicalGpuDisplay::copies`, and `controls` where the status came with
+it), a handoff admitted or refused, a live event settled, a failure; after
+every step the two must stand in one state. An f64 reference follows the
+timeline the device accepted on a thread of its own: each generation from
+rest or handed the field at the step its clock names, each event the device
+took at the step it encoded it at, a source patch as the device rewrites the
+drives (`CanonicalForcing::replaced_on`), a cleanup by the increment the app
+sent, as the device took it, the filter on the device's cadence; every full
+snapshot must stand within 1e-5 of the most Q, b and the wall's pole states
+held and within 3e-5 of themselves, and each cleanup's increment within 5e-5
+of the flux from the reference's own solve. After the last action Run is
+pressed, again if a fault armed while paused lands after it, and the run
+must come to rest, running the accepted revision or with an error naming it,
+the model at rest with it. A failure writes the actions, the model's steps,
+what the reference was told and every comparison to
+`target/interleaved-<seed>.log`. The study, 30 seeds on lavapipe, read
+9.4e-7 of the peak and 2.8e-6 held at most, a cleanup's increment 5.6e-6
+from the reference's; Metal, the device suite's twelve, 8.4e-7 and
+1.4e-6. Across them
+the device took 117 pulses, 38 Switches, 50 source weight patches, 22
+cleanups and one drive patch, with 28 faults and 41 refused handoffs. The
+study found the device's force cache missing a flux maintenance's force:
+the stationary part pushes nothing, but what the app's solve leaves beside
+it does, and the cache, which the steps update rather than gather, never
+took it in. The wall's pole states, small on the fixture's short
+generations, read 4.6e-4 of their peak from the cleanup's step on. With the
+user, the event stage now adds the increment's force to the cache, as the
+grid filter adds its correction's; `canonical_gpu_live_events` adds a
+pushing thousandth beside its stationary tenth, which read Q 1.4e-2 from the
+reference before and 3.2e-7 after. On the host, the adaptive machine found a
+cleanup found while the run had failed offered to the device, refused and
+given up; with the user it waits for Run (`cleanup_may_send`,
+`a_stationary_flux_found_on_a_failed_run_waits_for_it_to_clear`), and the
+device showed a picture arriving before its status, which now readies
+nothing (`a_picture_without_its_status_readies_nothing`). Its mutations are
+`upload-begins-behind-the-device` and
+`flux-maintenance-misses-the-force-cache` on the device, and
+`cleanup-sent-to-a-failed-run` on the host. It runs natively only: in the
+browser the reference would step inside the page's frames.
+
 RT-02, batching, is held on the device by `batches`. A frame asks for at most
 64 steps and never more than leaves 64 asked past what the queue has retired;
 the render world encodes them, at most 256 a frame and, unless stepping is

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0d3ff78d74dd61fcf5fb15108207aed82c4c5924c4380b316e25db6e778ab9d4 # shrinks to (initial_state, transitions, seen_counter) = ((), [Material { nth: 13, kind: 187 }, Fault, Frame(Some(0)), Frame(Some(0)), Frame(None), Handoff(true), Frame(Some(0)), Frame(Some(0)), Clean(true), Fault, Frame(Some(0)), Frame(Some(0))], None)

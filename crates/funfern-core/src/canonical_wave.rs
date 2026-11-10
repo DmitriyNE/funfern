@@ -328,8 +328,9 @@ impl CanonicalForcing {
     ///   absolute time, the same either way.
     ///
     /// A harmonic channel carried with a new acceleration takes it with its
-    /// rate and carrier continuous (`replace_drive`), which is not modelled
-    /// here yet, and is refused rather than run from the wrong anchor.
+    /// rate and carrier continuous (`replace_drive`), which needs the forcing
+    /// the running generation was authored with: here it is refused rather
+    /// than run from the wrong anchor, and [`Self::replaced_on`] takes it.
     pub fn handed_on(&self, previous: &CanonicalForcing, time: f64) -> Result<Self, WaveError> {
         if !time.is_finite() {
             return Err(WaveError::InvalidState);
@@ -370,6 +371,95 @@ impl CanonicalForcing {
                     return Err(WaveError::Unsupported(
                         "a harmonic channel carried across a handoff with new parameters is not \
                          modelled",
+                    ));
+                }
+            };
+        }
+        Ok(handed)
+    }
+
+    /// [`Self::handed_on`] with a harmonic channel carried with a new
+    /// acceleration taken as the device takes it, in a handoff
+    /// (`replace_drive`) and in a live source patch alike: its carrier runs
+    /// on from the phase it has reached at `time`, stepped by as much as the
+    /// authored phase stepped from the channel of `authored`, the forcing the
+    /// running generation was authored with, and its integrated rate runs on
+    /// from where it has got to. Which channels carry the same acceleration
+    /// is read off `authored` too, since `previous` holds them as they run,
+    /// their phases moved to where each was last started or replaced.
+    pub fn replaced_on(
+        &self,
+        previous: &CanonicalForcing,
+        authored: &CanonicalForcing,
+        time: f64,
+    ) -> Result<Self, WaveError> {
+        if !time.is_finite() {
+            return Err(WaveError::InvalidState);
+        }
+        let mut handed = self.clone();
+        for (source, key) in handed.sources.iter_mut().zip(&self.keys) {
+            let CanonicalRateDrive::LegacyIntegratedHarmonic {
+                acceleration,
+                anchor_time,
+                ..
+            } = source.drive
+            else {
+                continue;
+            };
+            let started = || {
+                let mut moved = acceleration;
+                let (_, _, frequency_hz, phase) = moved.carrier_mut();
+                *phase = (*phase + std::f64::consts::TAU * *frequency_hz * (time - anchor_time))
+                    .rem_euclid(std::f64::consts::TAU);
+                CanonicalRateDrive::legacy_with_rate_anchor(moved, time, 0.0)
+            };
+            let channel = |forcing: &CanonicalForcing| {
+                forcing
+                    .keys
+                    .iter()
+                    .position(|candidate| candidate == key)
+                    .map(|index| forcing.sources[index].drive)
+            };
+            source.drive = match channel(previous) {
+                None => started()?,
+                Some(CanonicalRateDrive::Direct(signal)) if signal.is_pulsed() => started()?,
+                Some(
+                    running @ CanonicalRateDrive::LegacyIntegratedHarmonic {
+                        acceleration: ran,
+                        anchor_time: ran_from,
+                        ..
+                    },
+                ) => {
+                    let Some(CanonicalRateDrive::LegacyIntegratedHarmonic {
+                        acceleration: was,
+                        ..
+                    }) = channel(authored)
+                    else {
+                        return Err(WaveError::Unsupported(
+                            "a running harmonic channel the running generation did not author",
+                        ));
+                    };
+                    if was == acceleration {
+                        running
+                    } else {
+                        let [_, _, ran_hz, ran_phase] = ran.carrier();
+                        let reached =
+                            ran_phase + std::f64::consts::TAU * ran_hz * (time - ran_from);
+                        let step = acceleration.carrier()[3] - was.carrier()[3];
+                        let mut replaced = acceleration;
+                        let (_, _, _, phase) = replaced.carrier_mut();
+                        *phase = (reached + step.sin().atan2(step.cos()))
+                            .rem_euclid(std::f64::consts::TAU);
+                        CanonicalRateDrive::legacy_with_rate_anchor(
+                            replaced,
+                            time,
+                            running.value(time)?,
+                        )?
+                    }
+                }
+                Some(_) => {
+                    return Err(WaveError::Unsupported(
+                        "a harmonic channel carried from a direct drive is not modelled",
                     ));
                 }
             };
@@ -7463,6 +7553,82 @@ mod tests {
             )
             .unwrap();
         assert!(edited.handed_on(&previous, time).is_err());
+    }
+
+    /// RT-01: a harmonic channel carried with new parameters, by a handoff or
+    /// a live source patch, runs on as the device runs it: its carrier from
+    /// the phase it had reached, stepped by as much as the authored phase
+    /// stepped, its rate from where it had got to, and the new acceleration
+    /// from there. One whose authored acceleration is unchanged runs on as
+    /// it ran, though its running phase was moved where a handoff started it.
+    #[test]
+    fn a_channel_carried_with_new_parameters_keeps_its_carrier_and_its_rate() {
+        use std::f64::consts::TAU;
+        let (_, operator) = compile(&TopologyScene::default());
+        let weights = operator.primary_mass().to_vec();
+        let forcing = |signal| {
+            let drive = CanonicalRateDrive::authored(signal, SOURCE_ANCHOR_TIME).unwrap();
+            let mut forcing = CanonicalForcing::none(&operator);
+            forcing
+                .push_keyed_source(
+                    CanonicalSource::new(&operator, weights.clone(), drive).unwrap(),
+                    CanonicalSourceKey::Point,
+                )
+                .unwrap();
+            forcing
+        };
+        let authored = forcing(TimeSignal::harmonic(0.1, 2.0, 0.8, 0.3));
+        // A handoff 1.5 s in started it, at rest there.
+        let running = authored
+            .handed_on(&CanonicalForcing::none(&operator), 1.5)
+            .unwrap();
+        let ran = running.sources()[0].drive();
+        let time = 4.25;
+
+        let unchanged = authored.replaced_on(&running, &authored, time).unwrap();
+        assert_eq!(unchanged.sources()[0].drive(), ran, "it runs on as it ran");
+
+        let retuned = forcing(TimeSignal::harmonic(0.1, 1.5, 1.7, 1.1));
+        let replaced = retuned.replaced_on(&running, &authored, time).unwrap();
+        let drive = replaced.sources()[0].drive();
+        assert!(
+            (drive.value(time).unwrap() - ran.value(time).unwrap()).abs() < 1.0e-12,
+            "the rate runs on from where it had got to"
+        );
+        let (
+            CanonicalRateDrive::LegacyIntegratedHarmonic {
+                acceleration,
+                anchor_time,
+                ..
+            },
+            CanonicalRateDrive::LegacyIntegratedHarmonic {
+                acceleration: before,
+                anchor_time: from,
+                ..
+            },
+        ) = (drive, ran)
+        else {
+            panic!("both integrated harmonics");
+        };
+        assert_eq!(anchor_time, time);
+        let [offset, amplitude, frequency, phase] = acceleration.carrier();
+        assert_eq!((offset, amplitude, frequency), (0.1, 1.5, 1.7));
+        let reached = before.carrier()[3] + TAU * 0.8 * (time - from);
+        let apart = (phase - reached - 0.8).rem_euclid(TAU);
+        assert!(
+            apart.min(TAU - apart) < 1.0e-12,
+            "the carrier steps as the authored phase did, from where it had reached"
+        );
+        let omega = TAU * frequency;
+        for later in [0.01, 0.37, 2.0] {
+            let gained = drive.value(time + later).unwrap() - drive.value(time).unwrap();
+            let integral =
+                offset * later + amplitude / omega * (phase.cos() - (phase + omega * later).cos());
+            assert!(
+                (gained - integral).abs() < 1.0e-12,
+                "the new acceleration drives it from there"
+            );
+        }
     }
 
     #[test]

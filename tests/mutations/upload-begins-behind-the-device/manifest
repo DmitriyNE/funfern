@@ -1,0 +1,4 @@
+about: a packed candidate's upload begins while the device is still behind the steps asked for, which the protocol model holds until it has caught up: RT-01's fixture parts from the model at the first such handoff
+test: scripts/e2e-fixture.sh interleaved-1
+expect: e2e interleaved failed: after the frame .* the runtime and the protocol model part
+needs: device

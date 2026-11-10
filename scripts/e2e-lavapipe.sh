@@ -26,12 +26,22 @@ else
   # The fixtures the device suite runs, so the two lists cannot part: its run
   # lines alone, not its probe, which asks the linked binary for a fixture
   # that does not exist.
-  mapfile -t fixtures < <(grep -o "'FUNFERN_E2E=[a-z-]* funfern-fixtures'" scripts/device-suite.sh \
-    | sed "s/'FUNFERN_E2E=\([a-z-]*\) .*/\1/")
+  mapfile -t fixtures < <(grep -o "'FUNFERN_E2E=[a-z0-9-]* funfern-fixtures'" scripts/device-suite.sh \
+    | sed "s/'FUNFERN_E2E=\([a-z0-9-]*\) .*/\1/")
   if [[ ${#fixtures[@]} -eq 0 ]]; then
     echo "no fixture run lines found in scripts/device-suite.sh" >&2
     exit 1
   fi
+  # RT-01's interleaved seeds past the third run in the device suite alone:
+  # on lavapipe each takes half a minute to a minute.
+  kept=()
+  for fixture in "${fixtures[@]}"; do
+    if [[ $fixture =~ ^interleaved-([0-9]+)$ ]] && ((BASH_REMATCH[1] > 3)); then
+      continue
+    fi
+    kept+=("$fixture")
+  done
+  fixtures=("${kept[@]}")
 fi
 target=${CARGO_TARGET_DIR:-target}
 logs=$target/e2e-lavapipe

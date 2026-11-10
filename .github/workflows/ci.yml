@@ -1083,7 +1083,9 @@ jobs:
     # - state: the rest, but the adaptive loop's `adaptive` and
     #   `adaptive-slow`, which run in no part: their f64 reference follows the
     #   run on a thread of its own natively, and on the page would step inside
-    #   its frames, setting the pace it is there to judge.
+    #   its frames, setting the pace it is there to judge. RT-01's
+    #   `interleaved-<seed>` runs are left out for the same reason, by the
+    #   spec itself.
     # A cell that runs long fails at 340 minutes, before the runner's own
     # cancel, so it reports which page it stood at.
     timeout-minutes: 340

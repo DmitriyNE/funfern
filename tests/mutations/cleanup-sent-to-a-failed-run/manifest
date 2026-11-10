@@ -1,0 +1,4 @@
+about: the stationary flux a handoff left is offered to the device while it has failed, which refuses it, and the cleanup is given up as a defect's rather than waiting for Run, as RT-01's host fuzzing found on 2026-11-10
+test: cargo test -p funfern-protocol --release --locked
+expect: a_stationary_flux_found_on_a_failed_run_waits_for_it_to_clear \.\.\. FAILED
+needs: cpu

@@ -9,11 +9,16 @@ import { expectedBuildId } from "./build-id.mjs";
 // its driver probe, so the native, software-Vulkan and browser runs cannot
 // part. `npm run test:e2e` serves `dist-e2e`, built with
 //   scripts/fixtures-page.sh && scripts/trunk build fixtures.html --release --dist dist-e2e
+// RT-01's `interleaved-<seed>` runs are left out: their f64 reference
+// follows the run on a thread of its own natively, and on the page would
+// step inside its frames, setting the pace it is there to judge.
 const allFixtures = [
   ...readFileSync("scripts/device-suite.sh", "utf8").matchAll(
-    /'FUNFERN_E2E=([a-z-]+) funfern-fixtures'/g,
+    /'FUNFERN_E2E=([a-z0-9-]+) funfern-fixtures'/g,
   ),
-].map((match) => match[1]);
+]
+  .map((match) => match[1])
+  .filter((name) => !name.startsWith("interleaved-"));
 // The ones to run, comma-separated, or all of them: CI's run on every push
 // names `cavity`, which on SwiftShader takes minutes where Chrome takes seconds.
 const named = (process.env.FUNFERN_E2E_FIXTURES ?? "")

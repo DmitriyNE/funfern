@@ -1,8 +1,11 @@
 //! Paused zero-duration edits on the production canonical GPU core.
 //!
 //! The last of them adds a stationary flux, as the flux maintenance that
-//! takes one away after a handoff does with the opposite sign: it pushes no
-//! node, so the run goes on as the reference does, carrying it, and its
+//! takes one away after a handoff does with the opposite sign, and a little
+//! that is not stationary, as the app's solve leaves beside it. The
+//! stationary part pushes no node; the rest pushes as the reference's
+//! gathered force has it, the device's force cache taking it in (RT-01,
+//! 2026-11-10: the cache had missed it for the rest of the generation). Its
 //! energy is booked in the maintenance lane.
 //!
 //! After them and 48 steps, a pulse whose energy overflows f32 is refused,
@@ -176,6 +179,11 @@ fn main() -> AppExit {
     let stationary = operator
         .stationary_complementary_component(&smooth)
         .expect("a stationary flux to add");
+    let pushing = smooth
+        .iter()
+        .zip(&stationary)
+        .map(|(smooth, stationary)| *smooth - *stationary)
+        .collect::<Vec<_>>();
     let events = VecDeque::from([
         CanonicalGpuLiveEvent::linear_loss_patch(
             time_step,
@@ -231,20 +239,25 @@ fn main() -> AppExit {
     oracle
         .apply_grid_filter(&operator, &accepted_new_forcing, FILTER_STRENGTH)
         .expect("filter oracle event");
-    // The stationary flux, a tenth of the field's energy at the edit.
-    let scale = (0.1 * oracle.energy(&operator).expect("the edit's energy")
-        / stationary
+    // The stationary flux, a tenth of the field's energy at the edit, and
+    // beside it a thousandth that pushes.
+    let energy = oracle.energy(&operator).expect("the edit's energy");
+    let scaled = |flux: &[Point2], share: f64| {
+        let held = flux
             .iter()
             .zip(operator.constitutive_samples())
             .map(|(value, sample)| {
                 0.5 * sample.integration_weight
                     * value.dot(sample.complementary_inverse.apply(*value))
             })
-            .sum::<f64>())
-    .sqrt();
-    let increment = stationary
-        .iter()
-        .map(|value| *value * scale)
+            .sum::<f64>();
+        let scale = (share * energy / held).sqrt();
+        flux.iter().map(|value| *value * scale).collect::<Vec<_>>()
+    };
+    let increment = scaled(&stationary, 0.1)
+        .into_iter()
+        .zip(scaled(&pushing, 1.0e-3))
+        .map(|(stationary, pushing)| stationary + pushing)
         .collect::<Vec<_>>();
     events.push_back(
         CanonicalGpuLiveEvent::flux_maintenance(&operator, &increment, 6)

@@ -1475,6 +1475,30 @@ fn candidate_constitutive_force(node: u32) -> f32 {
     return result;
 }
 
+// The force a flux maintenance's increment adds at a node, gathered as
+// `candidate_constitutive_force` gathers the flux's, from the increment the
+// samples' rows of scratch hold.
+fn increment_force(node: u32) -> f32 {
+    let range = nodes[node].ranges.xy;
+    let driven = temporal_enabled();
+    var result = 0.0;
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
+        if tables[entry].data.y != FORCE_KIND_GAP {
+            let sample = tables[entry].data.x;
+            let coefficient = vec2<f32>(
+                table_float(entry, 2u), table_float(entry, 3u));
+            var inverse_factor = 1.0;
+            if driven {
+                inverse_factor = 1.0 / temporal_complementary_factor(
+                    sample, control.clock_f32.y);
+            }
+            result += inverse_factor
+                * dot(coefficient, scratch[complementary_offset() + sample].values.xy);
+        }
+    }
+    return result;
+}
+
 // `K (Sᵖ M⁻¹ x)` of one scratch lane, `p` the power of each node's reach the
 // filter weighs that pass with: `K S² M⁻¹ K M⁻¹ Q` on `Q`, `S M⁻¹ K M⁻¹ S` on
 // the force.
@@ -1904,6 +1928,15 @@ fn event_simple_stage(@builtin(global_invocation_id) id: vec3<u32>) {
             if !finite_scalar(fraction) || fraction < 0.0 || fraction > 1.0 {
                 reject(STATUS_LAYOUT);
             }
+        } else if operation == 9u && use_force_cache() {
+            // The cache moves by the increment's force, as it moves by the
+            // grid filter's correction. A stationary part pushes no node,
+            // but what a solve leaves beside it does, as the reference's
+            // gathered force has it; missed, the cache stood apart from the
+            // flux for the rest of the generation (RT-01, 2026-11-10).
+            let next_force = accepted_force(i) + increment_force(i);
+            set_candidate_force(i, next_force);
+            if !finite_scalar(next_force) { reject(STATUS_NON_FINITE); }
         }
     } else if operation == 3u && i < control.counts_a.x + control.counts_a.y {
         let sample = i - complementary_offset();

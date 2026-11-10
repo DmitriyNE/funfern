@@ -242,7 +242,7 @@ impl Playground {
 
     /// Sends the stationary flux's increment, found for the running
     /// generation, as a flux maintenance, once the device is free of the
-    /// edits, pulses and Switch presses it waits behind
+    /// edits, pulses and Switch presses it waits behind, and of a failure
     /// ([`cleanup_may_send`]).
     pub(super) fn send_flux_cleanup(
         &mut self,
@@ -263,6 +263,7 @@ impl Playground {
                 || self.coordinator.source_commit.is_some(),
             pressed: !self.coordinator.pending_pulses.is_empty()
                 || !self.coordinator.pending_switches.is_empty(),
+            failed: request.failed(),
         }) {
             return;
         }

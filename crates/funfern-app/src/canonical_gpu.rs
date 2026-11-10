@@ -4664,9 +4664,9 @@ pub(crate) struct CanonicalGpuBufferHandles {
     event_kind: u32,
     event_serial: u32,
     event_dispatches: u64,
-    /// The step the generation was packed for, which host tests compare with
-    /// the step the host believes is running.
-    #[cfg(test)]
+    /// The step the generation was packed for, which host tests and the
+    /// `interleaved` fixture compare with the step the host believes is
+    /// running.
     time_step: f64,
 }
 
@@ -4970,7 +4970,6 @@ fn add_canonical_buffers(
         event_kind: plan.event_kind,
         event_serial: plan.control.event.y,
         event_dispatches: plan.manifest.event_dispatches as u64,
-        #[cfg(test)]
         time_step: plan.time_step,
     };
     AddedCanonicalBuffers {
@@ -5353,13 +5352,11 @@ impl CanonicalGpuRequest {
     }
 
     /// The step the running generation was packed for.
-    #[cfg(test)]
     pub fn running_time_step(&self) -> Option<f64> {
         self.buffers.as_ref().map(|handles| handles.time_step)
     }
 
-    /// Nodes of the running generation.
-    #[cfg(test)]
+    /// Nodes of the running generation; none with no generation installed.
     pub fn running_node_count(&self) -> Option<usize> {
         self.buffers
             .as_ref()
@@ -5919,6 +5916,12 @@ pub struct CanonicalGpuDisplay {
     pub active_gain: f32,
     pub readbacks: u64,
     pub full_readbacks: u64,
+    /// Control and state copies of the running generation read, and of them
+    /// the control copies, for what holds the host to the protocol model:
+    /// the device's readbacks, which a handoff's receipt is not, and its
+    /// status.
+    pub copies: u64,
+    pub controls: u64,
     /// Gate O: the accepted integrated field from its own continuous
     /// readback or the latest handoff receipt, for a view that paints `r`;
     /// empty without one. Its own serial, so the full-snapshot rule on
@@ -6522,6 +6525,7 @@ fn apply_canonical_state(
     }
     refresh_canonical_display(display);
     display.readbacks = display.readbacks.saturating_add(1);
+    display.copies = display.copies.wrapping_add(1);
     if copy == CanonicalStateCopy::Live && display.primary_flux.len() == display.node_count {
         display.picture.push(PictureCopy {
             serial: display.readbacks,
@@ -6579,6 +6583,8 @@ fn receive_canonical_control(
     let values: Vec<GpuCanonicalControl> = event.to_shader_type();
     let Some(value) = values.first() else { return };
     read_canonical_control(&tag.stats, &mut display, tag.generation, value);
+    display.copies = display.copies.wrapping_add(1);
+    display.controls = display.controls.wrapping_add(1);
 }
 
 /// What a control readback says, into the generation's stats and the

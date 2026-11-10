@@ -1,0 +1,4 @@
+about: a flux maintenance adds its increment to the flux but not to the force cache, so what the solve leaves beside the stationary part never pushes for the rest of the generation, as RT-01's device fuzzing found on 2026-11-10
+test: scripts/e2e-fixture.sh --example canonical_gpu_live_events
+expect: six paused events committed .* Q [0-9.]+e-[1-4], b
+needs: device
