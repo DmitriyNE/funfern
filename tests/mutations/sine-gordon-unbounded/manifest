@@ -1,0 +1,4 @@
+about: sine-Gordon declares no bound on the CPU, and a field past the phase f32 holds steps
+test: cargo test --release -p funfern-core --lib -- --exact canonical_temporal::tests::sine_gordon_steps_only_within_the_phase_f32_holds
+expect: panicked at crates/funfern-core/src/canonical_temporal.rs
+needs: cpu

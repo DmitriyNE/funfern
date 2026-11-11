@@ -33522,3 +33522,123 @@ the device.
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs. No device
   suite: the shaders, the device path and the runtime are unchanged.
+
+## 2026-11-12 — C8.2: the edge cases on the device
+
+- **Why.** C8's second item (campaign plan, section 6l): section 5.2 on the
+  device, each case read against the f64 reference on the generation the
+  app accepted.
+- **Study** (the `edges` fixture's categories, kept; 467 cases on lavapipe,
+  2026-11-11): node counts of 127 to 257 and outgoing traces of 127 to 129
+  through the direct, swept and nonlinear wall solves, contrast to 1e6,
+  axis ratios to 1e4, holes to 1e-2 off a wall and each other, a 3e-4
+  channel, a 1e-3 edge, the 216 empty resources, sums that cancel and
+  probe counts about their kernels' widths all within 1e-6 to 4e-6 of the
+  reference, the probes at their known floor (5.6e-5 of the peak against
+  the observables fixture's 2.8e-5 on Metal), 15 and 16 probes alike. Holes
+  1e-4 and 1e-6 off are refused when the scene is prepared, as on the CPU;
+  the quadratic mass law is refused there too. A pulse taken back to a
+  millionth reads 4e-2 off, f32's cancellation.
+- **Found, in the device** (with the user, each fixed):
+  - the shared sine reduces its argument once, which past 1e6 leaves it
+    outside the polynomials' range: emulated in f32, it came back as large
+    as 81 by 1e7, 1e11 by 1e8 and 4e18 by 1e10. A sine-Gordon pulse whose
+    field peaked at 5.7e7 grew to 2.3e18 in six steps before the device
+    failed, where the CPU ran on. Sine-Gordon now takes no step past
+    `SINE_GORDON_PHASE_BOUND`, `2^17`, where f32 holds `r` to 1/64 rad, on
+    both sides with φ⁴'s refusal; and the sine reduces what is left again,
+    up to six times, so it stays a sine everywhere (5e-7 off to 1e8, below
+    1e6 its bits unchanged over 250,000 arguments);
+  - van der Pol's half step formed its multiplier as its departures from
+    one, which cancel when it damps a node to a small share of itself: the
+    multiplier kept 6e-8·√s of itself, and a pulse at 1e10 ended 1.18 of
+    its scale off, at 1e18 22. Its CPU twins, struck a part in 1e7 apart or
+    rounded to f32, ended 1e-9 apart: the run is not sensitive, the device's
+    arithmetic was. Past `s` or `|x|` of one the multiplier is now formed
+    whole;
+  - the Kerr inverse ran Newton from the middle of `[0, goal/m]`, which on
+    the cubic walks down a third a step: 39 steps at a goal of 1e10, past
+    the 40 beyond. Driven at 1e10 on the stiffness it failed at step 140,
+    at 1e19 on the mass at once, where the CPU, from its cached field with
+    200, converged. The bracket's top is now cut to `∛(goal/Σcχ)`, widened
+    by a part in 1e4: 8 steps whatever the goal;
+  - a source at 1e30 overflowed the books with the field at 5.8e25 and the
+    reference's: every step after committed with NaN in them, and every
+    handoff was refused until Reset. The step whose entry, over every item
+    and the totals it folds into, would pass f32's largest now fails with
+    code 4, so no fold can overflow; the test is the sum's finiteness,
+    since the ceiling would be a literal Safari cannot read.
+- **Found, in the code** (with the user, each fixed):
+  - `commit_event` read the candidate's code and not the latch, as
+    `commit_step` and the filter's commit do. A first event behind a failed
+    step was refused and cleared the code, and a second, sent before the
+    host read the latch from the status readback (the control readback
+    answers events, frames apart), committed the failed step's lane; and
+    `live_event_stage` returned before staging the event's serial, so the
+    commit answered the event before it and the host waited on the pulse.
+    The latch now refuses the event by its own serial. Twelve trials of
+    pulses into a failed run never reached the window through the app's
+    pacing; the gate's case latches the device directly and sends the
+    pulse in the same frame;
+  - no plan was held to the 65,535 workgroups a dimension holds: the
+    scratch clear's pass, about 15 words a node, needs 63,804 on an 8 × 8
+    domain at the Fine edge and 120,437 on an 11 × 11 one, prepared in
+    10 s, which on a device binding past 128 MiB fails validation. The
+    admission now refuses it as GPU-7 refuses a buffer, and the wall's
+    passes, and a live event whose upload needs more; splitting the passes
+    over two dimensions is under Worth checking sometime;
+  - the drift's nodes were reached only because a mesh holds fewer of them
+    than samples: it is dispatched over all three counts. The wall's
+    per-mode passes, dispatched by the trace's count, are refused a wall
+    with more modes. The encoder took the time-driven path from the runtime
+    records' count, the shader from a bit: it reads the bit. The workgroup
+    widths, literals in the shaders and the encoders, are held by a test.
+- **Not defects.** φ⁴ struck past its bound is refused at its first step on
+  both sides, its bound on `r`, which a pulse does not move. Defocusing Kerr
+  driven at 1e2 reached its bound one step later on the device, at the
+  threshold. The device refuses pulses of 1e20 and more, and fails the
+  first step of saturable media driven at 1e19, code 4 and finite, where
+  the f64 reference takes them; below a field of about 1e-34 nonlinear mass
+  laws lose their relative digits, the inverse floored at f32's smallest
+  normal by design (3e-3 at a drive of 1e-30); a pulse of 1e-45 lands as
+  nothing. Written in `checks.md`.
+- **Checks.** The `edges` gate, 22 cases in the device suite (305 s on
+  lavapipe): the tails within 1e-5 (1.6e-6), sine-Gordon at 5.7e7 refused
+  by both, a 1 MHz pulse 1,000 s before its centre bounded (7.3 times the
+  reference's peak, its carrier phaseless in f32 there; 2.4e11 with the sine
+  reduced once, where a carrier run from zero for 2,000 steps had read only
+  2.2 times), van der Pol
+  at 5.7e7 and 5.7e15 within 1e-5 (8.4e-7, 3.3e-6), Kerr driven at 1e10
+  within 1e-5 (1.0e-6), a source at 1e30 failing its first step with its
+  books finite, and the pulse behind a latch refused with its code, the
+  field 2.7e-7 off the reference's without it. On the host: the sine-Gordon
+  bound a radian either side, the workgroup admission at 8,388,480 and
+  8,388,481 items, a live event's upload, the modes against the trace, the
+  time-driven bit and the shaders' widths. On Metal the gate held in 57 s:
+  the tails within 1.9e-6, the pulse at 5.4 times the reference's peak, van
+  der Pol within 3.2e-6, the latched pulse refused 2.6e-7 off.
+- **Mutations**, each failing its check, the device's on lavapipe:
+  `sine-gordon-unbounded-on-the-device` (the device ran on, the reference
+  refused), `portable-sine-reduced-once` (a peak of 2.4e11 against 3.5e-6),
+  `van-der-pol-multiplier-by-departures` (1.7 and 2.6e9 off),
+  `kerr-inverse-from-the-midpoint` (failed at step 140),
+  `accounting-overflow-unchecked` (ran 400 steps, its books NaN),
+  `event-commit-ignores-the-latch` (the pulse taken, the field 8.4e-2 off)
+  and `latched-event-left-unanswered` (never answered); on the host
+  `sine-gordon-unbounded`, `dispatch-limit-unchecked`,
+  `live-event-upload-unchecked`, `wall-modes-past-the-trace`,
+  `handles-temporal-from-the-runtime-count` and
+  `probe-kernel-width-out-of-step`. The drift's dispatch over all three
+  counts has none: no mesh holds more nodes than samples. The first device
+  trials ran the unpatched binary, Colima sharing only the home directory
+  with the container; the patched trees are now streamed into a volume.
+- **Passed on to C8.3.** A carrier's phase over a 256 s epoch passes 1e6,
+  where the sine starts to lose digits, at about 620 Hz, and the editor
+  allows 1 MHz; a pulse's carrier, counted from its centre, holds no phase
+  past an argument of about 1e7, 1.6 s from the centre at 1 MHz; and
+  `reduced_phase`, through which the rebase carries the carriers' phases,
+  leaves its range past 1e6 as the sine did.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release), the
+  default scene in the debug profile, release build, the wasm32 and threaded
+  wasm checks, the browser shader compile and the protocol proofs; the device
+  suite on Metal, 139 of 139 (shaders and the device path changed).

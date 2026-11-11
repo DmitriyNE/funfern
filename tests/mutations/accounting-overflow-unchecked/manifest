@@ -1,0 +1,4 @@
+about: the books overflow with the field finite, and every step after commits
+test: FUNFERN_E2E_EDGES_ONLY="driven at 1e30" scripts/e2e-fixture.sh edges
+expect: MISSED DeviceFails\(4, [^)]*\): the device failed with 0
+needs: device

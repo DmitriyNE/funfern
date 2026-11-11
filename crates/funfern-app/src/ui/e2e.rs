@@ -22,6 +22,9 @@ mod adaptive;
 mod batches;
 #[path = "../../examples/support/check.rs"]
 mod check;
+#[path = "../../tests/support/edge_scenes.rs"]
+mod edge_scenes;
+mod edges;
 pub(crate) mod far_field;
 mod interleaved;
 mod observables;
@@ -29,6 +32,8 @@ mod rollback;
 
 use super::runtime::pulse_increment;
 use super::*;
+// The shared scenes name the app's paths through this.
+use crate as app_crate;
 use crate::canonical_gpu::{
     CANONICAL_FAILURE_INVERSE_DOMAIN, CanonicalGpuHandoffOutcome, CanonicalGpuRuntimeTransfer,
     canonical_failure_description,
@@ -115,6 +120,10 @@ pub(crate) fn add(app: &mut App) {
     };
     if name == "batches" {
         batches::add(app, seconds);
+        return;
+    }
+    if name == "edges" {
+        edges::add(app, seconds);
         return;
     }
     // RT-01's fuzzing: `interleaved-<seed>` as the suites name it, or
@@ -4784,7 +4793,15 @@ fn field_errors(
     display: &CanonicalGpuDisplay,
     included: Option<&[bool]>,
 ) -> Result<(f64, f64, f64), String> {
-    let expected = &reference.state;
+    state_errors(&reference.state, display, included)
+}
+
+/// [`field_errors`] against any state.
+fn state_errors(
+    expected: &State,
+    display: &CanonicalGpuDisplay,
+    included: Option<&[bool]>,
+) -> Result<(f64, f64, f64), String> {
     let integrated = display.integrated_field();
     if display.primary_flux.len() != expected.primary().len()
         || display.complementary_flux.len() != expected.complementary().len()

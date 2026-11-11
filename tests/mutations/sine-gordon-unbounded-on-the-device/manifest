@@ -1,0 +1,4 @@
+about: the device steps sine-Gordon past the phase f32 holds, where the reference refuses
+test: FUNFERN_E2E_EDGES_ONLY="sine-Gordon" scripts/e2e-fixture.sh edges
+expect: MISSED BothRefuse\(6\): the device failed with 0
+needs: device

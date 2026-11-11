@@ -76,7 +76,11 @@ macro_rules! add_shader_buffer {
 
 pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 7;
 pub const CANONICAL_GPU_STORAGE_BINDINGS: usize = 8;
+/// The width of the step's and the handoff's workgroups, every shader's
+/// `WORKGROUP_SIZE`; `the_workgroup_widths_agree_with_the_shaders` holds them.
 pub const CANONICAL_GPU_WORKGROUP_SIZE: u32 = 128;
+/// The width of the recorders' and the far field's workgroups.
+pub const RECORDER_WORKGROUP_SIZE: u32 = 64;
 /// The most workgroups one dispatch launches along a dimension, WebGPU's
 /// portable `maxComputeWorkgroupsPerDimension`. Each boundary pass gives every
 /// trace node a workgroup of its own, so this is the longest outgoing trace the
@@ -262,10 +266,15 @@ impl CanonicalGpuClock {
 /// against before its buffers are made: past either, its bind group failed
 /// validation and rendering stopped for good, with the running generation lost
 /// where the scene could have been refused (GPU-7 of the 2026-10-20 review).
+/// The workgroups one dimension of a dispatch holds bound the plan the same
+/// way: the step's widest pass, the scratch clear's, passed 65,535 at about
+/// 0.96M nodes, an 8 × 8 domain at the Fine edge reaching 63,804 (C8.2,
+/// 2026-11-11).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanonicalGpuLimits {
     pub max_storage_buffer_binding_size: u64,
     pub max_buffer_size: u64,
+    pub max_compute_workgroups_per_dimension: u32,
 }
 
 impl CanonicalGpuLimits {
@@ -279,6 +288,7 @@ impl CanonicalGpuLimits {
             .map(|limits| Self {
                 max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
                 max_buffer_size: limits.max_buffer_size,
+                max_compute_workgroups_per_dimension: limits.max_compute_workgroups_per_dimension,
             })
     }
 
@@ -295,6 +305,20 @@ impl CanonicalGpuLimits {
             "the {name} buffer needs {:.1} MiB, more than the {:.1} MiB this device binds",
             mib(bytes as u64),
             mib(limit)
+        ))
+    }
+
+    /// Refuses a pass over `items` that `width`-wide workgroups cannot cover
+    /// in one dimension, naming it.
+    pub(crate) fn admit_dispatch(self, name: &str, items: usize, width: u32) -> Result<(), String> {
+        let groups = items.div_ceil(width.max(1) as usize);
+        let limit = self.max_compute_workgroups_per_dimension;
+        if groups <= limit as usize {
+            return Ok(());
+        }
+        Err(format!(
+            "the {name} needs {groups} workgroups, more than the {limit} this device dispatches \
+             in one dimension"
         ))
     }
 }
@@ -1290,6 +1314,26 @@ pub struct CanonicalGpuPlan {
 }
 
 impl CanonicalGpuPlan {
+    /// The most items one of the generation's passes spreads over
+    /// [`CANONICAL_GPU_WORKGROUP_SIZE`]-wide workgroups: every count the
+    /// encoder dispatches by, the scratch clear's the widest on any mesh.
+    pub fn widest_dispatch(&self) -> usize {
+        let counts = &self.control;
+        [
+            self.scratch.len(),
+            counts.counts_a.w as usize,
+            (counts.counts_a.x + counts.counts_a.y + counts.counts_b.z) as usize,
+            counts.counts_b.x as usize,
+            counts.counts_c.z as usize,
+            self.manifest
+                .temporal
+                .map_or(0, |temporal| temporal.runtime_record_count),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+    }
+
     /// Each buffer the plan's install binds, by name and size, measured on
     /// the words themselves: the manifest's report leaves out the temporal
     /// runtime bank, which the state buffer carries.
@@ -3780,6 +3824,7 @@ fn compile_boundary(
         }
         None => false,
     };
+    modes_within_trace(outgoing.modes().len(), trace_count)?;
     Ok(CompiledBoundary {
         words,
         trace_positions: positions,
@@ -3794,6 +3839,18 @@ fn compile_boundary(
         trace_sweeps: usize_u32(export.device_sweeps)?,
         trace_direct,
     })
+}
+
+/// The wall's per-mode passes take a workgroup a mode but are dispatched by
+/// the trace's count, which a mode past it would never reach. A factor holds
+/// one mode a trace node, so they agree; nothing held them to.
+fn modes_within_trace(mode_count: usize, trace_count: usize) -> Result<(), CanonicalGpuBuildError> {
+    if mode_count <= trace_count {
+        return Ok(());
+    }
+    Err(CanonicalGpuBuildError::InvalidLayout(
+        "the outgoing boundary has more modes than trace nodes",
+    ))
 }
 
 fn gpu_signal(
@@ -4124,7 +4181,11 @@ fn pack_restoring(
         RestoringLawValues::KleinGordon { omega0 } => {
             (RESTORING_KLEIN_GORDON, omega0 * omega0, 0.0)
         }
-        RestoringLawValues::SineGordon { omega0 } => (RESTORING_SINE_GORDON, omega0 * omega0, 0.0),
+        RestoringLawValues::SineGordon { omega0 } => (
+            RESTORING_SINE_GORDON,
+            omega0 * omega0,
+            funfern_core::SINE_GORDON_PHASE_BOUND,
+        ),
         RestoringLawValues::Phi4 {
             lambda,
             amplitude_bound,
@@ -4656,6 +4717,10 @@ pub(crate) struct CanonicalGpuBufferHandles {
     short_wave: bool,
     drive_count: u32,
     material_runtime_count: u32,
+    /// The time-driven path, read from the bit the shader's
+    /// `temporal_enabled` reads: the encoder took it from the runtime records'
+    /// count, which agreed only because one builder sets both.
+    temporal: bool,
     source_count: u32,
     rebase_step_limit: u32,
     dispatches_per_step: u64,
@@ -4962,6 +5027,7 @@ fn add_canonical_buffers(
         short_wave: plan.short_wave,
         drive_count,
         material_runtime_count,
+        temporal: plan.control.runtime_slots.w & TEMPORAL_ENABLED != 0,
         source_count,
         rebase_step_limit,
         dispatches_per_step,
@@ -5008,6 +5074,13 @@ impl CanonicalGpuRequest {
         for (name, bytes) in plan.buffer_bytes() {
             limits.admit(&format!("generation's {name}"), bytes)?;
         }
+        // The wall's passes take one workgroup a trace node or mode.
+        limits.admit_dispatch("generation's wall passes", plan.trace_count, 1)?;
+        limits.admit_dispatch(
+            "generation's widest pass",
+            plan.widest_dispatch(),
+            CANONICAL_GPU_WORKGROUP_SIZE,
+        )?;
         if let Some(transfer) = transfer {
             limits.admit(
                 "generation's handoff transfer",
@@ -5496,7 +5569,7 @@ impl CanonicalGpuRequest {
         // reference mass, not the moving one, and the carrier is re-anchored
         // on the device's own clock, so a driven medium composes with it
         // unchanged (`canonical_gpu_temporal_live_source`).
-        if handles.material_runtime_count != 0
+        if handles.temporal
             && !matches!(
                 event.kind,
                 EVENT_PRIMARY_PULSE
@@ -5509,12 +5582,12 @@ impl CanonicalGpuRequest {
         {
             return Err("this event has not passed its Stage 7 temporal composition gate".into());
         }
-        if handles.material_runtime_count == 0
+        if !handles.temporal
             && matches!(event.kind, EVENT_TEMPORAL_SWITCH | EVENT_TEMPORAL_LAW_PATCH)
         {
             return Err("a temporal material event requires a temporal generation".into());
         }
-        if handles.material_runtime_count != 0 && event.kind == EVENT_GRID_FILTER {
+        if handles.temporal && event.kind == EVENT_GRID_FILTER {
             event.dispatches += 2;
         }
         let upload_words = event
@@ -5522,6 +5595,17 @@ impl CanonicalGpuRequest {
             .len()
             .try_into()
             .map_err(|_| "a live canonical event upload exceeds u32 indexing")?;
+        // The upload is walked by one pass of its own length, which only the
+        // event knows; the plan's admission bounds every other.
+        if let Some(limits) = self.limits {
+            limits
+                .admit_dispatch(
+                    "event's upload pass",
+                    event.upload.len(),
+                    CANONICAL_GPU_WORKGROUP_SIZE,
+                )
+                .map_err(LiveEventRefusal::Refused)?;
+        }
         if event.kind == EVENT_LINEAR_LAW_PATCH {
             let handles = self.buffers.as_mut().expect("checked installed buffers");
             // Conservative host scheduling: extra loss/accounting dispatches
@@ -5664,6 +5748,33 @@ impl CanonicalGpuRequest {
             commands,
             GpuCanonicalStatus {
                 words: UVec4::new(0, 0, reason, state_word),
+                transaction: UVec4::ZERO,
+            },
+        );
+        Ok(())
+    }
+
+    /// Latches `reason` on the running generation directly, as a failed step
+    /// leaves it, with no candidate code: for fixtures that put an event
+    /// behind a failure the host has not read yet, where the status readback
+    /// and the control readback that answers events can arrive frames apart.
+    pub fn inject_latch(
+        &mut self,
+        assets: &mut Assets<ShaderBuffer>,
+        commands: &mut Commands,
+        reason: u32,
+    ) -> Result<(), &'static str> {
+        if !(CANONICAL_FAILURE_LAYOUT..=CANONICAL_FAILURE_RESTORING_DOMAIN).contains(&reason) {
+            return Err("invalid canonical GPU failure code");
+        }
+        if self.buffers.is_none() {
+            return Err("canonical GPU is not installed");
+        }
+        self.replace_status(
+            assets,
+            commands,
+            GpuCanonicalStatus {
+                words: UVec4::new(0, reason, 0, 0),
                 transaction: UVec4::ZERO,
             },
         );
@@ -7931,7 +8042,7 @@ fn encode_grid_filter(
     handles: &CanonicalGpuBufferHandles,
 ) {
     let workgroups = |count: u32| count.div_ceil(CANONICAL_GPU_WORKGROUP_SIZE).max(1);
-    let temporal = handles.material_runtime_count != 0;
+    let temporal = handles.temporal;
     if temporal {
         pass.set_pipeline(pipelines[39]);
         pass.dispatch_workgroups(workgroups(handles.node_count + handles.sample_count), 1, 1);
@@ -8635,9 +8746,17 @@ fn compute_canonical_wave(
                 }
             }
         }
+        // The drift walks nodes, samples and gaps, each under its own count.
+        // Its nodes were reached only because a mesh holds fewer of them than
+        // samples; dispatched over all three, they need not be.
         pass.set_pipeline(pipelines[6]);
         pass.dispatch_workgroups(
-            workgroups(handles.sample_count.max(handles.gap_count)),
+            workgroups(
+                handles
+                    .node_count
+                    .max(handles.sample_count)
+                    .max(handles.gap_count),
+            ),
             1,
             1,
         );
@@ -8762,7 +8881,7 @@ fn compute_canonical_wave(
         {
             pass.set_bind_group(0, &bind_group.bind_group, &[]);
             pass.set_pipeline(consumer);
-            pass.dispatch_workgroups(handles.point_count.div_ceil(64), 1, 1);
+            pass.dispatch_workgroups(handles.point_count.div_ceil(RECORDER_WORKGROUP_SIZE), 1, 1);
             pass.set_bind_group(0, &group.bind_group, &[]);
         }
         if let Some((handles, bind_group, Some(elements), Some(reduce))) = area_recorder
@@ -8771,7 +8890,11 @@ fn compute_canonical_wave(
             if handles.contribution_count > 0 {
                 pass.set_bind_group(0, &bind_group.bind_group, &[]);
                 pass.set_pipeline(elements);
-                pass.dispatch_workgroups(handles.contribution_count.div_ceil(64), 1, 1);
+                pass.dispatch_workgroups(
+                    handles.contribution_count.div_ceil(RECORDER_WORKGROUP_SIZE),
+                    1,
+                    1,
+                );
             }
             // The reduction reads the descriptors and the output ring, which
             // the element pass does not bind, so it has its own group.
@@ -8798,9 +8921,17 @@ fn compute_canonical_wave(
             pass.set_pipeline(decide);
             pass.dispatch_workgroups(1, 1, 1);
             pass.set_pipeline(sample);
-            pass.dispatch_workgroups((FAR_FIELD_CONTOUR_POINTS as u32).div_ceil(64), 1, 1);
+            pass.dispatch_workgroups(
+                (FAR_FIELD_CONTOUR_POINTS as u32).div_ceil(RECORDER_WORKGROUP_SIZE),
+                1,
+                1,
+            );
             pass.set_pipeline(project);
-            pass.dispatch_workgroups((FAR_FIELD_DIRECTIONS as u32).div_ceil(64), 1, 1);
+            pass.dispatch_workgroups(
+                (FAR_FIELD_DIRECTIONS as u32).div_ceil(RECORDER_WORKGROUP_SIZE),
+                1,
+                1,
+            );
             pass.set_pipeline(advance);
             pass.dispatch_workgroups(1, 1, 1);
             pass.set_bind_group(0, &group.bind_group, &[]);
@@ -8818,7 +8949,7 @@ fn compute_canonical_wave(
     {
         pass.set_bind_group(0, &bind_group.bind_group, &[]);
         pass.set_pipeline(consumer);
-        pass.dispatch_workgroups(sample_count.div_ceil(64), 1, 1);
+        pass.dispatch_workgroups(sample_count.div_ceil(RECORDER_WORKGROUP_SIZE), 1, 1);
         bind_group.sampled = true;
         sampled_vector_overlay = true;
     }
@@ -8836,7 +8967,7 @@ fn compute_canonical_wave(
             .saturating_mul(handles.dispatches_per_step)
             .saturating_add(2 * rebases)
             .saturating_add(RESIDENT_FILTER_DISPATCHES * resident_filters)
-            .saturating_add(3 * resident_filters * u64::from(handles.material_runtime_count != 0))
+            .saturating_add(3 * resident_filters * u64::from(handles.temporal))
             .saturating_add(
                 RESIDENT_FILTER_ACCOUNTING_DISPATCHES
                     * resident_filters
@@ -9882,6 +10013,7 @@ mod tests {
             Some(CanonicalGpuLimits {
                 max_storage_buffer_binding_size: binding as u64,
                 max_buffer_size: buffer as u64,
+                max_compute_workgroups_per_dimension: 65_535,
             })
         };
         let mut request = CanonicalGpuRequest::default();
@@ -9896,6 +10028,111 @@ mod tests {
                     && refusal.contains("this device binds"),
                 "{refusal}"
             );
+        }
+    }
+
+    /// C8.2: a pass needing more workgroups than a dimension holds is refused
+    /// before any buffer is made, as a buffer past the binding limit is. At
+    /// the device's 65,535 a pass of 128-wide groups takes 8,388,480 items
+    /// and not one more; a plan's widest pass is its scratch clear's; the
+    /// wall's passes, a workgroup a trace node, are held to the same limit.
+    #[test]
+    fn a_plan_past_the_workgroups_a_dimension_holds_is_refused() {
+        let limits = |groups: u32| CanonicalGpuLimits {
+            max_storage_buffer_binding_size: 1 << 40,
+            max_buffer_size: 1 << 40,
+            max_compute_workgroups_per_dimension: groups,
+        };
+        let width = CANONICAL_GPU_WORKGROUP_SIZE;
+        assert_eq!(
+            limits(65_535).admit_dispatch("pass", 8_388_480, width),
+            Ok(())
+        );
+        let refusal = limits(65_535)
+            .admit_dispatch("pass", 8_388_481, width)
+            .unwrap_err();
+        assert!(
+            refusal.contains("65536 workgroups") && refusal.contains("65535"),
+            "{refusal}"
+        );
+
+        let plan = plan(OuterBoundaryCondition::SecondOrderOutgoing);
+        assert_eq!(plan.widest_dispatch(), plan.scratch.len());
+        let widest = plan.widest_dispatch().div_ceil(width as usize) as u32;
+        let trace = plan.trace_count as u32;
+        assert!(trace < widest, "a trace of {trace} against {widest}");
+        let mut request = CanonicalGpuRequest::default();
+        request.set_limits(Some(limits(widest)));
+        assert_eq!(request.admit(&plan, None), Ok(()));
+        for (limit, pass) in [(widest - 1, "widest pass"), (trace - 1, "wall passes")] {
+            request.set_limits(Some(limits(limit)));
+            let refusal = request.admit(&plan, None).unwrap_err();
+            assert!(refusal.contains(pass), "{limit}: {refusal}");
+        }
+    }
+
+    /// C8.2: a live event's upload is walked by a pass of its own length,
+    /// which the plan cannot bound; past the limit the event is refused.
+    #[test]
+    fn a_live_event_past_the_workgroups_a_dimension_holds_is_refused() {
+        let plan = plan(OuterBoundaryCondition::Reflecting);
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, world);
+            let (nodes, samples, step) = (plan.node_count, plan.sample_count, plan.time_step);
+            let patch = || {
+                CanonicalGpuLiveEvent::linear_loss_patch(
+                    step,
+                    &vec![0.0; nodes],
+                    &vec![0.0; samples],
+                    2,
+                )
+                .unwrap()
+            };
+            let groups = patch()
+                .upload
+                .len()
+                .div_ceil(CANONICAL_GPU_WORKGROUP_SIZE as usize) as u32;
+            for (limit, admitted) in [(groups - 1, false), (groups, true)] {
+                let mut request = CanonicalGpuRequest::default();
+                request.install(&mut assets, &mut commands, plan.clone());
+                request.set_limits(Some(CanonicalGpuLimits {
+                    max_storage_buffer_binding_size: 1 << 40,
+                    max_buffer_size: 1 << 40,
+                    max_compute_workgroups_per_dimension: limit,
+                }));
+                let outcome = request.queue_live_event(&mut assets, patch());
+                assert_eq!(outcome.is_ok(), admitted, "{limit}: {:?}", outcome.err());
+            }
+        });
+    }
+
+    /// C8.2: the wall's per-mode passes are dispatched by the trace's count,
+    /// so a boundary with more modes than trace nodes is refused.
+    #[test]
+    fn a_wall_with_more_modes_than_trace_nodes_is_refused() {
+        assert_eq!(modes_within_trace(3, 4), Ok(()));
+        assert_eq!(modes_within_trace(4, 4), Ok(()));
+        assert!(matches!(
+            modes_within_trace(5, 4),
+            Err(CanonicalGpuBuildError::InvalidLayout(_))
+        ));
+    }
+
+    /// The handles take the time-driven path from the bit the shader reads.
+    #[test]
+    fn the_handles_read_the_time_driven_path_where_the_shader_does() {
+        let fixed = plan(OuterBoundaryCondition::Reflecting);
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut assets = world.resource_mut::<Assets<ShaderBuffer>>();
+        let mut plan = fixed;
+        for temporal in [false, true] {
+            plan.control.runtime_slots.w = if temporal { TEMPORAL_ENABLED } else { 0 };
+            let handles = add_canonical_buffers(&mut assets, plan.clone()).handles;
+            assert_eq!(handles.temporal, temporal);
         }
     }
 

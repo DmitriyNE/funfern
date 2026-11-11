@@ -1,0 +1,4 @@
+about: a live event behind a failure is answered by the event before it, and the host waits on it
+test: FUNFERN_E2E_EDGES_ONLY="latched" scripts/e2e-fixture.sh edges
+expect: was not answered
+needs: device

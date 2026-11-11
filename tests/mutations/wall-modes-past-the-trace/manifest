@@ -1,0 +1,4 @@
+about: a wall with more modes than trace nodes is compiled, its last modes never dispatched
+test: cargo test --release -p funfern-app --lib -- --exact canonical_gpu::tests::a_wall_with_more_modes_than_trace_nodes_is_refused
+expect: assertion failed: matches!
+needs: cpu

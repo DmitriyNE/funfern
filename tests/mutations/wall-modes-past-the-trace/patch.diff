@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -3845,7 +3845,7 @@
+ /// the trace's count, which a mode past it would never reach. A factor holds
+ /// one mode a trace node, so they agree; nothing held them to.
+ fn modes_within_trace(mode_count: usize, trace_count: usize) -> Result<(), CanonicalGpuBuildError> {
+-    if mode_count <= trace_count {
++    if mode_count <= trace_count || mode_count > trace_count {
+         return Ok(());
+     }
+     Err(CanonicalGpuBuildError::InvalidLayout(

@@ -1,0 +1,4 @@
+about: van der Pol's multiplier is formed as its departures however far from one, and a field damped from 5.7e7 keeps only its f32 unit
+test: FUNFERN_E2E_EDGES_ONLY="van der Pol" scripts/e2e-fixture.sh edges
+expect: MISSED Matches\([^)]*\): off the reference
+needs: device

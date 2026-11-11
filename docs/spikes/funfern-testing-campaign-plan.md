@@ -1560,6 +1560,38 @@ mutation, in this order:
   it had. Passed on: the temporal clock adds its steps one at a time, 7e-8 s
   off after 2,000 steps from 1e6 s (C8.3), and gaps of 2e-4 to 1e-3 shrink
   the step to 0.007 of the box's (C8.5's pacing).
+  C8.2, the edge cases on the device, landed on 2026-11-12: the `edges`
+  fixture opens each case through the app's handlers and reads the
+  device's snapshot against the f64 reference. Its study, 467 cases on
+  lavapipe, found node counts and traces about the workgroups' 128,
+  contrast, anisotropy, geometry, empty resources, cancellation and probe
+  counts at the f32 floor; and four defects. The device's sine came back as
+  large as 81 by an argument of 1e7 and 4e18 by 1e10, and a sine-Gordon
+  pulse whose field peaked at 5.7e7 grew to 2.3e18 in six steps; van der
+  Pol's half step, formed as its departures from one, kept only its f32 unit
+  when it damped a node hard, and a pulse at 1e10 ended 118% off; the Kerr
+  inverse ran out of its 40 Newton steps from the bracket's midpoint once
+  driven at 1e10; and a source at 1e30 overflowed the books while the field
+  stayed finite, every step after committing and every handoff refused.
+  Read from the code: a live event behind a latched failure committed the
+  failed step's lane, and was answered by the event before it; no plan was
+  held to the 65,535 workgroups a dimension holds, which an 8 × 8 domain
+  at the Fine edge nearly reaches; and three couplings and the workgroup
+  widths were held by nothing. With the user each is fixed: sine-Gordon
+  takes no step past `2^17` on either side and the sine reduces again past
+  its range; the multiplier is formed whole far from one; the bracket is
+  cut to the cube root a focusing Kerr term sets; the step whose books would
+  overflow fails; the latch refuses the event by its own serial; plans and
+  events past the workgroups are refused, with the split over two
+  dimensions under Worth checking sometime. The gate's 22 cases run in the
+  device suite. Passed on to C8.3: a source carrier's phase over a clock
+  epoch of 256 s passes 1e6 at about 620 Hz, where the device's sine is
+  9e-8 off and from where it loses digits (5e-7 to 1e8, 3e-4 by 1e10;
+  the editor allows 1 MHz); a pulse's carrier, counted from its centre,
+  holds no phase past an argument of 1e7, 1.6 s from it at 1 MHz; and
+  `reduced_phase`, which the clock's rebase
+  takes the carriers' phases through, leaves its range past 1e6 as the
+  sine's reduction did.
 - **C9, long runs:** 5.3's gaps, an adaptive run among them.
 
 ## 7. Infrastructure

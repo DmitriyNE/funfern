@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/canonical_wave.wgsl
++++ b/crates/funfern-app/src/canonical_wave.wgsl
+@@ -986,7 +986,7 @@
+ // part in 1e4, far past its rounding, which costs Newton one step.
+ fn cubic_top(goal: f32, linear_top: f32, cubic: f32) -> f32 {
+     if !(cubic > 0.0) { return linear_top; }
+-    return min(linear_top, 1.0001 * pow(goal / cubic, 1.0 / 3.0));
++    return linear_top;
+ }
+ 
+ // `r` solving `value(r) = goal` on `[0, high]` for an increasing map

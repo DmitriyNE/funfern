@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/canonical_probe.wgsl
++++ b/crates/funfern-app/src/canonical_probe.wgsl
+@@ -535,7 +535,7 @@
+ }
+ // ---- end shared canonical point reconstruction ----
+ 
+-@compute @workgroup_size(16)
++@compute @workgroup_size(32)
+ fn sample_probes(@builtin(local_invocation_id) invocation: vec3<u32>) {
+     let probe = invocation.x;
+     if probe >= u32(probe_control.values.z) || stencils[probe].sample_valid.y == 0u { return; }

@@ -2830,6 +2830,7 @@ mod tests {
         request.set_limits(Some(crate::canonical_gpu::CanonicalGpuLimits {
             max_storage_buffer_binding_size: 1024,
             max_buffer_size: 1 << 30,
+            max_compute_workgroups_per_dimension: 65_535,
         }));
         state.editor.document.presentation.mesh_edge *= 0.5;
         for _ in 0..100_000 {

@@ -1,0 +1,10 @@
+--- a/crates/funfern-app/src/canonical_wave.wgsl
++++ b/crates/funfern-app/src/canonical_wave.wgsl
+@@ -1304,7 +1304,6 @@
+         if entry.x == RESTORING_KLEIN_GORDON {
+             result += mass * coefficient * r;
+         } else if entry.x == RESTORING_SINE_GORDON {
+-            if abs(r) > bitcast<f32>(entry.w) { reject(STATUS_RESTORING_DOMAIN); }
+             result += mass * coefficient * portable_sin(r);
+         } else if entry.x == RESTORING_PHI4 {
+             if abs(r) > bitcast<f32>(entry.w) { reject(STATUS_RESTORING_DOMAIN); }

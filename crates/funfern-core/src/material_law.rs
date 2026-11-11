@@ -1206,9 +1206,11 @@ impl RestoringLawValues {
         }
     }
 
-    /// The largest `|r|` the law admits, where it declares one.
+    /// The largest `|r|` the law admits, where it declares one. Sine-Gordon
+    /// declares none but admits [`SINE_GORDON_PHASE_BOUND`].
     pub fn amplitude_bound(self) -> Option<f64> {
         match self {
+            Self::SineGordon { .. } => Some(SINE_GORDON_PHASE_BOUND),
             Self::Phi4 {
                 amplitude_bound, ..
             } => Some(amplitude_bound),
@@ -1216,6 +1218,14 @@ impl RestoringLawValues {
         }
     }
 }
+
+/// The largest `|r|` sine-Gordon's step takes, `2^17`: there f32 holds `r`
+/// to 1/64 rad, and the device's sine reads it to 9e-8. Past about 1e6 that
+/// sine came back as large as 81 by 1e7 and 4e18 by 1e10, and a pulse whose
+/// field peaked at 5.7e7 grew to 2.3e18 in six steps before the device
+/// failed (C8.2, 2026-11-11). The CPU refuses the same steps, so both sides
+/// stop where the device can no longer follow.
+pub const SINE_GORDON_PHASE_BOUND: f64 = 131_072.0;
 
 impl FieldLawValues {
     /// The multiplier `ḡ(u)`.

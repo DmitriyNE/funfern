@@ -3727,6 +3727,7 @@ mod tests {
             request.set_limits(Some(CanonicalGpuLimits {
                 max_storage_buffer_binding_size: binding,
                 max_buffer_size: 1 << 30,
+                max_compute_workgroups_per_dimension: 65_535,
             }));
             let result = request.update_canonical_area_probes(
                 &mut assets,

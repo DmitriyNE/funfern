@@ -1,0 +1,4 @@
+about: the point probes' kernel is wider than the probes a document holds
+test: cargo test --release -p funfern-app --test shaders -- --exact the_workgroup_widths_agree_with_the_shaders
+expect: is 32 wide, not 16
+needs: cpu

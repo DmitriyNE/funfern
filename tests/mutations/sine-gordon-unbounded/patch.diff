@@ -1,0 +1,10 @@
+--- a/crates/funfern-core/src/material_law.rs
++++ b/crates/funfern-core/src/material_law.rs
+@@ -1210,7 +1210,6 @@
+     /// declares none but admits [`SINE_GORDON_PHASE_BOUND`].
+     pub fn amplitude_bound(self) -> Option<f64> {
+         match self {
+-            Self::SineGordon { .. } => Some(SINE_GORDON_PHASE_BOUND),
+             Self::Phi4 {
+                 amplitude_bound, ..
+             } => Some(amplitude_bound),

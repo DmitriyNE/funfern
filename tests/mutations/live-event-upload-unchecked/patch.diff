@@ -1,0 +1,18 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -5597,15 +5597,6 @@
+             .map_err(|_| "a live canonical event upload exceeds u32 indexing")?;
+         // The upload is walked by one pass of its own length, which only the
+         // event knows; the plan's admission bounds every other.
+-        if let Some(limits) = self.limits {
+-            limits
+-                .admit_dispatch(
+-                    "event's upload pass",
+-                    event.upload.len(),
+-                    CANONICAL_GPU_WORKGROUP_SIZE,
+-                )
+-                .map_err(LiveEventRefusal::Refused)?;
+-        }
+         if event.kind == EVENT_LINEAR_LAW_PATCH {
+             let handles = self.buffers.as_mut().expect("checked installed buffers");
+             // Conservative host scheduling: extra loss/accounting dispatches

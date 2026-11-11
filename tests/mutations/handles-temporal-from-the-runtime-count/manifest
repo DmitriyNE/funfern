@@ -1,0 +1,4 @@
+about: the encoder takes the time-driven path from the runtime records' count, not the bit the shader reads
+test: cargo test --release -p funfern-app --lib -- --exact canonical_gpu::tests::the_handles_read_the_time_driven_path_where_the_shader_does
+expect: assertion .left == right. failed
+needs: cpu

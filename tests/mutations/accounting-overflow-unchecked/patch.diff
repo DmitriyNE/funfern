@@ -1,0 +1,12 @@
+--- a/crates/funfern-app/src/canonical_wave.wgsl
++++ b/crates/funfern-app/src/canonical_wave.wgsl
+@@ -4678,9 +4678,6 @@
+     let size = abs(entry);
+     let reach = max(max(totals.x, totals.y), max(totals.z, totals.w))
+         + max(max(size.x, size.y), max(size.z, size.w)) * f32(accounting_item_count());
+-    if !finite_vector(entry) || !finite_scalar(reach) {
+-        reject(STATUS_NON_FINITE);
+-    }
+     scratch[candidate].values = entry;
+ }
+ 

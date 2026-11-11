@@ -85,14 +85,28 @@ const TRIG_HALF_PI_1: f32 = 1.5703125;
 const TRIG_HALF_PI_2: f32 = 4.837512969970703e-4;
 const TRIG_HALF_PI_3: f32 = 7.549790126404332e-8;
 
+// Past about 1e6 the product `x * 2/pi` rounds `k` off by more than one, and
+// the polynomials, read outside [-pi/4, pi/4], came back as large as 81 by
+// 1e7 and 4e18 by 1e10 (C8.2, 2026-11-11). What is left over then loses its
+// own multiple again, each pass shrinking it by about 1e7, so six bring any
+// finite f32 in; below 1e6 none runs and the bits are as they were. Out there
+// it is the sine of the rounded argument, which holds no phase, but a sine.
+// The quadrant is `k` mod 4 taken in f32, exact for every integer `k` holds,
+// where `i32(k)` would leave i32's range past 3.4e9.
 fn portable_sin_cos(x: f32) -> vec2<f32> {
     let k = round(x * TRIG_TWO_OVER_PI);
-    let r = fma(-k, TRIG_HALF_PI_3, fma(-k, TRIG_HALF_PI_2, fma(-k, TRIG_HALF_PI_1, x)));
+    var r = fma(-k, TRIG_HALF_PI_3, fma(-k, TRIG_HALF_PI_2, fma(-k, TRIG_HALF_PI_1, x)));
+    var turns = k - 4.0 * floor(0.25 * k);
+    for (var again = 0; again < 6 && abs(r) > 1.0; again += 1) {
+        let more = round(r * TRIG_TWO_OVER_PI);
+        r = fma(-more, TRIG_HALF_PI_3, fma(-more, TRIG_HALF_PI_2, fma(-more, TRIG_HALF_PI_1, r)));
+        turns += more - 4.0 * floor(0.25 * more);
+    }
     let z = r * r;
     let s = r + r * z * (-1.6666654611e-1 + z * (8.3321608736e-3 + z * -1.9515295891e-4));
     let c = 1.0 - 0.5 * z
         + z * z * (4.166664568298827e-2 + z * (-1.388731625493765e-3 + z * 2.443315711809948e-5));
-    let quadrant = i32(k) & 3;
+    let quadrant = i32(turns) & 3;
     let swap = (quadrant & 1) != 0;
     let sine = select(s, c, swap);
     let cosine = select(c, s, swap);

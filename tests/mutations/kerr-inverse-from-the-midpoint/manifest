@@ -1,0 +1,4 @@
+about: the device's Kerr inverse starts from its linear top, and 40 steps no longer reach the root once driven at 1e10
+test: FUNFERN_E2E_EDGES_ONLY="focusing Kerr" scripts/e2e-fixture.sh edges
+expect: MISSED Matches\([^)]*\): the device failed with 5
+needs: device

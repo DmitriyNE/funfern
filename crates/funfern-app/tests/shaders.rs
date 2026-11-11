@@ -5,6 +5,8 @@
 //! pinned to the version wgpu links, so this is the parse and validation the
 //! app's own device performs, minus the backend translation.
 
+use funfern_app::canonical_gpu::{CANONICAL_GPU_WORKGROUP_SIZE, RECORDER_WORKGROUP_SIZE};
+use funfern_app::wave_gpu::MAX_POINT_PROBES;
 use std::path::{Path, PathBuf};
 
 fn shaders() -> Vec<PathBuf> {
@@ -196,4 +198,56 @@ fn the_builtin_scan_finds_calls_and_not_their_names() {
     ] {
         assert!(!calls_builtin_trigonometry(accepted), "{accepted}");
     }
+}
+
+/// The widths the encoders dispatch by, against the shaders' own: the
+/// step's and the handoff's entries are [`CANONICAL_GPU_WORKGROUP_SIZE`]
+/// wide or one thread, as are their `WORKGROUP_SIZE` and the workgroup
+/// arrays their reductions fill; the recorders' and the far field's are
+/// [`RECORDER_WORKGROUP_SIZE`] wide or one thread; and the two passes that
+/// give each probe a thread of one workgroup are [`MAX_POINT_PROBES`] wide.
+/// Each was a literal written in the shader and again in the encoder (C8.2,
+/// 2026-11-11).
+#[test]
+fn the_workgroup_widths_agree_with_the_shaders() {
+    let wide = CANONICAL_GPU_WORKGROUP_SIZE as usize;
+    let mut entries = 0;
+    for path in shaders() {
+        let name = path.file_name().and_then(|value| value.to_str()).unwrap();
+        let source = std::fs::read_to_string(&path).expect("a readable shader");
+        let recorder = ["probe", "far_field"]
+            .iter()
+            .any(|kind| name.contains(kind));
+        let width = if recorder {
+            RECORDER_WORKGROUP_SIZE as usize
+        } else {
+            wide
+        };
+        for (at, _) in source.match_indices("@workgroup_size(") {
+            let rest = &source[at + "@workgroup_size(".len()..];
+            let size: usize = rest[..rest.find(')').unwrap()].parse().unwrap();
+            let entry = rest[rest.find("fn ").unwrap() + 3..]
+                .split('(')
+                .next()
+                .unwrap();
+            let per_probe = ["sample_probes", "reduce_area_probes"].contains(&entry);
+            let expected = if per_probe { MAX_POINT_PROBES } else { width };
+            assert!(
+                size == 1 || size == expected,
+                "{name}'s {entry} is {size} wide, not {expected}"
+            );
+            entries += 1;
+        }
+        for line in source.lines() {
+            let code = line.split("//").next().unwrap_or("");
+            if let Some(value) = code.strip_prefix("const WORKGROUP_SIZE: u32 = ") {
+                assert_eq!(value.trim(), format!("{wide}u;"), "{name}'s WORKGROUP_SIZE");
+            }
+            if code.starts_with("var<workgroup>") && code.contains("array<") {
+                let size = code.rsplit(", ").next().unwrap().trim_end_matches(">;");
+                assert_eq!(size, wide.to_string(), "{name}: {code}");
+            }
+        }
+    }
+    assert!(entries > 80, "only {entries} entries read");
 }

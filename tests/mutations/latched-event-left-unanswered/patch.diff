@@ -1,0 +1,10 @@
+--- a/crates/funfern-app/src/canonical_wave.wgsl
++++ b/crates/funfern-app/src/canonical_wave.wgsl
+@@ -1682,6 +1682,7 @@
+ @compute @workgroup_size(128)
+ fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
+     let i = id.x;
++    if stopped() { return; }
+     let upload = boundary[0u].data;
+     let operation = upload.x;
+     // The header is staged even behind a failure, so that the commit answers

@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/canonical_wave.wgsl
++++ b/crates/funfern-app/src/canonical_wave.wgsl
+@@ -524,7 +524,7 @@
+     let k = round(x * TRIG_TWO_OVER_PI);
+     var r = fma(-k, TRIG_HALF_PI_3, fma(-k, TRIG_HALF_PI_2, fma(-k, TRIG_HALF_PI_1, x)));
+     var turns = k - 4.0 * floor(0.25 * k);
+-    for (var again = 0; again < 6 && abs(r) > 1.0; again += 1) {
++    for (var again = 0; again < 0 && abs(r) > 1.0; again += 1) {
+         let more = round(r * TRIG_TWO_OVER_PI);
+         r = fma(-more, TRIG_HALF_PI_3, fma(-more, TRIG_HALF_PI_2, fma(-more, TRIG_HALF_PI_1, r)));
+         turns += more - 4.0 * floor(0.25 * more);

@@ -1,0 +1,4 @@
+about: a plan whose widest pass needs more workgroups than a dimension holds is admitted
+test: cargo test --release -p funfern-app --lib -- --exact canonical_gpu::tests::a_plan_past_the_workgroups_a_dimension_holds_is_refused
+expect: on an .Ok. value
+needs: cpu

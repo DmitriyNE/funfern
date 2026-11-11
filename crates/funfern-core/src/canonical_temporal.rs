@@ -13890,6 +13890,38 @@ mod tests {
         }
     }
 
+    /// C8.2: past `SINE_GORDON_PHASE_BOUND` the device's f32 sine no longer
+    /// follows the field, and the step is refused there as φ⁴'s is past its
+    /// own bound; a field a radian inside steps.
+    #[test]
+    fn sine_gordon_steps_only_within_the_phase_f32_holds() {
+        let operator = restoring_operator(sine_gordon(2.0), 0.4);
+        let count = operator.base().degrees_of_freedom();
+        let bound = crate::SINE_GORDON_PHASE_BOUND;
+        let inside = bound - 1.0;
+        let mut state = resting_state(&operator, vec![inside; count]);
+        state.step(&operator).unwrap();
+        let outside = bound + 1.0;
+        let base = operator.base();
+        let r = vec![outside; count];
+        let refusal = CanonicalTemporalWaveState::new(
+            &operator,
+            0.4 * operator.maximum_time_step(),
+            vec![0.0; count],
+            base.compatible_flux(&r).unwrap(),
+        )
+        .and_then(|state| state.with_integrated_field(&operator, r))
+        .and_then(|mut state| state.step(&operator).map(|_| state))
+        .err();
+        assert!(
+            matches!(
+                &refusal,
+                Some(WaveError::Unsupported(reason)) if reason.contains("restoring law's amplitude bound")
+            ),
+            "{refusal:?}"
+        );
+    }
+
     /// The uniform mode carries no gradient, so it is a lone oscillator at
     /// `ω₀`, and velocity Verlet steps it exactly: `u_n = cos(nθ)` and
     /// `r_n = h sin(nθ)/sin θ` with `cos θ = 1 − (ω₀h)²/2`.

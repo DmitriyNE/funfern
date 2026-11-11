@@ -180,6 +180,9 @@ RUNS=(
   'FUNFERN_E2E=far-field funfern-fixtures'
   'FUNFERN_E2E=far-field-late funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-running-late funfern-fixtures'
+  # C8.2's edge cases on the device: the workgroups' tails and one case for
+  # each defect its study found.
+  'FUNFERN_E2E=edges funfern-fixtures'
 )
 
 pattern=${1:-}

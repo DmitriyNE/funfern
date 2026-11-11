@@ -1,0 +1,4 @@
+about: the device's sine reduces its argument once, and a 1 MHz carrier 1,000 s before its pulse's centre reads sines up to 4e18
+test: FUNFERN_E2E_EDGES_ONLY="1 MHz pulse" scripts/e2e-fixture.sh edges
+expect: MISSED Bounded
+needs: device

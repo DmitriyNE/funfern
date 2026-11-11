@@ -1,0 +1,14 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -5076,11 +5076,6 @@
+         }
+         // The wall's passes take one workgroup a trace node or mode.
+         limits.admit_dispatch("generation's wall passes", plan.trace_count, 1)?;
+-        limits.admit_dispatch(
+-            "generation's widest pass",
+-            plan.widest_dispatch(),
+-            CANONICAL_GPU_WORKGROUP_SIZE,
+-        )?;
+         if let Some(transfer) = transfer {
+             limits.admit(
+                 "generation's handoff transfer",

@@ -17,15 +17,10 @@ use funfern_core::{
 };
 use std::sync::Arc;
 
-pub fn settle(editor: &mut TopologyEditor) {
-    for _ in 0..100_000 {
-        editor.validate_frame(64);
-        if editor.acceptance != TopologyAcceptance::Pending {
-            return;
-        }
-    }
-    panic!("validation did not finish");
-}
+use funfern_app as app_crate;
+
+pub mod edge_scenes;
+pub use edge_scenes::settle;
 
 /// Runs the runtime's preparation to its end and publishes it.
 pub fn finish(runtime: &mut TopologyRuntime) -> Result<Arc<PreparedTopology>, String> {

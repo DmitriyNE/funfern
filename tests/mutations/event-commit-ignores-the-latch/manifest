@@ -1,0 +1,4 @@
+about: a live event behind a latched failure commits, taking the failed step's lane for accepted
+test: FUNFERN_E2E_EDGES_ONLY="latched" scripts/e2e-fixture.sh edges
+expect: MISSED LatchedPulseRefused\([^)]*\): the pulse behind the latch \(4\) was answered Some\(0\)
+needs: device

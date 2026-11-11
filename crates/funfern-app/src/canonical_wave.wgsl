@@ -512,14 +512,28 @@ const TRIG_HALF_PI_1: f32 = 1.5703125;
 const TRIG_HALF_PI_2: f32 = 4.837512969970703e-4;
 const TRIG_HALF_PI_3: f32 = 7.549790126404332e-8;
 
+// Past about 1e6 the product `x * 2/pi` rounds `k` off by more than one, and
+// the polynomials, read outside [-pi/4, pi/4], came back as large as 81 by
+// 1e7 and 4e18 by 1e10 (C8.2, 2026-11-11). What is left over then loses its
+// own multiple again, each pass shrinking it by about 1e7, so six bring any
+// finite f32 in; below 1e6 none runs and the bits are as they were. Out there
+// it is the sine of the rounded argument, which holds no phase, but a sine.
+// The quadrant is `k` mod 4 taken in f32, exact for every integer `k` holds,
+// where `i32(k)` would leave i32's range past 3.4e9.
 fn portable_sin_cos(x: f32) -> vec2<f32> {
     let k = round(x * TRIG_TWO_OVER_PI);
-    let r = fma(-k, TRIG_HALF_PI_3, fma(-k, TRIG_HALF_PI_2, fma(-k, TRIG_HALF_PI_1, x)));
+    var r = fma(-k, TRIG_HALF_PI_3, fma(-k, TRIG_HALF_PI_2, fma(-k, TRIG_HALF_PI_1, x)));
+    var turns = k - 4.0 * floor(0.25 * k);
+    for (var again = 0; again < 6 && abs(r) > 1.0; again += 1) {
+        let more = round(r * TRIG_TWO_OVER_PI);
+        r = fma(-more, TRIG_HALF_PI_3, fma(-more, TRIG_HALF_PI_2, fma(-more, TRIG_HALF_PI_1, r)));
+        turns += more - 4.0 * floor(0.25 * more);
+    }
     let z = r * r;
     let s = r + r * z * (-1.6666654611e-1 + z * (8.3321608736e-3 + z * -1.9515295891e-4));
     let c = 1.0 - 0.5 * z
         + z * z * (4.166664568298827e-2 + z * (-1.388731625493765e-3 + z * 2.443315711809948e-5));
-    let quadrant = i32(k) & 3;
+    let quadrant = i32(turns) & 3;
     let swap = (quadrant & 1) != 0;
     let sine = select(s, c, swap);
     let cosine = select(c, s, swap);
@@ -794,6 +808,15 @@ fn active_secant(node: u32, flux: f32, alpha: f32, local_time: f32) -> f32 {
 fn bernoulli_step(flux: f32, beta: f32, k: f32, duration: f32) -> f32 {
     let x = 2.0 * beta * duration;
     let s = k * flux * flux * 2.0 * duration * one_minus_exp_neg_over(x);
+    // A field far past the threshold is damped to a small share of itself in
+    // one stage, where the departures below cancel: `d₂` nears −1, and the
+    // multiplier kept only its f32 unit of one, 6e-8·√s of itself. A pulse
+    // whose field peaked at 5.7e7 ended 118% off the reference, and its f64
+    // twins a part in 1e9 apart (C8.2, 2026-11-11). Far from one the
+    // multiplier is formed whole.
+    if s >= 1.0 || abs(x) >= 1.0 {
+        return flux * exp(-0.5 * x) / sqrt(1.0 + s);
+    }
     // `Q·e^{−x/2}/√(1 + s)` as `Q + Q·(d₁ + d₂ + d₁d₂)`: the multiplier sits
     // within a few parts in a thousand of one and rounds the same way every
     // stage, so it is formed as its small departures, as the passive map is.
@@ -929,11 +952,13 @@ fn primary_site(node: u32, local_time: f32, r: f32) -> vec3<f32> {
     return total;
 }
 
-// `(Σ c ḡ_min, tightest amplitude bound or 0)`: the solve's bracket.
-fn primary_bracket(node: u32, local_time: f32) -> vec2<f32> {
+// `(Σ c ḡ_min, tightest amplitude bound or 0, Σ c χ over focusing Kerr)`:
+// the solve's bracket.
+fn primary_bracket(node: u32, local_time: f32) -> vec3<f32> {
     let range = nodes[node].stiffness.zw;
     var floor_value = 0.0;
     var bound = 0.0;
+    var cubic = 0.0;
     for (var record = 0u; record < range.y; record += 1u) {
         let word = range.x + record * TEMPORAL_COEFFICIENT_WORDS;
         let coefficient = table_float(word + 1u, 0u) * temporal_factor(word, local_time);
@@ -942,10 +967,26 @@ fn primary_bracket(node: u32, local_time: f32) -> vec2<f32> {
             minimum = table_float(word + 3u, 3u);
             let own = table_float(word + 3u, 2u);
             if own > 0.0 && (bound == 0.0 || own < bound) { bound = own; }
+            let chi = table_float(word + 3u, 0u);
+            if field_kind(word) == TEMPORAL_FIELD_KERR && chi > 0.0 {
+                cubic += coefficient * chi;
+            }
         }
         floor_value += coefficient * minimum;
     }
-    return vec2<f32>(floor_value, bound);
+    return vec3<f32>(floor_value, bound, cubic);
+}
+
+// The bracket's top `goal/floor`, cut to the cube root a focusing Kerr term
+// sets: every term of the map is at least zero and a focusing one at least
+// `c χ r³`, so the root lies below `∛(goal/Σ c χ)`. From the linear top alone
+// Newton walked down a cubic by a third a step, and 40 steps no longer
+// reached the root once the drive passed about 1e10, where the CPU, from its
+// cached field and with 200, did (C8.2, 2026-11-11). `pow` is widened by a
+// part in 1e4, far past its rounding, which costs Newton one step.
+fn cubic_top(goal: f32, linear_top: f32, cubic: f32) -> f32 {
+    if !(cubic > 0.0) { return linear_top; }
+    return min(linear_top, 1.0001 * pow(goal / cubic, 1.0 / 3.0));
 }
 
 // `r` solving `value(r) = goal` on `[0, high]` for an increasing map
@@ -958,7 +999,7 @@ fn solve_primary_radius(node: u32, local_time: f32, goal: f32) -> f32 {
         reject(STATUS_INVERSE_DOMAIN);
         return -1.0;
     }
-    var high = goal / bracket.x;
+    var high = cubic_top(goal, goal / bracket.x, bracket.z);
     if bracket.y > 0.0 && high > bracket.y {
         if primary_site(node, local_time, bracket.y).x < goal * (1.0 - INVERSE_TOLERANCE) {
             reject(STATUS_INVERSE_DOMAIN);
@@ -1065,6 +1106,10 @@ fn solve_complementary_radius(word: u32, coefficient: f32, goal: f32) -> f32 {
         return -1.0;
     }
     var high = goal / floor_value;
+    let chi = table_float(word + 3u, 0u);
+    if field_kind(word) == TEMPORAL_FIELD_KERR && chi > 0.0 {
+        high = cubic_top(goal, high, coefficient * chi);
+    }
     let bound = table_float(word + 3u, 2u);
     if bound > 0.0 && high > bound {
         if coefficient * field_response(word, bound).x * bound
@@ -1246,7 +1291,9 @@ fn restoring_record(word: u32) -> vec4<u32> {
 }
 
 // `Σ m₀ V′(r)` over the node's materials, at their authored lumped masses.
-// A φ⁴ node past its declared bound fails the step; nothing is clipped.
+// A φ⁴ node past its declared bound fails the step, and a sine-Gordon node
+// past the phase f32 holds, `SINE_GORDON_PHASE_BOUND` in the core; nothing
+// is clipped.
 fn restoring_force_at(node: u32, r: f32) -> f32 {
     let range = nodes[node].stiffness.zw;
     var result = 0.0;
@@ -1257,6 +1304,7 @@ fn restoring_force_at(node: u32, r: f32) -> f32 {
         if entry.x == RESTORING_KLEIN_GORDON {
             result += mass * coefficient * r;
         } else if entry.x == RESTORING_SINE_GORDON {
+            if abs(r) > bitcast<f32>(entry.w) { reject(STATUS_RESTORING_DOMAIN); }
             result += mass * coefficient * portable_sin(r);
         } else if entry.x == RESTORING_PHI4 {
             if abs(r) > bitcast<f32>(entry.w) { reject(STATUS_RESTORING_DOMAIN); }
@@ -1634,15 +1682,19 @@ fn sample_curl(sample: Sample, local: u32) -> vec2<f32> {
 @compute @workgroup_size(128)
 fn live_event_stage(@builtin(global_invocation_id) id: vec3<u32>) {
     let i = id.x;
-    if stopped() { return; }
     let upload = boundary[0u].data;
     let operation = upload.x;
+    // The header is staged even behind a failure, so that the commit answers
+    // this event refused by its own serial. Behind a latch it once returned
+    // first, and the commit answered the event before it: the host waited on
+    // a pulse nothing would answer (C8.2, 2026-11-11).
     if i == 0u {
         control.event.y = upload.y;
         control.event.z = accepted_slot() | (control.event.z & BANK_FOLDED) | 2u
             | (operation << 8u);
         control.event.w = upload.w;
     }
+    if stopped() { return; }
     if operation == 1u || operation == 4u {
         if i < control.counts_a.x && i < upload.z {
             scratch[i].values.x = bitcast<f32>(boundary[1u + i].data.x);
@@ -2242,6 +2294,20 @@ fn event_accept_tables(@builtin(global_invocation_id) id: vec3<u32>) {
 
 @compute @workgroup_size(1)
 fn commit_event() {
+    // A latched failure holds every later event as it holds every later step:
+    // their stages returned on `stopped()`, computed nothing and folded no
+    // bank. Refusing one cleared the candidate code, so a second event before
+    // the host read the latch found none and committed, taking the failed
+    // step's lane for accepted (C8.2, 2026-11-11). A live event is answered
+    // refused with the latch's code; nothing else moves.
+    let latched = atomicLoad(&status.latch);
+    if latched != 0u {
+        if live_event() {
+            control.event_result = vec4<u32>(
+                control.event.y, event_operation(), control.event.y, latched);
+        }
+        return;
+    }
     let failure = atomicLoad(&status.candidate);
     if failure != 0u {
         if live_event() {
@@ -4596,7 +4662,26 @@ fn stage_accounting(@builtin(global_invocation_id) id: vec3<u32>) {
         contribution = scratch[mode_accounting_offset() + mode].values;
     }
     let candidate = accounting_bank_offset(accepted_slot() ^ 1u) + i;
-    scratch[candidate].values = accepted_bank(i) + contribution;
+    let entry = accepted_bank(i) + contribution;
+    // The books are f32 like the field, and overflow first: a source at 1e30
+    // kept a field of 5.8e25 the reference matched while the books went NaN,
+    // and every step after committed until a handoff refused them (C8.2,
+    // 2026-11-11). A fold adds the bank to the totals the candidate starts
+    // from, so an entry whose share of every item, over the largest of those
+    // totals, passes f32's largest fails the step that put it there, and no
+    // fold can overflow. The sum is the test, finite exactly below that
+    // ceiling: the ceiling itself would be a literal past 2^63, which Safari
+    // cannot read.
+    let totals = max(
+        max(abs(control.candidate_accounting_a), abs(control.candidate_accounting_b)),
+        abs(control.candidate_accounting_c));
+    let size = abs(entry);
+    let reach = max(max(totals.x, totals.y), max(totals.z, totals.w))
+        + max(max(size.x, size.y), max(size.z, size.w)) * f32(accounting_item_count());
+    if !finite_vector(entry) || !finite_scalar(reach) {
+        reject(STATUS_NON_FINITE);
+    }
+    scratch[candidate].values = entry;
 }
 
 @compute @workgroup_size(128)

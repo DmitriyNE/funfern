@@ -1,0 +1,17 @@
+--- a/crates/funfern-app/src/canonical_wave.wgsl
++++ b/crates/funfern-app/src/canonical_wave.wgsl
+@@ -2300,14 +2300,6 @@
+     // the host read the latch found none and committed, taking the failed
+     // step's lane for accepted (C8.2, 2026-11-11). A live event is answered
+     // refused with the latch's code; nothing else moves.
+-    let latched = atomicLoad(&status.latch);
+-    if latched != 0u {
+-        if live_event() {
+-            control.event_result = vec4<u32>(
+-                control.event.y, event_operation(), control.event.y, latched);
+-        }
+-        return;
+-    }
+     let failure = atomicLoad(&status.candidate);
+     if failure != 0u {
+         if live_event() {

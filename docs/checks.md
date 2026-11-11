@@ -2078,6 +2078,52 @@ and 1e-3 off a wall; each converges, the EM flux at contrast 1e4 at order
 `vector-inverse-norm-underflows`, `van-der-pol-map-squares-the-flux`,
 `sine-gordon-potential-one-minus-cos` and `fixed-pulse-kept-when-refused`.
 
+The `edges` fixture holds what C8.2 found of section 5.2 on the device. It
+opens each case through the app's handlers, strikes it with the app's
+pulses or drives it with its source, and reads the device's snapshot
+against the f64 reference stepped on the generation the app accepted.
+Unset, `FUNFERN_E2E_EDGES` runs the gate's 22 cases, each held to what it
+must do; named categories run the study's and hold nothing. The gate: the
+box at 127, 128, 129, 255, 256 and 257 nodes and outgoing traces of 127,
+128 and 129 nodes, fixed, pumped and Kerr, within 1e-5 of the reference
+(1.6e-6 at worst on lavapipe); sine-Gordon struck to 5.7e7 refused at its
+first step by both sides, past `SINE_GORDON_PHASE_BOUND`; a 1 MHz pulse
+1,000 s before its centre, whose carrier's argument is 6.3e9, finite with
+its peak within a hundred times the reference's (7.3 times: no f32
+argument there holds a phase; reduced once, the sine took the field to
+2.4e11); van
+der Pol struck to 5.7e7 and 5.7e15 within 1e-5 (8.4e-7 and 3.3e-6, where
+they ended 1.2 and 22 of their scale off); focusing Kerr on the stiffness driven at 1e10
+for 400 steps within 1e-5, where it failed at step 140; a source at 1e30
+failing its first step with code 4, its accepted books finite; and a pulse
+sent behind a latched failure the host has not read refused with the
+latch's code, the field the reference's without it. On lavapipe the gate
+takes 305 s. The f32 range the study found, held by nothing: the device
+refuses pulses of 1e20 and more, and fails the first step of saturable
+media driven at 1e19, where the f64 reference takes both; below a field
+of about 1e-34 nonlinear mass laws lose their relative digits (3e-3 at a
+drive of 1e-30), the inverse's residual floored at f32's smallest normal;
+and a pulse of 1e-45 lands as nothing. On the host, sine-Gordon steps a
+radian inside its bound and is refused a radian past it
+(`sine_gordon_steps_only_within_the_phase_f32_holds`); a plan whose widest
+pass, or whose wall, needs more workgroups than a dimension holds is
+refused, at 8,388,480 items admitted and 8,388,481 not
+(`a_plan_past_the_workgroups_a_dimension_holds_is_refused`), as is a live
+event whose upload does (`a_live_event_past_the_workgroups_a_dimension_holds_is_refused`)
+and a wall with more modes than trace nodes
+(`a_wall_with_more_modes_than_trace_nodes_is_refused`); the encoder reads
+the time-driven path from the bit the shader reads
+(`the_handles_read_the_time_driven_path_where_the_shader_does`); and every
+shader entry's width is the one its encoder dispatches by
+(`the_workgroup_widths_agree_with_the_shaders`). Its mutations, on the
+device: `sine-gordon-unbounded-on-the-device`, `portable-sine-reduced-once`,
+`van-der-pol-multiplier-by-departures`, `kerr-inverse-from-the-midpoint`,
+`accounting-overflow-unchecked`, `event-commit-ignores-the-latch` and
+`latched-event-left-unanswered`; on the host: `sine-gordon-unbounded`,
+`dispatch-limit-unchecked`, `live-event-upload-unchecked`,
+`wall-modes-past-the-trace`, `handles-temporal-from-the-runtime-count` and
+`probe-kernel-width-out-of-step`.
+
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
 catch it and the pattern its failure must match; the script applies each,

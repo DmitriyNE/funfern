@@ -1,0 +1,12 @@
+--- a/crates/funfern-app/src/canonical_wave.wgsl
++++ b/crates/funfern-app/src/canonical_wave.wgsl
+@@ -814,9 +814,6 @@
+     // whose field peaked at 5.7e7 ended 118% off the reference, and its f64
+     // twins a part in 1e9 apart (C8.2, 2026-11-11). Far from one the
+     // multiplier is formed whole.
+-    if s >= 1.0 || abs(x) >= 1.0 {
+-        return flux * exp(-0.5 * x) / sqrt(1.0 + s);
+-    }
+     // `Q·e^{−x/2}/√(1 + s)` as `Q + Q·(d₁ + d₂ + d₁d₂)`: the multiplier sits
+     // within a few parts in a thousand of one and rounds the same way every
+     // stage, so it is formed as its small departures, as the passive map is.

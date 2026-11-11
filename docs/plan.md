@@ -1829,6 +1829,12 @@ is next touched.
   the diagnostics would say the stationary flux could not be taken away. A
   preconditioner that follows the medium's frame would cut the count and
   the time (C8.1, 2026-11-10).
+- A plan whose widest pass needs more than the 65,535 workgroups a
+  dimension holds is refused: the scratch clear's, about 15 words a node,
+  passes it near 0.96M nodes. An 8 × 8 domain at the Fine edge reaches
+  63,804 and an 11 × 11 one 120,437, prepared in 10 s. Splitting the step's
+  passes over two dimensions would lift it, if a refused scene of that size
+  turns up (C8.2, 2026-11-12).
 
 ## Working practice
 
