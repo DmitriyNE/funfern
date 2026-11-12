@@ -1,0 +1,4 @@
+about: an epoch runs to 256 s, where the device's local time is one f32 1.5e-5 s apart and a driven wall reads it late in the epoch
+test: FUNFERN_E2E_EDGES_ONLY="a 5 Hz Dirichlet wall, speed 1, from 0e0 s" scripts/e2e-fixture.sh edges
+expect: MISSED Clock
+needs: device

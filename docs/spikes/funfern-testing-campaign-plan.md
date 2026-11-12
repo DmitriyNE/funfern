@@ -1592,6 +1592,35 @@ mutation, in this order:
   `reduced_phase`, which the clock's rebase
   takes the carriers' phases through, leaves its range past 1e6 as the
   sine's reduction did.
+  C8.3, RT-06, landed on 2026-11-12: the `edges` driver's clock cases start
+  a fresh clock 100 steps before the device's rebase at speeds 1 and 0.3,
+  from origins 0, 36 hours and 1e6 s, with sources, pulses, trains, driven
+  and pulsed walls, second-order walls, a pump, a gated pump and a Switch
+  whose ramp runs across the rebase, 86 on lavapipe and 24 in the gate; and
+  three fixtures retime: eight handoffs between the speeds, one at an
+  epoch's last step and one across its rebase. Rebases and retimes landed
+  where they should, with no step or epoch lost, the readout on the device's
+  clock, the walls' memory the same at any age of the epoch, and far origins
+  read as zero does. Two defects: each rebase put the device's clock 1.7e-5 s
+  ahead of the host's at 1/120 s and 6.1e-6 behind at 0.0025 s for good,
+  since the device stepped the f32 nearest the step and an epoch's time,
+  one step short of 256 s, rounded at f32's spacing there; and late in an
+  epoch the local time, one f32 near 256 s, put a 5 Hz wall 3.7e-4 off
+  where early it read 3.9e-6. With the user the step is the f32 at or below
+  the paced one, and an epoch holds the largest power of two of steps that
+  fits in 16 s, whose time f32 holds exactly: the origin moves on exactly,
+  the cases read up to 230 times less, the retime at an epoch's end 1.8e-6
+  where it read 2.0e-5, and `far-field-late` and
+  `handoff-memory-running-late` are held to their siblings' bounds. A
+  carrier's phase within an epoch now passes 1e6 at about 10 kHz, not
+  620 Hz. Under Worth checking sometime: the f32 frequency, whose phase
+  walks 0.15 to 0.23 rad over 7 hours at 50 Hz against the absolute clock;
+  `reduced_phase` past 1e6; a pulse's carrier past 1e7; and the CPU
+  reference's clock, which adds its step each step. Found while verifying:
+  since C8.2 the latch answers an event sent behind a failure, refused,
+  where the protocol model still stranded it until the failure was cleared,
+  RT-3's design; `interleaved-2` parted from the runtime there, and the
+  model now settles it as the device answers.
 - **C9, long runs:** 5.3's gaps, an adaptive run among them.
 
 ## 7. Infrastructure

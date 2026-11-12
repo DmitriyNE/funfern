@@ -209,6 +209,45 @@ const SNAPSHOT_METADATA_MAGIC: f32 = 8_675_309.0;
 
 const _: () = assert!(CANONICAL_GPU_STORAGE_BINDINGS <= 8);
 
+/// The longest a clock epoch runs. The device's epoch-local time is one f32,
+/// `steps × dt`, which every source, wall, pump, gate and Switch reads: near
+/// 256 s, the epoch it ran to before C8.3, it was 1.5e-5 s apart and a 5 Hz
+/// wall read 3.7e-4 off late in an epoch against 3.9e-6 early in it (C8.3,
+/// 2026-11-12); near 16 s it is 9.5e-7 s apart.
+pub const EPOCH_SECONDS: f64 = 16.0;
+
+/// The steps an epoch holds at `time_step` as the device holds it: the
+/// largest power of two of them that fits in [`EPOCH_SECONDS`], and at most
+/// 2^16. A power of two makes the epoch's time, `steps × dt`, exact in f32,
+/// so the device's rebase moves the origin, the pulses' starts and the
+/// Switches' ramps on by exactly the time that passed; a count one short of
+/// 256 s rounded it at f32's spacing there, 1.7e-5 s a rebase at 1/120 s,
+/// into the clock for good (C8.3).
+pub fn epoch_steps(time_step: f64) -> u32 {
+    let time_step = f64::from(time_step as f32);
+    let mut steps = 1_u32;
+    while steps < 1 << 16 && f64::from(2 * steps) * time_step <= EPOCH_SECONDS {
+        steps *= 2;
+    }
+    steps
+}
+
+/// `time_step` as the device runs it: the f32 at or below it, so that a
+/// stability limit it rounds still holds. The device steps in f32 and the
+/// host's clock counts the step in f64: at a step f32 rounds they ran apart,
+/// 4.4e-10 s a step at 1/120 s, which each rebase kept (C8.3). The app paces
+/// its step through this, so its clock, its state and the CPU reference
+/// count what the device steps; the clock takes the step it is given, which
+/// must be the state's.
+pub fn device_time_step(time_step: f64) -> f64 {
+    let single = time_step as f32;
+    f64::from(if f64::from(single) > time_step {
+        single.next_down()
+    } else {
+        single
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CanonicalGpuClock {
     pub epoch: u64,
@@ -238,8 +277,10 @@ impl CanonicalGpuClock {
         self.epoch_origin_seconds + self.local_seconds()
     }
 
+    /// Past its epoch's steps: the device reads the last of them before it
+    /// rebases, so a snapshot may carry it.
     pub fn requires_rebase(self) -> bool {
-        self.step_in_epoch >= (1 << 16) || self.local_seconds() >= 256.0
+        self.step_in_epoch > epoch_steps(self.time_step)
     }
 
     pub fn rebased(self) -> Result<Self, CanonicalGpuBuildError> {
@@ -4722,7 +4763,8 @@ pub(crate) struct CanonicalGpuBufferHandles {
     /// count, which agreed only because one builder sets both.
     temporal: bool,
     source_count: u32,
-    rebase_step_limit: u32,
+    /// The steps an epoch holds, after which the encoder rebases.
+    epoch_steps: u32,
     dispatches_per_step: u64,
     needs_loss_stages: bool,
     needs_accounting: bool,
@@ -4982,10 +5024,7 @@ fn add_canonical_buffers(
         .temporal
         .map_or(0, |temporal| temporal.runtime_record_count as u32);
     let source_count = plan.control.counts_c.y;
-    let time_limit = (256.0 / plan.control.clock_f32.x as f64)
-        .ceil()
-        .clamp(1.0, u32::MAX as f64) as u32;
-    let rebase_step_limit = time_limit.min(1 << 16);
+    let epoch_steps = epoch_steps(f64::from(plan.control.clock_f32.x));
     let scratch_count = plan.scratch.len() as u32;
     let accounting_item_count = node_count + sample_count + plan.control.counts_b.z;
     let dispatches_per_step = plan.manifest.dispatches_per_step as u64;
@@ -5029,7 +5068,7 @@ fn add_canonical_buffers(
         material_runtime_count,
         temporal: plan.control.runtime_slots.w & TEMPORAL_ENABLED != 0,
         source_count,
-        rebase_step_limit,
+        epoch_steps,
         dispatches_per_step,
         needs_loss_stages: plan.needs_loss_stages,
         needs_accounting: plan.needs_accounting,
@@ -7651,11 +7690,12 @@ fn prepare_canonical_bind_group(
     );
     // A revision within one generation carries the encoded clock across, since
     // steps are in flight. A cleared failure does not: what was encoded after
-    // the failure never committed. That includes a live event, which the
-    // stopped device never processed: it is encoded again from the serial
-    // processed. Carried forward as sent, it never was, and the host waited
-    // for it for good, a source patch holding every edit and Reset behind it
-    // (RT-3 of the 2026-10-20 review).
+    // the failure never committed. A live event is encoded again from the
+    // serial processed: carried forward as sent, an event the stopped device
+    // never answered was waited for for good, a source patch holding every
+    // edit and Reset behind it (RT-3 of the 2026-10-20 review). Since C8.2
+    // the latch answers one, refused, so its own serial is the one processed
+    // unless the clear comes before the answer is read.
     let (encoded_steps, encoded_local_step, encoded_event, encoded_live_event) = existing
         .as_ref()
         .filter(|group| group.generation == request.generation)
@@ -8659,7 +8699,7 @@ fn compute_canonical_wave(
         pass.set_bind_group(0, &group.bind_group, &[]);
     }
     for offset in 0..pending {
-        if group.encoded_local_step.saturating_add(1) >= handles.rebase_step_limit {
+        if group.encoded_local_step >= handles.epoch_steps {
             pass.set_pipeline(pipelines[22]);
             pass.dispatch_workgroups(
                 workgroups(
@@ -9850,8 +9890,9 @@ mod tests {
         // RT-5 of the 2026-10-20 review: a rebase is encoded with the step
         // after it, so a snapshot on an epoch's last step is the old epoch's
         // while its step reads as the new epoch's first, the same as above.
-        // Decoded against the new origin, its carriers stood ω(L - 1)dt off
-        // and its Switch about 256 s early. Only the epoch it carries tells.
+        // Decoded against the new origin, its carriers stood an epoch's
+        // phase off and its Switch an epoch early. Only the epoch it carries
+        // tells.
         display.raw_state_epoch = 2;
         assert!(
             display.accepted_material_runtime(&authored).is_none(),
@@ -11286,29 +11327,60 @@ mod tests {
     }
 
     #[test]
-    fn clock_contract_rebases_before_f32_integer_or_elapsed_limits() {
+    fn clock_contract_rebases_past_its_epochs_steps() {
         let clock = CanonicalGpuClock {
             epoch: u64::MAX - 1,
             epoch_origin_seconds: 1.0e12,
-            step_in_epoch: (1 << 16) - 1,
+            step_in_epoch: 16_384,
             time_step: 1.0 / 1024.0,
         };
         assert!(!clock.requires_rebase());
         assert!(
             CanonicalGpuClock {
-                step_in_epoch: 1 << 16,
+                step_in_epoch: 16_385,
                 ..clock
             }
             .requires_rebase()
         );
+        // A step whose 16 s pass 2^16 steps holds 2^16.
+        let fine = CanonicalGpuClock {
+            step_in_epoch: 1 << 16,
+            time_step: 1.0e-5,
+            ..clock
+        };
+        assert!(!fine.requires_rebase());
         assert!(
             CanonicalGpuClock {
-                step_in_epoch: 32_768,
-                time_step: 1.0 / 128.0,
-                ..clock
+                step_in_epoch: (1 << 16) + 1,
+                ..fine
             }
             .requires_rebase()
         );
+    }
+
+    /// An epoch's time is exact in f32 at any step, and as long as fits in
+    /// 16 s; the step the device runs is an f32, at or below the one asked
+    /// for (C8.3).
+    #[test]
+    fn epochs_hold_their_time_exactly_and_steps_round_down() {
+        for exponent in -200..=60 {
+            let asked = 10.0_f64.powf(f64::from(exponent) / 20.0);
+            let step = device_time_step(asked);
+            assert!(step <= asked && step > 0.0, "{asked:e}: {step:e}");
+            assert_eq!(f64::from(step as f32), step, "{asked:e}");
+            assert!(f64::from((step as f32).next_up()) > asked, "{asked:e}");
+            let steps = epoch_steps(step);
+            assert!(steps.is_power_of_two() && steps <= 1 << 16, "{asked:e}");
+            let time = f64::from(steps) * step;
+            assert_eq!(f64::from(steps as f32 * step as f32), time, "{asked:e}");
+            assert!(time <= EPOCH_SECONDS || steps == 1, "{asked:e}");
+            assert!(
+                2.0 * time > EPOCH_SECONDS || steps == 1 << 16,
+                "{asked:e}: {steps} steps"
+            );
+        }
+        assert_eq!(epoch_steps(device_time_step(1.0 / 120.0)), 1_024);
+        assert_eq!(epoch_steps(device_time_step(0.0025)), 4_096);
     }
 
     #[test]

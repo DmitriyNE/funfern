@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -214,7 +214,7 @@
+ /// 256 s, the epoch it ran to before C8.3, it was 1.5e-5 s apart and a 5 Hz
+ /// wall read 3.7e-4 off late in an epoch against 3.9e-6 early in it (C8.3,
+ /// 2026-11-12); near 16 s it is 9.5e-7 s apart.
+-pub const EPOCH_SECONDS: f64 = 16.0;
++pub const EPOCH_SECONDS: f64 = 256.0;
+ 
+ /// The steps an epoch holds at `time_step` as the device holds it: the
+ /// largest power of two of them that fits in [`EPOCH_SECONDS`], and at most

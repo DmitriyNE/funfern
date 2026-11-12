@@ -1,0 +1,4 @@
+about: the model keeps a live event in flight while the run has failed, as RT-3's stranding did, where since C8.2 the device answers it refused, and the runtime and the model part
+test: cargo test -p funfern-protocol --release --locked
+expect: an_event_in_flight_when_the_run_fails_settles_refused \.\.\. FAILED
+needs: cpu

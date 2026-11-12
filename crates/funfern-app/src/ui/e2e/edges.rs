@@ -19,7 +19,9 @@
 
 use super::edge_scenes::*;
 use super::*;
-use crate::canonical_gpu::{CANONICAL_FAILURE_NON_FINITE, CANONICAL_FAILURE_RESTORING_DOMAIN};
+use crate::canonical_gpu::{
+    CANONICAL_FAILURE_NON_FINITE, CANONICAL_FAILURE_RESTORING_DOMAIN, device_time_step,
+};
 use crate::topology_editor::TopologyProbeTarget;
 use crate::topology_runtime::{TopologyProbeCompilation, TopologyProbeStencil};
 use funfern_core::{
@@ -70,6 +72,11 @@ struct Case {
     /// The step past which the generation is latched failed directly and a
     /// pulse sent at once, before the host has read the latch.
     latch: Option<u64>,
+    /// Where the fresh generation's clock starts: its origin, and how many
+    /// steps before the epoch's rebase.
+    clock: Option<(FreshOrigin, u32)>,
+    /// The step the run is held at and the medium's Switch thrown.
+    switch_at: Option<u64>,
 }
 
 /// What a gate case must do.
@@ -92,6 +99,10 @@ enum Expect {
     /// The pulse sent behind the latch refused with the latch's code, and
     /// the field within `.0` of the reference's, which never took it.
     LatchedPulseRefused(f64),
+    /// As [`Expect::Matches`] with `.0`, and the device's clock on the exact
+    /// one: its epoch, its origin within `.1` s, and its time and the app's
+    /// readout within [`CLOCK_TIME_TOLERANCE`].
+    Clock(f64, f64),
 }
 
 /// What a case did, as the gate reads it.
@@ -113,6 +124,17 @@ struct Outcome {
     books_finite: bool,
     /// The refusal code the pulse behind the latch was answered with.
     latched_pulse: Option<u32>,
+    /// The device's clock against the exact one, where the case set it.
+    clock: Option<ClockOff>,
+}
+
+/// The device's clock against the exact one, as [`read_clock`] reads it.
+#[derive(Clone, Copy, Debug)]
+struct ClockOff {
+    epoch: bool,
+    origin: f64,
+    time: f64,
+    readout: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +152,9 @@ struct Mirror {
     comparable: bool,
     found: Vec<String>,
     outcome: Outcome,
+    /// The steps the reference has taken, where an event made it step
+    /// before the snapshot.
+    stepped: u64,
 }
 
 enum EdgePhase {
@@ -151,6 +176,13 @@ enum EdgePhase {
     Remesh {
         generation: u64,
         asked: Instant,
+    },
+    /// The run held at step `at` and the Switch thrown, which the device is
+    /// to take.
+    Switching {
+        at: u64,
+        processed: u32,
+        since: Instant,
     },
     /// The generation was latched at step `at` and a pulse placed, which
     /// the device is to answer.
@@ -182,6 +214,7 @@ impl EdgePhase {
             EdgePhase::Run => "running",
             EdgePhase::Snapshot { .. } => "waiting for the snapshot",
             EdgePhase::Remesh { .. } => "waiting for the handoff",
+            EdgePhase::Switching { .. } => "waiting for the Switch",
             EdgePhase::Latched { .. } => "waiting for the pulse behind the latch",
             EdgePhase::Faulted { .. } => "firing pulses into a failed run",
             EdgePhase::Done => "done",
@@ -297,6 +330,9 @@ fn cases() -> Vec<Case> {
     if wanted("failure") {
         cases.extend(failure_cases());
     }
+    if wanted("clock") {
+        cases.extend(clock_cases());
+    }
     cases.retain(|case| only.as_deref().is_none_or(|only| case.label.contains(only)));
     cases
 }
@@ -328,6 +364,8 @@ fn tail_cases() -> Vec<Case> {
             fault: None,
             expect: Expect::Studied,
             latch: None,
+            clock: None,
+            switch_at: None,
         });
     }
     for &(trace, width, edge, sides) in TAIL_TRACES {
@@ -371,6 +409,8 @@ fn tail_cases() -> Vec<Case> {
                 fault: None,
                 expect: Expect::Studied,
                 latch: None,
+                clock: None,
+                switch_at: None,
             });
         }
     }
@@ -410,6 +450,8 @@ fn gate_cases() -> Vec<Case> {
         fault: None,
         expect,
         latch: None,
+        clock: None,
+        switch_at: None,
     };
     // Its field at 5.7e7 put `r` past the phase f32 holds in one step, where
     // the device's sine came back as large as 81 and the field grew to
@@ -487,6 +529,14 @@ fn gate_cases() -> Vec<Case> {
             Expect::LatchedPulseRefused(GATE_TOLERANCE),
         )
     });
+    // C8.3's: what a clock carries across the device's rebase and late in
+    // an epoch, held on the exact clock.
+    for mut clock in clock_cases() {
+        if matches!(clock.expect, Expect::Clock(..)) {
+            clock.category = "gate";
+            cases.push(clock);
+        }
+    }
     cases
 }
 
@@ -520,6 +570,200 @@ const TAIL_TRACES: &[(usize, f64, f64, &[OuterSide])] = &[
     (129, 0.3, 0.026 + 0.00005 * 210.0, &[OuterSide::Right]),
 ];
 
+/// The steps before the device's rebase a clock case starts at.
+const CLOCK_BEFORE: u32 = 100;
+
+/// The gate's tolerance on a clock case's field against the reference, of
+/// its scale: on lavapipe they read 1.5e-5 at worst, a pulse train across
+/// the rebase at 0.0025 s, where on epochs of 256 s they read up to 5.5e-4
+/// (C8.3).
+const CLOCK_TOLERANCE: f64 = 5.0e-5;
+
+/// How far the device's time and the app's readout may be from the exact
+/// clock: the epoch-local time is one f32 under 16 s, 9.5e-7 s apart at
+/// most.
+const CLOCK_TIME_TOLERANCE: f64 = 1.0e-6;
+
+/// How far the device's origin may be from the exact one where the clock
+/// started from zero: at a whole-second origin it moves on exactly, but
+/// this one is the start's local time, whose fraction f32 holds to 6e-8 s.
+const CLOCK_ORIGIN_FROM_ZERO_TOLERANCE: f64 = 1.0e-7;
+
+/// C8.3's study: what a clock carries, crossing one of the device's rebases,
+/// the fresh clock started [`CLOCK_BEFORE`] steps before it and run 300
+/// steps. At speed 1, a step of 1/120 s, and at 0.3, 0.0025 s, each as f32
+/// holds it; from origins 0, 36 hours and 1e6 s, and the time-driven media
+/// from zero, where their reference starts. Those the gate holds are judged
+/// here too.
+fn clock_cases() -> Vec<Case> {
+    use crate::ui::pacing::PACING_FRAME_SECONDS;
+    let mut cases = Vec::new();
+    let flat = |duration: f64, edge: f64| funfern_core::PulseEnvelope::FlatTop { duration, edge };
+    let wall = |mut document: TopologyDocument, signal: TimeSignal| {
+        for model in [&mut document.model.draft, &mut document.model.accepted] {
+            model.outer_boundaries.sides[OuterSide::Left.index()] =
+                OuterBoundaryCondition::Dirichlet { signal };
+        }
+        document
+    };
+    let at = |mut document: TopologyDocument, speed: f64| {
+        document.presentation.simulation_speed = speed;
+        plain(document, 0.2)
+    };
+    let boxed = || document(OuterBoundaryCondition::Reflecting, |_| Ok(()));
+    let case = |label: String, document, strikes, clock, switch_at, gated: bool| Case {
+        category: "clock",
+        label,
+        document,
+        strikes,
+        steps: 300,
+        remesh: None,
+        fault: None,
+        expect: if !gated {
+            Expect::Studied
+        } else if matches!(clock, (FreshOrigin::StartingAtZero, _)) {
+            Expect::Clock(CLOCK_TOLERANCE, CLOCK_ORIGIN_FROM_ZERO_TOLERANCE)
+        } else {
+            Expect::Clock(CLOCK_TOLERANCE, 0.0)
+        },
+        latch: None,
+        clock: Some(clock),
+        switch_at,
+    };
+    for speed in [1.0, 0.3] {
+        let h = device_time_step(PACING_FRAME_SECONDS * speed);
+        let limit = epoch_steps(h);
+        for origin in [0.0, 129_600.0, 1.0e6] {
+            let rebase = origin + f64::from(limit) * h;
+            let struck = vec![strike(0.3, 0.2, 1.0)];
+            let mut contents: Vec<(String, TopologyDocument, Vec<Strike>)> = Vec::new();
+            for frequency in [0.5, 5.0, 50.0] {
+                let mut document = boxed();
+                document.model.source.enabled = true;
+                document.model.source.signal = TimeSignal::harmonic(0.0, 1.0, frequency, 0.0);
+                contents.push((format!("a {frequency} Hz source"), document, Vec::new()));
+            }
+            let mut pulse = boxed();
+            pulse.model.source.enabled = true;
+            pulse.model.source.signal = TimeSignal::pulsed(
+                [0.0, 1.0, 2.0, 0.0],
+                flat(120.0 * h, 20.0 * h),
+                rebase - 60.0 * h,
+                0.0,
+            );
+            contents.push(("a pulse about the rebase".into(), pulse, Vec::new()));
+            let mut train = boxed();
+            train.model.source.enabled = true;
+            train.model.source.signal = TimeSignal::pulsed(
+                [0.0, 1.0, 2.0, 0.0],
+                flat(30.0 * h, 8.0 * h),
+                rebase - 90.0 * h,
+                60.0 * h,
+            );
+            contents.push(("a pulse train across the rebase".into(), train, Vec::new()));
+            contents.push((
+                "a 5 Hz Dirichlet wall".into(),
+                wall(boxed(), TimeSignal::harmonic(0.0, 0.05, 5.0, 0.0)),
+                Vec::new(),
+            ));
+            contents.push((
+                "a pulsed Dirichlet wall about the rebase".into(),
+                wall(
+                    boxed(),
+                    TimeSignal::pulsed(
+                        [0.0, 0.05, 3.0, 0.0],
+                        flat(120.0 * h, 20.0 * h),
+                        rebase - 60.0 * h,
+                        0.0,
+                    ),
+                ),
+                Vec::new(),
+            ));
+            contents.push((
+                "second-order walls struck".into(),
+                document(OuterBoundaryCondition::SecondOrderOutgoing, |_| Ok(())),
+                struck.clone(),
+            ));
+            for (label, document, strikes) in contents {
+                // From the origin, each also early in its epoch and late in
+                // it without crossing: what the epoch's age does, apart from
+                // what the rebase does.
+                let ages: &[(&str, u32)] = if origin == 0.0 {
+                    &[("", CLOCK_BEFORE), (", early", limit), (", late", 400)]
+                } else {
+                    &[("", CLOCK_BEFORE)]
+                };
+                for &(age, before) in ages {
+                    // The gate's: across the rebase from the origin all but
+                    // the slowest source, the wall late in its epoch, and
+                    // the 5 Hz source from 1e6 s.
+                    let gated = if origin == 0.0 && age.is_empty() {
+                        label != "a 0.5 Hz source"
+                    } else if origin == 0.0 {
+                        age == ", late" && label == "a 5 Hz Dirichlet wall"
+                    } else {
+                        origin == 1.0e6 && label == "a 5 Hz source"
+                    };
+                    cases.push(case(
+                        format!("{label}, speed {speed}, from {origin:e} s{age}"),
+                        at(document.clone(), speed),
+                        strikes.clone(),
+                        (FreshOrigin::At(origin), before),
+                        None,
+                        gated,
+                    ));
+                }
+            }
+        }
+        // From zero, the rebase at `CLOCK_BEFORE` steps: the pump's phase,
+        // a gate's window about it, and a Switch whose ramp runs across it.
+        let rebase = f64::from(CLOCK_BEFORE) * h;
+        let pump = |m: &mut funfern_core::Material| {
+            m.mass_law.drive = funfern_core::TimeDrive::ParametricPump {
+                depth: constant(0.2),
+                frequency_hz: constant(1.0),
+                phase_radians: constant(0.0),
+            }
+        };
+        let driven = [
+            ("a 1 Hz pump", None),
+            ("a gated pump", None),
+            (
+                "a Switch across the rebase",
+                Some(u64::from(CLOCK_BEFORE) - 15),
+            ),
+        ];
+        for (label, switch_at) in driven {
+            let document = document(OuterBoundaryCondition::Reflecting, |editor| {
+                medium(editor, |m| match label {
+                    "a 1 Hz pump" => pump(m),
+                    "a gated pump" => {
+                        pump(m);
+                        m.mass_law.gate = Some(funfern_core::PulseTrain {
+                            envelope: flat(40.0 * h, 10.0 * h),
+                            start: rebase - 20.0 * h,
+                            repeat: 0.0,
+                        });
+                    }
+                    _ => {
+                        m.mass_law.alternate = Some(constant(1.3));
+                        m.switch_ramp = 30.0 * h;
+                    }
+                })
+            });
+            cases.push(case(
+                format!("{label}, speed {speed}, from 0 s"),
+                at(document, speed),
+                vec![strike(0.3, 0.2, 1.0)],
+                (FreshOrigin::StartingAtZero, CLOCK_BEFORE),
+                switch_at,
+                true,
+            ));
+        }
+    }
+    cases
+}
+
 /// C8.1's 216 combinations of sources, probes, walls, histories and drives,
 /// each struck once and run 40 steps.
 fn empty_cases() -> Vec<Case> {
@@ -544,6 +788,8 @@ fn empty_cases() -> Vec<Case> {
                             fault: None,
                             expect: Expect::Studied,
                             latch: None,
+                            clock: None,
+                            switch_at: None,
                         });
                     }
                 }
@@ -604,6 +850,8 @@ fn amplitude_cases() -> Vec<Case> {
                 fault: None,
                 expect: Expect::Studied,
                 latch: None,
+                clock: None,
+                switch_at: None,
             });
         }
     }
@@ -643,6 +891,8 @@ fn source_cases() -> Vec<Case> {
                 fault: None,
                 expect: Expect::Studied,
                 latch: None,
+                clock: None,
+                switch_at: None,
             });
         }
     }
@@ -669,6 +919,8 @@ fn contrast_cases() -> Vec<Case> {
                 fault: None,
                 expect: Expect::Studied,
                 latch: None,
+                clock: None,
+                switch_at: None,
             });
         }
     }
@@ -683,6 +935,8 @@ fn contrast_cases() -> Vec<Case> {
             fault: None,
             expect: Expect::Studied,
             latch: None,
+            clock: None,
+            switch_at: None,
         });
     }
     cases
@@ -729,6 +983,8 @@ fn geometry_cases() -> Vec<Case> {
                 fault: None,
                 expect: Expect::Studied,
                 latch: None,
+                clock: None,
+                switch_at: None,
             })
         })
         .collect()
@@ -755,6 +1011,8 @@ fn cancellation_cases() -> Vec<Case> {
             fault: None,
             expect: Expect::Studied,
             latch: None,
+            clock: None,
+            switch_at: None,
         },
         Case {
             category: "cancellation",
@@ -766,6 +1024,8 @@ fn cancellation_cases() -> Vec<Case> {
             fault: None,
             expect: Expect::Studied,
             latch: None,
+            clock: None,
+            switch_at: None,
         },
         Case {
             category: "cancellation",
@@ -777,6 +1037,8 @@ fn cancellation_cases() -> Vec<Case> {
             fault: None,
             expect: Expect::Studied,
             latch: None,
+            clock: None,
+            switch_at: None,
         },
     ]
 }
@@ -817,6 +1079,8 @@ fn probe_cases() -> Vec<Case> {
                 fault: None,
                 expect: Expect::Studied,
                 latch: None,
+                clock: None,
+                switch_at: None,
             });
         }
     }
@@ -851,6 +1115,8 @@ fn probe_cases() -> Vec<Case> {
             fault: None,
             expect: Expect::Studied,
             latch: None,
+            clock: None,
+            switch_at: None,
         });
     }
     cases
@@ -876,6 +1142,8 @@ fn failure_cases() -> Vec<Case> {
             fault: Some(40 + 7 * trial),
             expect: Expect::Studied,
             latch: None,
+            clock: None,
+            switch_at: None,
         })
         .collect()
 }
@@ -977,7 +1245,7 @@ fn advance(
             let document = driver.cases.front()?.document.clone();
             // A case's time runs from its opening, the app's start up aside.
             driver.deadline = Instant::now() + driver.per_case;
-            *FRESH_CLOCK.lock().unwrap() = None;
+            *FRESH_CLOCK.lock().unwrap() = driver.cases.front()?.clock;
             state.e2e_steps.limit = Some(0);
             state.e2e_steps.batch = None;
             state.e2e_steps.burst = false;
@@ -1037,6 +1305,7 @@ fn advance(
                 state: reference,
                 comparable: true,
                 outcome: Outcome::default(),
+                stepped: 0,
             });
             driver.base = request.stats().completed_steps();
             state.e2e_steps.limit = Some(driver.base);
@@ -1112,6 +1381,23 @@ fn advance(
                 .saturating_sub(driver.base);
             let failure = request.stats().failure();
             let steps = driver.cases.front()?.steps;
+            if let Some(at) = driver.cases.front()?.switch_at
+                && driver.mirror.as_ref()?.stepped < at
+                && failure == 0
+            {
+                if completed < at {
+                    driver.phase = EdgePhase::Run;
+                    return None;
+                }
+                let processed = request.stats().processed_event();
+                state.request_material_switch();
+                driver.phase = EdgePhase::Switching {
+                    at,
+                    processed,
+                    since: Instant::now(),
+                };
+                return None;
+            }
             if let Some(at) = driver.cases.front()?.latch
                 && completed >= at
                 && failure == 0
@@ -1206,6 +1492,11 @@ fn advance(
                     .found
                     .push(format!("branches {}", request.step_branches().join(", ")));
             }
+            if driver.cases.front()?.clock.is_some() {
+                let (found, off) = read_clock(state, display, completed, mirror.state.time());
+                mirror.found.push(found);
+                mirror.outcome.clock = off;
+            }
             match driver.cases.front()?.remesh {
                 Some(edge) if failure == 0 => {
                     let generation = request.generation();
@@ -1246,6 +1537,63 @@ fn advance(
                 return Some(Ok(()));
             }
             driver.phase = EdgePhase::Remesh { generation, asked };
+            None
+        }
+        EdgePhase::Switching {
+            at,
+            processed,
+            since,
+        } => {
+            let waiting = request.stats().processed_event() == processed
+                || !state.coordinator.pending_switches.is_empty();
+            if waiting {
+                if since.elapsed().as_secs() >= WAIT_SECONDS {
+                    return Some(Err("the driver's Switch was not taken".into()));
+                }
+                driver.phase = EdgePhase::Switching {
+                    at,
+                    processed,
+                    since,
+                };
+                return None;
+            }
+            let rejection = request.stats().event_rejection();
+            let material = state.editor.document.model.accepted.materials[0].clone();
+            let Some(&target) = state.coordinator.switch_targets.get(&material.id) else {
+                return Some(Err("the driver's Switch was not recorded as sent".into()));
+            };
+            let steps = driver.cases.front()?.steps;
+            let mirror = driver.mirror.as_mut()?;
+            for _ in mirror.stepped..at {
+                if let Err(error) = mirror.state.step(&mirror.active) {
+                    return Some(Err(format!("the driver's reference did not step: {error}")));
+                }
+            }
+            mirror.stepped = at;
+            if rejection != 0 {
+                mirror
+                    .found
+                    .push(format!("the Switch REFUSED ({rejection})"));
+                mirror.comparable = false;
+            } else {
+                let State::Temporal(temporal) = &mut mirror.state else {
+                    return Some(Err("the driver's Switch is on a fixed generation".into()));
+                };
+                let time = temporal.time();
+                if let Err(error) = temporal.runtime_mut().begin_switch(
+                    material.id,
+                    target,
+                    time,
+                    material.switch_ramp,
+                ) {
+                    return Some(Err(format!(
+                        "the driver's reference did not switch: {error}"
+                    )));
+                }
+                mirror.found.push(format!("the Switch taken at step {at}"));
+            }
+            state.e2e_steps.limit = Some(driver.base + steps);
+            driver.phase = EdgePhase::Run;
             None
         }
         EdgePhase::Latched {
@@ -1393,7 +1741,8 @@ fn begin_strike(
 ) -> Option<Result<(), String>> {
     let case = driver.cases.front()?;
     let Some(strike) = case.strikes.get(index).copied() else {
-        state.e2e_steps.limit = Some(driver.base + case.steps);
+        // A Switch holds the run at its step until it is thrown.
+        state.e2e_steps.limit = Some(driver.base + case.switch_at.unwrap_or(case.steps));
         state.wave_running = true;
         driver.phase = EdgePhase::Run;
         return None;
@@ -1445,7 +1794,7 @@ fn read_against(
         keep(&mirror.state);
     }
     let mut cpu_stopped = None;
-    for step in 0..completed {
+    for step in mirror.stepped..completed {
         if let Err(error) = mirror.state.step(&mirror.active) {
             cpu_stopped = Some(format!("the reference REFUSED step {step}: {error}"));
             break;
@@ -1535,6 +1884,52 @@ fn read_against(
     });
 }
 
+/// The device's clock after `completed` steps against the exact one, the
+/// fresh clock's start and `completed` steps of the uploaded step in f64: its
+/// epoch and origin, which a rebase moves on by the [`epoch_steps`] its
+/// epoch held (the encoder rebases before the step after the last of them);
+/// its time; the app's readout; and the reference's.
+fn read_clock(
+    state: &Playground,
+    display: &CanonicalGpuDisplay,
+    completed: u64,
+    reference: f64,
+) -> (String, Option<ClockOff>) {
+    let h = state.coordinator.uploaded_time_step;
+    let (Ok(start), Some(clock)) = (fresh_clock(h), display.clock) else {
+        return ("clock: not read".into(), None);
+    };
+    let held = epoch_steps(h);
+    let to_rebase = u64::from(held - start.step_in_epoch);
+    let (epoch, origin) = if completed > to_rebase {
+        (
+            start.epoch + 1,
+            start.epoch_origin_seconds + f64::from(held) * h,
+        )
+    } else {
+        (start.epoch, start.epoch_origin_seconds)
+    };
+    let exact =
+        start.epoch_origin_seconds + (u64::from(start.step_in_epoch) + completed) as f64 * h;
+    let off = ClockOff {
+        epoch: clock.epoch == epoch,
+        origin: clock.epoch_origin_seconds - origin,
+        time: clock.absolute_seconds - exact,
+        readout: state.simulated_time() - exact,
+    };
+    let found = format!(
+        "clock: epoch {} (expected {epoch}), origin {:+.3e} s off, time {:+.3e}, readout \
+         {:+.3e}, reference {:+.3e}; step {h:.6e}, f32 {:+.2e}",
+        clock.epoch,
+        off.origin,
+        off.time,
+        off.readout,
+        reference - exact,
+        f64::from(h as f32) - h
+    );
+    (found, Some(off))
+}
+
 /// Whether `outcome` did what `expect` asks of it, a case of `strikes`.
 fn judge(expect: Expect, outcome: Option<&Outcome>, strikes: usize) -> Result<(), String> {
     let Some(outcome) = outcome else {
@@ -1596,6 +1991,21 @@ fn judge(expect: Expect, outcome: Option<&Outcome>, strikes: usize) -> Result<()
                 ))
             } else {
                 Ok(())
+            }
+        }
+        Expect::Clock(tolerance, origin) => {
+            judge(Expect::Matches(tolerance), Some(outcome), strikes)?;
+            match outcome.clock {
+                None => Err("the clock was not read".into()),
+                Some(off) if !off.epoch => Err("the clock is in another epoch".into()),
+                Some(off)
+                    if off.origin.abs() > origin
+                        || off.time.abs() > CLOCK_TIME_TOLERANCE
+                        || off.readout.abs() > CLOCK_TIME_TOLERANCE =>
+                {
+                    Err(format!("the clock is off the exact one by {off:?}"))
+                }
+                Some(_) => Ok(()),
             }
         }
         Expect::LatchedPulseRefused(tolerance) => {

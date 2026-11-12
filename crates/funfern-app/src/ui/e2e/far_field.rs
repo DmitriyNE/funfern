@@ -13,11 +13,11 @@ use funfern_core::{
 pub(super) const FAR_FIELD_STEPS: u64 = 1150;
 
 /// `far-field-late`'s clock: an epoch origin 36 hours in, the run starting
-/// 400 steps before the epoch rebases, 253.7 s past the origin, and the drive
-/// switched on 250 s past it.
+/// 400 steps before the epoch rebases, 9.3 s past the origin, and the drive
+/// switched on 5.6 s past it.
 pub(super) const LATE_ORIGIN: f64 = 129_600.0;
 pub(super) const LATE_STEPS_BEFORE_REBASE: u32 = 400;
-pub(super) const LATE_DRIVE: f64 = 250.0;
+pub(super) const LATE_DRIVE: f64 = 5.6;
 
 /// The cavity made a TM box whose every side is a first-order outgoing wall,
 /// with a hole off its centre and the document's point source beside it, a
@@ -68,22 +68,12 @@ pub(super) fn far_field_document(start: f64) -> TopologyDocument {
 /// at most a pass more apart from the first the delay window lets through to
 /// the run's end; each
 /// direction's amplitude within 4e-5 of the twin's at the same frame, relative
-/// to the largest the twin reads, f32 against f64 (the M1 Max reads 5.3e-6);
-/// each record's far time within 2e-6 s of the twin's (1.4e-7 s).
-pub(super) fn judge(
-    state: &Playground,
-    twin: &FarFieldTwin,
-    fixture: Fixture,
-) -> Result<String, String> {
-    // Late, the twin's f64 state and the device's stand 1.25e-4 apart (the
-    // run's own tolerance says why), and the projections with them: the M1
-    // Max reads 1.17e-4.
-    let late = matches!(fixture, Fixture::FarFieldLate);
-    let (tolerance, stamp_bound) = if late {
-        (5.0e-4, 2.0e-6)
-    } else {
-        (4.0e-5, 2.0e-6)
-    };
+/// to the largest the twin reads, f32 against f64 (the M1 Max reads 5.3e-6;
+/// lavapipe 6.3e-6 late in an epoch, where an epoch of 256 s read 1.17e-4
+/// on the M1 Max until C8.3); each record's far time within 2e-6 s of the
+/// twin's (1.4e-7 s).
+pub(super) fn judge(state: &Playground, twin: &FarFieldTwin) -> Result<String, String> {
+    let (tolerance, stamp_bound) = (4.0e-5, 2.0e-6);
     let records = &state.far_field_trace.records;
     if records.len() < 60 {
         return Err(format!("the far field holds {} records", records.len()));
@@ -205,7 +195,7 @@ pub(crate) struct FarFieldTwin {
     frames: Vec<Frame>,
     origin: (f32, f32),
     epoch_step: u32,
-    rebase_limit: u32,
+    epoch_steps: u32,
     /// The device's completed-step count before the run's first step, which
     /// the clock's step in the epoch seeds, and which the host counts its
     /// passes on.
@@ -217,23 +207,16 @@ impl FarFieldTwin {
     /// first pass differences its first step against.
     #[cfg(test)]
     pub(crate) fn new(active: &PreparedTopology, time_step: f64) -> Result<Self, String> {
-        Self::with_clock(
-            active,
-            time_step,
-            0.0,
-            0,
-            super::rebase_step_limit(time_step),
-        )
+        Self::with_clock(active, time_step, 0.0, 0)
     }
 
     /// The twin of a run that starts at rest on a clock at `origin`,
-    /// `step_in_epoch` steps into the epoch, which rebases at `rebase_limit`.
+    /// `step_in_epoch` steps into the epoch.
     pub(crate) fn with_clock(
         active: &PreparedTopology,
         time_step: f64,
         origin: f64,
         step_in_epoch: u32,
-        rebase_limit: u32,
     ) -> Result<Self, String> {
         let stencil = active
             .far_field
@@ -264,7 +247,7 @@ impl FarFieldTwin {
             frames: Vec::new(),
             origin: (origin.floor() as f32, (origin - origin.floor()) as f32),
             epoch_step: step_in_epoch,
-            rebase_limit,
+            epoch_steps: crate::canonical_gpu::epoch_steps(time_step),
             first_serial: u64::from(step_in_epoch),
         })
     }
@@ -281,11 +264,11 @@ impl FarFieldTwin {
     /// Moves the clock on a step, as the device does, and answers the stamp
     /// of a pass after it, as the shader forms it: the origin's coarse part,
     /// and its fine part with the epoch-local time centred half a step back.
-    /// The encoder rebases before the step that would reach the limit, adding
+    /// The encoder rebases before the step after the epoch's last, adding
     /// the local time onto the origin by `advance_origin`.
     fn step_clock(&mut self) -> (f32, f32) {
         let dt = self.time_step as f32;
-        if self.epoch_step + 1 >= self.rebase_limit {
+        if self.epoch_step >= self.epoch_steps {
             let (high, low) = self.origin;
             let increment = self.epoch_step as f32 * dt;
             let whole = increment.floor();

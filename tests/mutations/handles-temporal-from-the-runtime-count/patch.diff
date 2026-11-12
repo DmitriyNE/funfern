@@ -1,11 +1,11 @@
 --- a/crates/funfern-app/src/canonical_gpu.rs
 +++ b/crates/funfern-app/src/canonical_gpu.rs
-@@ -5027,7 +5027,7 @@
+@@ -5063,7 +5063,7 @@
          short_wave: plan.short_wave,
          drive_count,
          material_runtime_count,
 -        temporal: plan.control.runtime_slots.w & TEMPORAL_ENABLED != 0,
 +        temporal: material_runtime_count != 0,
          source_count,
-         rebase_step_limit,
+         epoch_steps,
          dispatches_per_step,

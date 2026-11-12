@@ -522,8 +522,8 @@ fn primary_field_and_rate(stencil: PointStencil) -> vec2<f32> {
 }
 // A record's time as the vector overlay carries its own: the epoch origin's
 // coarse part, and its fine part with the epoch-local time, which the host
-// adds in f64 (`stamp_seconds`). The epoch rebases within 256 s, so the fine
-// part keeps f32's spacing there, 3e-5 s. Summed here into one f32, a stamp
+// adds in f64 (`stamp_seconds`). The epoch rebases within 16 s, so the fine
+// part keeps f32's spacing there, 2e-6 s. Summed here into one f32, a stamp
 // kept f32's spacing at the run's absolute time: 2e-3 s after ten hours, 18%
 // of a 120 Hz record's spacing.
 fn stamp() -> vec2<f32> {

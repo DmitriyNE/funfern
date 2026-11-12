@@ -1,0 +1,4 @@
+about: an epoch holds the steps that fit in 16 s, not a power of two of them, and its time rounds in f32 into the origin a rebase moves on
+test: FUNFERN_E2E_EDGES_ONLY="a 5 Hz source, speed 0.3, from 0e0 s" scripts/e2e-fixture.sh edges
+expect: MISSED Clock
+needs: device

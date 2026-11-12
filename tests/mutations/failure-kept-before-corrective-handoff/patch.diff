@@ -1,9 +1,9 @@
 --- a/crates/funfern-app/src/ui/runtime.rs
 +++ b/crates/funfern-app/src/ui/runtime.rs
-@@ -709,9 +709,6 @@
+@@ -720,9 +720,6 @@
              // status would otherwise reject the new generation as its own.
-             // Cleared first, the failure sends again the live event it
-             // stranded, which the upload then waits for.
+             // Cleared first; a live event behind the failure is answered,
+             // refused by the latch (C8.2), and the upload waits for it.
 -            if request.failed() && request.clear_failure(assets, commands).is_ok() {
 -                self.coordinator.solver_fault = None;
 -            }

@@ -1726,19 +1726,19 @@ is next touched.
   `observables` channel's wall 2.0% high against 1.5%
   (`docs/spikes/funfern-point-recovery-spike.md`, "Line probes",
   2026-10-31). A recovery that keeps each element's own mean was not tried.
-- Late in an epoch the device's local time is one f32 near 256 s, 3e-5 s
-  apart, and the drives' phases carry about 1e-4 rad from it. 254 s into an
-  epoch, `far-field-late`'s state reads 1.25e-4 off the f64 reference, where a
-  run early in its epoch reads 2e-6. The error is bounded by the epoch's
-  length, which a shorter epoch would cut, at the cost of more rebases (found
-  by PH-18 on 2026-10-18). On an integrated source it is a mean-rate bias as
-  well: the carrier's phase in the rate rounds against the grid of the local
-  time's magnitude, a steady offset for the epoch. A uniformly driven box's
-  total flux reads 2.8e-3 of its swing off after 127 s inside one epoch
-  (`canonical_gpu_integrated_rebase` with its start moved to the epoch's
-  start), where 8 s after a rebase it reads 2.4e-5. Each rebase draws the
-  bias afresh, so the total walks rather than drifts (found with GPU-6 on
-  2026-10-22). A live source patch anchors the new drive on the old one
+- Late in an epoch the device's local time is one f32 under 16 s, at most
+  9.5e-7 s apart, and the drives' phases carry up to 3e-4 rad from it at
+  50 Hz: C8.3's clock cases read up to 3.2e-5 off the f64 reference late in
+  an epoch (a 50 Hz source at 0.0025 s), where early they read 9e-7. Until
+  C8.3 an epoch ran to 256 s, 1.5e-5 s apart, and `far-field-late` read
+  1.25e-4 (found by PH-18 on 2026-10-18). On an integrated source it is a
+  mean-rate bias as well: the carrier's phase in the rate rounds against the
+  grid of the local time's magnitude, a steady offset for the epoch. On
+  epochs of 256 s a uniformly driven box's total flux read 2.8e-3 of its
+  swing off after 127 s inside one epoch (`canonical_gpu_integrated_rebase`
+  with its start moved to the epoch's start), where 8 s after a rebase it
+  read 2.4e-5. Each rebase draws the bias afresh, so the total walks rather
+  than drifts (found with GPU-6 on 2026-10-22). A live source patch anchors the new drive on the old one
   evaluated at the running time, so that instant's bias stays in the new
   drive's mean rate for good, an offset of the same size each edit; forming
   both from their reduced phases, as `carried_rate_anchor` does at a rebase
@@ -1835,6 +1835,29 @@ is next touched.
   63,804 and an 11 × 11 one 120,437, prepared in 10 s. Splitting the step's
   passes over two dimensions would lift it, if a refused scene of that size
   turns up (C8.2, 2026-11-12).
+- The device holds a harmonic's angular frequency as an f32, up to 6e-8 of
+  itself off, and its rebase adds the frequency times the epoch's time to
+  the phase in f32, rounding once an epoch. Against the absolute clock a
+  50 Hz source's phase walks 0.15 to 0.23 rad over 7 hours, emulated at
+  1/120 s and 0.0025 s (0.78 rad on the epochs of 256 s before C8.3), the
+  same for every source of that frequency, so nothing on screen shows it. A
+  phase advance per epoch formed on the host in f64 and stored beside each
+  harmonic record would hold 7 hours within 2.4e-4 rad, for a record word,
+  a runtime slot's layout, and the patch and handoff paths that fill it
+  (C8.3, 2026-11-12).
+- `reduced_phase`, which the rebase takes the carriers' phases through,
+  reduces once: past an argument of 1e6 it leaves [-π, π], though it stays
+  the phase, 6e-5 rad off by 1e9. Inside an epoch of 16 s a carrier gets
+  there only above about 10 kHz, which aliases at the app's steps; a second
+  pass, as the sine has, would cost little (C8.2 and C8.3, 2026-11-12).
+- A pulse's carrier counts from the pulse's centre and holds no phase past an
+  argument of 1e7, 1.6 s from it at 1 MHz; below the step's Nyquist
+  frequency, only pulses longer than about 26,000 s get there (C8.2 and
+  C8.3, 2026-11-12).
+- The CPU reference's temporal clock adds its step each step: 7e-8 s off
+  after 2,000 steps from 1e6 s (C8.1), 6e-15 s after C8.3's 300 from zero.
+  Counting the origin plus the steps times the step would make it exact
+  (C8.3, 2026-11-12).
 
 ## Working practice
 

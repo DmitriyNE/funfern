@@ -718,8 +718,8 @@ impl Playground {
             // A corrective edit on a paused, failed run hands off from the
             // accepted state, which the failure never touched; the latched
             // status would otherwise reject the new generation as its own.
-            // Cleared first, the failure sends again the live event it
-            // stranded, which the upload then waits for.
+            // Cleared first; a live event behind the failure is answered,
+            // refused by the latch (C8.2), and the upload waits for it.
             if request.failed() && request.clear_failure(assets, commands).is_ok() {
                 self.coordinator.solver_fault = None;
             }

@@ -12,7 +12,7 @@ use std::time::Instant;
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuLiveEvent, CanonicalGpuPlan,
-    CanonicalGpuRequest, CanonicalWaveGpuPlugin,
+    CanonicalGpuRequest, CanonicalWaveGpuPlugin, device_time_step, epoch_steps,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::TopologyWaveModel;
@@ -107,17 +107,17 @@ fn main() -> AppExit {
         1,
     )
     .expect("temporal validation operator");
-    let time_step = 0.4 * operator.maximum_time_step();
+    let time_step = device_time_step(0.4 * operator.maximum_time_step());
 
-    // Install immediately before the same threshold used by the production
-    // render node. The second accepted step must therefore rebase both clock
-    // and temporal runtime records.
-    let rebase_limit = ((256.0 / time_step).ceil() as u64).min(1 << 16) as u32;
-    assert!(rebase_limit > 2);
+    // Install one step short of the epoch's end, which the production render
+    // node rebases after. The second accepted step must therefore rebase both
+    // clock and temporal runtime records.
+    let epoch_steps = epoch_steps(time_step);
+    assert!(epoch_steps > 2);
     let clock = CanonicalGpuClock {
         epoch: 7,
         epoch_origin_seconds: 1_000.0,
-        step_in_epoch: rebase_limit - 2,
+        step_in_epoch: epoch_steps - 1,
         time_step,
     };
     assert!(!clock.requires_rebase());

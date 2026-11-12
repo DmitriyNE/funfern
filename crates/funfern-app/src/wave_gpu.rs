@@ -2088,7 +2088,7 @@ pub(crate) fn differencing_sample_due(completed_step: u64, stride: u64, filterin
 /// A record's time from the two parts the recorders write, as the vector
 /// overlay writes its own: the epoch origin's coarse part, and its fine part
 /// with the epoch-local time. Added here in f64, a stamp keeps the fine part's
-/// precision, 3e-5 s, however long the run.
+/// precision, 2e-6 s, however long the run.
 pub(crate) fn stamp_seconds(coarse: f32, fine: f32) -> f64 {
     coarse as f64 + fine as f64
 }
@@ -3177,26 +3177,27 @@ mod tests {
     /// (`split_f64`; split instead into a nearest f32 and its residual, the
     /// test held another split than the device's, VER-45 of the 2026-10-20
     /// review), the local time `steps × dt` in f32, the fine part their f32
-    /// sum. Up to 36 hours in, at the observables fixture's step, every stamp
-    /// is within the 3e-5 s of the clock that `stamp_seconds` states (2.3e-5,
-    /// the local time's f32 near 256 s); the single f32 was 6.3e-3 s off at 36
-    /// hours, three quarters of a 120 Hz record's spacing.
+    /// sum. Up to 36 hours in, at the observables fixture's step as the device
+    /// runs it, every stamp is within the 2e-6 s of the clock that
+    /// `stamp_seconds` states (9.2e-7, the local time's f32 under 16 s; 2.3e-5
+    /// near 256 s, the epoch's end before C8.3); the single f32 was 5.7e-3 s
+    /// off at 36 hours, two thirds of a 120 Hz record's spacing.
     #[test]
     fn probe_stamps_keep_their_precision_however_long_the_run() {
-        let dt = 6.6931e-3_f64;
+        let dt = crate::canonical_gpu::device_time_step(6.6931e-3);
         let mut single_worst = 0.0_f64;
         for hours in [0.0, 1.0, 10.0, 18.2, 36.0] {
             let start = hours * 3600.0;
             // The epoch the device rebased onto last: its origin is a step
-            // count's time, within 256 s of the clock.
+            // count's time, within an epoch of the clock.
             let origin = (start / dt).floor() * dt;
             let [hi, lo] = crate::canonical_gpu::split_f64(origin).unwrap();
-            for step in (0..(256.0 / dt) as u32).step_by(97) {
+            for step in 0..=crate::canonical_gpu::epoch_steps(dt) {
                 let local = step as f32 * dt as f32;
                 let exact = origin + f64::from(step) * dt;
                 let read = stamp_seconds(hi, lo + local);
                 assert!(
-                    (read - exact).abs() < 3.0e-5,
+                    (read - exact).abs() < 2.0e-6,
                     "{hours} h, step {step}: {read} against {exact}"
                 );
                 let single = f64::from(hi + lo + local);

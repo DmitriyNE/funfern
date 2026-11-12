@@ -478,10 +478,13 @@ its flux maintenance goes on the generation it was found for, behind the
 presses waiting and any transaction, and holds the device's one live event as
 any event does; a Reset, or a generation it was not found for, drops it. The
 model's device, like
-the real one, processes nothing once it has failed: an event still in flight
-is stranded until clearing the failure sends it again. Its unit tests walk the
+the real one, steps nothing once it has failed, and answers an event still in
+flight refused, with the latch's code: until C8.2 the device left it
+unanswered and the model stranded it until clearing the failure sent it
+again, and `interleaved-2` found the model stranding it still on 2026-11-12
+(its mutation `event-behind-a-fault-kept-in-flight`). Its unit tests walk the
 two sequences the 2026-10-20 review found the model could not reach, a pulse
-sent while a packed candidate waits and a pulse stranded by a fault,
+sent while a packed candidate waits and a pulse in flight at a fault,
 AMR-04's two, an adaptation after an edit failed and one while the draft is
 invalid, neither of which asks for anything again, and RT-01's two, a pack
 back frames late and a stationary flux waiting behind a pulse and holding an
@@ -1000,7 +1003,9 @@ Last, the stamps.
   its fine part with the epoch-local time. The host adds them in f64.
 - **The test.** `probe_stamps_keep_their_precision_however_long_the_run`
   reproduces the device's arithmetic up to 36 hours in. Every stamp stands
-  within 2e-5 s of the clock, where one f32 was 3.9e-3 s off.
+  within 2e-6 s of the clock (9.2e-7, the local time's f32 under the 16 s
+  of an epoch; 2.3e-5 near 256 s until C8.3), where one f32 was 5.7e-3 s
+  off.
   `probe_recorders_write_their_stamps_as_two_parts` holds each shader's slots
   to its decoder's.
 - **Mutation.** `probe-stamps-summed-in-f32` sums the parts in f32 again; an
@@ -1022,18 +1027,20 @@ The far field's times, and the clock under them, late into a run.
 - **Late-clock fixtures.** A start clock, which only the fixtures set, starts
   two of them 36 hours in, a few hundred steps before an epoch's rebase.
   - **`far-field-late`:** the clock within 2e-5 s of the f64 reference across
-    the rebase (9.2e-6), the far field within 5e-4 of its twin (1.17e-4), its
-    stamps within 2e-6 s.
+    the rebase (1.0e-7 on lavapipe and the M1 Max), the state within 2e-5
+    (1.8e-6), the far field within 4e-5 of its twin (4.8e-6; 6.3e-6 on
+    lavapipe), its stamps within 2e-6 s (1.4e-7).
   - **`handoff-memory-running-late`:** the handoff that starts a drive, the
-    clock within 2e-5 s (4.4e-6), the state within 1e-4 (2.1e-5).
-  - **State bounds.** The late runs' state bounds stand above the others'.
-    Late in an epoch the local time is one f32 near 256 s, and drive phases
-    carry 1e-4 rad from it.
+    clock within 2e-5 s (1.9e-7), the state within 5e-6 (1.5e-6).
+  - **State bounds.** The late runs are held to the others' bounds. Until
+    C8.3 an epoch ran to 256 s, where the local time is one f32 1.5e-5 s
+    apart and drive phases carried 1e-4 rad from it: they read 1.25e-4 and
+    3.9e-5, held to 5e-4 and 2e-4.
 - **An integrated drive across a rebase.** `canonical_gpu_integrated_rebase`
   drives a closed reflecting box in proportion to the nodal mass with an
   integrated harmonic whose integral has no mean, so the field stays uniform
   and the box's total flux integrates the rate. Its clock starts 64 steps
-  before a rebase 1,256 s in and runs 16 s past it. The total reads 2.5e-5 of
+  before a rebase an epoch past 1,000 s and runs 4,096 steps past it. The total reads 2.5e-5 of
   its swing from the reference, held to 1e-4; a rebase that formed the rate
   anchor apart from the carrier's reduced phase read 4.1e-4 on the legacy
   scene's mesh (GPU-6 of the 2026-10-20 review). `canonical_gpu_handoff --source --integrated` carries
@@ -2082,8 +2089,9 @@ The `edges` fixture holds what C8.2 found of section 5.2 on the device. It
 opens each case through the app's handlers, strikes it with the app's
 pulses or drives it with its source, and reads the device's snapshot
 against the f64 reference stepped on the generation the app accepted.
-Unset, `FUNFERN_E2E_EDGES` runs the gate's 22 cases, each held to what it
-must do; named categories run the study's and hold nothing. The gate: the
+Unset, `FUNFERN_E2E_EDGES` runs the gate's 46 cases, each held to what it
+must do; named categories run the study's, and hold only those the gate
+holds. The gate: the
 box at 127, 128, 129, 255, 256 and 257 nodes and outgoing traces of 127,
 128 and 129 nodes, fixed, pumped and Kerr, within 1e-5 of the reference
 (1.6e-6 at worst on lavapipe); sine-Gordon struck to 5.7e7 refused at its
@@ -2097,8 +2105,8 @@ they ended 1.2 and 22 of their scale off); focusing Kerr on the stiffness driven
 for 400 steps within 1e-5, where it failed at step 140; a source at 1e30
 failing its first step with code 4, its accepted books finite; and a pulse
 sent behind a latched failure the host has not read refused with the
-latch's code, the field the reference's without it. On lavapipe the gate
-takes 305 s. The f32 range the study found, held by nothing: the device
+latch's code, the field the reference's without it. On lavapipe these
+took 305 s. The f32 range the study found, held by nothing: the device
 refuses pulses of 1e20 and more, and fails the first step of saturable
 media driven at 1e19, where the f64 reference takes both; below a field
 of about 1e-34 nonlinear mass laws lose their relative digits (3e-3 at a
@@ -2123,6 +2131,44 @@ device: `sine-gordon-unbounded-on-the-device`, `portable-sine-reduced-once`,
 `dispatch-limit-unchecked`, `live-event-upload-unchecked`,
 `wall-modes-past-the-trace`, `handles-temporal-from-the-runtime-count` and
 `probe-kernel-width-out-of-step`.
+
+The gate's other 24 cases hold what C8.3 found of the clock (RT-06). A clock
+case starts its fresh clock 100 steps before the device's rebase, at speed 1,
+a step of 1/120 s, and at 0.3, 0.0025 s, and runs 300 steps; the study
+(`FUNFERN_E2E_EDGES=clock`) runs 86. The gate's, at each speed: across the
+rebase from 0, sources of 5 and 50 Hz, a pulse about it, a train across it,
+a 5 Hz Dirichlet wall, a pulsed wall and struck second-order walls; the wall
+late in its epoch without crossing; the 5 Hz source from 1e6 s; and from
+zero, a pumped medium, a gated pump and a Switch whose ramp runs across the
+rebase. Each holds its field within 5e-5 of the reference (1.5e-5 at worst
+on lavapipe, the train at 0.0025 s), its epoch the one expected, its origin
+the exact one at whole-second origins and within 1e-7 s of it from zero
+(3e-8), and its time and the app's readout within 1e-6 s (2.1e-7). The study
+found the device's clock 1.7e-5 s ahead of the host's after each rebase at
+1/120 s and 6.1e-6 behind at 0.0025 s, kept for good: the device stepped the
+f32 nearest the step where the host counted the f64 one, and an epoch's
+time, one step short of 256 s, rounded at f32's spacing there. Late in an
+epoch the local time, one f32 near 256 s, 1.5e-5 s apart, put a 5 Hz wall
+3.7e-4 off where early it read 3.9e-6, and 5.1e-4 across the rebase. With
+the user the paced step is the f32 at or below it (`device_time_step`), the
+clock stores it, and an epoch holds the largest power of two of steps that
+fits in 16 s (`epoch_steps`), whose time f32 holds exactly: the origin moves
+on exactly, and the driven cases read up to 230 times less than on epochs
+of 256 s, the 5 Hz wall across the rebase 7.5e-6 at speed 1.
+The retimes are fixtures, each clock within 2e-5 s: `clock-retimes` hands
+the walled cavity over eight times between speeds 1 and 0.3, within 3e-5 at
+each handoff and at its end (the field 1.3e-6 at the end on lavapipe and the
+M1 Max, its clock 1.2e-7 s off; the wall's memory, 1.5e-4 of the field's
+energy integrated in f32 beside it, 1.0e-5 at the seventh retime);
+`clock-retime-at-rebase` at the step its epoch ends at, within 5e-6 (1.8e-6,
+where epochs of 256 s read 2.0e-5); and `clock-retime-across-rebase` with the
+run going on, the device rebasing while the candidate is prepared, within
+5e-6 (1.7e-6). The 46 cases hold on the M1 Max in 122 s and on lavapipe in
+521 s, the clock's at the same worst on both. On
+the host, `epochs_hold_their_time_exactly_and_steps_round_down` and
+`clock_contract_rebases_past_its_epochs_steps`. Its mutations, on the
+device: `device-step-rounded-to-nearest`, `epoch-steps-not-a-power-of-two`
+and `epochs-of-256-seconds`.
 
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must

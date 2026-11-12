@@ -8,8 +8,8 @@
 //! the box's total flux integrates the rate. A mean-rate error grows the total
 //! linearly where the reference's only oscillates.
 //!
-//! The clock starts 64 steps before an epoch's rebase, 1,256 s into the run,
-//! and runs 16 s past it. A rebase that formed the anchor apart from the
+//! The clock starts 64 steps before an epoch's rebase, an epoch past 1,000 s,
+//! and runs 4,096 steps past it. A rebase that formed the anchor apart from the
 //! carrier's reduced phase moved the mean rate for good: the total read
 //! 4.1e-4 of its swing off on the M1 Max, against 2.4e-5 with the anchor
 //! formed from that phase, both on the legacy scene's mesh (GPU-6 of the
@@ -27,7 +27,7 @@ use std::time::Instant;
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest,
-    CanonicalWaveGpuPlugin,
+    CanonicalWaveGpuPlugin, epoch_steps,
 };
 use funfern_core::TopologyWaveModel;
 use funfern_core::test_scenes::*;
@@ -81,13 +81,13 @@ fn main() -> AppExit {
     .expect("rebase canonical operator");
     let integrator = CanonicalIntegrator::FourthOrder;
     // A power of two, so the device's f32 step and the reference's count the
-    // same seconds, and an epoch ends at 256 s on a whole step.
+    // same seconds.
     let time_step = 2.0_f64.powi(
         (integrator.recommended() * operator.maximum_time_step())
             .log2()
             .floor() as i32,
     );
-    let epoch_steps = ((256.0 / time_step).ceil() as u64).min(1 << 16);
+    let epoch_steps = u64::from(epoch_steps(time_step));
     let initial_step = epoch_steps - BEFORE_REBASE;
     let start = ORIGIN + initial_step as f64 * time_step;
     let steps = BEFORE_REBASE + AFTER_REBASE;

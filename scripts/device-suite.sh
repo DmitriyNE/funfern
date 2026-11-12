@@ -180,8 +180,13 @@ RUNS=(
   'FUNFERN_E2E=far-field funfern-fixtures'
   'FUNFERN_E2E=far-field-late funfern-fixtures'
   'FUNFERN_E2E=handoff-memory-running-late funfern-fixtures'
+  # C8.3's retimes: eight handoffs at new steps, and one at an epoch's last
+  # step and one across its rebase.
+  'FUNFERN_E2E=clock-retimes funfern-fixtures'
+  'FUNFERN_E2E=clock-retime-at-rebase funfern-fixtures'
+  'FUNFERN_E2E=clock-retime-across-rebase funfern-fixtures'
   # C8.2's edge cases on the device: the workgroups' tails and one case for
-  # each defect its study found.
+  # each defect its study found; and C8.3's clock across a rebase.
   'FUNFERN_E2E=edges funfern-fixtures'
 )
 

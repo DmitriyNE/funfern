@@ -1,6 +1,8 @@
 //! Pacing the solver against the display: how many steps a frame asks for,
 //! the step it uses, and when a shortfall is worth reporting.
 
+use crate::canonical_gpu::device_time_step;
+
 /// Steps a frame may ask for, and steps the solver may owe at once. The
 /// requested and completed counters therefore cannot drift apart without
 /// limit when the solver cannot keep up with wall-clock time.
@@ -29,11 +31,17 @@ pub(super) const TIME_STEP_HYSTERESIS: f64 = 0.1;
 /// advancing at 0.05x, and a coarse mesh crosses the threshold at 0.8x — so the
 /// step shrinks instead and every frame gets one. Shrinking is always safe: the
 /// stability limit is an upper bound, and this never goes above it.
+///
+/// The step is the f32 at or below that, the one the device runs, so that
+/// the host's clock and the CPU reference step what the device steps (C8.3).
 pub(super) fn paced_time_step(recommended: f64, speed: f64) -> f64 {
-    if !recommended.is_finite() || recommended <= 0.0 || !speed.is_finite() || speed <= 0.0 {
+    if !recommended.is_finite() || recommended <= 0.0 {
         return recommended;
     }
-    recommended.min(PACING_FRAME_SECONDS * speed)
+    if !speed.is_finite() || speed <= 0.0 {
+        return device_time_step(recommended);
+    }
+    device_time_step(recommended.min(PACING_FRAME_SECONDS * speed))
 }
 
 /// Steps to ask the solver for this frame, spending `accumulator` at
@@ -1292,9 +1300,12 @@ mod tests {
             "threshold moved: {threshold}"
         );
 
-        // At and above it the mesh keeps its own step and the count does the work.
-        assert_eq!(paced_time_step(recommended, 1.0), recommended);
-        assert_eq!(paced_time_step(recommended, 2.0), recommended);
+        // At and above it the mesh keeps its own step, as the device runs
+        // it, and the count does the work.
+        let device = device_time_step(recommended);
+        assert!(device <= recommended && recommended - device < 1.0e-7 * recommended);
+        assert_eq!(paced_time_step(recommended, 1.0), device);
+        assert_eq!(paced_time_step(recommended, 2.0), device);
         assert!(
             paced_time_step(recommended, 1.0e6) <= recommended,
             "went above the limit"
@@ -1303,17 +1314,17 @@ mod tests {
         // Below it the step follows the ceiling down.
         assert_eq!(
             paced_time_step(recommended, 0.1),
-            PACING_FRAME_SECONDS * 0.1
+            device_time_step(PACING_FRAME_SECONDS * 0.1)
         );
         assert_eq!(
             paced_time_step(recommended, 0.02),
-            PACING_FRAME_SECONDS * 0.02
+            device_time_step(PACING_FRAME_SECONDS * 0.02)
         );
 
         // Nonsense leaves the mesh's own step alone.
-        assert_eq!(paced_time_step(recommended, 0.0), recommended);
-        assert_eq!(paced_time_step(recommended, f64::NAN), recommended);
-        assert_eq!(paced_time_step(recommended, -1.0), recommended);
+        assert_eq!(paced_time_step(recommended, 0.0), device);
+        assert_eq!(paced_time_step(recommended, f64::NAN), device);
+        assert_eq!(paced_time_step(recommended, -1.0), device);
     }
 
     /// What the cap is for: a frame's budget buys at least one step at every

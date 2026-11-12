@@ -306,9 +306,6 @@ pub struct Protocol {
     /// The last handoff was refused.
     pub refused: bool,
     pub event: Option<Event>,
-    /// The event in flight was encoded on a device that had stopped, which
-    /// processes nothing: it settles only once sent again.
-    pub stranded: bool,
     /// How the device settled the source patch in flight, until the host
     /// reads it.
     pub patched: Option<bool>,
@@ -359,7 +356,6 @@ impl Default for Protocol {
             handoff: None,
             refused: false,
             event: None,
-            stranded: false,
             patched: None,
             display: 0,
         }
@@ -402,11 +398,9 @@ impl Protocol {
                 }
             }
             Step::Settle { take } => {
-                // A stopped device processes no event; one it was sent after it
-                // stopped waits until it is sent again.
-                if self.stranded {
-                    return;
-                }
+                // A device that has failed answers an event behind its
+                // failure as well, refused with the latch's code (C8.2,
+                // 2026-11-12): every event sent settles.
                 if let Some(Event::Patch(_)) = self.event {
                     self.patched = Some(take);
                 }
@@ -416,10 +410,6 @@ impl Protocol {
                 if let Some(device) = &mut self.device {
                     device.failed = true;
                     device.ready = false;
-                    // An event not yet processed is one the device now never
-                    // processes: it is encoded after the failing step, which
-                    // the host does not know of for frames.
-                    self.stranded = self.event.is_some();
                 }
             }
             Step::Validate { inputs } => self.validate(inputs),
@@ -580,7 +570,6 @@ impl Protocol {
             self.handoff = None;
             self.refused = false;
             self.event = None;
-            self.stranded = false;
             self.patched = None;
             self.active = None;
             self.preparing = None;
@@ -628,9 +617,6 @@ impl Protocol {
                     device.ready = false;
                     device.caught_up = true;
                     self.fault = false;
-                    // Clearing the failure sends the event it stranded again
-                    // (RT-3 of the 2026-10-20 review).
-                    self.stranded = false;
                 }
             }
             Supervision::Hold => {}
@@ -705,9 +691,7 @@ impl Protocol {
         }
         // A packed candidate begins its upload once it is back, the device
         // has caught up and has no live event in flight. A failed device is
-        // cleared first: a corrective edit hands off from the accepted state,
-        // and the event the failure stranded is sent again, which the upload
-        // then waits for.
+        // cleared first: a corrective edit hands off from the accepted state.
         if self.uploading.is_none()
             && !self.behind()
             && self.pack_back
@@ -724,7 +708,6 @@ impl Protocol {
                 device.ready = false;
                 device.caught_up = true;
                 self.fault = false;
-                self.stranded = false;
             }
             if upload_may_begin(true, self.event.is_some()) {
                 self.unpack();
@@ -745,7 +728,6 @@ impl Protocol {
                     self.handoff = None;
                     self.refused = false;
                     self.event = None;
-                    self.stranded = false;
                     self.patched = None;
                     self.uploaded = Some(token);
                     self.uploading = Some(Upload {
@@ -821,7 +803,6 @@ impl Protocol {
             self.handoff = None;
             self.refused = false;
             self.event = None;
-            self.stranded = false;
             self.patched = None;
             // A pack waiting for the device was made against the run Reset
             // clears; the candidate is packed again.
@@ -1037,10 +1018,6 @@ impl Protocol {
             "a live event in flight across a handoff"
         );
         assert!(
-            !self.stranded || self.event.is_some(),
-            "a stranding with no event"
-        );
-        assert!(
             self.packed.is_none() || self.uploading.is_none(),
             "a candidate packed while another uploads"
         );
@@ -1239,20 +1216,27 @@ mod tests {
         assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
     }
 
-    /// RT-3 of the 2026-10-20 review: a pulse in flight when the run fails is
-    /// one the stopped device never processes, and the host, which learns of
-    /// the failure frames later, had recorded it as sent. Nothing sent it
-    /// again once the failure was cleared, and every later event waited
-    /// behind it, as a source patch did, which held Reset too.
+    /// RT-3 of the 2026-10-20 review: a pulse in flight when the run fails
+    /// went unanswered, and every later event waited behind it, as a source
+    /// patch did, which held Reset too; it was sent again once the failure
+    /// was cleared. Since C8.2 the latch answers it, refused, where the model
+    /// stranded it still: `interleaved-2` parted from the runtime there on
+    /// 2026-11-12. It settles as the device answers, and the run comes to
+    /// rest.
     #[test]
-    fn an_event_stranded_by_a_fault_settles_once_the_run_resumes() {
+    fn an_event_in_flight_when_the_run_fails_settles_refused() {
         let mut protocol = Protocol::default();
         assert!(protocol.settle(8, Carried::WHOLE, true));
-        for step in [Step::Pulse, Step::Frame(frame(false)), Step::Fault] {
+        for step in [
+            Step::Pulse,
+            Step::Frame(frame(false)),
+            Step::Fault,
+            Step::Settle { take: false },
+        ] {
             protocol.step(step);
             protocol.check();
         }
-        assert!(protocol.stranded, "the fault strands the pulse in flight");
+        assert_eq!(protocol.event, None, "the refused pulse waits for nothing");
         assert!(protocol.settle(8, Carried::WHOLE, true), "{protocol:#?}");
     }
 

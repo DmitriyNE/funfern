@@ -33642,3 +33642,101 @@ the device.
   default scene in the debug profile, release build, the wasm32 and threaded
   wasm checks, the browser shader compile and the protocol proofs; the device
   suite on Metal, 139 of 139 (shaders and the device path changed).
+
+## 2026-11-12 — C8.3: the clock's rebases and retimes, and an event behind a fault
+
+- **Why.** C8's third item (campaign plan, section 6l): RT-06, the clock
+  across the device's rebases and retimes, beside or across a rebase and
+  repeated.
+- **Study.** Host emulations of the device's f32 clock and phases first,
+  then the `edges` driver's clock cases on lavapipe (`FUNFERN_E2E_EDGES=clock`,
+  86): a fresh clock 100 steps before the rebase at speeds 1 (1/120 s) and
+  0.3 (0.0025 s), from origins 0, 36 hours and 1e6 s, with sources of 0.5, 5
+  and 50 Hz, a pulse about the rebase, a train across it, a 5 Hz Dirichlet
+  wall, a pulsed wall and struck second-order walls, each also early and
+  late in its epoch from 0; and from zero, a pump, a gated pump and a Switch
+  whose ramp runs across the rebase, thrown at step 85. Three fixtures
+  retime: `clock-retimes` hands the walled cavity over eight times between
+  the speeds, `clock-retime-at-rebase` at the step its epoch ends at, and
+  `clock-retime-across-rebase` with the run going on, so that the device
+  rebases while the candidate is prepared. Rebases and retimes landed on the
+  steps they should, no epoch lost or doubled, the app's readout on the
+  device's clock, the walls' memory the same at any age of the epoch, and
+  far origins read as zero does.
+- **Found** (with the user, each fixed):
+  - each rebase moved the device's clock off the host's for good: 1.73e-5 s
+    ahead at 1/120 s and 6.1e-6 behind at 0.0025 s. The device stepped the
+    f32 nearest the step, 4.35e-10 s long at 1/120 s, where the host counted
+    the f64 one, 1.3e-5 s an epoch; and an epoch's time, one step short of
+    256 s, rounded at f32's spacing there into the origin. Emulated, 7 hours
+    at 1/120 s put the clock 1.7e-3 s off and a 50 Hz source 0.78 rad. The
+    app's paced step is now the f32 at or below it (`device_time_step`), so
+    its clock, its state and the CPU reference count what the device steps;
+    and an epoch holds the largest power of two of steps that fits in 16 s,
+    at most 2^16 (`epoch_steps`), whose time f32 holds exactly, so the origin
+    moves on exactly. The encoder rebases once an epoch's steps are run,
+    where it rebased one step short of its ceiling. The clock stored the
+    rounded step too at first, which parted it from every example's state
+    at its own step and failed 61 device runs; it takes the step it is
+    given, which the app has rounded;
+  - late in an epoch the local time is one f32 near 256 s, 1.5e-5 s apart,
+    which every source, wall, pump, gate and Switch reads: a 5 Hz wall read
+    3.7e-4 off late in its epoch where early it read 3.9e-6, and 5.1e-4
+    across the rebase; `far-field-late` and `handoff-memory-running-late`
+    were held to 5e-4 and 2e-4 for it. Epochs of at most 16 s, 1,024 steps
+    at 1/120 s and 4,096 at 0.0025 s, keep it under 9.5e-7 s for two small
+    dispatches an epoch. A carrier's phase within an epoch now passes 1e6,
+    where the sine starts to lose digits, at about 10 kHz, not 620 Hz.
+- **Found while verifying** (with the user, fixed): `interleaved-2` failed
+  twice on the M1 Max, the runtime and the protocol model parting after a
+  pulse was sent to a run that had failed and whose host had not yet read
+  it. Since C8.2 the latch answers such an event, refused with its code,
+  and the runtime settles it; the model still stranded it, RT-3's design
+  from when the device left it unanswered and clearing the failure sent it
+  again. The model now settles it as the device answers. A pulse pressed on
+  an unseen failure is dropped; a refused source patch falls back to an
+  upload, which keeps the edit. The rerun suite missed that interleaving,
+  and passed; so did seeds 1 to 40 on lavapipe with the model's settle
+  waiting on the failure again, none of them pulsing an unread failure
+  there. The model's own test holds it.
+- **Not defects.** The CPU reference's clock adds its step each step,
+  6e-15 s off after 300 steps from zero; `reduced_phase` leaves [-π, π] past
+  1e6 but stays the phase, 6e-5 rad off by 1e9; a pulse's carrier holds no
+  phase past an argument of 1e7, which below Nyquist only pulses longer than
+  about 26,000 s reach. What the fixes leave: the device holds a harmonic's
+  frequency in f32, up to 6e-8 of itself off, and the rebase rounds its
+  phase step once an epoch, so a 50 Hz source's phase walks 0.15 to
+  0.23 rad over 7 hours against the absolute clock, every source of that
+  frequency alike. These four are under Worth checking sometime, with a
+  phase advance per epoch formed on the host in f64 as the frequency's fix.
+- **Checks.** The `edges` gate's 24 clock cases, each within 5e-5 of the
+  reference (1.54e-5 at worst on lavapipe and on the M1 Max), its epoch the
+  one expected, its origin exact at whole-second origins and within 1e-7 s
+  from zero (3e-8), its time and readout within 1e-6 s (2.1e-7); the driven
+  cases read up to 230 times less than on epochs of 256 s, the 5 Hz wall
+  across the rebase 7.5e-6 from 5.1e-4. The 46 cases hold on the M1 Max in
+  122 s and on lavapipe in 521 s. The retime fixtures, their clocks within
+  2e-5 s: `clock-retimes` within 3e-5 at each of its nine handoffs and its
+  end (1.3e-6 at the end; the wall's memory, 1.5e-4 of the field's energy
+  integrated in f32 beside it, 1.0e-5 at the seventh retime on both
+  devices), the other two within 5e-6 (1.8e-6, where epochs of 256 s read
+  2.0e-5, and 1.7e-6).
+  `far-field-late` at 1.8e-6 and its far field at 4.8e-6 take `far-field`'s
+  bounds, and `handoff-memory-running-late` at 1.5e-6 the default 5e-6.
+  The probe stamps' precision is 2e-6 s, 9.2e-7 at worst, where it was
+  3e-5. On the host, the epochs' and the steps' contract, the clock's
+  rebase past its epoch's steps, and the model's event at a fault. The
+  examples that start near a rebase take the shared epoch and the device's
+  step. The browser nightly runs the retimes in a part of their own.
+- **Mutations**, each failing its check: on lavapipe
+  `device-step-rounded-to-nearest` (the origin 4.45e-7 s off),
+  `epoch-steps-not-a-power-of-two` (3.58e-7 s off at 0.0025 s) and
+  `epochs-of-256-seconds` (the late wall 1.79e-4); on the host
+  `event-behind-a-fault-kept-in-flight`, which replaces
+  `stranded-event-never-sent-again`. Five older patches whose context moved
+  were written again; four were rerun and fail theirs:
+  `handles-temporal-from-the-runtime-count`, `probe-stamps-summed-in-f32`,
+  `overlay-pass-takes-a-step` (the pulse at step 3) and
+  `rebase-checked-once-a-frame`, now deciding a batch's rebase from its
+  first step past the epoch's end (every batched scene's clock apart);
+  `failure-kept-before-corrective-handoff` lost only a comment line.

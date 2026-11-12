@@ -1,0 +1,16 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -240,12 +240,7 @@
+ /// count what the device steps; the clock takes the step it is given, which
+ /// must be the state's.
+ pub fn device_time_step(time_step: f64) -> f64 {
+-    let single = time_step as f32;
+-    f64::from(if f64::from(single) > time_step {
+-        single.next_down()
+-    } else {
+-        single
+-    })
++    time_step
+ }
+ 
+ #[derive(Clone, Copy, Debug, PartialEq)]

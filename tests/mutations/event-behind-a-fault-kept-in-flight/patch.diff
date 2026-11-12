@@ -1,0 +1,12 @@
+--- a/crates/funfern-protocol/src/lib.rs
++++ b/crates/funfern-protocol/src/lib.rs
+@@ -401,6 +401,9 @@
+                 // A device that has failed answers an event behind its
+                 // failure as well, refused with the latch's code (C8.2,
+                 // 2026-11-12): every event sent settles.
++                if self.device.as_ref().is_some_and(|device| device.failed) {
++                    return;
++                }
+                 if let Some(Event::Patch(_)) = self.event {
+                     self.patched = Some(take);
+                 }

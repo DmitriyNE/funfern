@@ -17,7 +17,7 @@
 //! nothing.
 //!
 //! `--long` runs on past the first clock rebase, which moves every start by
-//! the epoch it closes, some 72 s in at this step. Over that many steps the
+//! the epoch it closes, 8 to 16 s in. Over that many steps the
 //! f32 trajectory parts from the f64 one by more than roundoff in one step,
 //! so the bound there is looser; a start the rebase lost or a carrier phase
 //! it moved is a wrong train, far outside it.
@@ -30,7 +30,7 @@ use std::{collections::VecDeque, time::Instant};
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuLiveEvent, CanonicalGpuPlan,
-    CanonicalGpuRequest, CanonicalWaveGpuPlugin, LiveEventRefusal,
+    CanonicalGpuRequest, CanonicalWaveGpuPlugin, LiveEventRefusal, device_time_step, epoch_steps,
 };
 use funfern_core::TopologyWaveModel;
 use funfern_core::test_scenes::*;
@@ -44,8 +44,6 @@ const EPOCH_ORIGIN: f64 = 37.25;
 /// Local seconds at the edit, and at the end of the run.
 const EDIT_TIME: f64 = 0.45;
 const END_TIME: f64 = 1.9;
-/// Steps after which the device rebases its clock.
-const REBASE_STEPS: u64 = 1 << 16;
 /// Device f32 against the f64 oracle. The discrimination check keeps this far
 /// below what a wrong edit would cost.
 const TOLERANCE: f64 = 5.0e-5;
@@ -194,10 +192,10 @@ fn main() -> AppExit {
         1,
     )
     .expect("pulse operator");
-    let time_step = 0.4 * operator.maximum_time_step();
+    let time_step = device_time_step(0.4 * operator.maximum_time_step());
     let warmup_steps = (EDIT_TIME / time_step).round() as u64;
     let measured_steps = if long {
-        REBASE_STEPS + 3000 - warmup_steps
+        u64::from(epoch_steps(time_step)) + 3000 - warmup_steps
     } else {
         ((END_TIME - EDIT_TIME) / time_step).round() as u64
     };

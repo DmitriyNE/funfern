@@ -36,7 +36,7 @@ use super::*;
 use crate as app_crate;
 use crate::canonical_gpu::{
     CANONICAL_FAILURE_INVERSE_DOMAIN, CanonicalGpuHandoffOutcome, CanonicalGpuRuntimeTransfer,
-    canonical_failure_description,
+    canonical_failure_description, epoch_steps,
 };
 use crate::topology_editor::{
     ClosedCurvePurpose, OpenCurvePurpose, TopologyAttachment, TopologyDocument, TopologyEditor,
@@ -95,7 +95,7 @@ pub(crate) fn fresh_clock(
         return Ok(clock);
     };
     let clock = crate::canonical_gpu::CanonicalGpuClock {
-        step_in_epoch: rebase_step_limit(time_step) - before,
+        step_in_epoch: epoch_steps(clock.time_step) - before,
         ..clock
     };
     Ok(crate::canonical_gpu::CanonicalGpuClock {
@@ -105,12 +105,6 @@ pub(crate) fn fresh_clock(
         },
         ..clock
     })
-}
-
-/// The steps an epoch holds before the device's encoder rebases it, as the
-/// encoder counts them from the step in f32.
-pub(crate) fn rebase_step_limit(time_step: f64) -> u32 {
-    ((256.0 / f64::from(time_step as f32)).ceil() as u32).min(1 << 16)
 }
 
 /// Adds the driver of the fixture asked for, if one is.
@@ -171,6 +165,15 @@ pub(crate) fn add(app: &mut App) {
         "handoff-memory-running" => (Fixture::HandoffMemory(MemoryHandoff::Running), vec![None]),
         "handoff-memory-running-late" => (
             Fixture::HandoffMemory(MemoryHandoff::RunningLate),
+            vec![None],
+        ),
+        "clock-retimes" => (Fixture::HandoffMemory(MemoryHandoff::Retimes), vec![None]),
+        "clock-retime-at-rebase" => (
+            Fixture::HandoffMemory(MemoryHandoff::RetimeAtRebase),
+            vec![None],
+        ),
+        "clock-retime-across-rebase" => (
+            Fixture::HandoffMemory(MemoryHandoff::RetimeAcrossRebase),
             vec![None],
         ),
         "rejection" => (Fixture::Rejection, vec![None]),
@@ -424,6 +427,19 @@ enum MemoryHandoff {
     /// held run has none of that time, and a drive carried from the old
     /// generation takes its phase from the old clock.
     Running,
+    /// C8.3's: the drive switched on, then the speed taken from 1 to 0.3 and
+    /// back eight times, each a handoff at a new step, held. Lavapipe reads
+    /// 1.3e-6 after the eighth, the clock 1.2e-7 s from the run's.
+    Retimes,
+    /// C8.3's: the drive on, and the speed set to 0.3 at the step the epoch
+    /// ends at, its clock started 192 steps before its rebase. Lavapipe reads
+    /// 1.8e-6, where an epoch of 256 s read 2.0e-5.
+    RetimeAtRebase,
+    /// C8.3's: the drive on, and the speed set to 0.3 with the run not held,
+    /// its clock started so that its epoch ends at step 193, the step after
+    /// the request, and the device rebases while the candidate is prepared.
+    /// Lavapipe reads 1.6e-6.
+    RetimeAcrossRebase,
     /// `Running` 36 hours into a run, its clock started 300 steps before an
     /// epoch's rebase: the new generation's origin and the delay that moves a
     /// drive it starts on are compensated sums at that age, which a fast-math
@@ -570,6 +586,10 @@ enum Action {
     /// The simulation speed halved, as its slider does, which shortens the
     /// time step and hands the running field to a generation stepping at it.
     Timestep,
+    /// The simulation speed set to 0.3, or back to 1 from it: a step whose
+    /// epoch the device's f32 product of its steps does not land on, and
+    /// back.
+    Retime,
     /// The top side's law set to the driven Dirichlet, as the inspector's
     /// picker does: a drive the new generation starts.
     Drive,
@@ -618,6 +638,26 @@ impl Fixture {
             Fixture::HandoffMemory(MemoryHandoff::Running | MemoryHandoff::RunningLate) => {
                 (&[(192, Action::Drive)], 768)
             }
+            Fixture::HandoffMemory(MemoryHandoff::Retimes) => (
+                &[
+                    (32, Action::Drive),
+                    (96, Action::Retime),
+                    (160, Action::Retime),
+                    (224, Action::Retime),
+                    (288, Action::Retime),
+                    (352, Action::Retime),
+                    (416, Action::Retime),
+                    (480, Action::Retime),
+                    (544, Action::Retime),
+                ],
+                640,
+            ),
+            Fixture::HandoffMemory(MemoryHandoff::RetimeAtRebase) => {
+                (&[(32, Action::Drive), (192, Action::Retime)], 384)
+            }
+            Fixture::HandoffMemory(MemoryHandoff::RetimeAcrossRebase) => {
+                (&[(32, Action::Drive), (192, Action::Retime)], 768)
+            }
             // The endpoint is never reached: the device is gone at 128.
             Fixture::DeviceLoss => (&[(128, Action::LoseDevice)], 256),
             // The endpoint is a ceiling the run must not reach.
@@ -636,8 +676,11 @@ impl Fixture {
     fn holds(self) -> bool {
         !matches!(
             self,
-            Fixture::HandoffMemory(MemoryHandoff::Running | MemoryHandoff::RunningLate)
-                | Fixture::EventsHandoff
+            Fixture::HandoffMemory(
+                MemoryHandoff::Running
+                    | MemoryHandoff::RunningLate
+                    | MemoryHandoff::RetimeAcrossRebase
+            ) | Fixture::EventsHandoff
         )
     }
 
@@ -780,15 +823,17 @@ impl Fixture {
     fn tolerance(self) -> f64 {
         match self {
             // 1195 and 1150 steps, not 256: the M1 Max reads 2.1e-6 on the
-            // first.
-            Fixture::Observables | Fixture::FarField => 2.0e-5,
-            // Late in an epoch the local time is one f32 near 256 s, 3e-5 s
-            // apart, and the drives' phases carry 1e-4 rad from it, which a
-            // run early in its epoch never reaches: the M1 Max reads 1.25e-4
-            // 254 s into the epoch, and 2.1e-5 to 3.9e-5 where a handoff starts
-            // a new one, by the step it lands at.
-            Fixture::FarFieldLate => 5.0e-4,
-            Fixture::HandoffMemory(MemoryHandoff::RunningLate) => 2.0e-4,
+            // first. Late in an epoch, lavapipe reads 1.8e-6 on the last:
+            // epochs of 256 s read 1.25e-4 there on the M1 Max until C8.3,
+            // the local time one f32 near 256 s, and held it to 5e-4, as
+            // `handoff-memory-running-late` to 2e-4 for 3.9e-5.
+            Fixture::Observables | Fixture::FarField | Fixture::FarFieldLate => 2.0e-5,
+            // Nine handoffs, each held here: the wall's memory, 1.5e-4 of
+            // the field's energy and integrated in f32 beside it, reads
+            // 1.0e-5 at the seventh retime on the M1 Max and on lavapipe,
+            // where the field reads 1.3e-6 (the endpoint holds the memory
+            // to `WALL_TOLERANCE`).
+            Fixture::HandoffMemory(MemoryHandoff::Retimes) => 3.0e-5,
             _ => 5.0e-6,
         }
     }
@@ -831,7 +876,12 @@ impl Fixture {
                 None,
             ),
             Fixture::HandoffMemory(
-                MemoryHandoff::Running | MemoryHandoff::RunningLate | MemoryHandoff::Flux,
+                MemoryHandoff::Running
+                | MemoryHandoff::RunningLate
+                | MemoryHandoff::Flux
+                | MemoryHandoff::Retimes
+                | MemoryHandoff::RetimeAtRebase
+                | MemoryHandoff::RetimeAcrossRebase,
             ) => (wall_document(false), None),
             Fixture::HandoffMemory(_) => (wall_document(true), None),
             Fixture::Switch | Fixture::Events | Fixture::EventsHandoff => {
@@ -3014,6 +3064,12 @@ fn advance(
                 Fixture::HandoffMemory(MemoryHandoff::RunningLate) => {
                     Some((FreshOrigin::At(far_field::LATE_ORIGIN), 300))
                 }
+                Fixture::HandoffMemory(MemoryHandoff::RetimeAtRebase) => {
+                    Some((FreshOrigin::At(0.0), 192))
+                }
+                Fixture::HandoffMemory(MemoryHandoff::RetimeAcrossRebase) => {
+                    Some((FreshOrigin::At(0.0), 193))
+                }
                 _ => None,
             };
             let (mut document, material) = driver.fixture.document();
@@ -3157,7 +3213,6 @@ fn advance(
                         time_step,
                         clock.epoch_origin_seconds,
                         clock.step_in_epoch,
-                        rebase_step_limit(time_step),
                     ) {
                         Ok(far) => Some(far),
                         Err(error) => {
@@ -3430,6 +3485,10 @@ fn advance(
                     }
                 }
                 Action::Timestep => state.editor.document.presentation.simulation_speed = 0.5,
+                Action::Retime => {
+                    let speed = &mut state.editor.document.presentation.simulation_speed;
+                    *speed = if *speed == 1.0 { 0.3 } else { 1.0 };
+                }
                 Action::Drive => {
                     let driven = state.editor.set_outer_condition(
                         &BTreeSet::from([OuterSide::Top]),
@@ -3490,6 +3549,7 @@ fn advance(
                 | Action::Remesh
                 | Action::Rebuild
                 | Action::Timestep
+                | Action::Retime
                 | Action::Drive
                 | Action::Flux
                 | Action::Move
@@ -3618,6 +3678,7 @@ fn advance(
                 | Action::Remesh
                 | Action::Rebuild
                 | Action::Timestep
+                | Action::Retime
                 | Action::Drive
                 | Action::Flux
                 | Action::Move
@@ -4234,7 +4295,7 @@ fn advance(
             }
             let judged = match (&reference.twin, &reference.far) {
                 (Some(twin), _) => observables::judge(state, twin, endpoint),
-                (None, Some(far)) => far_field::judge(state, far, driver.fixture),
+                (None, Some(far)) => far_field::judge(state, far),
                 (None, None) => unreachable!("an observed run has its twins"),
             };
             Some(judged.map(|recorded| Run {

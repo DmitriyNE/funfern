@@ -1,0 +1,15 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -225,11 +225,7 @@
+ /// into the clock for good (C8.3).
+ pub fn epoch_steps(time_step: f64) -> u32 {
+     let time_step = f64::from(time_step as f32);
+-    let mut steps = 1_u32;
+-    while steps < 1 << 16 && f64::from(2 * steps) * time_step <= EPOCH_SECONDS {
+-        steps *= 2;
+-    }
+-    steps
++    ((EPOCH_SECONDS / time_step).floor() as u32).clamp(1, 1 << 16)
+ }
+ 
+ /// `time_step` as the device runs it: the f32 at or below it, so that a

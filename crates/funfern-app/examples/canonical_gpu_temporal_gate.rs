@@ -21,7 +21,7 @@ use std::time::Instant;
 use bevy::{app::AppExit, prelude::*, render::storage::ShaderBuffer};
 use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest,
-    CanonicalWaveGpuPlugin,
+    CanonicalWaveGpuPlugin, device_time_step, epoch_steps,
 };
 use funfern_app::wave_gpu::WaveGpuPlugin;
 use funfern_core::TopologyWaveModel;
@@ -175,14 +175,13 @@ fn main() -> AppExit {
     let scalar = assembled(&mesh, &fixed_scene, OuterBoundaryCondition::Reflecting)
         .expect("gated validation scalar operator");
     // The gates do not move the step bound, so the probe's is the step.
-    let time_step = 0.4 * operator(&mesh, &scalar, &probe).maximum_time_step();
+    let time_step = device_time_step(0.4 * operator(&mesh, &scalar, &probe).maximum_time_step());
 
-    // Two steps short of the production rebase threshold.
-    let rebase_limit = ((256.0 / time_step).ceil() as u64).min(1 << 16) as u32;
+    // One step short of the epoch's end, so the second step rebases.
     let clock = CanonicalGpuClock {
         epoch: 7,
         epoch_origin_seconds: EPOCH_ORIGIN,
-        step_in_epoch: rebase_limit - 2,
+        step_in_epoch: epoch_steps(time_step) - 1,
         time_step,
     };
     assert!(!clock.requires_rebase());

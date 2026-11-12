@@ -1659,8 +1659,9 @@ fn forward(driver: &mut InterleavedDriver) -> Result<(), String> {
             let Some(taken) = sent.taken else {
                 break;
             };
-            // A stranded event is encoded again once the failure is cleared:
-            // the last encoding is the one that ran.
+            // An event the latch refused is encoded again where the failure
+            // is cleared before its answer is read: the last encoding is the
+            // one that ran.
             let again = run.log[run.forwarded + 1..]
                 .iter()
                 .any(|later| later.serial == entry.serial);

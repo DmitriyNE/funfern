@@ -70,8 +70,8 @@ fn centred_stamp() -> vec2<f32> {
 }
 
 // `a − b` for two stamps, part by part. Two coarse parts are one epoch's
-// origin, whose difference is zero, or two origins minutes apart, whose
-// difference f32 holds exactly; the fine parts stay within an epoch's 256 s.
+// origin, whose difference is zero, or two origins epochs apart, whose
+// difference f32 holds exactly; the fine parts stay within an epoch's 16 s.
 // Summed into one f32 first, as frames were stamped until 2026-10-18, the
 // difference kept f32's spacing at the run's absolute time: 2e-3 s after ten
 // hours, and a 1/60 s bucket's worth after 36.

@@ -1,0 +1,4 @@
+about: the device runs the step f32 rounds to nearest while the host counts it in f64, and the origin a rebase moves on parts from the host's clock
+test: FUNFERN_E2E_EDGES_ONLY="a 5 Hz source, speed 1, from 0e0 s" scripts/e2e-fixture.sh edges
+expect: MISSED Clock
+needs: device
