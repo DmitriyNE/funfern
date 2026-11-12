@@ -145,6 +145,7 @@ pub(super) fn run_preparation_worker(
     job_receiver: Receiver<TopologyPreparationJob>,
     event_sender: Sender<BackgroundPreparationEvent>,
 ) {
+    let _live = crate::live_resources::live_thread();
     if event_sender
         .send(BackgroundPreparationEvent::WorkerStarted)
         .is_err()
@@ -426,6 +427,7 @@ pub(super) fn run_amr_worker(
     job_receiver: Receiver<BackgroundAmrCommand>,
     event_sender: Sender<BackgroundAmrEvent>,
 ) {
+    let _live = crate::live_resources::live_thread();
     if event_sender
         .send(BackgroundAmrEvent::WorkerStarted)
         .is_err()
@@ -689,6 +691,7 @@ pub(super) fn dispatch_gpu_upload_preparation(
     if std::thread::Builder::new()
         .name("funfern-gpu-pack".into())
         .spawn(move || {
+            let _live = crate::live_resources::live_thread();
             let _ = sender.send(compile_gpu_upload(
                 candidate,
                 active,
@@ -715,6 +718,7 @@ pub(super) fn dispatch_gpu_upload_preparation(
     if BROWSER_BACKGROUND_POOL_READY.load(Ordering::Acquire) {
         crate::set_browser_gpu_pack_status("scheduled");
         rayon::spawn(move || {
+            let _live = crate::live_resources::live_thread();
             let _ = sender.send(compile_gpu_upload(
                 candidate,
                 active,

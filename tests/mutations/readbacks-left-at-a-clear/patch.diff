@@ -1,0 +1,13 @@
+--- a/crates/funfern-app/src/canonical_gpu.rs
++++ b/crates/funfern-app/src/canonical_gpu.rs
+@@ -5193,9 +5193,7 @@
+                 assets.remove(handle.id());
+             }
+         }
+-        for entity in self.readback_entities.drain(..) {
+-            commands.entity(entity).despawn();
+-        }
++        self.readback_entities.clear();
+         self.status_readback_entity = None;
+         self.snapshot = None;
+         self.integrated_readback_entity = None;

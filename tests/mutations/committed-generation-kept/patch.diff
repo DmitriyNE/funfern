@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/topology_runtime.rs
++++ b/crates/funfern-app/src/topology_runtime.rs
+@@ -1783,7 +1783,7 @@
+         committed.canonical_transfer = None;
+         committed.transfer = None;
+         let committed = Arc::new(committed);
+-        self.active = Some(committed.clone());
++        std::mem::forget(self.active.replace(committed.clone()));
+         Ok(committed)
+     }
+ 

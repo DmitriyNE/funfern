@@ -1746,40 +1746,10 @@ fn unsettled(
     state: &Playground,
     request: &CanonicalGpuRequest,
 ) -> Option<String> {
-    let waits = [
-        ("a pause", !state.wave_running),
-        ("a failure", request.failed()),
-        ("a Reset", state.coordinator.reset_requested),
-        ("a drop", state.coordinator.drop_requested),
-        ("an upload", state.coordinator.uploading.is_some()),
-        ("a pack", state.coordinator.gpu_upload_preparation.is_some()),
-        (
-            "a handoff's stationary flux",
-            state.flux_cleanup.as_ref().is_some_and(|cleanup| {
-                !matches!(
-                    cleanup.stage,
-                    super::super::flux_cleanup::FluxCleanupStage::Sent(_)
-                        | super::super::flux_cleanup::FluxCleanupStage::Landed(_)
-                )
-            }),
-        ),
-        ("a source commit", state.coordinator.source_commit.is_some()),
-        ("a preparation", state.preparation_in_progress()),
-        ("a candidate", state.runtime.ready().is_some()),
-        ("a pulse", !state.coordinator.pending_pulses.is_empty()),
-        ("a Switch", !state.coordinator.pending_switches.is_empty()),
-        ("a live event", request.live_event_pending()),
-        (
-            "a handoff",
-            request.handoff_outcome() == CanonicalGpuHandoffOutcome::Pending,
-        ),
-        (
-            "validation",
-            state.editor.acceptance == crate::topology_editor::TopologyAcceptance::Pending,
-        ),
-        ("an adaptation", state.adaptation_in_flight()),
-    ];
-    if let Some((what, _)) = waits.iter().find(|(_, waiting)| *waiting) {
+    if !state.wave_running {
+        return Some("a pause still waits".into());
+    }
+    if let Some(what) = waiting(state, request) {
         return Some(format!("{what} still waits"));
     }
     if state.request_is_due() {

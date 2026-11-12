@@ -110,11 +110,8 @@ struct FieldPaintBuffers {
 }
 
 impl FieldPaintBuffers {
-    /// Frees the device memory now. The buffers are replaced before the
-    /// frame that would draw with them, so only work already submitted used
-    /// them, and a destroyed buffer outlives that work.
-    fn destroy(&self) {
-        for buffer in [
+    fn buffers(&self) -> [&Buffer; 7] {
+        [
             &self.positions,
             &self.values,
             &self.indices,
@@ -122,10 +119,31 @@ impl FieldPaintBuffers {
             &self.overlay_colors,
             &self.edges,
             &self.uniform,
-        ] {
+        ]
+    }
+
+    /// Frees the device memory now. The buffers are replaced before the
+    /// frame that would draw with them, so only work already submitted used
+    /// them, and a destroyed buffer outlives that work.
+    fn destroy(&self) {
+        for buffer in self.buffers() {
             buffer.destroy();
         }
     }
+}
+
+/// The field paint's buffers and bind group, for the `lifecycle` fixture.
+pub(crate) fn count_live(world: &World, counts: &mut crate::live_resources::RenderCounts) {
+    let Some(buffers) = world
+        .get_resource::<FieldPaintCache>()
+        .and_then(|cache| cache.0.as_ref())
+    else {
+        return;
+    };
+    for buffer in buffers.buffers() {
+        counts.paint_buffers.add(buffer);
+    }
+    counts.bind_groups("field paint", 1);
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]

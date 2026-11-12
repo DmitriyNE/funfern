@@ -1,0 +1,4 @@
+about: the far field's bind group is kept once its scene is gone, holding the device buffers it was built from
+test: scripts/e2e-fixture.sh lifecycle
+expect: bind groups \[.*\] to \[.*far field
+needs: device

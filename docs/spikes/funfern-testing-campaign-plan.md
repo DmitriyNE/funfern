@@ -1621,6 +1621,20 @@ mutation, in this order:
   where the protocol model still stranded it until the failure was cleared,
   RT-3's design; `interleaved-2` parted from the runtime there, and the
   model now settles it as the device answers.
+  C8.4, RT-07 with 5.4, landed on 2026-11-12: `live_resources` counts, in
+  the fixtures binary, the shader buffers in both worlds, the readbacks and
+  their staging, the snapshot's staging, the field paint's buffers, each
+  consumer's bind groups, the pipelines, both worlds' entities, the worker
+  threads alive and the generations' meshes and operators alive; and the
+  `lifecycle` fixture takes five gallery scenes, adapting, through a pulse,
+  an edit, the overlays, a coarser mesh, a snapshot, Reset, a fault resumed
+  past and a refused handoff asked for again, and counts each scene paused
+  and drained, twice over. The study, three cycles on lavapipe, found no
+  leak: every count the same scene's on the cycle before, one generation
+  alive, and the handoff's and live event's bind groups only while theirs
+  ran. Bevy keeps each resource in an entity it never despawns, which the
+  counts leave out. A device loss stops the app, so the fault and the
+  refused handoff are the recoveries it holds to.
 - **C9, long runs:** 5.3's gaps, an adaptive run among them.
 
 ## 7. Infrastructure

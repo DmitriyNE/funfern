@@ -2639,6 +2639,30 @@ pub(crate) struct VectorOverlayBindGroup {
     pub(crate) bind_group: BindGroup,
 }
 
+/// The recorders' bind groups, for the `lifecycle` fixture.
+pub(crate) fn count_live(world: &World, counts: &mut crate::live_resources::RenderCounts) {
+    counts.bind_groups(
+        "point probes",
+        usize::from(world.contains_resource::<ProbeBindGroup>()),
+    );
+    counts.bind_groups(
+        "line probes",
+        usize::from(world.contains_resource::<CurveProbeBindGroup>()),
+    );
+    counts.bind_groups(
+        "area probes",
+        2 * usize::from(world.contains_resource::<AreaProbeBindGroup>()),
+    );
+    counts.bind_groups(
+        "far field",
+        usize::from(world.contains_resource::<FarFieldBindGroup>()),
+    );
+    counts.bind_groups(
+        "vector overlay",
+        usize::from(world.contains_resource::<VectorOverlayBindGroup>()),
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_vector_overlay_bind_group(
     mut commands: Commands,

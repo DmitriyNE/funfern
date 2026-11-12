@@ -2170,6 +2170,38 @@ the host, `epochs_hold_their_time_exactly_and_steps_round_down` and
 device: `device-step-rounded-to-nearest`, `epoch-steps-not-a-power-of-two`
 and `epochs-of-256-seconds`.
 
+The `lifecycle` fixture holds what C8.4 found of RT-07 and section 5.4: the
+same work leaves the app holding the same. It opens the spatial soliton,
+the Josephson line, the self-sustained emitter, the ring resonator and the
+double slit as the gallery does, adaptation on and refining to half the
+scene's edge at most, and puts each through a pulse, a medium edited, the
+overlays on, a coarser mesh, a full snapshot, Reset, a non-finite fault and
+Run past it, a handoff the device refuses and asked for again, and the
+overlays off; then, adaptation off, back on the scene's own mesh and the
+run paused, it counts once the counts have held still for five frames past
+the readback pool's ten. It counts by the app's own records
+(`live_resources`), not wgpu's: the shader buffers in the main world and on
+the device, the readbacks and their staging, the snapshot's staging, the
+field paint's buffers, each consumer's bind groups, the pipelines, both
+worlds' entities but resources', the worker threads alive, and the meshes
+and operators the generations were built on still alive. Each count must
+hold the device's shader buffers to the main world's, the staging to what
+its readbacks can have in flight, no handoff's or live event's bind group,
+one mesh and one operator alive and no work in hand; between them the
+scenes must make all nine bind groups the app keeps; and each count must be
+the one the same scene left on the cycle before, over two cycles, but the
+snapshot staging's bytes: its one buffer is sized to the state the last
+snapshot copied, taken while adaptation refines at the device's pace. At rest a
+scene holds 12 to 18 shader buffers, 4 or 5 readbacks with twice as many
+staging buffers, the snapshot's one, the paint's 7, 103 pipelines and two
+worker threads. The study, three cycles on lavapipe, found no leak; Bevy
+keeps each resource in an entity it never despawns, one for every kind of
+resource a world has held, which the entity counts leave out. Two cycles
+take 602 s on lavapipe and 41 s on the M1 Max. Its mutations, on the
+device: `readbacks-left-at-a-clear`, `staging-never-retired`,
+`far-field-bind-group-kept`, `committed-generation-kept` and
+`preparation-worker-left-running`.
+
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
 catch it and the pattern its failure must match; the script applies each,

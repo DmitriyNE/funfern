@@ -1,0 +1,4 @@
+about: the readbacks' staging pool keeps every buffer it has made, one for each size a handoff has read back
+test: scripts/e2e-fixture.sh lifecycle
+expect: staging buffers, where [0-9]+ readbacks have
+needs: device

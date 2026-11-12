@@ -7178,6 +7178,29 @@ fn destroy_released_shader_buffers(
     }
 }
 
+/// The snapshot's staging and the solver's bind groups, for the `lifecycle`
+/// fixture.
+pub(crate) fn count_live(world: &World, counts: &mut crate::live_resources::RenderCounts) {
+    if let Some(buffer) = world
+        .get_resource::<CanonicalSnapshotStaging>()
+        .and_then(|staging| staging.buffer.as_ref())
+    {
+        counts.snapshot_staging.add(buffer);
+    }
+    counts.bind_groups(
+        "step",
+        usize::from(world.contains_resource::<CanonicalBindGroup>()),
+    );
+    counts.bind_groups(
+        "handoff",
+        6 * usize::from(world.contains_resource::<CanonicalHandoffBindGroups>()),
+    );
+    counts.bind_groups(
+        "live event",
+        usize::from(world.contains_resource::<CanonicalLiveEventBindGroup>()),
+    );
+}
+
 #[derive(Resource)]
 struct CanonicalPipeline {
     layout: BindGroupLayoutDescriptor,

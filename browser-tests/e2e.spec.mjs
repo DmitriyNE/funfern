@@ -56,7 +56,8 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // baffle-move runs 512 steps of 33,938 nodes: 22.5 of its 25 minutes isolated
 // on 2026-11-05, and past them served as Pages without the worker pool.
 // batches runs five scenes six times each, on lavapipe about four times as
-// long as cavity-batches, whose page takes 745 s.
+// long as cavity-batches, whose page takes 745 s. lifecycle remeshes and
+// adapts five scenes twice, 602 s on lavapipe, where edges took 521 s.
 const runLength = {
   "handoff-memory-running": 2,
   "handoff-memory-running-late": 2,
@@ -68,6 +69,7 @@ const runLength = {
   "far-field-late": 2,
   "baffle-move": 2,
   batches: 4,
+  lifecycle: 4,
 };
 // How the bundle is hosted: `isolated`, the test server sending the headers that
 // isolate the page; `pages`, as GitHub Pages serves the site - no headers, so the

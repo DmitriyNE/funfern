@@ -1,0 +1,12 @@
+--- a/crates/funfern-app/src/wave_gpu.rs
++++ b/crates/funfern-app/src/wave_gpu.rs
+@@ -2746,9 +2746,6 @@
+ ) {
+     let Some(request) = request else { return };
+     let Some(far_field) = &request.far_field else {
+-        if existing.is_some() {
+-            commands.remove_resource::<FarFieldBindGroup>();
+-        }
+         return;
+     };
+     if existing.as_ref().is_some_and(|group| {

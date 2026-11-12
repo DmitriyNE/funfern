@@ -1,0 +1,12 @@
+--- a/crates/funfern-app/src/ui/session.rs
++++ b/crates/funfern-app/src/ui/session.rs
+@@ -188,6 +188,9 @@
+     /// selection or tools carries over, and its generation is dropped at the
+     /// next runtime update so none of it runs on under the new geometry.
+     pub(super) fn scene_replaced(&mut self, fresh: bool) {
++        if let Some(worker) = super::workers::BackgroundPreparationWorker::spawn() {
++            std::mem::forget(self.background_preparation.replace(worker));
++        }
+         self.selection = TopologySelection::None;
+         // A pivot moved by hand is kept for the selection it was moved for,
+         // and the incoming scene numbers its spans from the same small ids:

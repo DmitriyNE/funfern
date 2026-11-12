@@ -1,0 +1,4 @@
+about: a cleared generation's readbacks are forgotten, not despawned, so every install leaves its state, control and status readbacks behind
+test: scripts/e2e-fixture.sh lifecycle
+expect: readbacks [0-9]+ to [0-9]+
+needs: device

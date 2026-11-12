@@ -188,6 +188,9 @@ RUNS=(
   # C8.2's edge cases on the device: the workgroups' tails and one case for
   # each defect its study found; and C8.3's clock across a rebase.
   'FUNFERN_E2E=edges funfern-fixtures'
+  # C8.4's lifecycle: five gallery scenes cycled twice through the work that
+  # makes and drops what the device holds, each count as the cycle before.
+  'FUNFERN_E2E=lifecycle funfern-fixtures'
 )
 
 pattern=${1:-}

@@ -19,6 +19,7 @@ mod field_paint;
 #[allow(dead_code)]
 mod files;
 pub mod gpu_frame_timer;
+mod live_resources;
 mod material_overlay;
 mod paced_readback;
 pub mod picture_playout;

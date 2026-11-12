@@ -27,6 +27,7 @@ mod edge_scenes;
 mod edges;
 pub(crate) mod far_field;
 mod interleaved;
+mod lifecycle;
 mod observables;
 mod rollback;
 
@@ -118,6 +119,10 @@ pub(crate) fn add(app: &mut App) {
     }
     if name == "edges" {
         edges::add(app, seconds);
+        return;
+    }
+    if name == "lifecycle" {
+        lifecycle::add(app, seconds);
         return;
     }
     // RT-01's fuzzing: `interleaved-<seed>` as the suites name it, or
@@ -5142,6 +5147,47 @@ fn compare(
 }
 
 /// `‖actual − expected‖ / ‖expected‖`, a NaN on either side carried through.
+/// The first piece of work the app still has in hand, the run's own stepping
+/// aside: until none is left, what it runs may yet change.
+fn waiting(state: &Playground, request: &CanonicalGpuRequest) -> Option<&'static str> {
+    let waits = [
+        ("a failure", request.failed()),
+        ("a Reset", state.coordinator.reset_requested),
+        ("a drop", state.coordinator.drop_requested),
+        ("an upload", state.coordinator.uploading.is_some()),
+        ("a pack", state.coordinator.gpu_upload_preparation.is_some()),
+        (
+            "a handoff's stationary flux",
+            state.flux_cleanup.as_ref().is_some_and(|cleanup| {
+                !matches!(
+                    cleanup.stage,
+                    super::flux_cleanup::FluxCleanupStage::Sent(_)
+                        | super::flux_cleanup::FluxCleanupStage::Landed(_)
+                )
+            }),
+        ),
+        ("a source commit", state.coordinator.source_commit.is_some()),
+        ("a preparation", state.preparation_in_progress()),
+        ("a candidate", state.runtime.ready().is_some()),
+        ("a pulse", !state.coordinator.pending_pulses.is_empty()),
+        ("a Switch", !state.coordinator.pending_switches.is_empty()),
+        ("a live event", request.live_event_pending()),
+        (
+            "a handoff",
+            request.handoff_outcome() == CanonicalGpuHandoffOutcome::Pending,
+        ),
+        (
+            "validation",
+            state.editor.acceptance == crate::topology_editor::TopologyAcceptance::Pending,
+        ),
+        ("an adaptation", state.adaptation_in_flight()),
+    ];
+    waits
+        .iter()
+        .find(|(_, waiting)| *waiting)
+        .map(|(what, _)| *what)
+}
+
 fn relative_l2(actual: impl Iterator<Item = f64>, expected: impl Iterator<Item = f64>) -> f64 {
     let (difference, scale) = actual.zip(expected).fold((0.0, 0.0), |sum, pair| {
         (sum.0 + (pair.0 - pair.1).powi(2), sum.1 + pair.1 * pair.1)

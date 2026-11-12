@@ -33740,3 +33740,74 @@ the device.
   `rebase-checked-once-a-frame`, now deciding a batch's rebase from its
   first step past the epoch's end (every batched scene's clock apart);
   `failure-kept-before-corrective-handoff` lost only a comment line.
+
+## 2026-11-12 — C8.4: what the app holds across cycled scenes
+
+- **Why.** C8's fourth item (campaign plan, section 6l): RT-07 with section
+  5.4 of the 11 October plan, repeated edits, remeshes, resets and recoveries
+  leaving the app holding no more than they found, counted by the app's own
+  records in the fixtures binary rather than wgpu's counters.
+- **The count** (`live_resources`): the shader buffers in the main world and
+  on the device, the readbacks and their staging pool, the snapshot's
+  staging, the field paint's buffers, each consumer's bind groups by holder,
+  the pipelines, both worlds' entities, the worker threads alive (each
+  holds a guard for its life), and, by weak references to what each
+  generation was built on, the meshes and operators still alive. The render
+  world counts itself at each frame's cleanup.
+- **The fixture.** `lifecycle` opens the spatial soliton, the Josephson
+  line, the self-sustained emitter, the ring resonator and the double slit
+  as the gallery does, adaptation on, and puts each through a pulse, a
+  medium edited, the overlays on, a coarser mesh, a full snapshot, Reset, a
+  non-finite fault and Run past it, a handoff the device refuses and asked
+  for again, and the overlays off; then adaptation off, the scene's own
+  mesh, the run paused, and the count once it has held still for five
+  frames past the readback pool's ten. Twice over. A device loss stops the
+  app (`device-loss`), so the fault and the refused handoff are the
+  recoveries it has.
+- **Study**, three cycles on lavapipe: no leak. At rest each scene holds
+  one mesh and one operator, and a time-driven operator where its media
+  are; 12 to 18 shader buffers, the device's the same; 4 or 5 readbacks
+  with twice as many staging buffers; one snapshot staging buffer, the
+  paint's 7 and 103 pipelines; the step's bind group, the paint's and the
+  scene's probes' and far field's; two worker threads. The handoff's and
+  the live event's bind groups live only while theirs is under way. Every
+  count the third cycle read, the second had.
+- **Not defects.** The render world's entities grew by five over the
+  first cycle: Bevy 0.19 keeps each resource in an entity and never
+  despawns it, so a world holds one for every kind of resource it has
+  held, six where only the step's and the paint's bind groups had been
+  made and ten once every holder had held one. The count leaves resources'
+  entities out, and every count is held to the cycle before from the
+  first.
+- **The fixture's own fixes.** Adaptation refined the soliton to 0.45
+  frames a second on lavapipe; it refines to half the scene's edge at
+  most. An adaptation's handoff took the failure armed for the edit's; the
+  fixture waits for the failure to be taken and names an edit that landed
+  without a handoff. An act may take a sixth of the run's time. The
+  snapshot's staging is one buffer sized to the state the last snapshot
+  copied, taken while adaptation refines at the device's pace: on the M1
+  Max the emitter's read 566,112 B on one cycle and 369,888 B on the next,
+  and on a second run the Josephson line's 539,872 B and 350,304 B, and the
+  device suite failed there. Its bytes are reported, not compared.
+- **Checks.** Each count holds the device's shader buffers to the main
+  world's, the staging to what its readbacks can have in flight, no
+  handoff's or live event's bind group, one generation alive and no work in
+  hand; between them the scenes make all nine bind groups; and each count
+  is the one the same scene left on the cycle before. Two cycles on
+  lavapipe in 602 s; on the M1 Max in 41 s. The interleaved fixture's
+  rest condition is now shared with it (`waiting`).
+- **Mutations**, each failing the fixture on lavapipe:
+  `readbacks-left-at-a-clear` (readbacks 7 to 37 by the second cycle, the
+  device's buffers 45 for 12), `staging-never-retired` (156 staging
+  buffers for 4 readbacks), `far-field-bind-group-kept` (the far field's
+  bind group on every scene after the slit),
+  `committed-generation-kept` (15 meshes alive after the first scene) and
+  `preparation-worker-left-running` (threads 4 to 9 on the soliton's
+  second cycle, one more for each scene).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  the default scene in the debug profile, release build, the wasm32 and
+  threaded wasm checks, the browser shader compile and the protocol proofs;
+  the device suite on Metal, 142 of 143 with `lifecycle` failing at the
+  snapshot staging's bytes, and `lifecycle` passing after (the device path
+  changed: the counts, the workers' guards, and the interleaved fixture's
+  rest condition).

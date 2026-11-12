@@ -1,0 +1,4 @@
+about: each scene opened starts a new preparation worker and leaves the old one waiting on its queue for good
+test: scripts/e2e-fixture.sh lifecycle
+expect: threads [0-9]+ to [0-9]+
+needs: device

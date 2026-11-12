@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/paced_readback.rs
++++ b/crates/funfern-app/src/paced_readback.rs
+@@ -63,7 +63,7 @@
+ pub(crate) const IN_FLIGHT_DEPTH: u8 = 3;
+ 
+ /// Frames a staging buffer stays in the pool unused before it is dropped.
+-const UNUSED_FRAMES_KEPT: usize = 10;
++const UNUSED_FRAMES_KEPT: usize = usize::MAX;
+ 
+ /// A buffer, or a range of one, read back every frame the depth allows. The
+ /// count in flight is shared between the main and render worlds: the render

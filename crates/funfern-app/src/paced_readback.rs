@@ -60,7 +60,7 @@ use bevy::{
 /// is three to four frames. The cost is a staging buffer a copy. At 120 Hz
 /// four and five did no better than three: there the copies all arrive, but
 /// unevenly, which `picture_playout` smooths.
-const IN_FLIGHT_DEPTH: u8 = 3;
+pub(crate) const IN_FLIGHT_DEPTH: u8 = 3;
 
 /// Frames a staging buffer stays in the pool unused before it is dropped.
 const UNUSED_FRAMES_KEPT: usize = 10;
@@ -369,6 +369,20 @@ fn deliver_copies(
         false
     });
     staging.retire_unused();
+}
+
+/// The staging pool and the copies in flight, for the `lifecycle` fixture.
+pub(crate) fn count_live(world: &World, counts: &mut crate::live_resources::RenderCounts) {
+    if let Some(staging) = world.get_resource::<Staging>() {
+        for buffers in staging.buffers.values() {
+            for staging in buffers {
+                counts.readback_staging.add(&staging.buffer);
+            }
+        }
+    }
+    if let Some(copies) = world.get_resource::<Copies>() {
+        counts.copies_in_flight = copies.requested.len() + copies.mapped.len();
+    }
 }
 
 #[cfg(test)]

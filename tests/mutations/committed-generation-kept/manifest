@@ -1,0 +1,4 @@
+about: each commit keeps the generation it replaces alive for good, its mesh and operators with it
+test: scripts/e2e-fixture.sh lifecycle
+expect: [0-9]+ meshes, [0-9]+ operators and [0-9]+ time-driven operators alive
+needs: device
