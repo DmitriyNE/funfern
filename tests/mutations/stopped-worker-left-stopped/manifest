@@ -1,0 +1,4 @@
+about: a preparation worker that stops is not replaced, and every preparation after runs a few milliseconds a frame on the main thread
+test: FUNFERN_E2E_PREPARATION=replace scripts/e2e-fixture.sh preparation
+expect: no new worker took the stopped one's place
+needs: device

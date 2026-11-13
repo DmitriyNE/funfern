@@ -1858,6 +1858,26 @@ is next touched.
   after 2,000 steps from 1e6 s (C8.1), 6e-15 s after C8.3's 300 from zero.
   Counting the origin plus the steps times the step would make it exact
   (C8.3, 2026-11-12).
+- Without workers, as the static-host page runs when its worker pool cannot
+  start, the cooperative runner still meets one-shot steps past its 4 ms at
+  87,000 nodes on the M1 Max: legalizing a mesh's edges, 31 ms; compiling
+  the sources, 26; validating the outgoing-history transfer, 26 to 30;
+  bounding a time-driven operator's step, 17, and its grid filter's reach,
+  16; finishing the canonical operator, 16. Each is a frame of its own, once
+  a preparation (C8.5,
+  2026-11-13).
+- There, too, the GPU pack runs inline in one frame: 250 to 650 ms at
+  87,000 nodes, 90 to 150 at the Fine preset. Slicing it means making
+  `compile_gpu_upload` resumable (C8.5, 2026-11-13).
+- And a preparation there gets 4 ms of each frame, the stationary flux's
+  solve 2, so both slow with the frame rate: the double slit's large
+  remesh took 39 to 55 s on the M1 Max against 9 to 17 with the workers,
+  and did not finish in 600 s on lavapipe. A budget that grows while the
+  frames stay short would trade smoothness for it (C8.5, 2026-11-13).
+- The viewport builds the field paint's topology on the main thread the
+  first frame it draws a new mesh: 11 to 32 ms of one frame at 87,000
+  nodes, most of it an ordered map of the 44,000 edges, which sorting would
+  take to about 3 ms (C8.5, 2026-11-13).
 
 ## Working practice
 

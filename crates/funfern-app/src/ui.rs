@@ -8,8 +8,8 @@ use crate::adaptation::{
 #[cfg(test)]
 use crate::adaptation::{AmrDecision, DORMANT_ENERGY_RATIO, adaptation_decision, adaptation_field};
 use crate::canonical_gpu::{
-    CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest, CanonicalGpuTemporalManifest,
-    CanonicalGpuTransferPlan,
+    CanonicalGpuDisplay, CanonicalGpuRequest, CanonicalGpuTemporalManifest,
+    CanonicalGpuTransferUpload, CanonicalGpuUpload,
 };
 use crate::document::{ProbeId, ProbeSamplingPreset, VectorOverlayStyle};
 use crate::files::FileEvent;
@@ -460,6 +460,10 @@ enum ProtocolNote {
     Adapted(TopologyToken),
     /// A preparation settled, prepared or failed.
     Prepared(bool),
+    /// The worker finished a preparation a newer request had replaced, and
+    /// it was dropped: work the worker leaves for the newer job unless it
+    /// had all but finished when that arrived.
+    Discarded,
     /// A ready candidate is carried: whether its step is the one the device
     /// runs, and what it changes of what the solver runs.
     Carry {
@@ -550,8 +554,8 @@ impl PreparedInputs {
 }
 
 struct PreparedGpuUpload {
-    plan: CanonicalGpuPlan,
-    transfer: Option<CanonicalGpuTransferPlan>,
+    plan: CanonicalGpuUpload,
+    transfer: Option<CanonicalGpuTransferUpload>,
 }
 
 #[derive(Clone, Debug, PartialEq)]

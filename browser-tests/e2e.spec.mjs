@@ -58,6 +58,9 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // batches runs five scenes six times each, on lavapipe about four times as
 // long as cavity-batches, whose page takes 745 s. lifecycle remeshes and
 // adapts five scenes twice, 602 s on lavapipe, where edges took 521 s.
+// preparation's replacing part asks two scenes for the Fine mesh four times
+// each, 71 s on lavapipe with its workers; served without them, a page prepares and
+// takes away a handoff's stationary flux a few milliseconds a frame.
 const runLength = {
   "handoff-memory-running": 2,
   "handoff-memory-running-late": 2,
@@ -70,6 +73,7 @@ const runLength = {
   "baffle-move": 2,
   batches: 4,
   lifecycle: 4,
+  preparation: 2,
 };
 // How the bundle is hosted: `isolated`, the test server sending the headers that
 // isolate the page; `pages`, as GitHub Pages serves the site - no headers, so the

@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/topology_runtime.rs
++++ b/crates/funfern-app/src/topology_runtime.rs
+@@ -1763,7 +1763,7 @@
+         result: Result<PreparedTopology, TopologyPreparationError>,
+     ) -> Option<Result<TopologyToken, TopologyPreparationError>> {
+         match result {
+-            Ok(candidate) if Some(candidate.bundle.token) == self.requested => {
++            Ok(candidate) => {
+                 let token = candidate.bundle.token;
+                 self.ready = Some(candidate);
+                 Some(Ok(token))

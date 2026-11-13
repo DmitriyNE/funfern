@@ -65,13 +65,19 @@ use crate::wave_gpu::{
 // default usage kept the whole layout as a main-world copy for the
 // generation's life, about as much as the solver's own operator at 130k DOFs,
 // on top of a full clone made to extract it.
-macro_rules! add_shader_buffer {
-    ($assets:expr, $value:expr) => {{
+macro_rules! shader_buffer {
+    ($value:expr) => {{
         let mut buffer = ShaderBuffer::default();
         buffer.set_data($value);
         buffer.asset_usage = RenderAssetUsages::RENDER_WORLD;
-        $assets.add(buffer)
+        buffer
     }};
+}
+
+macro_rules! add_shader_buffer {
+    ($assets:expr, $value:expr) => {
+        $assets.add(shader_buffer!($value))
+    };
 }
 
 pub const CANONICAL_GPU_LAYOUT_VERSION: u32 = 7;
@@ -5006,10 +5012,107 @@ fn live_word_count(node_count: u32, integrated_count: u32) -> u32 {
     node_count + 1 + integrated
 }
 
+/// A plan made ready to add, its words serialized into the bytes the device
+/// takes. Serializing is most of what adding a generation costs the thread
+/// that does it, 27 to 50 ms for the 130 to 175 MiB of a generation at 87k
+/// nodes on the M1 Max, so the app does it where it packed the plan, off the
+/// main thread wherever it has another (C8.5). The control and the status
+/// are serialized as they are added: a handoff and a fixture's fault still
+/// change them.
+pub struct CanonicalGpuUpload {
+    /// The plan's description. Its large words are in `buffers`, and its own
+    /// are empty.
+    plan: CanonicalGpuPlan,
+    buffers: SerializedCanonicalBuffers,
+    buffer_bytes: [(&'static str, usize); 9],
+    widest_dispatch: usize,
+    scratch_count: u32,
+}
+
+struct SerializedCanonicalBuffers {
+    state: ShaderBuffer,
+    nodes: ShaderBuffer,
+    samples: ShaderBuffer,
+    tables: ShaderBuffer,
+    scratch: ShaderBuffer,
+    boundary: ShaderBuffer,
+    live: ShaderBuffer,
+}
+
+impl From<CanonicalGpuPlan> for CanonicalGpuUpload {
+    fn from(mut plan: CanonicalGpuPlan) -> Self {
+        let buffer_bytes = plan.buffer_bytes();
+        let widest_dispatch = plan.widest_dispatch();
+        let scratch_count = plan.scratch.len() as u32;
+        let live_words = live_word_count(plan.control.counts_a.x, plan.integrated_count as u32);
+        let buffers = SerializedCanonicalBuffers {
+            state: shader_buffer!(std::mem::take(&mut plan.state)),
+            nodes: shader_buffer!(std::mem::take(&mut plan.nodes)),
+            samples: shader_buffer!(std::mem::take(&mut plan.samples)),
+            tables: shader_buffer!(std::mem::take(&mut plan.tables)),
+            scratch: shader_buffer!(std::mem::take(&mut plan.scratch)),
+            boundary: shader_buffer!(std::mem::take(&mut plan.boundary)),
+            live: shader_buffer!(vec![GpuCanonicalStateWord::default(); live_words as usize]),
+        };
+        Self {
+            plan,
+            buffers,
+            buffer_bytes,
+            widest_dispatch,
+            scratch_count,
+        }
+    }
+}
+
+impl CanonicalGpuUpload {
+    pub fn clock_origin_seconds(&self) -> f64 {
+        self.plan.clock_origin_seconds()
+    }
+
+    pub fn stage_failure_injection(
+        &mut self,
+        reason: u32,
+        state_word: u32,
+    ) -> Result<(), CanonicalGpuBuildError> {
+        self.plan.stage_failure_injection(reason, state_word)
+    }
+}
+
+/// A handoff's transfer made ready to add, its words serialized where a
+/// [`CanonicalGpuUpload`]'s are.
+pub struct CanonicalGpuTransferUpload {
+    /// The transfer's description. Its words are in `words`, and its own are
+    /// empty.
+    plan: CanonicalGpuTransferPlan,
+    words: ShaderBuffer,
+    bytes: usize,
+}
+
+impl From<CanonicalGpuTransferPlan> for CanonicalGpuTransferUpload {
+    fn from(mut plan: CanonicalGpuTransferPlan) -> Self {
+        let bytes = plan.words.len() * size_of::<GpuCanonicalTransferWord>();
+        let words = shader_buffer!(std::mem::take(&mut plan.words));
+        Self { plan, words, bytes }
+    }
+}
+
+impl CanonicalGpuTransferUpload {
+    /// See [`CanonicalGpuTransferPlan::material_runtime_counts`].
+    pub fn material_runtime_counts(&self) -> (usize, usize) {
+        self.plan.material_runtime_counts()
+    }
+}
+
 fn add_canonical_buffers(
     assets: &mut Assets<ShaderBuffer>,
-    plan: CanonicalGpuPlan,
+    upload: CanonicalGpuUpload,
 ) -> AddedCanonicalBuffers {
+    let CanonicalGpuUpload {
+        plan,
+        buffers,
+        scratch_count,
+        ..
+    } = upload;
     let initial_step = plan.control.clock_u32.w as u64;
     let local_step = plan.control.clock_u32.z;
     let node_count = plan.control.counts_a.x;
@@ -5025,25 +5128,18 @@ fn add_canonical_buffers(
         .map_or(0, |temporal| temporal.runtime_record_count as u32);
     let source_count = plan.control.counts_c.y;
     let epoch_steps = epoch_steps(f64::from(plan.control.clock_f32.x));
-    let scratch_count = plan.scratch.len() as u32;
     let accounting_item_count = node_count + sample_count + plan.control.counts_b.z;
     let dispatches_per_step = plan.manifest.dispatches_per_step as u64;
     let handles = CanonicalGpuBufferHandles {
         control: add_shader_buffer!(assets, plan.control),
         status: add_shader_buffer!(assets, plan.status),
-        state: add_shader_buffer!(assets, plan.state),
-        nodes: add_shader_buffer!(assets, plan.nodes),
-        samples: add_shader_buffer!(assets, plan.samples),
-        tables: add_shader_buffer!(assets, plan.tables),
-        scratch: add_shader_buffer!(assets, plan.scratch),
-        boundary: add_shader_buffer!(assets, plan.boundary),
-        live: add_shader_buffer!(
-            assets,
-            vec![
-                GpuCanonicalStateWord::default();
-                live_word_count(node_count, plan.integrated_count as u32) as usize
-            ]
-        ),
+        state: assets.add(buffers.state),
+        nodes: assets.add(buffers.nodes),
+        samples: assets.add(buffers.samples),
+        tables: assets.add(buffers.tables),
+        scratch: assets.add(buffers.scratch),
+        boundary: assets.add(buffers.boundary),
+        live: assets.add(buffers.live),
         node_count,
         sample_count,
         gap_count,
@@ -5104,27 +5200,24 @@ impl CanonicalGpuRequest {
     /// report.
     pub fn admit(
         &self,
-        plan: &CanonicalGpuPlan,
-        transfer: Option<&CanonicalGpuTransferPlan>,
+        upload: &CanonicalGpuUpload,
+        transfer: Option<&CanonicalGpuTransferUpload>,
     ) -> Result<(), String> {
         let Some(limits) = self.limits else {
             return Ok(());
         };
-        for (name, bytes) in plan.buffer_bytes() {
+        for (name, bytes) in upload.buffer_bytes {
             limits.admit(&format!("generation's {name}"), bytes)?;
         }
         // The wall's passes take one workgroup a trace node or mode.
-        limits.admit_dispatch("generation's wall passes", plan.trace_count, 1)?;
+        limits.admit_dispatch("generation's wall passes", upload.plan.trace_count, 1)?;
         limits.admit_dispatch(
             "generation's widest pass",
-            plan.widest_dispatch(),
+            upload.widest_dispatch,
             CANONICAL_GPU_WORKGROUP_SIZE,
         )?;
         if let Some(transfer) = transfer {
-            limits.admit(
-                "generation's handoff transfer",
-                transfer.words.len() * size_of::<GpuCanonicalTransferWord>(),
-            )?;
+            limits.admit("generation's handoff transfer", transfer.bytes)?;
         }
         Ok(())
     }
@@ -5133,12 +5226,12 @@ impl CanonicalGpuRequest {
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
-        plan: CanonicalGpuPlan,
+        upload: impl Into<CanonicalGpuUpload>,
     ) {
         self.clear(assets, commands);
         let generation = self.generation.wrapping_add(1).max(1);
         self.stats = Arc::new(CanonicalGpuStats::default());
-        let added = add_canonical_buffers(assets, plan);
+        let added = add_canonical_buffers(assets, upload.into());
         let handles = added.handles;
         let state_entity = spawn_canonical_state_readback(
             commands,
@@ -5675,9 +5768,16 @@ impl CanonicalGpuRequest {
         &mut self,
         assets: &mut Assets<ShaderBuffer>,
         commands: &mut Commands,
-        mut target: CanonicalGpuPlan,
-        transfer: CanonicalGpuTransferPlan,
+        upload: impl Into<CanonicalGpuUpload>,
+        transfer: impl Into<CanonicalGpuTransferUpload>,
     ) -> Result<(), &'static str> {
+        let mut upload = upload.into();
+        let CanonicalGpuTransferUpload {
+            plan: transfer,
+            words: transfer_words,
+            ..
+        } = transfer.into();
+        let target = &upload.plan;
         if self.handoff.is_some() {
             return Err("a canonical GPU handoff is already pending");
         }
@@ -5727,10 +5827,10 @@ impl CanonicalGpuRequest {
         {
             return Err("canonical GPU handoff layouts do not match");
         }
-        target.status.transaction.x = GPU_HANDOFF_PENDING;
-        let added = add_canonical_buffers(assets, target);
+        upload.plan.status.transaction.x = GPU_HANDOFF_PENDING;
+        let added = add_canonical_buffers(assets, upload);
         let stats = Arc::new(CanonicalGpuHandoffStats::default());
-        let transfer_handle = add_shader_buffer!(assets, transfer.words);
+        let transfer_handle = assets.add(transfer_words);
         let receipt_entity = commands
             .spawn((
                 // The transfer pipelines may not be ready in the first render
@@ -10080,13 +10180,14 @@ mod tests {
                 max_compute_workgroups_per_dimension: 65_535,
             })
         };
+        let upload = CanonicalGpuUpload::from(plan);
         let mut request = CanonicalGpuRequest::default();
-        assert_eq!(request.admit(&plan, None), Ok(()));
+        assert_eq!(request.admit(&upload, None), Ok(()));
         request.set_limits(limits(largest, largest));
-        assert_eq!(request.admit(&plan, None), Ok(()));
+        assert_eq!(request.admit(&upload, None), Ok(()));
         for (binding, buffer) in [(largest - 1, 1 << 40), (1 << 40, largest - 1)] {
             request.set_limits(limits(binding, buffer));
-            let refusal = request.admit(&plan, None).unwrap_err();
+            let refusal = request.admit(&upload, None).unwrap_err();
             assert!(
                 refusal.contains(&format!("{largest_name} buffer"))
                     && refusal.contains("this device binds"),
@@ -10125,12 +10226,13 @@ mod tests {
         let widest = plan.widest_dispatch().div_ceil(width as usize) as u32;
         let trace = plan.trace_count as u32;
         assert!(trace < widest, "a trace of {trace} against {widest}");
+        let upload = CanonicalGpuUpload::from(plan);
         let mut request = CanonicalGpuRequest::default();
         request.set_limits(Some(limits(widest)));
-        assert_eq!(request.admit(&plan, None), Ok(()));
+        assert_eq!(request.admit(&upload, None), Ok(()));
         for (limit, pass) in [(widest - 1, "widest pass"), (trace - 1, "wall passes")] {
             request.set_limits(Some(limits(limit)));
-            let refusal = request.admit(&plan, None).unwrap_err();
+            let refusal = request.admit(&upload, None).unwrap_err();
             assert!(refusal.contains(pass), "{limit}: {refusal}");
         }
     }
@@ -10195,7 +10297,7 @@ mod tests {
         let mut plan = fixed;
         for temporal in [false, true] {
             plan.control.runtime_slots.w = if temporal { TEMPORAL_ENABLED } else { 0 };
-            let handles = add_canonical_buffers(&mut assets, plan.clone()).handles;
+            let handles = add_canonical_buffers(&mut assets, plan.clone().into()).handles;
             assert_eq!(handles.temporal, temporal);
         }
     }

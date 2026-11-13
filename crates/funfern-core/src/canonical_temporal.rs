@@ -24,11 +24,11 @@ use crate::{
     CanonicalWaveOperator, CoefficientLaw, CoefficientLawValues, ComplementaryRecovery,
     ConstitutiveInverseError, ConstitutiveSite, ConstitutiveTerm, DampingLaw, DampingLawValues,
     ElectromagneticPolarization, FieldLawValues, LossChannel, Material, MaterialCoordinates,
-    MaterialError, MaterialId, MaterialSwitchRuntime, PhysicsModel, Point2, QuadraticAreaElement,
-    QuadraticAreaStencil, QuadraticPointStencil, QuadraticWaveOperator, RateLaw, RateLawValues,
-    RegionId, RestoringLaw, RestoringLawValues, SymmetricTensor2, TimeDriveRuntime,
-    TimeDriveValues, TopologyWaveModel, TriMesh, WaveError, canonical_area_contribution,
-    complementary_interpolation_weights,
+    MaterialError, MaterialId, MaterialSwitchRuntime, OwnedTopologyWaveModel, PhysicsModel, Point2,
+    QuadraticAreaElement, QuadraticAreaStencil, QuadraticPointStencil, QuadraticWaveOperator,
+    RateLaw, RateLawValues, RegionId, RestoringLaw, RestoringLawValues, SymmetricTensor2,
+    TimeDriveRuntime, TimeDriveValues, TopologyWaveModel, TriMesh, WaveError,
+    canonical_area_contribution, complementary_interpolation_weights,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2337,104 +2337,227 @@ pub struct CanonicalTemporalWaveOperator {
 /// the 78 s run with the tone itself unchanged.
 const SHORT_WAVE_VISCOSITY: f64 = 8.0;
 
-impl CanonicalTemporalWaveOperator {
-    pub fn compile(
-        mesh: &TriMesh,
-        quadratic: &QuadraticWaveOperator,
-        model: TopologyWaveModel<'_>,
-        constitutive_revision: u64,
-    ) -> Result<Self, WaveError> {
-        let mut stripped = model.to_owned();
-        strip_temporal_laws(&mut stripped.materials);
-        let base = CanonicalWaveOperator::compile(
-            mesh,
-            quadratic,
-            stripped.as_model(),
-            constitutive_revision,
-        )?;
-        Self::from_base(Arc::new(base), mesh, quadratic, model)
+/// Sites one step of [`TemporalLawWork`] samples: a fraction of a
+/// millisecond of law evaluation.
+const TEMPORAL_SITES_PER_STEP: usize = 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TemporalLawPhase {
+    Primary(usize),
+    Complementary(usize),
+    Reach,
+    Recovery,
+    Finish,
+    Done,
+}
+
+impl TemporalLawPhase {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Primary(_) | Self::Complementary(_) => "Sampling the media's laws",
+            Self::Reach => "Bounding the laws' filter reach",
+            Self::Recovery => "Compiling the laws' recovery",
+            Self::Finish | Self::Done => "Bounding the laws' time step",
+        }
+    }
+}
+
+/// Resumable [`CanonicalTemporalWaveOperator::from_base`]: the law samples a
+/// thousand sites per step, primary and then complementary, then the grid
+/// filter's reach, the complementary recovery and the rest a step each.
+/// `from_base` drives it to completion in one call;
+/// [`CanonicalTemporalAssemblyJob`] spreads the same steps across frames, so
+/// both build the same operator. Until C8.5 it was one step: 100 to 120 ms
+/// at 87k nodes, a frame of the static-host page's.
+struct TemporalLawWork {
+    base: Arc<CanonicalWaveOperator>,
+    model: OwnedTopologyWaveModel,
+    phase: TemporalLawPhase,
+    primary: TemporalSites<TemporalPrimarySample>,
+    complementary: TemporalSites<TemporalComplementarySample>,
+    last_record: BTreeMap<MaterialId, u32>,
+    used_materials: BTreeSet<MaterialId>,
+    has_temporal_laws: bool,
+    /// Each element's authored short-wave loss α, read from its material.
+    element_short_wave: Vec<f64>,
+    grid_filter_reach: Option<Vec<f64>>,
+    recovery: Option<ComplementaryRecovery>,
+}
+
+/// Whether any site's coefficient follows a field law.
+fn any_field_law(
+    primary: &TemporalSites<TemporalPrimarySample>,
+    complementary: &TemporalSites<TemporalComplementarySample>,
+) -> bool {
+    primary
+        .iter()
+        .map(|sample| sample.coefficient)
+        .chain(complementary.iter().map(|sample| sample.coefficient))
+        .any(|coefficient| coefficient.law.field != FieldLawValues::Linear)
+}
+
+/// Whether any primary site carries a restoring law (Gate O).
+fn any_restoring(primary: &TemporalSites<TemporalPrimarySample>) -> bool {
+    primary.iter().any(|sample| !sample.restoring.is_none())
+}
+
+impl TemporalLawWork {
+    fn new(base: Arc<CanonicalWaveOperator>, model: TopologyWaveModel<'_>) -> Self {
+        Self {
+            primary: TemporalSites::with_capacity(base.primary_contributions().len()),
+            complementary: TemporalSites::with_capacity(base.constitutive_samples().len()),
+            element_short_wave: vec![0.0_f64; base.element_nodes().len()],
+            base,
+            model: model.to_owned(),
+            phase: TemporalLawPhase::Primary(0),
+            last_record: BTreeMap::new(),
+            used_materials: BTreeSet::new(),
+            has_temporal_laws: false,
+            grid_filter_reach: None,
+            recovery: None,
+        }
     }
 
-    /// The law samples alone, over a base someone else has already compiled.
-    ///
-    /// The base must come from this model with its temporal laws stripped,
-    /// which is what [`Self::compile`] does before calling this. An
-    /// application whose assembly is incremental builds that base through its
-    /// own resumable job and would otherwise compile it twice: once for the
-    /// solver and once inside here. Everything this adds is per-sample law
-    /// evaluation with no linear algebra, so it is cheap next to the assembly
-    /// it reuses.
-    ///
-    /// Splitting it out is also what lets an application hold a law-carrying
-    /// document at all. The fixed compiler refuses one - that is the gate
-    /// stopping a law from being executed as a static medium - so the stripped
-    /// model is not an optimization there, it is the only thing that compiles.
-    pub fn from_base(
-        base: Arc<CanonicalWaveOperator>,
+    /// One step: `Some` carries the operator or the first error, after which
+    /// the work is spent.
+    fn step(
+        &mut self,
         mesh: &TriMesh,
         quadratic: &QuadraticWaveOperator,
-        model: TopologyWaveModel<'_>,
-    ) -> Result<Self, WaveError> {
-        let authored_owned = model.to_owned();
-        let authored = authored_owned.as_model();
-        let mut primary = TemporalSites::with_capacity(base.primary_contributions().len());
-        let mut complementary = TemporalSites::with_capacity(base.constitutive_samples().len());
-        let mut last_record = BTreeMap::new();
-        let mut used_materials = BTreeSet::new();
-        let mut has_temporal_laws = false;
-
-        for contribution in base.primary_contributions() {
-            let triangle =
-                mesh.triangles
-                    .get(contribution.element as usize)
-                    .ok_or(WaveError::InvalidMesh(
-                        "a canonical contribution has no element",
-                    ))?;
-            let point = base.node_points()[contribution.node as usize];
-            let sample = temporal_material_sample(authored, triangle.region, point, true)?;
-            has_temporal_laws |= sample.coefficient.law.drive != TimeDriveValues::None
-                || sample.coefficient.law.alternate.is_some()
-                || sample.loss.law.drive != TimeDriveValues::None;
-            used_materials.insert(sample.coefficient.material);
-            primary.push(
-                TemporalPrimarySample {
-                    coefficient: sample.coefficient,
-                    loss: sample.loss,
-                    restoring: sample.restoring,
-                },
-                &mut last_record,
-            )?;
+    ) -> Option<Result<CanonicalTemporalWaveOperator, WaveError>> {
+        if self.phase == TemporalLawPhase::Done {
+            return None;
         }
-        last_record.clear();
-        // Each element's authored short-wave loss α, read from its material.
-        let mut element_short_wave = vec![0.0_f64; base.element_nodes().len()];
-        for sample in base.constitutive_samples() {
-            let triangle = mesh
-                .triangles
-                .get(sample.element as usize)
-                .ok_or(WaveError::InvalidMesh("a canonical sample has no element"))?;
-            let temporal =
-                temporal_material_sample(authored, triangle.region, sample.point, false)?;
-            if let Some(material) = authored.material(temporal.coefficient.material) {
-                element_short_wave[sample.element as usize] = material.short_wave_loss;
+        match self.unit(mesh, quadratic) {
+            Ok(None) => None,
+            Ok(Some(operator)) => {
+                self.phase = TemporalLawPhase::Done;
+                Some(Ok(operator))
             }
-            has_temporal_laws |= temporal.coefficient.law.drive != TimeDriveValues::None
-                || temporal.coefficient.law.alternate.is_some()
-                || temporal.loss.law.drive != TimeDriveValues::None;
-            used_materials.insert(temporal.coefficient.material);
-            complementary.push(
-                TemporalComplementarySample {
-                    coefficient: temporal.coefficient,
-                    loss: temporal.loss,
-                },
-                &mut last_record,
-            )?;
+            Err(error) => {
+                self.phase = TemporalLawPhase::Done;
+                Some(Err(error))
+            }
         }
-        let has_field_laws = primary
-            .iter()
-            .map(|sample| sample.coefficient)
-            .chain(complementary.iter().map(|sample| sample.coefficient))
-            .any(|coefficient| coefficient.law.field != FieldLawValues::Linear);
+    }
+
+    fn unit(
+        &mut self,
+        mesh: &TriMesh,
+        quadratic: &QuadraticWaveOperator,
+    ) -> Result<Option<CanonicalTemporalWaveOperator>, WaveError> {
+        let base = self.base.clone();
+        let authored = self.model.as_model();
+        match self.phase {
+            TemporalLawPhase::Primary(start) => {
+                let contributions = base.primary_contributions();
+                let end = (start + TEMPORAL_SITES_PER_STEP).min(contributions.len());
+                for contribution in &contributions[start..end] {
+                    let triangle = mesh.triangles.get(contribution.element as usize).ok_or(
+                        WaveError::InvalidMesh("a canonical contribution has no element"),
+                    )?;
+                    let point = base.node_points()[contribution.node as usize];
+                    let sample = temporal_material_sample(authored, triangle.region, point, true)?;
+                    self.has_temporal_laws |= sample.coefficient.law.drive != TimeDriveValues::None
+                        || sample.coefficient.law.alternate.is_some()
+                        || sample.loss.law.drive != TimeDriveValues::None;
+                    self.used_materials.insert(sample.coefficient.material);
+                    self.primary.push(
+                        TemporalPrimarySample {
+                            coefficient: sample.coefficient,
+                            loss: sample.loss,
+                            restoring: sample.restoring,
+                        },
+                        &mut self.last_record,
+                    )?;
+                }
+                self.phase = if end < contributions.len() {
+                    TemporalLawPhase::Primary(end)
+                } else {
+                    self.last_record.clear();
+                    TemporalLawPhase::Complementary(0)
+                };
+            }
+            TemporalLawPhase::Complementary(start) => {
+                let samples = base.constitutive_samples();
+                let end = (start + TEMPORAL_SITES_PER_STEP).min(samples.len());
+                for sample in &samples[start..end] {
+                    let triangle = mesh
+                        .triangles
+                        .get(sample.element as usize)
+                        .ok_or(WaveError::InvalidMesh("a canonical sample has no element"))?;
+                    let temporal =
+                        temporal_material_sample(authored, triangle.region, sample.point, false)?;
+                    if let Some(material) = authored.material(temporal.coefficient.material) {
+                        self.element_short_wave[sample.element as usize] = material.short_wave_loss;
+                    }
+                    self.has_temporal_laws |= temporal.coefficient.law.drive
+                        != TimeDriveValues::None
+                        || temporal.coefficient.law.alternate.is_some()
+                        || temporal.loss.law.drive != TimeDriveValues::None;
+                    self.used_materials.insert(temporal.coefficient.material);
+                    self.complementary.push(
+                        TemporalComplementarySample {
+                            coefficient: temporal.coefficient,
+                            loss: temporal.loss,
+                        },
+                        &mut self.last_record,
+                    )?;
+                }
+                self.phase = if end < samples.len() {
+                    TemporalLawPhase::Complementary(end)
+                } else {
+                    TemporalLawPhase::Reach
+                };
+            }
+            TemporalLawPhase::Reach => {
+                let (primary, complementary) = (&self.primary, &self.complementary);
+                self.grid_filter_reach = Some(
+                    if self.has_temporal_laws
+                        || any_field_law(primary, complementary)
+                        || any_restoring(primary)
+                    {
+                        trajectory_grid_filter_reach(&base, primary, complementary)?
+                    } else {
+                        base.grid_filter_reach().to_vec()
+                    },
+                );
+                self.phase = TemporalLawPhase::Recovery;
+            }
+            TemporalLawPhase::Recovery => {
+                self.recovery = Some(ComplementaryRecovery::new(
+                    mesh,
+                    base.element_nodes(),
+                    base.degrees_of_freedom(),
+                    authored,
+                )?);
+                self.phase = TemporalLawPhase::Finish;
+            }
+            TemporalLawPhase::Finish => return self.finish(quadratic).map(Some),
+            TemporalLawPhase::Done => {}
+        }
+        Ok(None)
+    }
+
+    /// The bounds, the short-wave viscosity and the operator.
+    fn finish(
+        &mut self,
+        quadratic: &QuadraticWaveOperator,
+    ) -> Result<CanonicalTemporalWaveOperator, WaveError> {
+        let base = self.base.clone();
+        let primary = std::mem::replace(&mut self.primary, TemporalSites::with_capacity(0));
+        let complementary =
+            std::mem::replace(&mut self.complementary, TemporalSites::with_capacity(0));
+        let used_materials = std::mem::take(&mut self.used_materials);
+        let element_short_wave = std::mem::take(&mut self.element_short_wave);
+        let has_temporal_laws = self.has_temporal_laws;
+        let grid_filter_reach = self
+            .grid_filter_reach
+            .take()
+            .expect("the reach comes first");
+        let recovery = self.recovery.take().expect("the recovery comes first");
+        let authored = self.model.as_model();
+        let has_field_laws = any_field_law(&primary, &complementary);
         let has_complementary_field_laws = complementary
             .iter()
             .any(|sample| sample.coefficient.law.field != FieldLawValues::Linear);
@@ -2480,7 +2603,7 @@ impl CanonicalTemporalWaveOperator {
         // The restoring force uses the authored mass while the step divides by
         // the mass in force, so its curvature is scaled by the lowest mass
         // factor the trajectory reaches.
-        let has_restoring = primary.iter().any(|sample| !sample.restoring.is_none());
+        let has_restoring = any_restoring(&primary);
         let has_nonlinear_restoring = primary.iter().any(|sample| !sample.restoring.is_linear());
         let has_active_loss = primary
             .iter()
@@ -2584,24 +2707,13 @@ impl CanonicalTemporalWaveOperator {
         } else {
             Vec::new()
         };
-        let grid_filter_reach = if has_temporal_laws || has_field_laws || has_restoring {
-            trajectory_grid_filter_reach(&base, &primary, &complementary)?
-        } else {
-            base.grid_filter_reach().to_vec()
-        };
         let short_wave_samples = short_wave
             .iter()
             .enumerate()
             .filter(|(_, value)| **value > 0.0)
             .map(|(index, _)| index as u32)
             .collect();
-        let recovery = ComplementaryRecovery::new(
-            mesh,
-            base.element_nodes(),
-            base.degrees_of_freedom(),
-            authored,
-        )?;
-        Ok(Self {
+        Ok(CanonicalTemporalWaveOperator {
             base,
             primary,
             complementary,
@@ -2626,6 +2738,96 @@ impl CanonicalTemporalWaveOperator {
             grid_filter_reach,
             recovery,
         })
+    }
+}
+
+/// Builds a [`CanonicalTemporalWaveOperator`] over its base across frames,
+/// as [`CanonicalTemporalWaveOperator::from_base`] does in one call. It owns
+/// both discretizations, so a preparation can hold it while the document
+/// keeps changing.
+pub struct CanonicalTemporalAssemblyJob {
+    mesh: Arc<TriMesh>,
+    quadratic: Arc<QuadraticWaveOperator>,
+    work: TemporalLawWork,
+}
+
+impl CanonicalTemporalAssemblyJob {
+    pub fn new(
+        base: Arc<CanonicalWaveOperator>,
+        mesh: Arc<TriMesh>,
+        quadratic: Arc<QuadraticWaveOperator>,
+        model: TopologyWaveModel<'_>,
+    ) -> Self {
+        Self {
+            mesh,
+            quadratic,
+            work: TemporalLawWork::new(base, model),
+        }
+    }
+
+    pub fn phase(&self) -> &'static str {
+        self.work.phase.label()
+    }
+
+    /// Runs up to `budget` steps. `Some` carries the operator or the first
+    /// error, after which the job is spent.
+    pub fn advance(
+        &mut self,
+        budget: usize,
+    ) -> Option<Result<CanonicalTemporalWaveOperator, WaveError>> {
+        for _ in 0..budget {
+            if let Some(result) = self.work.step(&self.mesh, &self.quadratic) {
+                return Some(result);
+            }
+        }
+        None
+    }
+}
+
+impl CanonicalTemporalWaveOperator {
+    pub fn compile(
+        mesh: &TriMesh,
+        quadratic: &QuadraticWaveOperator,
+        model: TopologyWaveModel<'_>,
+        constitutive_revision: u64,
+    ) -> Result<Self, WaveError> {
+        let mut stripped = model.to_owned();
+        strip_temporal_laws(&mut stripped.materials);
+        let base = CanonicalWaveOperator::compile(
+            mesh,
+            quadratic,
+            stripped.as_model(),
+            constitutive_revision,
+        )?;
+        Self::from_base(Arc::new(base), mesh, quadratic, model)
+    }
+
+    /// The law samples alone, over a base someone else has already compiled.
+    ///
+    /// The base must come from this model with its temporal laws stripped,
+    /// which is what [`Self::compile`] does before calling this. An
+    /// application whose assembly is incremental builds that base through its
+    /// own resumable job and would otherwise compile it twice: once for the
+    /// solver and once inside here. Everything this adds is per-sample law
+    /// evaluation with no linear algebra, so it is cheap next to the assembly
+    /// it reuses.
+    ///
+    /// Splitting it out is also what lets an application hold a law-carrying
+    /// document at all. The fixed compiler refuses one - that is the gate
+    /// stopping a law from being executed as a static medium - so the stripped
+    /// model is not an optimization there, it is the only thing that compiles.
+    pub fn from_base(
+        base: Arc<CanonicalWaveOperator>,
+        mesh: &TriMesh,
+        quadratic: &QuadraticWaveOperator,
+        model: TopologyWaveModel<'_>,
+    ) -> Result<Self, WaveError> {
+        let mut work = TemporalLawWork::new(base, model);
+        loop {
+            if let Some(result) = work.step(mesh, quadratic) {
+                return result;
+            }
+        }
     }
 
     /// Each complementary sample's short-wave viscosity `τ`, in sample order;
@@ -9109,7 +9311,7 @@ mod tests {
             .unwrap(),
         );
         let reused = CanonicalTemporalWaveOperator::from_base(
-            base,
+            base.clone(),
             &mesh,
             &quadratic,
             crate::TopologyWaveModel::from_topology_scene(&scene),
@@ -9130,6 +9332,25 @@ mod tests {
             reused.primary_mass_at(0.3, &runtime).unwrap(),
             "the reused base must give the same instantaneous coefficients"
         );
+
+        // A preparation builds it in steps across frames, and builds the
+        // same operator (C8.5).
+        let mut job = CanonicalTemporalAssemblyJob::new(
+            base,
+            std::sync::Arc::new(mesh.mesh.clone()),
+            std::sync::Arc::new(quadratic.clone()),
+            TopologyWaveModel::from_topology_scene(&scene),
+        );
+        let mut steps = 0;
+        let stepped = loop {
+            steps += 1;
+            if let Some(result) = job.advance(1) {
+                break result.unwrap();
+            }
+        };
+        assert!(steps > 3, "{steps} steps");
+        assert!(stepped == reused, "the steps built another operator");
+        assert!(job.advance(1).is_none(), "a spent job builds nothing more");
     }
 
     /// Two things the variable-coefficient supplement has to get right. On an

@@ -2202,6 +2202,38 @@ device: `readbacks-left-at-a-clear`, `staging-never-retired`,
 `far-field-bind-group-kept`, `committed-generation-kept` and
 `preparation-worker-left-running`.
 
+The `preparation` fixture holds what C8.5 found of RT-08: large jobs keep the
+app responsive, and a cancelled or replaced one never leaves a stale result
+running. It opens the double slit and the plasma mirror in turn. Its
+replacing part asks each for the Fine mesh and, while it prepares, edits it
+three times, opens the other scene, hands it to a worker that stops four
+quanta in, or to one that finishes it and hands the result back only after a
+newer request, edited in. After each the app must come to rest running the
+document as it stands: its revision, on the mesh a fresh preparation of it
+makes, shown by the device, with two worker threads alive. The active
+revision must never go back, and no candidate may be ready but for the newest
+request; each edit lands once the one before is being prepared, and where a
+preparation outlasts the edits' spacing three times at most one of the three
+superseded may come back finished (`ProtocolNote::Discarded`); the late result must be
+dropped; and the stopped worker's job must fail with "the preparation worker
+stopped", light the warning, and leave a new worker to take the remesh. Its
+frames part asks for 87,000 nodes and edits them with the workers and then
+with the cooperative runner the static-host page uses, and holds every frame
+under 100 ms of main-thread time and every slice of the cooperative runner's
+under 60 ms; on a software adapter, and on a page, it is left out. On the
+M1 Max the worst frame read 37.5 ms, once 73, and the runner's longest
+slice 31 ms, where before C8.5 an upload's frame took up to 128 ms and the
+runner's slices up to 446. The replacing part takes 70 s on
+lavapipe; both parts 160 s on the M1 Max, where at a load of about 8
+its worst frame took 51 ms and the runner's longest slice 45. On the host,
+`a_driven_mediums_laws_are_sampled_across_units`, and the stepped build in
+`a_law_carrying_scene_needs_a_stripped_base_the_temporal_operator_can_reuse`:
+the time-driven operator, sampled a thousand sites a step, is the one
+`from_base` builds in one call. Its mutations:
+`temporal-laws-sampled-at-once` on the CPU, and on the device
+`superseded-job-kept`, `late-result-taken` and
+`stopped-worker-left-stopped`.
+
 `scripts/mutations.sh` is stage A0.4: each folder under `tests/mutations/`
 holds a deliberate defect as a patch and a manifest naming the test that must
 catch it and the pattern its failure must match; the script applies each,

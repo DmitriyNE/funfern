@@ -23,7 +23,7 @@ use bevy::{
 };
 use funfern_app::canonical_gpu::{
     CanonicalGpuClock, CanonicalGpuDisplay, CanonicalGpuPlan, CanonicalGpuRequest,
-    CanonicalWaveGpuPlugin,
+    CanonicalGpuUpload, CanonicalWaveGpuPlugin,
 };
 use funfern_core::TopologyWaveModel;
 use funfern_core::test_scenes::*;
@@ -36,8 +36,8 @@ const STEPS: u64 = 16;
 
 #[derive(Resource)]
 struct Pending {
-    refused: CanonicalGpuPlan,
-    admitted: Option<CanonicalGpuPlan>,
+    refused: CanonicalGpuUpload,
+    admitted: Option<CanonicalGpuUpload>,
     limit: u64,
     deadline: Instant,
     failed: bool,
@@ -117,8 +117,8 @@ fn main() -> AppExit {
     )
     .add_plugins(CanonicalWaveGpuPlugin)
     .insert_resource(Pending {
-        refused,
-        admitted: Some(admitted),
+        refused: refused.into(),
+        admitted: Some(admitted.into()),
         limit,
         deadline: check::deadline(60),
         failed: false,

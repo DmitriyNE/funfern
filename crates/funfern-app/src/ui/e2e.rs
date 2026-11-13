@@ -29,6 +29,7 @@ pub(crate) mod far_field;
 mod interleaved;
 mod lifecycle;
 mod observables;
+mod preparation;
 mod rollback;
 
 use super::runtime::pulse_increment;
@@ -123,6 +124,10 @@ pub(crate) fn add(app: &mut App) {
     }
     if name == "lifecycle" {
         lifecycle::add(app, seconds);
+        return;
+    }
+    if name == "preparation" {
+        preparation::add(app, seconds);
         return;
     }
     // RT-01's fuzzing: `interleaved-<seed>` as the suites name it, or

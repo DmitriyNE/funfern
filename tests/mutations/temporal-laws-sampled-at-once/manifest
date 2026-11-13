@@ -1,0 +1,4 @@
+about: a driven medium's laws are sampled in one unit, 100 to 120 ms at 87k nodes in a frame of the static-host page's
+test: cargo test --release -p funfern-app --lib -- topology_runtime::tests::a_driven_mediums_laws_are_sampled_across_units
+expect: sites sampled in 1 units
+needs: cpu

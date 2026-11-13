@@ -1,0 +1,16 @@
+--- a/crates/funfern-app/src/ui/workers.rs
++++ b/crates/funfern-app/src/ui/workers.rs
+@@ -154,13 +154,6 @@
+     }
+     while let Ok(mut job) = job_receiver.recv() {
+         loop {
+-            loop {
+-                match job_receiver.try_recv() {
+-                    Ok(newer) => job = newer,
+-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => return,
+-                }
+-            }
+             let token = job.token();
+             let result = job.advance_for(BackgroundPreparationWorker::QUANTUM);
+             if let Some(result) = result {

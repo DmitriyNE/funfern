@@ -563,7 +563,7 @@ pub(super) fn compile_gpu_upload(
     let plan = compile_generation_plan(&candidate, time_step, clock)?;
     if candidate.fresh || active.is_none() {
         return Ok(PreparedGpuUpload {
-            plan,
+            plan: plan.into(),
             transfer: None,
         });
     }
@@ -633,8 +633,8 @@ pub(super) fn compile_gpu_upload(
         gpu_transfer
     };
     Ok(PreparedGpuUpload {
-        plan,
-        transfer: Some(gpu_transfer),
+        plan: plan.into(),
+        transfer: Some(gpu_transfer.into()),
     })
 }
 

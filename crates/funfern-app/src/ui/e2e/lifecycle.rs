@@ -462,7 +462,7 @@ fn main_counts(
 
 /// Whether what the app runs is the document's accepted revision, with
 /// nothing left in hand.
-fn at_rest(
+pub(super) fn at_rest(
     state: &Playground,
     request: &CanonicalGpuRequest,
     display: &CanonicalGpuDisplay,
@@ -685,7 +685,7 @@ fn advance(
 }
 
 /// Toggles the first material's density, as its editor does.
-fn edit(state: &mut Playground) -> Result<(), String> {
+pub(super) fn edit(state: &mut Playground) -> Result<(), String> {
     let mut material = state
         .editor
         .document

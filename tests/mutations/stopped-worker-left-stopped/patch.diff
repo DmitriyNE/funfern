@@ -1,0 +1,10 @@
+--- a/crates/funfern-app/src/ui/runtime.rs
++++ b/crates/funfern-app/src/ui/runtime.rs
+@@ -115,7 +115,6 @@
+         }
+         self.message = "The preparation worker stopped and was restarted".into();
+         self.unseen_error = true;
+-        self.background_preparation = BackgroundPreparationWorker::spawn();
+     }
+ 
+     /// Advances candidate assembly without making its execution placement part

@@ -5,7 +5,7 @@ use super::coordinator::Press;
 use crate::canonical_gpu::{
     CANONICAL_FAILURE_NON_FINITE, CanonicalGpuClock, CanonicalGpuDisplay,
     CanonicalGpuHandoffOutcome, CanonicalGpuLiveEvent, CanonicalGpuPlan, CanonicalGpuRequest,
-    LiveEventRefusal, canonical_failure_description,
+    CanonicalGpuUpload, LiveEventRefusal, canonical_failure_description,
 };
 use crate::drawn_pacing::PacingNote;
 use crate::gpu_frame_timer::GpuFrameReading;
@@ -158,10 +158,10 @@ impl Playground {
             }
             if let BackgroundPreparationEvent::Finished { result, .. } = event {
                 let settled = self.runtime.finish_external_preparation(*result);
-                if let Some(settled) = &settled {
-                    self.protocol_log
-                        .push(ProtocolNote::Prepared(settled.is_ok()));
-                }
+                self.protocol_log.push(match &settled {
+                    Some(settled) => ProtocolNote::Prepared(settled.is_ok()),
+                    None => ProtocolNote::Discarded,
+                });
                 if let Some(Ok(_)) = settled {
                     self.handoff_ready = Some(Instant::now());
                 }
@@ -937,10 +937,12 @@ impl Playground {
                 } else {
                     reset
                 };
-                let reset = reset.and_then(|plan| request.admit(&plan, None).map(|()| plan));
+                let reset = reset
+                    .map(CanonicalGpuUpload::from)
+                    .and_then(|upload| request.admit(&upload, None).map(|()| upload));
                 match reset {
-                    Ok(plan) => {
-                        request.install(assets, commands, plan);
+                    Ok(upload) => {
+                        request.install(assets, commands, upload);
                         self.coordinator.reset_installed(dt);
                         self.sim_time_offset = 0.0;
                         self.sim_time_step = dt;

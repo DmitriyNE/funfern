@@ -33811,3 +33811,92 @@ the device.
   snapshot staging's bytes, and `lifecycle` passing after (the device path
   changed: the counts, the workers' guards, and the interleaved fixture's
   rest condition).
+
+## 2026-11-13 — C8.5: preparation scheduling, responsive and replaced
+
+- **Why.** C8's last item (campaign plan, section 6l): RT-08 of the 11
+  October plan, large jobs keeping the app responsive, and cancellation and
+  replacement producing no stale result. The plan had preparation slices
+  that yield and a dead worker replaced; it lacked a frame's cost during a
+  large preparation, and cancel and replace on the device.
+- **Study.** Every main-thread step of a large preparation timed natively
+  on the M1 Max at about 87,000 nodes (edge 0.025 on the gallery's 2 x 2
+  domains), with the workers and with the cooperative runner the
+  static-host page falls back to; preparations replaced and cancelled on
+  lavapipe. Replacing held: three edits during a preparation, a scene
+  opened during one, and a worker stopping a few quanta into one each ended
+  on the document as it stood, on a fresh preparation's mesh. Four findings
+  on responsiveness.
+- **The upload's serialization.** Starting a large generation's upload
+  serialized its 130 to 175 MiB of buffers on the main thread, 27 to 50 ms,
+  in frames reaching 128 ms. `CanonicalGpuUpload` and
+  `CanonicalGpuTransferUpload` now carry the buffers serialized, built where
+  the plan is packed, on the pack thread natively and on the pool in the
+  threaded browser; the install and the handoff only add the assets, 0 ms.
+  The control and status stay typed until added, since a handoff and a
+  fixture's fault still write them.
+- **Steps that never yielded.** The time-driven operator's laws were
+  sampled in one step, 100 to 120 ms at 87,000 nodes and 115 to 446 in the
+  app: `CanonicalTemporalAssemblyJob` samples a thousand sites a step, then
+  the filter's reach (16 ms), the recovery (5) and the bounds (17) a step
+  each, and `from_base` drives the same steps in one call. A remesh's
+  transfer setup was one step of 38 to 41 ms on an 87,000-node source; it
+  is now a step for each mesh's separated curves and the previous mesh's
+  nodes 4,096 a step. The cooperative runner's longest slice now reads 23
+  to 31 ms. Left, under Worth checking sometime: its other one-shot steps
+  of 16 to 31 ms, the inline pack a page without threads runs (250 to 650
+  ms), and its throughput, 4 ms a frame.
+- **The UI.** Traced to the step: the viewport builds the field paint's
+  topology on the main thread the first frame a new mesh shows, 11 to 32
+  ms, most of it an ordered map of the edges (7 to 8 ms on the host, 2.5 to
+  2.8 sorted). Under Worth checking sometime. One frame of 73 ms in
+  `refresh_runtime`, outside the preparation, in one of two runs, did not
+  recur with finer marks; freeing an 87,000-node generation takes 0.1 ms.
+- **The fixture.** `preparation`: the replacing part asks the double slit
+  and the plasma mirror for the Fine mesh and, while it prepares, edits it
+  three times, opens the other scene, hands it to a worker that stops, or to
+  one that hands its result back only after a newer request. Each must end
+  on the document as it stands, on a fresh preparation's mesh, shown by the
+  device, with two worker threads; the revision never going back; at most
+  one superseded preparation back finished (`ProtocolNote::Discarded`); the
+  late one dropped; the stopped one failed, the warning lit and a new
+  worker in its place. The frames part, natively on a hardware adapter,
+  asks for 87,000 nodes and edits them with the workers and with the
+  cooperative runner, every frame under 100 ms of main-thread time and the
+  runner's slices under 60. Measured on the M1 Max: frames 37.5 ms at
+  worst, once 73; slices 31.
+- **The fixture's own fixes.** With edits three frames apart, the plasma
+  mirror's Fine preparation, 0.5 s on lavapipe and three of its frames,
+  finished between them, and two of three came back finished with the drain
+  in place; each edit now lands once the one before is being prepared, and
+  the drain is judged where a preparation outlasts the edits' spacing three
+  times. The
+  late worker, which keeps to every job, stayed for the next scene's acts;
+  the app's own worker now takes over. A stale result taken left the app
+  short of rest until the act's deadline, so every frame checks that no
+  candidate is ready but for the newest request.
+- **Checks.** `a_driven_mediums_laws_are_sampled_across_units` and the
+  stepped build against `from_base`. The replacing part 70 s on
+  lavapipe; both parts 160 s on the M1 Max, the worst frame 51 ms and the
+  runner's longest slice 45 there at a load of about 8.
+- **Mutations**, each caught at its check: `temporal-laws-sampled-at-once`
+  on the CPU (65,715 sites sampled in one unit), and on lavapipe
+  `superseded-job-kept` (all three superseded preparations back finished),
+  `late-result-taken` (revision 1 ready where 2 is asked for) and
+  `stopped-worker-left-stopped` (no new worker, then one thread alive).
+  `dispatch-limit-unchecked` is rewritten against `admit`'s new form, which
+  reads the upload; its test still catches it.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release, 1,537
+  passed, 38 ignored), the default scene in the debug profile, release build,
+  the wasm32 and threaded wasm checks, the browser shader compile and the
+  protocol proofs (2 of 2); the device suite on Metal (the device path
+  changed). Its first run, the morning after the machine crashed, passed 142
+  of 144 at a load of 20 to 40 from Spotlight reindexing: the TM cavity modes
+  past their 600 s deadline (76 s quiet) and `preparation` on a 114 ms frame.
+  That run also carried a study's prints in funfern-core: a scratch copy of
+  the tree built into the repo's `target/` had left its instrumented
+  artifacts looking fresh, since the copy kept the repo's old file times;
+  `cargo clean -p` on the workspace's three packages cleared them. Rerun at a
+  load of about 30, both failed again on load (TM past 600 s; frames of 636
+  and 254 ms). At a load of 4 to 8 both passed: TM in 76 s, `preparation` in
+  160 s.

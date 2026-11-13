@@ -398,6 +398,9 @@ pub struct TopologyPreparationJob {
     #[cfg(test)]
     mesh_fails: bool,
     canonical_assembly_job: Option<CanonicalAssemblyJob>,
+    /// The laws the canonical assembly was not given, sampled over its base
+    /// when the document carries one.
+    temporal_job: Option<CanonicalTemporalAssemblyJob>,
     canonical_operator: Option<Arc<CanonicalWaveOperator>>,
     /// The time-driven operator over the same base, when the document carries
     /// a material law. Absent means the generation is inert and the fixed
@@ -694,6 +697,7 @@ impl TopologyPreparationJob {
             mesh_fails: false,
             assembly_job: None,
             canonical_assembly_job: None,
+            temporal_job: None,
             canonical_temporal_operator,
             stripped_model: None,
             canonical_operator,
@@ -773,6 +777,7 @@ impl TopologyPreparationJob {
             mesh_fails: false,
             assembly_job: None,
             canonical_assembly_job: None,
+            temporal_job: None,
             canonical_temporal_operator: None,
             stripped_model: None,
             canonical_operator: None,
@@ -814,6 +819,8 @@ impl TopologyPreparationJob {
         } else if let Some(job) = &self.assembly_job {
             job.phase()
         } else if let Some(job) = &self.canonical_assembly_job {
+            job.phase()
+        } else if let Some(job) = &self.temporal_job {
             job.phase()
         } else if let Some(job) = &self.transfer_job {
             job.phase()
@@ -1031,28 +1038,32 @@ impl TopologyPreparationJob {
             match result {
                 Ok(operator) => {
                     let operator = Arc::new(operator);
-                    // The laws the assembly was not given. Everything this adds
-                    // is per-sample law evaluation over the base just built, so
-                    // it is cheap next to the assembly it reuses - but it does
-                    // not yield, so it is measured rather than assumed.
+                    // The laws the assembly was not given, sampled over the
+                    // base just built. In one call that was 100 to 120 ms at
+                    // 87k nodes, a frame of the static-host page's, so it is
+                    // a job of its own that yields like the rest (C8.5).
                     if self.driven() {
-                        let started = Instant::now();
-                        let temporal = CanonicalTemporalWaveOperator::from_base(
+                        self.temporal_job = Some(CanonicalTemporalAssemblyJob::new(
                             operator.clone(),
-                            self.mesh.as_ref().unwrap(),
-                            self.operator.as_ref().unwrap(),
+                            self.mesh.as_ref().unwrap().clone(),
+                            self.operator.as_ref().unwrap().clone(),
                             self.bundle.model(),
-                        );
-                        self.timing.assembly_ms += elapsed_ms(started);
-                        match temporal {
-                            Ok(temporal) => {
-                                self.canonical_temporal_operator = Some(Arc::new(temporal))
-                            }
-                            Err(error) => return Some(Err(self.fail(error.to_string()))),
-                        }
+                        ));
                     }
                     self.canonical_operator = Some(operator);
                 }
+                Err(error) => return Some(Err(self.fail(error.to_string()))),
+            }
+            return None;
+        }
+        if let Some(job) = &mut self.temporal_job {
+            let started = Instant::now();
+            let result = job.advance(budget);
+            self.timing.assembly_ms += elapsed_ms(started);
+            let result = result?;
+            self.temporal_job = None;
+            match result {
+                Ok(temporal) => self.canonical_temporal_operator = Some(Arc::new(temporal)),
                 Err(error) => return Some(Err(self.fail(error.to_string()))),
             }
             return None;
@@ -2494,6 +2505,50 @@ mod tests {
         assert_eq!(finished, token);
         assert!(calls > 1, "a zero budget still yields after one slice");
         assert_eq!(bounded.commit_ready(token).unwrap().timing.slices, calls);
+    }
+
+    /// C8.5: a driven medium's laws are sampled a thousand sites a unit. In
+    /// one call they took 100 to 120 ms at 87k nodes, a frame of the
+    /// static-host page's, where the cooperative runner lends 4 ms. One unit
+    /// at a time, the preparation reports the sampling for a unit in every
+    /// 4,096 sites at least.
+    #[test]
+    fn a_driven_mediums_laws_are_sampled_across_units() {
+        let mut document = TopologyEditor::default().document;
+        pumped(&mut document.model.draft.materials[0]);
+        pumped(&mut document.model.accepted.materials[0]);
+        let mut runtime = TopologyRuntime::default();
+        let token = runtime
+            .request(
+                1,
+                &document,
+                document.model.accepted.compile(1).unwrap(),
+                MeshingOptions {
+                    target_edge_length: 0.06,
+                    ..options()
+                },
+                true,
+            )
+            .unwrap();
+        let mut sampling = 0usize;
+        let finished = loop {
+            if runtime.detail() == Some("Sampling the media's laws") {
+                sampling += 1;
+            }
+            if let Some(result) = runtime.advance(1) {
+                break result;
+            }
+        };
+        assert_eq!(finished.unwrap(), token);
+        let active = runtime.commit_ready(token).unwrap();
+        assert!(active.driven());
+        let base = &active.canonical_operator;
+        let sites = base.primary_contributions().len() + base.constitutive_samples().len();
+        assert!(sites > 16_384, "{sites} sites");
+        assert!(
+            sampling * 4096 >= sites,
+            "{sites} sites sampled in {sampling} units"
+        );
     }
 
     /// The editor's document prepared from nothing and committed.

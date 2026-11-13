@@ -1,0 +1,4 @@
+about: a preparation that comes back after a newer request is taken as the candidate, where it is the document no longer
+test: FUNFERN_E2E_PREPARATION=replace scripts/e2e-fixture.sh preparation
+expect: is ready where .* is asked for
+needs: device

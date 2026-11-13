@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/topology_runtime.rs
++++ b/crates/funfern-app/src/topology_runtime.rs
+@@ -1058,7 +1058,7 @@
+         }
+         if let Some(job) = &mut self.temporal_job {
+             let started = Instant::now();
+-            let result = job.advance(budget);
++            let result = job.advance(usize::MAX);
+             self.timing.assembly_ms += elapsed_ms(started);
+             let result = result?;
+             self.temporal_job = None;

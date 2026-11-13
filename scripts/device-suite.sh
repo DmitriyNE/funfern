@@ -191,6 +191,11 @@ RUNS=(
   # C8.4's lifecycle: five gallery scenes cycled twice through the work that
   # makes and drops what the device holds, each count as the cycle before.
   'FUNFERN_E2E=lifecycle funfern-fixtures'
+  # C8.5's preparation: preparations superseded, abandoned, stopped and late,
+  # each ending on the document as it stands; and on a hardware adapter each
+  # frame and slice bounded while a large mesh prepares, with the workers and
+  # without them.
+  'FUNFERN_E2E=preparation funfern-fixtures'
 )
 
 pattern=${1:-}

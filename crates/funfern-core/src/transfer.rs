@@ -418,16 +418,26 @@ impl QuadraticTransferMap {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TransferPhase {
     Validate,
+    TargetTraces,
+    SourceTraces,
+    SourceSides,
+    Points(usize),
     Bins(usize),
     Locate(usize),
     Done,
 }
 
+/// Source nodes one step files by point.
+const POINTS_PER_STEP: usize = 4096;
+
 impl TransferPhase {
     const fn label(self) -> &'static str {
         match self {
             Self::Validate => "Checking the field transfer",
-            Self::Bins(_) => "Indexing the previous mesh",
+            Self::TargetTraces | Self::SourceTraces | Self::SourceSides => {
+                "Tracing the separated curves"
+            }
+            Self::Points(_) | Self::Bins(_) => "Indexing the previous mesh",
             Self::Locate(_) => "Locating field samples",
             Self::Done => "Finished",
         }
@@ -435,8 +445,11 @@ impl TransferPhase {
 }
 
 /// Resumable construction of a `QuadraticTransferMap`: validation and the
-/// restriction tables in one step, then one source triangle per step into the
-/// locator grid, then one target node per step. `QuadraticTransferMap::build`
+/// restriction tables in one step, each mesh's separated curves in a step of
+/// their own, the source nodes by point a few thousand per step, then one
+/// source triangle per step into the locator grid, then one target node per
+/// step. Validation and the tables were one step until C8.5: 38 to 41 ms on
+/// an 87k-node source, a frame of the static-host page's. `QuadraticTransferMap::build`
 /// drives it to completion in one call; `QuadraticTransferJob` spreads the same
 /// steps across frames, so both produce the same map.
 struct QuadraticTransferWork {
@@ -444,6 +457,8 @@ struct QuadraticTransferWork {
     bins: Option<SourceBins>,
     target_groups: Vec<Option<crate::RegionId>>,
     region_groups: Option<BTreeMap<crate::RegionId, crate::RegionId>>,
+    /// Whether either mesh carries the unified topology's trace lineage.
+    unified_topology: bool,
     target_traces: Vec<TargetTracePreference>,
     source_traces: SourceTraceTriangles,
     /// Source nodes by exact point. A target node at a point held by exactly
@@ -513,6 +528,7 @@ impl QuadraticTransferWork {
             bins: None,
             target_groups: Vec::new(),
             region_groups: None,
+            unified_topology: false,
             target_traces: Vec::new(),
             source_traces: SourceTraceTriangles::default(),
             source_by_point: BTreeMap::new(),
@@ -545,9 +561,9 @@ impl QuadraticTransferWork {
                 // so spatial transfer must not require the same RegionId on both
                 // revisions. A mesh built by hand, which has neither, transfers
                 // within each region.
-                let unified_topology =
+                self.unified_topology =
                     has_unified_topology(source_mesh) || has_unified_topology(target_mesh);
-                self.region_groups = (!unified_topology).then(|| region_groups(target_mesh));
+                self.region_groups = (!self.unified_topology).then(|| region_groups(target_mesh));
                 self.target_groups = vec![None; target_operator.degrees_of_freedom()];
                 if let Some(region_groups) = &self.region_groups {
                     for (triangle, nodes) in target_mesh
@@ -567,24 +583,47 @@ impl QuadraticTransferWork {
                         }
                     }
                 }
+                self.phase = TransferPhase::TargetTraces;
+            }
+            TransferPhase::TargetTraces => {
                 self.target_traces = quadratic_trace_nodes(target_mesh, target_operator)?;
+                self.phase = TransferPhase::SourceTraces;
+            }
+            TransferPhase::SourceTraces => {
                 self.source_traces = source_trace_triangles(source_mesh)?;
+                self.phase = TransferPhase::SourceSides;
+            }
+            TransferPhase::SourceSides => {
                 self.source_sides = quadratic_trace_nodes(source_mesh, source_operator)?
                     .into_iter()
                     .map(|preference| preference.boundaries)
                     .collect();
-                if unified_topology {
-                    for (index, point) in source_operator.node_points().iter().enumerate() {
+                self.phase = TransferPhase::Points(0);
+            }
+            TransferPhase::Points(start) => {
+                // Only a unified topology's nodes are copied by point.
+                let points = source_operator.node_points();
+                let end = if self.unified_topology {
+                    (start + POINTS_PER_STEP).min(points.len())
+                } else {
+                    points.len()
+                };
+                if self.unified_topology {
+                    for (index, point) in (start..end).zip(&points[start..end]) {
                         self.source_by_point
                             .entry(point_key(*point))
                             .or_default()
                             .push(index as u32);
                     }
                 }
-                self.swept_ground = SweptGround::new(source_mesh, target_mesh);
-                self.bins = Some(SourceBins::new(source_mesh)?);
-                self.samples = Vec::with_capacity(target_operator.degrees_of_freedom());
-                self.phase = TransferPhase::Bins(0);
+                if end < points.len() {
+                    self.phase = TransferPhase::Points(end);
+                } else {
+                    self.swept_ground = SweptGround::new(source_mesh, target_mesh);
+                    self.bins = Some(SourceBins::new(source_mesh)?);
+                    self.samples = Vec::with_capacity(target_operator.degrees_of_freedom());
+                    self.phase = TransferPhase::Bins(0);
+                }
             }
             TransferPhase::Bins(index) => {
                 if index == source_mesh.triangles.len() {

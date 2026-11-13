@@ -1635,6 +1635,26 @@ mutation, in this order:
   ran. Bevy keeps each resource in an entity it never despawns, which the
   counts leave out. A device loss stops the app, so the fault and the
   refused handoff are the recoveries it holds to.
+  C8.5, RT-08, landed on 2026-11-13: the study timed every main-thread
+  step of a large preparation, natively on the M1 Max at 87,000 nodes, and
+  replaced and cancelled preparations on lavapipe. Replacing held: three
+  edits during a preparation, a scene opened during one and a worker
+  stopping in one each ended on the document as it stood. Responsiveness
+  did not. A large generation's upload serialized its 130 to 175 MiB of
+  buffers on the main thread, 27 to 50 ms of frames reaching 128, and is
+  now serialized where the plan is packed (`CanonicalGpuUpload`). Without
+  workers, as the static-host page runs, the cooperative runner's 4 ms
+  slices met steps that never yield: the time-driven operator's laws, 115
+  to 446 ms in one step, now sampled a thousand sites a step
+  (`CanonicalTemporalAssemblyJob`), and a remesh's transfer setup, 38 to
+  41 ms, now a step per mesh's curves and the previous mesh's nodes a few
+  thousand a step; its longest slice reads 23 to 31 ms. The
+  `preparation` fixture holds both: the replacing part, a late result among
+  its acts, on every pull request's lavapipe run, and the frames part on a
+  hardware adapter. Under Worth checking sometime: the static host's
+  remaining one-shot steps, its inline pack and its frame-rate-bound
+  throughput, and the field paint's topology rebuilt on the main thread for
+  each new mesh.
 - **C9, long runs:** 5.3's gaps, an adaptive run among them.
 
 ## 7. Infrastructure

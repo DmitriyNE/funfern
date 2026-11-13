@@ -1,0 +1,4 @@
+about: the preparation worker works each job it is sent to the end, a superseded one too, before it looks at the newer
+test: FUNFERN_E2E_PREPARATION=replace scripts/e2e-fixture.sh preparation
+expect: superseded preparations came back finished
+needs: device
