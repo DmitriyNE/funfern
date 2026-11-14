@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/canonical_wave.wgsl	2026-11-14 20:56:12
++++ b/crates/funfern-app/src/canonical_wave.wgsl	2026-11-14 20:56:12
+@@ -4117,7 +4117,7 @@
+ // `Cᵀ b`; the sum of `Q` integrates the walk, which in a reflecting box grew
+ // a uniform offset of 0.4% of the field over a million steps (C9, 2026-11-14).
+ fn rebuilds_force_cache() -> bool {
+-    return control.clock_u32.z % FORCE_CACHE_REBUILD_CADENCE == 0u;
++    return false;
+ }
+ 
+ // `Cᵀ b` at a node from the step's accepted flux, each lane read alone: the

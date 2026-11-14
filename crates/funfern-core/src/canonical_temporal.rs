@@ -18414,6 +18414,264 @@ mod tests {
         }
     }
 
+    /// The PH-16 case named `name`.
+    fn oscillator_case(name: &str) -> OscillatorCase {
+        oscillator_cases()
+            .into_iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("no PH-16 case {name}"))
+    }
+
+    /// C9 (long runs): PH-16's swings that stay uniform, two thousand
+    /// seconds at the production step, 44,000 to 59,000 steps. Each keeps
+    /// the period error it starts with, read over the first and the last
+    /// twentieth, within a tenth of it (4.9e-7 to 2.3e-4 measured, moving by
+    /// 4e-8 at most); its phase at the end lags RK4's by that error times
+    /// the periods run, within 5% (0.02% to 1% measured), so nothing but a
+    /// constant frequency error accumulates. A conservative swing's energy
+    /// breathes over the last twentieth as over the first, within 2% (the
+    /// same to five digits); van der Pol's limit cycle holds RK4's amplitude
+    /// within 1e-4 (3.4e-5 measured);
+    /// and the nodes stay together within 1e-9 (1.4e-13 measured).
+    #[test]
+    #[ignore = "nightly: energy-long-runs"]
+    fn long_run_stable_uniform_oscillators_keep_their_period_and_energy() {
+        for name in [
+            "sine-Gordon swung to 0.001 rad",
+            "sine-Gordon swung to 1 rad",
+            "φ⁴ in a well, small",
+            "van der Pol with Klein-Gordon, from inside",
+            "van der Pol with Klein-Gordon, from outside",
+        ] {
+            let case = oscillator_case(name);
+            let operator = law_operator(|material| (case.author)(material), 0.4);
+            let h = operator.recommended_time_step();
+            let (r0, u0) = case.start;
+            let q0 = (case.flux)(u0);
+            let series = uniform_series(&operator, (r0, q0), h, 2000.0);
+            let steps = series.r.len() - 1;
+            let field = |q: f64| bisected(|u| (case.flux)(u), q);
+            let (rs, us) = uniform_reference(field, &case.force, &case.loss, (r0, q0), h, steps);
+            let window = steps / 20;
+            let (first, last) = (0..window, steps - window..steps + 1);
+            let error_over = |range: std::ops::Range<usize>| {
+                case.period_of(&series.r[range.clone()], h) / case.period_of(&rs[range], h) - 1.0
+            };
+            let (early, late) = (error_over(first.clone()), error_over(last.clone()));
+            assert!(
+                (late - early).abs() <= 0.1 * early.abs() + 1.0e-7,
+                "{name}: the period's error moved from {early:.3e} to {late:.3e}"
+            );
+            // The last upward crossing against RK4's nearest, in periods.
+            let (OscillatorPeriod::Exact { level, .. } | OscillatorPeriod::Reference { level }) =
+                case.period
+            else {
+                unreachable!("{name} rotates")
+            };
+            let period = case.period_of(&rs[last.clone()], h);
+            let mine = *level_crossings(&series.r, h, level).last().unwrap();
+            let nearest = level_crossings(&rs, h, level)
+                .into_iter()
+                .map(|time| time - mine)
+                .fold(f64::INFINITY, |best, gap| {
+                    if gap.abs() < best.abs() { gap } else { best }
+                });
+            let lag = -nearest / period;
+            let expected = early * steps as f64 * h / period;
+            eprintln!(
+                "{name}: period error {early:.3e} first, {late:.3e} last; lag {lag:.4e} periods, \
+                 {expected:.4e} from the error"
+            );
+            assert!(
+                (lag - expected).abs() <= 0.05 * expected.abs(),
+                "{name}: lags {lag:.4e} periods, the error accounts for {expected:.4e}"
+            );
+            let largest = |values: &[f64]| values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+            if case.conservative {
+                let start = series.energy[0];
+                let band = |range: std::ops::Range<usize>| {
+                    series.energy[range]
+                        .iter()
+                        .fold(0.0_f64, |m, e| m.max((e - start).abs()))
+                        / start
+                };
+                let (early, late) = (band(first), band(last));
+                eprintln!("{name}: energy breathes {early:.4e} first, {late:.4e} last");
+                assert!(
+                    late <= 1.02 * early,
+                    "{name}: the energy's band grew from {early:.4e} to {late:.4e}"
+                );
+            } else {
+                let amplitude = largest(&series.u[last.clone()]) / largest(&us[last]) - 1.0;
+                eprintln!("{name}: the cycle's amplitude {amplitude:.2e} off RK4's");
+                assert!(
+                    amplitude.abs() <= 1.0e-4,
+                    "{name}: amplitude {amplitude:.2e} off"
+                );
+            }
+            assert!(
+                series.spread <= 1.0e-9,
+                "{name}: the nodes spread {:.2e}",
+                series.spread
+            );
+        }
+    }
+
+    /// Floquet's largest growth rate about a PH-16 case's uniform orbit,
+    /// whose period it is given: each mode of the reflecting box `[−1, 1]²`,
+    /// `k² = (π/2)²(m² + n²)` up to `m, n = 4`, perturbs the swing as
+    /// `δr̈ = −(k² + V″(r(t))) δr`, and its monodromy over a period, by RK4
+    /// in 4000 steps beside the orbit, grows by its largest multiplier.
+    fn floquet_growth(case: &OscillatorCase, period: f64) -> f64 {
+        let curvature = |r: f64| ((case.force)(r + 1.0e-5) - (case.force)(r - 1.0e-5)) / 2.0e-5;
+        let steps = 4000;
+        let h = period / f64::from(steps);
+        let (r0, u0) = case.start;
+        let mut fastest = f64::NEG_INFINITY;
+        for m in 0..=4_u32 {
+            for n in 0..=m {
+                if m + n == 0 {
+                    continue;
+                }
+                let k2 = (0.5 * std::f64::consts::PI).powi(2) * f64::from(m * m + n * n);
+                let rate = |y: [f64; 6]| {
+                    let pull = k2 + curvature(y[0]);
+                    [
+                        y[1],
+                        -(case.force)(y[0]),
+                        y[3],
+                        -pull * y[2],
+                        y[5],
+                        -pull * y[4],
+                    ]
+                };
+                let along = |y: [f64; 6], slope: [f64; 6], by: f64| -> [f64; 6] {
+                    std::array::from_fn(|i| y[i] + by * slope[i])
+                };
+                let mut y = [r0, u0, 1.0, 0.0, 0.0, 1.0];
+                for _ in 0..steps {
+                    let s1 = rate(y);
+                    let s2 = rate(along(y, s1, 0.5 * h));
+                    let s3 = rate(along(y, s2, 0.5 * h));
+                    let s4 = rate(along(y, s3, h));
+                    y = std::array::from_fn(|i| {
+                        y[i] + h / 6.0 * (s1[i] + 2.0 * s2[i] + 2.0 * s3[i] + s4[i])
+                    });
+                }
+                let [_, _, a, da, b, db] = y;
+                let (trace, det) = (a + db, a * db - b * da);
+                let discriminant = 0.25 * trace * trace - det;
+                let multiplier = if discriminant >= 0.0 {
+                    0.5 * trace.abs() + discriminant.sqrt()
+                } else {
+                    det.abs().sqrt()
+                };
+                fastest = fastest.max(multiplier.ln() / period);
+            }
+        }
+        fastest
+    }
+
+    /// C9 (long runs): a large uniform swing does not stay uniform. Its own
+    /// motion pumps the box's modes parametrically, as Hill's equation has
+    /// it, and rounding seeds them: the nodes part at Floquet's rate, read
+    /// here from the largest spread of `r` over each period between 1e-11
+    /// and 1e-4, within 5% of the largest rate over the box's modes (1.066
+    /// against 1.058 swung to 2.5 rad, 0.730 against 0.742 rotating, 0.633
+    /// against 0.626 near φ⁴'s barrier and 0.461 against 0.455 over it). A
+    /// swing that stays together has no unstable mode, so what parts the
+    /// others is the law and not the solver.
+    #[test]
+    fn large_uniform_swings_break_up_at_the_floquet_rate() {
+        let period_of = |case: &OscillatorCase| match case.period {
+            OscillatorPeriod::Exact { period, .. } | OscillatorPeriod::Rotation { period } => {
+                period
+            }
+            OscillatorPeriod::Reference { .. } => unreachable!("{} has a closed form", case.name),
+        };
+        for name in ["sine-Gordon swung to 1 rad", "φ⁴ in a well, small"] {
+            let case = oscillator_case(name);
+            let growth = floquet_growth(&case, period_of(&case));
+            assert!(growth < 1.0e-6, "{name}: Floquet grows {growth:.3e}");
+        }
+        for name in [
+            "sine-Gordon swung to 2.5 rad",
+            "sine-Gordon rotating",
+            "φ⁴ in a well, near the barrier",
+            "φ⁴ over the barrier",
+        ] {
+            let case = oscillator_case(name);
+            let period = period_of(&case);
+            let floquet = floquet_growth(&case, period);
+            let operator = law_operator(|material| (case.author)(material), 0.4);
+            let h = operator.recommended_time_step();
+            let base = operator.base();
+            let masses = base.primary_mass();
+            let (r0, u0) = case.start;
+            let q0 = (case.flux)(u0);
+            let primary = masses.iter().map(|mass| mass * q0).collect();
+            let complementary = vec![Point2::default(); base.complementary_degrees_of_freedom()];
+            let mut state =
+                CanonicalTemporalWaveState::new(&operator, h, primary, complementary).unwrap();
+            if r0 != 0.0 {
+                state = state
+                    .with_integrated_field(&operator, vec![r0; base.degrees_of_freedom()])
+                    .unwrap();
+            }
+            // The largest spread over each period, until it passes 1e-3.
+            let window = (period / h).round() as usize;
+            let mut peaks = vec![0.0_f64];
+            for step in 1_usize.. {
+                state.step(&operator).unwrap();
+                let r = state.integrated_field();
+                let spread = r
+                    .iter()
+                    .fold(0.0_f64, |m, value| m.max((value - r[0]).abs()));
+                let peak = peaks.last_mut().unwrap();
+                *peak = peak.max(spread);
+                if spread > 1.0e-3 || step as f64 * h > 200.0 {
+                    break;
+                }
+                if step.is_multiple_of(window) {
+                    peaks.push(0.0);
+                }
+            }
+            let start = peaks.iter().position(|peak| *peak >= 1.0e-11).unwrap();
+            let end = start
+                + peaks[start..]
+                    .iter()
+                    .position(|peak| *peak > 1.0e-4)
+                    .unwrap();
+            assert!(
+                end - start >= 3,
+                "{name}: {:?} spans too few periods",
+                &peaks[start..end]
+            );
+            let points = (start..end)
+                .map(|index| (index as f64 * window as f64 * h, peaks[index].ln()))
+                .collect::<Vec<_>>();
+            let count = points.len() as f64;
+            let (mean_t, mean_y) = points.iter().fold((0.0, 0.0), |(t, y), point| {
+                (t + point.0 / count, y + point.1 / count)
+            });
+            let (covariance, variance) = points.iter().fold((0.0, 0.0), |(c, v), point| {
+                (
+                    c + (point.0 - mean_t) * (point.1 - mean_y),
+                    v + (point.0 - mean_t).powi(2),
+                )
+            });
+            let rate = covariance / variance;
+            eprintln!(
+                "{name}: the nodes part at {rate:.4}/s over {} periods, Floquet {floquet:.4}/s",
+                end - start
+            );
+            assert!(
+                (rate / floquet - 1.0).abs() <= 0.05,
+                "{name}: parts at {rate:.4}/s, Floquet {floquet:.4}/s"
+            );
+        }
+    }
+
     /// PH-16's references against each other before they judge the solver:
     /// RK4's crossings meet each closed-form period, sine-Gordon's elliptic
     /// ones and φ⁴'s quadratures, within 1e-7. Its van der Pol cycle is the

@@ -1655,7 +1655,29 @@ mutation, in this order:
   remaining one-shot steps, its inline pack and its frame-rate-bound
   throughput, and the field paint's topology rebuilt on the main thread for
   each new mesh.
-- **C9, long runs:** 5.3's gaps, an adaptive run among them.
+- **C9, long runs:** 5.3's gaps, an adaptive run among them. Landed on
+  2026-11-14. The f64 study ran the cavity 5,000 s in three skins under
+  either integrator, filtered and not, PH-16's uniform swings 2,000 s,
+  PH-17's Kerr box to 2,000, PH-15's pumps 1,000 periods and AMR-03's
+  adaptive run 480 s; the device ran the cavity a million steps against f64
+  on lavapipe. No drift in f64: frequency, phase and amplitude hold, the
+  filter's decay meets its prediction, the stable swings keep a constant
+  period error. What moves is physics or the step: the large swings break
+  up at Floquet's rate (Hill's instability of the box's modes), and Kerr's
+  unfiltered gain is the step's, its fastest modes near half a cycle a
+  step, gone at half the step; under the filter, as the app runs it, Kerr's
+  box loses energy instead. On the device the sum of `Q`, which a
+  reflecting box conserves, drifted, a uniform offset of 0.4% of the field
+  by a million steps: the fixed generation's force cache, `Cᵀ b` advanced
+  beside `b`, was never rebuilt from the flux, and its f32 rounding walked.
+  The drift now rebuilds it every sixteenth step. The tests: the cavity, the
+  stable swings, Kerr under the filter and the pumps for 300 periods
+  nightly; the break-up against the test's own Floquet monodromy in the
+  gate; `canonical_gpu_cavity_drift`, 200,000 steps against f64, nightly on
+  lavapipe and in the device suite; and `endurance`, the app run on for
+  six counts of what it holds, nightly. Under Worth checking sometime: a
+  dormant field coarsened below the authored mesh fading half as fast, and
+  the app's wait for a full readback starving where several land a frame.
 
 ## 7. Infrastructure
 

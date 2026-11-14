@@ -861,7 +861,26 @@ bound alike; van der Pol off the primary row, or driven, does not compile
 (`a_uniform_field_driven_past_its_bound_is_refused_where_its_ode_crosses`).
 The mutation `sine-gordon-force-linearized`, sine-Gordon's force its
 small-angle limit, puts the 1 rad swing's period 6.2% off while the 1e-3 rad
-swing still passes.
+swing still passes. Over long runs (C9): the swings that stay uniform run
+two thousand seconds, 44,000 to 59,000 steps
+(`long_run_stable_uniform_oscillators_keep_their_period_and_energy`,
+nightly, a minute). Each keeps its period's error between the first
+twentieth and the last within a tenth (moved 4e-8 at most), lags RK4 at the
+end by that error times the periods run within 5% (0.02% to 1%), its energy
+breathing over the last twentieth as over the first within 2% (to five
+digits), van der Pol's cycle within 1e-4 of RK4's amplitude (3.4e-5), the
+nodes together within 1e-9. The larger swings do not stay uniform: their
+own motion pumps the box's modes, Hill's equation, and rounding seeds them
+(`large_uniform_swings_break_up_at_the_floquet_rate`, in the gate, 0.6 s).
+The nodes part at the rate the test's own monodromy gives for the box's
+fastest mode, within 5%: 1.066 against 1.058 swung to 2.5 rad, 0.730
+against 0.742 rotating, 0.633 and 0.461 against 0.626 and 0.455 near φ⁴'s
+barrier and over it; the swings that stay together have no unstable mode.
+After breaking up, φ⁴'s swings are refused at their law's bound (59 and 83
+s), and the lossless Kerr swing with Klein-Gordon gains energy, 320-fold by
+t = 2000: the step's own, its fastest modes near half a cycle a step, gone
+at half the step (1.05-fold by t = 500 against 13.7) under either
+integrator, and under the grid filter the app applies it loses instead.
 PH-18 holds what users read to analytic fields. Every probe number on screen
 comes from a GPU recorder whose CPU twin is the canonical consumer:
 `CanonicalPointStencil` for a point, its transverse field recovered from the
@@ -1286,7 +1305,27 @@ weak loss, either wall and a wall beside a gap four hundred seconds in each
 skin, the peak of each 20 s window never above the last; the slow near field
 twenty periods, its residual where its switch-on left it; and Kerr's known
 gain under the splitting held to 0.15 by t = 160 (measured 9.5e-2), which
-by t = 1000 takes this strong a field past its declared bound.
+at t = 288 takes this strong a field past its declared bound: the step's own
+gain, its fastest modes turning nearly half a cycle a step, gone at half the
+step. C9's long runs join them (ten minutes): PH-01's cavity a thousand
+seconds in each skin under either integrator, filtered and not
+(`long_run_cavity_modes_hold_frequency_phase_and_amplitude`), each mode's
+frequency between the first 200 s and the last within 1e-8 (8e-10), its
+phase within 1e-4 rad (4.4e-7) and its amplitude within 1e-7 (2e-9), the
+energy's band the same over the last window as the first; under the filter
+no application raising the energy and each mode falling as one
+application predicts, its logarithm within 10% (3% to 6%); the sum of `Q`
+within 1e-12 throughout (6.8e-15). Kerr's box as the app runs it, under the
+grid filter, to t = 1000 (`long_run_kerr_under_the_filter_never_gains`): no
+step refused, no 20 s window's peak above the one before (each 1% below at
+least), 84% gone by then, the cascade the filter takes, which converges with
+the mesh (58%, 53% and 50% by t = 200 on edges 0.25, 0.125 and 0.0625).
+PH-15's stable pumps for three hundred periods and a hundred and fifty
+(`long_run_modulated_media_part_from_the_mode_only_in_phase`): the trace
+grows from one to the other at most 2.4-fold (1.67 to 2.14), a frequency's
+error moving the phase linearly, and the growth keeps the gate's bound
+(2.8e-6 at most); the stiffness-side pump outside the tongue's edge reads
+the most, 6.5e-2, its known second-order error.
 
 `temporal_amr_calibration` measures the AMR estimator's efficiency index, its
 estimate over the true error, across a refinement sequence on a smooth
@@ -1429,9 +1468,14 @@ the gradient of a potential vanishing on every wall, on the reflecting box
 and, with `--baffle`, on a box a reflecting baffle divides from wall to wall,
 drawn as the editor draws one, the flux on the baffle's left alone. Stepped
 400 steps in f64 the mode is exact, Q at 1e-24 of its energy and the energy
-kept to 1e-16; on the device b stays within `2.6e-8` of the reference, Q at
-1e-24 and the energy within `2e-9`, where the bound is 1e-8, and the right
-side of the baffle holds nothing, to the bit. The carry onto a mesh 1.4 times
+kept to 1e-16; on the device b stays within `5.7e-7` of the reference, Q at
+1.3e-13 and the energy within `7.8e-8`, where the bounds are 1e-8 and 2e-7,
+and the right side of the baffle holds nothing, to the bit. Before C9 the
+device read b 2.6e-8, Q 1e-24 and the energy 2e-9: its force cache kept the
+host's f64 `Cᵀ b` for good, and nothing moved. It now rebuilds the cache from
+its own f32 flux every sixteenth step, whose rounding has a compatible part
+that moves Q a little, and b then takes f32's rounding each step as a
+moving field does. The carry onto a mesh 1.4 times
 finer, through the maps the runtime prepares for the edit, has its own
 budget, the carried flux against the mode sampled on the new mesh, `4.0e-5`
 on the box at edge 0.16 and `1.5e-4` on the baffled one, falling eightfold
@@ -1454,6 +1498,30 @@ floor, held to 1e-7; that floor lies under the frequency's own error on
 every mesh, so the device shows the element's fourth order in space to the
 finest, (2,3) at 2.6e-5, 2.9e-6 and 1.8e-7, and leapfrog's second order in
 time, successive differences falling 4.001 times. 45 to 90 s a model.
+
+`canonical_gpu_cavity_drift` is C9's long run on the device: the same box
+on edge 0.08, (1,0) and half of (2,3), 200,000 steps of the fourth-order
+step (3,500 s), mechanical by default, `--physics tm` or `te`, `--filter`
+under the grid filter, read at forty checkpoints against f64, the step the
+app's own (`device_time_step`, an f32 the device steps by exactly). The
+device's clock reads `n dt` within 2e-6 s, an f32 time in an epoch of 16 s
+(5e-7); each mode's phase drifts as a frequency within 1e-8 of the
+reference's (8e-10 to 3.6e-9 on lavapipe),
+its amplitude within 1e-5 (9.7e-7 to 3e-6: the cache's rounding, held up to
+sixteen steps between rebuilds, a faint noise in the force that warms the
+modes, three to eight times what the force gathered every step leaves); the
+stationary flux holds under 1e-9 of the energy (4.4e-11), the energy within
+1e-5 (1.3e-6 to 3.4e-6), and the sum of `Q`, which the box conserves, within
+2e-5 (1.7e-6 to 4.6e-6), its uniform mode under 1e-10 of the energy (1.8e-13
+to 1.2e-12). That last
+pair is what the study found: a fixed generation's force cache, `F = Cᵀ b`
+advanced each step beside `b`, was never rebuilt from the flux, its f32
+rounding walked, and the sum of `Q` integrated it, 3.3e-3 by 200,000 steps
+in the study's run (3e-4 under the filter) and a uniform offset of 0.4% of
+the field by a million. The drift now sets the cache from the accepted flux
+every sixteenth step. The mutation `force-cache-never-rebuilt` takes the
+rebuild away: the sum reads 6.2e-4 and the uniform mode 2.1e-8. Nightly on lavapipe (`device-long-runs`: mechanical with and without
+the filter, and TM); the device suite runs the unfiltered one.
 
 The walls step by the trapezoid rule
 (`docs/spikes/funfern-outgoing-wall-step-spike.md`) on the reference and the
@@ -2201,6 +2269,18 @@ take 602 s on lavapipe and 41 s on the M1 Max. Its mutations, on the
 device: `readbacks-left-at-a-clear`, `staging-never-retired`,
 `far-field-bind-group-kept`, `committed-generation-kept` and
 `preparation-worker-left-running`.
+
+The `endurance` fixture is C9's long run of the app: the same driver over
+the self-sustained emitter alone, opened and pulsed, run on with its
+adaptation on, and counted as `lifecycle` counts every 1,800 frames, six
+times, adaptation back on and the run resumed after each. Every count must
+hold what any count must and be the one before. On lavapipe under emulation
+the 1,800 frames take eight minutes, adaptation taking the mesh from 8,719
+nodes to 12,501 each time; the six counts, over 51 minutes, were the same:
+13 shader buffers (17.8 MB on the device), 4 readbacks and 8 staging
+buffers, the snapshot's one, the paint's 7, three bind groups, 103
+pipelines, two threads, one mesh and one operator alive. Nightly on lavapipe
+(`device-long-runs`).
 
 The `preparation` fixture holds what C8.5 found of RT-08: large jobs keep the
 app responsive, and a cancelled or replaced one never leaves a stale result

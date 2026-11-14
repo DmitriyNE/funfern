@@ -371,13 +371,17 @@ jobs:
 
   # Nightly: PH-05 and PH-17 over long runs, the conservative media to a
   # thousand seconds, the passive ones and the walls to four hundred, Kerr's
-  # known drift to 160; about half a minute on an M1 Max
-  # (crates/funfern-app/src/topology_examples.rs, long_run_*).
+  # known drift to 160; and C9's: the cavity's modes for a thousand seconds,
+  # Kerr under the filter to a thousand, the bounded pumps for three hundred
+  # periods, and the uniform oscillators that stay uniform for two thousand;
+  # about ten minutes and one on an M1 Max
+  # (crates/funfern-app/src/topology_examples.rs and
+  # crates/funfern-core/src/canonical_temporal.rs, long_run_*).
   energy-long-runs:
-    name: Energy over long runs, PH-05 and PH-17
+    name: Energy over long runs, PH-05, PH-17 and C9
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -412,9 +416,15 @@ jobs:
             target/
           key: native-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Energy over long runs, PH-05 and PH-17
+      - name: Energy over long runs, PH-05, PH-17 and C9
         run: >-
           cargo test --release -p funfern-app --lib --locked --
+          --ignored --nocapture long_run_
+
+      - name: Uniform oscillators over long runs, C9
+        if: success() || failure()
+        run: >-
+          cargo test --release -p funfern-core --lib --locked --
           --ignored --nocapture long_run_
 
   # Nightly: PH-07, an absorbing circular hole, the same cases
@@ -851,6 +861,81 @@ jobs:
 
       - name: Run every mutation
         run: scripts/mutations.sh
+
+  # Nightly: C9's long runs on the device. PH-01's cavity for 200,000 steps
+  # on lavapipe against f64, mechanical with the grid filter and without,
+  # and TM: the clock, each mode's phase and amplitude, the stationary flux,
+  # the energy and the sum of Q
+  # (crates/funfern-app/examples/canonical_gpu_cavity_drift.rs); the device
+  # suite runs the unfiltered one on hardware. And the app run on, the
+  # `endurance` fixture: one adaptive scene counted every 1,800 frames, six
+  # times, each count what the one before held (src/ui/e2e/lifecycle.rs).
+  device-long-runs:
+    name: Device long runs on software Vulkan
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies, lavapipe and a virtual display
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            g++ \
+            pkg-config \
+            libx11-dev \
+            libxkbcommon-x11-0 \
+            libwayland-dev \
+            libxkbcommon-dev \
+            mesa-vulkan-drivers \
+            libvulkan1 \
+            xvfb \
+            xauth \
+            libxcursor1 \
+            libxrandr2 \
+            libxi6 \
+            libx11-xcb1
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --no-self-update
+          rustup default "$RUST_VERSION"
+
+      - name: Restore build cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: device-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Mechanical, unfiltered
+        env:
+          FIXTURE_TIMEOUT: 1700
+        run: scripts/e2e-fixture.sh --example canonical_gpu_cavity_drift
+
+      - name: Mechanical, under the grid filter
+        if: success() || failure()
+        env:
+          FIXTURE_TIMEOUT: 1700
+        run: scripts/e2e-fixture.sh --example canonical_gpu_cavity_drift --filter
+
+      - name: TM, unfiltered
+        if: success() || failure()
+        env:
+          FIXTURE_TIMEOUT: 1700
+        run: scripts/e2e-fixture.sh --example canonical_gpu_cavity_drift --physics tm
+
+      - name: The app run on, its resources counted
+        if: success() || failure()
+        env:
+          FIXTURE_TIMEOUT: 5400
+        run: scripts/e2e-fixture.sh endurance
 
   web:
     name: Browser bundle

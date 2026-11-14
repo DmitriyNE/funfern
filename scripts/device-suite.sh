@@ -90,6 +90,7 @@ RUNS=(
   'canonical_gpu_cavity_modes --physics mechanical'
   'canonical_gpu_cavity_modes --physics tm'
   'canonical_gpu_cavity_modes --physics te'
+  'canonical_gpu_cavity_drift'
   'canonical_gpu_handoff'
   'canonical_gpu_handoff --source --prescribed --edit'
   'canonical_gpu_handoff --source --integrated'

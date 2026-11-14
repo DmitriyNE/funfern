@@ -123,7 +123,11 @@ pub(crate) fn add(app: &mut App) {
         return;
     }
     if name == "lifecycle" {
-        lifecycle::add(app, seconds);
+        lifecycle::add(app, &lifecycle::LIFECYCLE, seconds);
+        return;
+    }
+    if name == "endurance" {
+        lifecycle::add(app, &lifecycle::ENDURANCE, seconds);
         return;
     }
     if name == "preparation" {

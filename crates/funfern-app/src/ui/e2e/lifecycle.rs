@@ -20,6 +20,12 @@
 //! flight, no handoff's or live event's bind groups kept, one generation
 //! alive, no work in hand - and be the one the same scene left on the cycle
 //! before: a bounded workload, a bounded steady state.
+//!
+//! `endurance` (C9, long runs) runs the same driver over one adaptive scene
+//! for a long time instead ([`ENDURANCE`]): opened once and run on, its
+//! adaptation refining as it goes, counted every [`ENDURANCE_FRAMES`]
+//! frames and resumed after each count, every count holding what any count
+//! must and the one before it.
 
 use super::*;
 use crate::document::{MaterialOverlay, MaterialProperty, VectorOverlay};
@@ -80,6 +86,57 @@ const HOLDERS: &[&str] = &[
     "field paint",
 ];
 
+/// What a run of the driver takes: the scenes, the work each is put
+/// through, how many times over, and the bind group holders the scenes must
+/// make between them.
+pub(super) struct Plan {
+    name: &'static str,
+    scenes: &'static [&'static str],
+    work: &'static [Act],
+    cycles: usize,
+    holders: &'static [&'static str],
+}
+
+/// RT-07's cycled scenes.
+pub(super) const LIFECYCLE: Plan = Plan {
+    name: "lifecycle",
+    scenes: SCENES,
+    work: WORK,
+    cycles: CYCLES,
+    holders: HOLDERS,
+};
+
+/// Frames the endurance run goes on for between counts.
+const ENDURANCE_FRAMES: u32 = 1800;
+
+/// C9's long run: the self-sustained emitter, whose van der Pol medium
+/// keeps a field up for good, with a pulse to start adaptation off, run on
+/// and counted [`ENDURANCE_COUNTS`] times.
+pub(super) const ENDURANCE: Plan = Plan {
+    name: "endurance",
+    scenes: &["Self-sustained emitter"],
+    work: &ENDURANCE_WORK,
+    cycles: 1,
+    holders: &[],
+};
+
+/// Times the endurance run is counted.
+const ENDURANCE_COUNTS: usize = 6;
+
+const ENDURANCE_WORK: [Act; 2 + 3 * ENDURANCE_COUNTS] = {
+    let mut work = [Act::Resume; 2 + 3 * ENDURANCE_COUNTS];
+    work[0] = Act::Open;
+    work[1] = Act::Pulse;
+    let mut count = 0;
+    while count < ENDURANCE_COUNTS {
+        work[2 + 3 * count] = Act::Frames(ENDURANCE_FRAMES);
+        work[3 + 3 * count] = Act::Count;
+        // The last count's resumption is the run's end.
+        count += 1;
+    }
+    work
+};
+
 /// Frames a count waits once the run is paused, past the readback pool's
 /// ten unused frames, and the frames its counts must then hold still for.
 const SETTLE_FRAMES: u32 = 15;
@@ -116,6 +173,8 @@ enum Act {
     /// Adaptation off, the scene's own mesh, the run paused and drained,
     /// and what the app holds counted.
     Count,
+    /// After a count, adaptation back on and the run resumed.
+    Resume,
 }
 
 /// Where an act has got to.
@@ -272,6 +331,7 @@ impl Counted {
 
 #[derive(Resource)]
 pub(super) struct LifecycleDriver {
+    plan: &'static Plan,
     /// The scene and the act under way, by index.
     cycle: usize,
     scene: usize,
@@ -297,11 +357,11 @@ pub(super) struct LifecycleDriver {
 
 impl LifecycleDriver {
     fn scene(&self) -> &'static str {
-        SCENES[self.scene]
+        self.plan.scenes[self.scene]
     }
 
     fn act(&self) -> Act {
-        WORK[self.act]
+        self.plan.work[self.act]
     }
 
     /// Moves on to the next act, the next scene's first, or the next cycle's;
@@ -310,7 +370,8 @@ impl LifecycleDriver {
         let took = self.act_started.elapsed().as_secs_f64();
         if took > SLOW_ACT_SECONDS {
             report(&format!(
-                "e2e lifecycle: cycle {}, {}: {:?} took {took:.0} s, {nodes} nodes",
+                "e2e {}: cycle {}, {}: {:?} took {took:.0} s, {nodes} nodes",
+                self.plan.name,
                 self.cycle,
                 self.scene(),
                 self.act()
@@ -320,28 +381,30 @@ impl LifecycleDriver {
         self.act_started = Instant::now();
         self.act_deadline = self.act_started + self.act_time;
         self.act += 1;
-        if self.act < WORK.len() {
+        if self.act < self.plan.work.len() {
             return true;
         }
         self.act = 0;
         self.scene += 1;
-        if self.scene < SCENES.len() {
+        if self.scene < self.plan.scenes.len() {
             return true;
         }
         self.scene = 0;
         self.cycle += 1;
-        self.cycle <= CYCLES
+        self.cycle <= self.plan.cycles
     }
 }
 
-/// Adds the lifecycle fixture's driver, and the render world's count.
-pub(super) fn add(app: &mut App, seconds: Option<u64>) {
+/// Adds the driver of `plan`, the lifecycle fixture's or the endurance
+/// run's, and the render world's count.
+pub(super) fn add(app: &mut App, plan: &'static Plan, seconds: Option<u64>) {
     mark("running", "");
     report(&format!("e2e build {}", crate::BUILD_ID));
     let count = crate::live_resources::add_render_count(app);
     let run_time = std::time::Duration::from_secs(seconds.unwrap_or(1800));
     let act_time = run_time / ACT_SHARE;
     app.insert_resource(LifecycleDriver {
+        plan,
         cycle: 1,
         scene: 0,
         act: 0,
@@ -421,12 +484,12 @@ fn drive_lifecycle(
     state.wave_running = false;
     match verdict {
         Ok(summary) => {
-            report(&format!("e2e lifecycle: {summary}"));
+            report(&format!("e2e {}: {summary}", driver.plan.name));
             mark("pass", &summary);
             exit.write(AppExit::Success);
         }
         Err(failure) => {
-            report(&format!("e2e lifecycle FAILED: {failure}"));
+            report(&format!("e2e {} FAILED: {failure}", driver.plan.name));
             mark("fail", &failure);
             exit.write(AppExit::error());
         }
@@ -618,6 +681,11 @@ fn advance(
             state.coordinator.remesh_requested = true;
             Stage::Rest
         }
+        (Act::Resume, Stage::Take) => {
+            state.editor.document.presentation.adaptation.enabled = true;
+            state.wave_running = true;
+            Stage::Rest
+        }
         (Act::Count, Stage::Take) => {
             let presentation = &mut state.editor.document.presentation;
             presentation.adaptation.enabled = false;
@@ -657,7 +725,7 @@ fn advance(
                     main,
                     render,
                 };
-                report(&format!("e2e lifecycle: {}", counted.line()));
+                report(&format!("e2e {}: {}", driver.plan.name, counted.line()));
                 driver.counted.push(counted);
                 driver.last = None;
                 return Ok(driver.next(display.primary_flux.len()));
@@ -703,10 +771,12 @@ pub(super) fn edit(state: &mut Playground) -> Result<(), String> {
         .map_err(|error| format!("the edit was refused: {error:?}"))
 }
 
-/// Every holder made, and every count as the cycle before left it.
+/// Every holder made, and every count as the scene's count before left it.
 fn judge(driver: &LifecycleDriver) -> Result<String, String> {
     let mut failures = Vec::new();
-    let missing: Vec<&str> = HOLDERS
+    let missing: Vec<&str> = driver
+        .plan
+        .holders
         .iter()
         .copied()
         .filter(|holder| !driver.holders.contains(holder))
@@ -717,7 +787,7 @@ fn judge(driver: &LifecycleDriver) -> Result<String, String> {
             missing.join(", ")
         ));
     }
-    for counted in &driver.counted {
+    for (index, counted) in driver.counted.iter().enumerate() {
         let broken = held(counted);
         if !broken.is_empty() {
             failures.push(format!(
@@ -727,10 +797,10 @@ fn judge(driver: &LifecycleDriver) -> Result<String, String> {
                 broken.join(", ")
             ));
         }
-        let Some(before) = driver
-            .counted
+        let Some(before) = driver.counted[..index]
             .iter()
-            .find(|before| before.cycle + 1 == counted.cycle && before.scene == counted.scene)
+            .rev()
+            .find(|before| before.scene == counted.scene)
         else {
             continue;
         };
@@ -739,18 +809,22 @@ fn judge(driver: &LifecycleDriver) -> Result<String, String> {
             continue;
         }
         failures.push(format!(
-            "{}, cycle {} against {}: {}",
+            "{}, cycle {} at {:.0} s against cycle {} at {:.0} s: {}",
             counted.scene,
             counted.cycle,
+            counted.seconds,
             before.cycle,
+            before.seconds,
             changed.join(", ")
         ));
     }
     if failures.is_empty() {
         Ok(format!(
-            "{} scenes, {CYCLES} cycles, every bind group made, every count as the cycle \
-             before left it",
-            SCENES.len()
+            "{} scenes, {} cycles, {} counts, every bind group made, every count as the \
+             scene's count before left it",
+            driver.plan.scenes.len(),
+            driver.plan.cycles,
+            driver.counted.len()
         ))
     } else {
         Err(failures.join("; "))

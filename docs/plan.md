@@ -1783,12 +1783,6 @@ is next touched.
   crossed before IV-11's projection; a projection along the trace is the
   candidate. IV-13 holds the energy within 4e-4 (found by IV-13 on
   2026-11-03).
-- The device's flux grows by `C u` each step in f32, and what its rounding
-  leaves outside `C`'s range is stationary, as a handoff's carry is: it
-  never leaves, and only after a handoff is the stationary part taken away
-  (2026-11-03). How much a long run gathers is unmeasured; C9's long runs
-  are the place to read it, from a readback through
-  `CanonicalStationaryFluxJob`.
 - A coarsening of a dormant field can raise its energy: in AMR-01's study
   of 2026-11-05 the rings' dormant coarsenings added up to 131% and 144% of
   what was left, at 3e-5 to 8e-5 of their peaks, and the slow packet's 42%,
@@ -1878,6 +1872,23 @@ is next touched.
   first frame it draws a new mesh: 11 to 32 ms of one frame at 87,000
   nodes, most of it an ordered map of the 44,000 edges, which sorting would
   take to about 3 ms (C8.5, 2026-11-13).
+- A dormant field coarsened below the authored mesh fades half as fast as
+  on it. In C9's long adaptive run (480 s of strikes, 2026-11-14), after the
+  last strike the mesh coarsened from 2772 to 1890 triangles at 61 to 78 s;
+  those handoffs added 22.5%, 7.4%, 5.4% and 2.7% of a residual at 5e-6 of
+  the peak, which then fell at 7.4e-3/s against the authored mesh's
+  1.47e-2/s: 9.6e-8 of the peak at 480 s against 4.4e-10. Above the
+  exposure floor of 1% amplitude the tail paints about 20%, 10% at 150 s
+  and 3% at 450 s, where the authored mesh's paints 10% and then 2%. Of a
+  kind with the dormant coarsening above that raised AMR-01's rings.
+- Adaptation (`ui/amr.rs`), the flux cleanup (`ui/flux_cleanup.rs`), the
+  energy diagnostics (`ui/runtime.rs`) and the field's snapshot for the
+  display (`ui.rs`) act on a state readback only when the newest is a full one
+  (`full_readback_at == readbacks`). Where several readbacks complete in one
+  frame the full one is rarely the last: on lavapipe under amd64 emulation
+  about five land a frame, and C9's device harness, gated the same way
+  without continuous full readbacks, waited 30 to 45 s for each sample.
+  Not seen on Metal or on CI's lavapipe (C9, 2026-11-14).
 
 ## Working practice
 

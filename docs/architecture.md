@@ -1139,7 +1139,13 @@ event leaves accepted physical state and its clock unchanged.
 
 The GPU manifest stays within eight storage bindings and owns explicit accepted
 and candidate lanes for `Q`, `b`, physical auxiliaries, force caches, energy
-accounting and the bounded epoch clock. Every topology/material generation is
+accounting and the bounded epoch clock. A fixed generation without
+complementary loss keeps each node's `Cᵀ b` in its force cache and advances
+it beside `b`, `F += h K u`; every sixteenth step the drift sets it from the
+accepted flux instead, so the two integrations cannot round apart: left to
+themselves in f32 they did, and a reflecting box's total of `Q` integrated
+the walk (C9, 2026-11-14). The rebuild costs 1.3% of a step on the M1 Max.
+Every topology/material generation is
 prepared while the current one evolves, maps the latest accepted direct state and
 physical histories on GPU, validates the complete target, then switches all
 resources together. Upload and asynchronous admission do not freeze the source:

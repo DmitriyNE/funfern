@@ -1,0 +1,4 @@
+about: the drift advances the force cache every step and never rebuilds it from the flux, so its f32 rounding walks unchecked and a reflecting box's sum of Q integrates it, a uniform offset of 0.4% of the field over a million steps, as C9's long runs found on 2026-11-14
+test: FIXTURE_TIMEOUT=1700 scripts/e2e-fixture.sh --example canonical_gpu_cavity_drift
+expect: the (sum of Q|uniform mode's energy): .* FAILS
+needs: device

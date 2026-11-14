@@ -55,6 +55,14 @@ const EXACT: f64 = 1.0e-10;
 /// The same on the device, which steps in f32: a force of roundoff size
 /// integrated over the run. Measured 2026-10-13; see the engineering log.
 const DEVICE_EXACT: f64 = 1.0e-8;
+/// What b's energy may change by on the device. Since C9 (2026-11-14) the
+/// device rebuilds its force cache from its own f32 flux every sixteenth
+/// step, where the cache had kept the host's f64 `Cᵀ b` for good: the f32
+/// flux's rounding has a compatible part, about 6e-8 of it, whose force
+/// moves Q (1.2e-13 of the energy), and from then on b takes f32's
+/// rounding each step as a moving field does. Measured 1.9e-8 and 7.8e-8
+/// on the baffled box, against 7.2e-10 and 2.0e-9 before.
+const DEVICE_ENERGY: f64 = 2.0e-7;
 
 fn edge() -> f64 {
     std::env::var("COMPLEMENTARY_EDGE")
@@ -684,7 +692,7 @@ fn drive(
         None => {
             within(b, TOLERANCE)
                 && within(device.pushed, DEVICE_EXACT)
-                && within(device.energy_change, DEVICE_EXACT)
+                && within(device.energy_change, DEVICE_ENERGY)
                 && (!expected.baffle || device.right == 0.0)
         }
     };

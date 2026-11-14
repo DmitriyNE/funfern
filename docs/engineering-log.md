@@ -33900,3 +33900,138 @@ the device.
   load of about 30, both failed again on load (TM past 600 s; frames of 636
   and 254 ms). At a load of 4 to 8 both passed: TM in 76 s, `preparation` in
   160 s.
+
+## 2026-11-14 — C9: long runs, and the device's force cache rebuilt from the flux
+
+- **Why.** C9, the campaign plan's last stage: 5.3 of the 11 October plan had
+  conservative and wall runs past 1000 s and Kerr to t = 160; it lacked
+  phase and modal drift, long φ⁴, sine-Gordon and van der Pol runs, a long
+  driven run and an adaptive one.
+- **Study.** f64 first, every finding against an oracle written apart from
+  the solver (Python Floquet monodromies for the uniform swings and the
+  pumped mode), then the device against f64 on lavapipe for up to a million
+  steps.
+  - The cavity (PH-01's box, two modes over a constant, three skins, either
+    integrator, filtered or not, 5,000 s): no drift. Frequency 8e-10 between
+    the first and last 200 s, phase 4.4e-6 rad, amplitude 2e-9; under the
+    filter no application raised the energy and the decay met one
+    application's prediction within 3 to 6%.
+  - PH-16's uniform swings, 2,000 s: the ones that stay uniform keep a
+    constant period error, their lag at the end that error times the
+    periods; van der Pol keeps its cycle. The larger ones break up by
+    Hill's instability of the box's modes at Floquet's rate (1.06 against
+    1.058 swung to 2.5 rad, 0.70 against 0.742 rotating, 0.47 and 0.65
+    against 0.455 and 0.626 over φ⁴'s barrier and near it, the lossless
+    Kerr swing with Klein-Gordon 0.32 to 0.38 against 0.344; the saturable
+    one in narrow tongues, 0.026/s). φ⁴'s are then refused at its bound (59
+    and 83 s); Kerr's gains energy 320-fold by t = 2,000.
+  - That gain, and PH-17's Kerr box refused unfiltered at t = 288 (the doc
+    of `long_run_kerr_gains_no_more_than_its_known_drift` said 1000), are
+    the step's: 13.7-fold by t = 500 at the production step, 1.05 at half,
+    1.003 at a quarter, alike under either integrator, whose core is
+    symplectic. The fastest mesh modes turn nearly half a cycle a step and
+    the nonlinearity pumps them. Under the grid filter, which the app
+    applies, the box loses 84% by t = 1000 instead, converging with the
+    mesh (58%, 53%, 50% by t = 200 on edges 0.25, 0.125, 0.0625). With the
+    user: left as it is (D1).
+  - PH-15's stable pumps, 1,000 mode periods: growth and envelope as exact;
+    the trace a linear phase drift from the mode's 1e-6 frequency error.
+    Outside the tongue's edge a stiffness-side pump reads 14 times more,
+    second order in time, as PH-15's log of 2026-10-18 already says.
+  - AMR-03's adaptive run, 480 s of strikes: no reversal. A dormant field
+    coarsened below the authored mesh fades half as fast: under Worth
+    checking sometime (D2). So is the app's wait for a full readback
+    (adaptation, the cleanup, the diagnostics), which the device harness,
+    gated the same way, met starving on emulated lavapipe, where about five
+    readbacks land a frame and the full one is rarely the last.
+  - The device, a million steps of the cavity on lavapipe: the harness gave
+    the device a step f32 rounds up (2.6e-8), and the clock led by exactly
+    `n (f32(dt) − dt)`, as it should (the app paces its step through
+    `device_time_step` since C8.3, and has no lead); against that clock the
+    phase drifts 1.6e-6 and 2.8e-5 rad; the stationary flux
+    gathers 2e-10 of the energy, linearly (plan.md's open question,
+    answered and closed). And the sum of `Q`, which a reflecting box
+    conserves and f64 holds to every digit, drifted: -3.3e-3 by 200,000
+    steps, -2.2e-2 by a million, a uniform offset of 0.4% of the field, the
+    device's energy above f64's by exactly the uniform mode's (2.759e-5
+    against 2.769e-5 of E0).
+- **The cause.** A fixed generation without complementary loss keeps each
+  node's `Cᵀ b` in a force cache and advances it beside `b` (`F += h K u`,
+  `b += h ηC u`). Nothing rebuilt it from `b` within a generation: the
+  filter and the flux maintenance update it by their increments too. The
+  two integrations round apart in f32 with nothing pulling them together,
+  and the sum of `Q` integrates the cache's walk. The cache switched off (a
+  scratch switch) held the sum within 1e-6 over 200,000 steps, 1.4 times
+  slower a step on lavapipe. The 2026-09-15 fix was an older, thousandfold
+  larger offset from the rows' sums.
+- **The fix (F1, with the user; D3).** Every sixteenth step the drift sets
+  the cache from the accepted flux, `Cᵀ b` plus the step's `h K u`, in the
+  candidate lanes as before; `rebuilds_force_cache` and
+  `force_of_accepted_flux`, which reads the accepted lanes alone since the
+  drift's samples write the candidate lanes of the same words. Under the
+  filter or not. 200,000 steps on lavapipe, six runs: the sum within 1.2e-6
+  to 4.6e-6 of f64, the uniform mode 8.5e-14 to 1.2e-12 of the energy, the
+  phase as with the cache off. The amplitudes wander more than with the
+  cache off, 8.2e-7 to 3e-6 against 3.8e-7: the cache's error is now a
+  force held up to sixteen steps, a faint noise that warms the modes as any
+  noise does; at worst 1.5e-5 of the amplitude a million steps, unfiltered,
+  where the offset was 0.4%. Its cost on the M1 Max,
+  `canonical_gpu_timing --edge=0.06 --steps=20000` in four rounds, the
+  order rotated: 0.154 ms a step against 0.152 without the rebuild, 1.3%,
+  every round alike.
+- **Tests (T1 to T7).** Nightly in `energy-long-runs`:
+  `long_run_cavity_modes_hold_frequency_phase_and_amplitude` (1,000 s, three
+  skins, either integrator, filtered and not; frequency 8e-10 against 1e-8,
+  phase 4.4e-7 rad against 1e-4, amplitude 2e-9 against 1e-7, the filter's
+  decay within 10% of its prediction (3 to 6%), the sum of `Q` 6.8e-15;
+  190 s), `long_run_kerr_under_the_filter_never_gains` (to t = 1000, no
+  refusal, every 20 s window's peak at least 1% below the last; 62 s),
+  `long_run_modulated_media_part_from_the_mode_only_in_phase` (150 and 300
+  periods: the trace grows 1.67 to 2.14-fold, held to 2.4, a linear phase
+  drift; from 30 periods the edge case grew fifteenfold, its envelope's
+  slow beat hiding the drift early, so the long pair is what is compared;
+  277 s), and in funfern-core
+  `long_run_stable_uniform_oscillators_keep_their_period_and_energy` (2,000
+  s; the period's error moves 4e-8 at most, the lag is the error times the
+  periods within 1%; 62 s). In the gate
+  `large_uniform_swings_break_up_at_the_floquet_rate`: Hill's monodromy in
+  the test, the measured rates within 1.7% of it, held to 5% (0.6 s).
+  `canonical_gpu_cavity_drift` (T6): 200,000 steps on the device against
+  f64 at the app's step, the clock, each mode's frequency and amplitude, the
+  stationary flux, the energy, the sum of `Q` and its uniform mode; nightly
+  on lavapipe (`device-long-runs`, mechanical with and without the filter,
+  and TM) and in the device suite. The `endurance` fixture (T7): the
+  lifecycle driver now runs a plan, its own or one adaptive scene run on and
+  counted every 1,800 frames six times; on lavapipe the six counts over 51
+  minutes were the same. Nightly in `device-long-runs`.
+- **Mutations.** `force-cache-never-rebuilt`, the drift never rebuilding
+  the cache: T6 reads the sum of `Q` 6.2e-4 and its uniform mode 2.1e-8 of
+  the energy, against 1.9e-6 and 2.2e-13. The older
+  `flux-maintenance-misses-the-force-cache` is still caught with the
+  rebuild in place: Q 6.5e-3 from the reference against 3.2e-7, the missing
+  force pushing until the next rebuild.
+- **PH-03's example on the device.** `canonical_gpu_complementary_mode`, Q
+  zero and b a stationary flux, read b 5.7e-7 from the reference, Q 1.3e-13
+  and b's energy changed 1.9e-8 and 7.8e-8 (baffled), against 2.6e-8, 1e-24
+  and 2e-9 before; the energy past its 1e-8. The build without the rebuild
+  reads the old numbers to the digit. The plan uploads the cache from the
+  host's f64 `Cᵀ b`, about 1e-16 for this flux, and the cache kept it, so
+  Q never moved and b never rounded; the rebuild takes `Cᵀ b` of the
+  device's own f32 flux, whose rounding has a compatible part, about 6e-8,
+  and from its first push b takes f32's rounding each step, as any moving
+  field does. That is the force of the flux the device holds, the
+  consistency F1 is for, so the example's device energy bound is now its
+  own, 2e-7, its reason beside it; Q's stays 1e-8.
+- **Docs.** architecture.md (the cache's rebuild), checks.md, plan.md
+  (Worth checking: the dormant tail, and the full-snapshot gate that
+  starves where several readbacks land a frame; the stationary flux's item
+  closed), the campaign plan.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release,
+  1,538 passed, 42 ignored), the default scene in the debug profile, release
+  build, the wasm32 and threaded wasm checks, the browser shader compile and
+  the protocol proofs (2 of 2); the device suite on Metal (the shader
+  changed): 142 of 145 at a load of about 13, the two fixed-mesh PH-03
+  entries on the bound above and `preparation`'s frames part at 100.7 ms
+  against its 100 (waiting on a handoff's stationary flux, main-thread
+  time); with the bound, the four PH-03 entries and `preparation` passed
+  rerun alone. `canonical_gpu_cavity_drift` 268 s there.

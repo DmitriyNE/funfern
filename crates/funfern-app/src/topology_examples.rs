@@ -11343,6 +11343,19 @@ mod tests {
         integrator: CanonicalIntegrator,
         dt: f64,
     ) -> CanonicalWaveState {
+        mode_state_at(prepared, medium, modes, constant, BOX_PHASE, integrator, dt)
+    }
+
+    /// `mode_state` at the phase `phase` in place of `BOX_PHASE`.
+    fn mode_state_at(
+        prepared: &crate::topology_runtime::PreparedTopology,
+        medium: BoxMedium,
+        modes: &[(BoxMode, f64)],
+        constant: f64,
+        phase: f64,
+        integrator: CanonicalIntegrator,
+        dt: f64,
+    ) -> CanonicalWaveState {
         let operator = &prepared.canonical_operator;
         let orientation = medium.orientation();
         let primary = operator
@@ -11354,7 +11367,7 @@ mod tests {
                     .iter()
                     .map(|(mode, amplitude)| amplitude * mode.shape(*point))
                     .sum::<f64>();
-                mass * (constant + field * BOX_PHASE.cos())
+                mass * (constant + field * phase.cos())
             })
             .collect::<Vec<_>>();
         let sampled = operator
@@ -11365,7 +11378,7 @@ mod tests {
                     .iter()
                     .fold(Point2::default(), |flux, (mode, amplitude)| {
                         let gradient = mode.gradient(sample.point);
-                        let scale = orientation * amplitude * BOX_PHASE.sin() / medium.omega(*mode);
+                        let scale = orientation * amplitude * phase.sin() / medium.omega(*mode);
                         flux + Point2::new(-gradient.y, gradient.x) * scale
                     })
             })
@@ -11798,6 +11811,291 @@ mod tests {
         box_modes_in(PhysicsModel::Electromagnetic {
             polarization: ElectromagneticPolarization::Te,
         });
+    }
+
+    /// What one long cavity run reads, each mode's `[first window, last]`
+    /// frequency, its phase's largest departure from the first window's, its
+    /// amplitude's ratio last to first and the ratio the grid filter's
+    /// single application predicts; the energy's band about its start over
+    /// the first window and the last; the filter's applications that raised
+    /// the energy; and how far the sum of `Q` moved, relative.
+    struct CavityDrift {
+        what: String,
+        frequencies: Vec<[f64; 2]>,
+        phases: Vec<f64>,
+        amplitudes: Vec<f64>,
+        predicted: Vec<f64>,
+        bands: [f64; 2],
+        rises: usize,
+        total: f64,
+    }
+
+    /// C9's cavity: PH-01's 2 × 1.4 box on edge 0.08, modes (1,0) and half
+    /// of (2,3) over a constant of a tenth, run for `duration` at the
+    /// integrator's own production step, the grid filter applied every
+    /// sixteen steps as the app applies it or not at all, read in windows of
+    /// 200 s.
+    fn cavity_drift(
+        physics: PhysicsModel,
+        integrator: CanonicalIntegrator,
+        filtered: bool,
+        duration: f64,
+    ) -> CavityDrift {
+        let window_time = 200.0;
+        let modes = [(BoxMode::ph01(1, 0), 1.0), (BoxMode::ph01(2, 3), 0.5)];
+        let medium = BoxMedium::ph01(physics);
+        let prepared = mode_box(medium, 2.0, 1.4, 0.08);
+        let operator = &prepared.canonical_operator;
+        let forcing = &prepared.canonical_forcing;
+        let strength = funfern_core::CANONICAL_GRID_FILTER_STRENGTH;
+        let cadence = funfern_core::GRID_SCALE_FILTER_CADENCE as usize;
+        let shapes = modes.map(|(mode, _)| {
+            operator
+                .node_points()
+                .iter()
+                .map(|point| mode.shape(*point))
+                .collect::<Vec<_>>()
+        });
+        let weights = shapes.each_ref().map(|shape| {
+            shape
+                .iter()
+                .zip(operator.primary_mass())
+                .map(|(phi, mass)| phi * mass)
+                .collect::<Vec<_>>()
+        });
+        let norms = [0, 1].map(|i| {
+            weights[i]
+                .iter()
+                .zip(&shapes[i])
+                .map(|(w, phi)| w * phi)
+                .sum::<f64>()
+        });
+        // The constant's share of each projection, taken off.
+        let offsets = [0, 1].map(|i| 0.1 * weights[i].iter().sum::<f64>() / norms[i]);
+        let dt = prepared.recommended_time_step() * integrator.recommended()
+            / CanonicalIntegrator::default().recommended();
+        // One application's energy factor on a mode all in Q and all in b;
+        // its phase at the applications spreads evenly over a long run, so
+        // its amplitude keeps the root of their mean an application.
+        let transfer = modes.map(|(mode, _)| {
+            let factor = |phase: f64| {
+                let mut state = mode_state_at(
+                    &prepared,
+                    medium,
+                    &[(mode, 1.0)],
+                    0.0,
+                    phase,
+                    integrator,
+                    dt,
+                );
+                let before = state.energy(operator).unwrap();
+                state
+                    .apply_grid_filter(operator, forcing, strength)
+                    .unwrap();
+                state.energy(operator).unwrap() / before
+            };
+            (0.5 * (factor(0.0) + factor(std::f64::consts::FRAC_PI_2))).sqrt()
+        });
+        let mut state = mode_state(&prepared, medium, &modes, 0.1, integrator, dt);
+        let steps = (duration / dt).ceil() as usize;
+        let per_window = (window_time / dt).round() as usize;
+        let mut series = [Vec::with_capacity(steps + 1), Vec::with_capacity(steps + 1)];
+        let mut energies = Vec::with_capacity(steps + 1);
+        let mut record = |state: &CanonicalWaveState| {
+            let field = state.primary_field(operator).unwrap();
+            for i in 0..2 {
+                series[i].push(
+                    weights[i]
+                        .iter()
+                        .zip(&field)
+                        .map(|(w, u)| w * u)
+                        .sum::<f64>()
+                        / norms[i]
+                        - offsets[i],
+                );
+            }
+            energies.push(state.energy(operator).unwrap());
+        };
+        record(&state);
+        let total = state.primary_flux().iter().sum::<f64>();
+        let mut rises = 0;
+        for step in 1..=steps {
+            state.step(operator).unwrap();
+            if filtered && step.is_multiple_of(cadence) {
+                let before = state.energy(operator).unwrap();
+                state
+                    .apply_grid_filter(operator, forcing, strength)
+                    .unwrap();
+                rises += usize::from(state.energy(operator).unwrap() > before);
+            }
+            record(&state);
+        }
+        let moved = state.primary_flux().iter().sum::<f64>() / total - 1.0;
+        let windows = steps / per_window;
+        let first = 0..per_window;
+        let last = (windows - 1) * per_window..windows * per_window;
+        let band = |range: std::ops::Range<usize>| {
+            energies[range].iter().fold(0.0_f64, |band, energy| {
+                band.max((energy - energies[0]).abs())
+            }) / energies[0]
+        };
+        let mut reading = CavityDrift {
+            what: format!("{physics:?} {integrator:?}, filtered {filtered}"),
+            frequencies: Vec::new(),
+            phases: Vec::new(),
+            amplitudes: Vec::new(),
+            predicted: Vec::new(),
+            bands: [band(first.clone()), band(last.clone())],
+            rises,
+            total: moved,
+        };
+        for (series, transfer) in series.iter().zip(transfer) {
+            let overall = sampled_frequency(series, dt);
+            // Amplitude and phase of a window, fitted at the run's frequency.
+            let fit = |range: std::ops::Range<usize>| {
+                let (mut cc, mut cs, mut ss, mut yc, mut ys) = (0.0, 0.0, 0.0, 0.0, 0.0);
+                for n in range {
+                    let (sin, cos) = (overall * dt * n as f64).sin_cos();
+                    cc += cos * cos;
+                    cs += cos * sin;
+                    ss += sin * sin;
+                    yc += series[n] * cos;
+                    ys += series[n] * sin;
+                }
+                let det = cc * ss - cs * cs;
+                let (a, c) = ((yc * ss - ys * cs) / det, (ys * cc - yc * cs) / det);
+                (a.hypot(c), (-c).atan2(a))
+            };
+            let fits = (0..windows)
+                .map(|w| fit(w * per_window..(w + 1) * per_window))
+                .collect::<Vec<_>>();
+            let mut phase = fits[0].1;
+            let mut departure = 0.0_f64;
+            for (_, next) in &fits[1..] {
+                // Unwrapped against the window before.
+                phase += (next - phase + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+                    - std::f64::consts::PI;
+                departure = departure.max((phase - fits[0].1).abs());
+            }
+            reading.frequencies.push([
+                sampled_frequency(&series[first.clone()], dt),
+                sampled_frequency(&series[last.clone()], dt),
+            ]);
+            reading.phases.push(departure);
+            reading.amplitudes.push(fits[windows - 1].0 / fits[0].0);
+            reading.predicted.push(if filtered {
+                transfer.powf(((windows - 1) * per_window) as f64 / cadence as f64)
+            } else {
+                1.0
+            });
+        }
+        reading
+    }
+
+    /// C9 (long runs): PH-01's cavity for a thousand seconds in each skin
+    /// under either integrator, 57,000 to 153,000 steps (the study ran five
+    /// thousand, and read the same). Unfiltered, each mode keeps its
+    /// frequency between the first 200 s and the last within 1e-8 (8e-10
+    /// measured), its phase within 1e-4 rad of the first window's (4.4e-7),
+    /// and its amplitude within 1e-7 (2e-9), and the energy breathes over
+    /// the last window as over the first, within 5% (to three digits). Under
+    /// the grid filter no application raises the energy, and each mode's
+    /// amplitude falls as the filter's single application predicts, its
+    /// logarithm within 10% (3% to 6% faster). The sum of `Q`, which nothing
+    /// in a reflecting box moves, holds within 1e-12 (6.8e-15).
+    #[test]
+    #[ignore = "nightly: energy-long-runs"]
+    fn long_run_cavity_modes_hold_frequency_phase_and_amplitude() {
+        let tm = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Tm,
+        };
+        let te = PhysicsModel::Electromagnetic {
+            polarization: ElectromagneticPolarization::Te,
+        };
+        let runs = [PhysicsModel::Mechanical, tm, te]
+            .into_iter()
+            .flat_map(|physics| {
+                [
+                    CanonicalIntegrator::Leapfrog,
+                    CanonicalIntegrator::FourthOrder,
+                ]
+                .into_iter()
+                .flat_map(move |integrator| {
+                    [false, true].map(|filtered| (physics, integrator, filtered))
+                })
+            })
+            .collect::<Vec<_>>();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let readings = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..workers.min(runs.len()) {
+                scope.spawn(|| {
+                    while let Some((physics, integrator, filtered)) = runs
+                        .get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                        .copied()
+                    {
+                        let reading = cavity_drift(physics, integrator, filtered, 1000.0);
+                        readings.lock().unwrap().push((filtered, reading));
+                    }
+                });
+            }
+        });
+        for (filtered, reading) in readings.into_inner().unwrap() {
+            let what = &reading.what;
+            let [first, last] = reading.bands;
+            eprintln!(
+                "{what}: energy band {first:.3e} first, {last:.3e} last, filter raised it {} \
+                 times; sum of Q moved {:.2e}",
+                reading.rises, reading.total
+            );
+            for (i, mode) in ["(1,0)", "(2,3)"].iter().enumerate() {
+                let [early, late] = reading.frequencies[i];
+                let drift = (late - early).abs() / early;
+                let (phase, ratio, predicted) = (
+                    reading.phases[i],
+                    reading.amplitudes[i],
+                    reading.predicted[i],
+                );
+                eprintln!(
+                    "{what} {mode}: frequency moved {drift:.2e}, phase {phase:.2e} rad, \
+                     amplitude {ratio:.9} (predicted {predicted:.9})"
+                );
+                if filtered {
+                    let share = ratio.ln() / predicted.ln();
+                    assert!(
+                        (share - 1.0).abs() <= 0.1,
+                        "{what} {mode}: fell {ratio:.9}, the filter predicts {predicted:.9}"
+                    );
+                } else {
+                    assert!(
+                        drift <= 1.0e-8,
+                        "{what} {mode}: frequency moved {drift:.2e}"
+                    );
+                    assert!(
+                        phase <= 1.0e-4,
+                        "{what} {mode}: phase moved {phase:.2e} rad"
+                    );
+                    assert!(
+                        (ratio - 1.0).abs() <= 1.0e-7,
+                        "{what} {mode}: amplitude {ratio:.9}"
+                    );
+                }
+            }
+            if filtered {
+                assert_eq!(reading.rises, 0, "{what}: the filter raised the energy");
+            } else {
+                assert!(
+                    last <= 1.05 * first,
+                    "{what}: the band grew from {first:.3e} to {last:.3e}"
+                );
+            }
+            assert!(
+                reading.total.abs() <= 1.0e-12,
+                "{what}: the sum of Q moved {:.2e}",
+                reading.total
+            );
+        }
     }
 
     /// PH-02's box, 2 × 1.06, and its modes, which together point from 0° to
@@ -14472,8 +14770,16 @@ mod tests {
     /// medium gains energy under the splitting at the production step, which
     /// `docs/spikes/funfern-fourth-order-step.md` measured at +5.4e-2 by
     /// t = 160 for Kerr on the density row. PH-17's TM box, its Kerr strong
-    /// at χ₂ = 0.5 on a unit field, gains 9.5e-2 by then, and by t = 1000 its
-    /// field leaves the declared amplitude bound of 4 and the step is refused.
+    /// at χ₂ = 0.5 on a unit field, gains 9.5e-2 by then, and at t = 288 its
+    /// field leaves the declared amplitude bound of 4 and the step is refused
+    /// (C9, 2026-11-14). The gain is the step's: the mesh's fastest modes
+    /// turn by nearly half a cycle a step, and the nonlinearity pumps them;
+    /// a lossless uniform Kerr swing with Klein-Gordon, which gains 13.7-fold
+    /// by t = 500 at the production step, gains 1.05-fold at half of it and
+    /// 1.003 at a quarter, alike under either integrator. The app runs Kerr
+    /// under the grid filter, which takes that content first
+    /// (`long_run_kerr_under_the_filter_never_gains`); unfiltered, as the
+    /// Advanced panel allows, a strong Kerr scene is refused.
     /// Held to 0.15 so that a worse drift shows.
     #[test]
     #[ignore = "nightly: energy-long-runs"]
@@ -14486,6 +14792,71 @@ mod tests {
         let gain = level.end / level.start - 1.0;
         eprintln!("TM Kerr by t = 160: {gain:.3e}");
         assert!(gain < 0.15, "Kerr gained {gain:.3e}");
+    }
+
+    /// C9 (long runs): the same Kerr box as the app runs it, under the grid
+    /// filter every sixteen steps, to t = 1000, 46,600 steps: no step is
+    /// refused, and the peak energy of each 20 s window never exceeds the one
+    /// before. The box loses 84% by then (8% by t = 40, half by 160): the
+    /// cascade Kerr drives to the grid scale, which the filter takes; a
+    /// finer mesh loses less, 53% and 50% by t = 200 on edges 0.125 and
+    /// 0.0625 against 58% here, converging on the physical loss from the
+    /// resolved band.
+    #[test]
+    #[ignore = "nightly: energy-long-runs"]
+    fn long_run_kerr_under_the_filter_never_gains() {
+        let config = Ledgered {
+            kerr: Some(0.5),
+            ..Ledgered::plain("Kerr", LEDGER_TM)
+        };
+        let prepared = ledger_box(&config, 0.25);
+        let operator = prepared
+            .canonical_temporal_operator
+            .as_deref()
+            .expect("Kerr runs driven");
+        let forcing = &prepared.canonical_forcing;
+        let integrator = CanonicalIntegrator::default();
+        let dt = prepared.recommended_time_step();
+        let fixed = mode_state(
+            &prepared,
+            BoxMedium::ph01(config.physics),
+            &LEDGER_MODES,
+            0.0,
+            integrator,
+            dt,
+        );
+        let mut state = CanonicalTemporalWaveState::new(
+            operator,
+            dt,
+            fixed.primary_flux().to_vec(),
+            fixed.complementary_flux().to_vec(),
+        )
+        .unwrap()
+        .with_integrator(integrator);
+        let start = state.energy(operator).unwrap();
+        let steps = (1000.0 / dt).ceil() as usize;
+        let mut energies = Vec::with_capacity(steps);
+        for step in 1..=steps {
+            if let Err(error) = state.step_with_forcing(operator, forcing) {
+                panic!("refused at t = {:.1}: {error}", step as f64 * dt);
+            }
+            if (step as u64).is_multiple_of(funfern_core::GRID_SCALE_FILTER_CADENCE) {
+                state
+                    .apply_grid_filter_with_forcing(
+                        operator,
+                        forcing,
+                        funfern_core::CANONICAL_GRID_FILTER_STRENGTH,
+                    )
+                    .unwrap();
+            }
+            energies.push(state.energy(operator).unwrap());
+        }
+        let rise = envelope_rise(&energies, (20.0 / dt).round() as usize);
+        let end = energies[steps - 1] / start - 1.0;
+        eprintln!(
+            "TM Kerr under the filter: {end:.3e} by t = 1000, envelope rose {rise:.3e} at most"
+        );
+        assert!(rise <= 0.0, "the envelope rose {rise:.3e}");
     }
 
     /// PH-17 and PH-05's long passive runs, 400 s at the production step in
@@ -18620,6 +18991,17 @@ mod tests {
     /// at each of the case's throws between steps, and run for the case's
     /// duration.
     fn temporal_run(case: &TemporalCase, edge: f64, fraction: f64) -> TemporalRun {
+        temporal_run_over(case, edge, fraction, 1)
+    }
+
+    /// `temporal_run` for `stretch` times the case's duration, which keeps
+    /// a modulation's whole periods whole.
+    fn temporal_run_over(
+        case: &TemporalCase,
+        edge: f64,
+        fraction: f64,
+        stretch: u32,
+    ) -> TemporalRun {
         let period = case.timing();
         let pieces = (period
             / (fraction * {
@@ -18664,7 +19046,7 @@ mod tests {
             TemporalChange::Gate { .. } | TemporalChange::Modulation { .. } => 0.0,
         };
         // Whole modulation periods are whole steps, give or take rounding.
-        let steps = (case.duration(dt) / dt - 1.0e-9).ceil() as usize;
+        let steps = (f64::from(stretch) * case.duration(dt) / dt - 1.0e-9).ceil() as usize;
         let throws = case.throws(dt);
         let project = |state: &CanonicalTemporalWaveState| {
             let field = operator
@@ -19649,6 +20031,18 @@ mod tests {
         edge: f64,
         fraction: f64,
     ) -> Vec<ModulatedReading> {
+        modulated_readings_over(cases, edge, fraction, 1)
+    }
+
+    /// `modulated_readings` over `stretch` times each case's duration; a
+    /// stretched run reads no spectrum, whose lines a constant frequency
+    /// error parts further the longer the window.
+    fn modulated_readings_over(
+        cases: &[(TemporalCase, bool, bool)],
+        edge: f64,
+        fraction: f64,
+        stretch: u32,
+    ) -> Vec<ModulatedReading> {
         let next = std::sync::atomic::AtomicUsize::new(0);
         let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
         let results = std::sync::Mutex::new(vec![None; cases.len()]);
@@ -19660,8 +20054,10 @@ mod tests {
                         let Some((case, spectral, _)) = cases.get(job) else {
                             break;
                         };
-                        let reading =
-                            case.read_modulated(&temporal_run(case, edge, fraction), *spectral);
+                        let reading = case.read_modulated(
+                            &temporal_run_over(case, edge, fraction, stretch),
+                            *spectral && stretch == 1,
+                        );
                         results.lock().unwrap()[job] = Some(reading);
                     }
                 });
@@ -19760,6 +20156,54 @@ mod tests {
             modulated_holds(&cases, &quarter, (0.1, 0.25), 0.25);
             let finer = modulated_readings(&cases, 0.05, 1.0);
             modulated_holds(&cases, &finer, (0.05, 1.0), 0.25);
+        }
+    }
+
+    /// C9 (long runs): PH-15's bounded pumps, the mode stable under each,
+    /// for three hundred periods of the mode, ten times the gate's thirty,
+    /// and for half as long, on edge 0.1 at the production step. What parts
+    /// a run from the mode's ODE is its frequency's error, about 1e-6, which
+    /// moves the phase linearly: from 150 periods to 300 the trace grows at
+    /// most twofold, with a fifth to spare, and the growth keeps the gate's
+    /// bound. From 30 periods the trace grows tenfold, but outside the
+    /// tongue's edge fifteenfold: there the field's envelope beats slowly, a
+    /// frequency's error moves the beat, and the beat's slope early in the
+    /// run hides it (1.67 to 2.14-fold measured from 150 periods; the
+    /// stiffness-side pump outside the tongue's edge reads the most, 6.5e-2,
+    /// its second-order error five times a mass-side one's, as PH-15 found).
+    /// The energy's ledger, the pump's work against the ODE's, is printed
+    /// and not held: it follows the phase error's effect on the exchange,
+    /// which moves irregularly, 3.4-fold from 150 periods to 300 for TM's
+    /// time crystal and down by half outside TM's tongue edge.
+    #[test]
+    #[ignore = "nightly: energy-long-runs"]
+    fn long_run_modulated_media_part_from_the_mode_only_in_phase() {
+        for physics in [LEDGER_TM, LEDGER_TE] {
+            let cases = modulated_cases(physics)
+                .into_iter()
+                .filter(|(case, _, grows)| !grows && case.floquet(4000).0.growth == 0.0)
+                .collect::<Vec<_>>();
+            let half = modulated_readings_over(&cases, 0.1, 1.0, 5);
+            let long = modulated_readings_over(&cases, 0.1, 1.0, 10);
+            for (((case, _, _), half), long) in cases.iter().zip(&half).zip(&long) {
+                let name = &case.name;
+                eprintln!(
+                    "{name}: trace {:.3e} over 150 periods, {:.3e} over 300; energy {:.3e}, \
+                     {:.3e}; growth's error {:.3e}",
+                    half.trace, long.trace, half.energy, long.energy, long.growth
+                );
+                assert!(
+                    long.trace <= 2.4 * half.trace,
+                    "{name}: the trace grew from {:.3e} to {:.3e}",
+                    half.trace,
+                    long.trace
+                );
+                assert!(
+                    long.growth < MODULATED_GROWTH,
+                    "{name}: growth {:.3e} off",
+                    long.growth
+                );
+            }
         }
     }
 

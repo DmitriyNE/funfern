@@ -4108,6 +4108,40 @@ fn stiffness_of_drift_field(node: u32, middle_time: f32) -> f32 {
     return result;
 }
 
+// Steps between the drift's rebuilds of the force cache from the flux.
+const FORCE_CACHE_REBUILD_CADENCE: u32 = 16u;
+
+// Whether this step's drift sets the force cache from the flux rather than
+// advancing it. Advanced alone, `F += h K u` beside `b += h ηC u`, the two
+// integrations round apart in f32 with nothing pulling the cache back to
+// `Cᵀ b`; the sum of `Q` integrates the walk, which in a reflecting box grew
+// a uniform offset of 0.4% of the field over a million steps (C9, 2026-11-14).
+fn rebuilds_force_cache() -> bool {
+    return control.clock_u32.z % FORCE_CACHE_REBUILD_CADENCE == 0u;
+}
+
+// `Cᵀ b` at a node from the step's accepted flux, each lane read alone: the
+// drift's samples write the candidate lanes of the same words in the same
+// dispatch, and `accepted_b`'s select loads all four.
+fn force_of_accepted_flux(node: u32) -> f32 {
+    let range = nodes[node].ranges.xy;
+    let slot = accepted_slot();
+    var result = 0.0;
+    for (var entry = range.x; entry < entry_end(range); entry += ENTRY_SLICE) {
+        if tables[entry].data.y != FORCE_KIND_GAP {
+            let word = complementary_offset() + tables[entry].data.x;
+            var flux: vec2<f32>;
+            if slot == 0u {
+                flux = vec2<f32>(state[word].values.x, state[word].values.y);
+            } else {
+                flux = vec2<f32>(state[word].values.z, state[word].values.w);
+            }
+            result += dot(vec2<f32>(table_float(entry, 2u), table_float(entry, 3u)), flux);
+        }
+    }
+    return result;
+}
+
 // A fixed generation with a force cache takes the drift form's `K u` from its
 // assembled row and the field from its flux, so the two passes that build
 // them on the samples are skipped there.
@@ -4517,7 +4551,11 @@ fn drift(@builtin(global_invocation_id) id: vec3<u32>) {
         } else {
             rate = stiffness_force(i, middle_time);
         }
-        let next_force = accepted_force(i) + control.clock_f32.x * rate;
+        var start_force = accepted_force(i);
+        if rebuilds_force_cache() {
+            start_force = force_of_accepted_flux(i);
+        }
+        let next_force = start_force + control.clock_f32.x * rate;
         set_candidate_force(i, next_force);
         if !finite_scalar(next_force) { reject(STATUS_NON_FINITE); }
     }
