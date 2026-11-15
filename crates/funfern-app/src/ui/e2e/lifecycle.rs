@@ -139,13 +139,19 @@ const ENDURANCE_WORK: [Act; 2 + 3 * ENDURANCE_COUNTS] = {
 };
 
 /// Frames a count waits once the run is paused, past the readback pool's
-/// ten unused frames, and the frames its counts must then hold still for.
+/// ten unused frames, and the frames its counts must then hold still for:
+/// longer than the pool keeps a buffer unused. A map that comes late while
+/// the run is paused gives each readback a third staging buffer, which the
+/// pool keeps ten frames; held still for five, the second cycle's ring
+/// resonator read 15 staging buffers to the first's 10 in two of three runs
+/// on the M1 Max (2026-11-16).
 const SETTLE_FRAMES: u32 = 15;
-const STILL_FRAMES: u32 = 5;
+const STILL_FRAMES: u32 = crate::paced_readback::UNUSED_FRAMES_KEPT as u32 + 1;
 
 /// The share of the run's time one act may take, 300 s of the native 1800
 /// and more on the browser's slower pages, and how long one takes before it
-/// is reported.
+/// is reported. The run's first act has the run's time: it waits for the
+/// device's first step ([`Stage::FirstStep`]).
 const ACT_SHARE: u32 = 6;
 const SLOW_ACT_SECONDS: f64 = 10.0;
 
@@ -185,6 +191,13 @@ enum Stage {
     Take,
     /// Taken; waiting for the app to come to rest.
     Rest,
+    /// The run's first scene at rest; waiting for the device to finish a
+    /// step past this many. Lavapipe compiles a compute shader at its first
+    /// dispatch, not when its pipeline is made, and from a cold shader cache
+    /// the step's took about 200 s (2026-11-15), which the first Frames act
+    /// took on alone and missed its share by. A backend's first step is the
+    /// run's to wait for, not an act's.
+    FirstStep(u64),
     /// Frames left to run.
     Frames(u32),
     /// The snapshot asked for, after this many had arrived.
@@ -422,6 +435,7 @@ pub(super) fn add(app: &mut App, plan: Plan, seconds: Option<u64>) {
     let count = crate::live_resources::add_render_count(app);
     let run_time = std::time::Duration::from_secs(seconds.unwrap_or(1800));
     let act_time = run_time / ACT_SHARE;
+    let deadline = Instant::now() + run_time;
     app.insert_resource(LifecycleDriver {
         plan,
         cycle: 1,
@@ -437,8 +451,9 @@ pub(super) fn add(app: &mut App, plan: Plan, seconds: Option<u64>) {
         last: None,
         act_started: Instant::now(),
         act_time,
-        act_deadline: Instant::now() + act_time,
-        deadline: Instant::now() + run_time,
+        // The first act waits for the device's first step.
+        act_deadline: deadline,
+        deadline,
         done: false,
     })
     .add_systems(EguiPrimaryContextPass, drive_lifecycle.before(frame));
@@ -762,8 +777,17 @@ fn advance(
                         still: 0,
                     }
                 }
+                Act::Open if driver.cycle == 1 && driver.scene == 0 => {
+                    Stage::FirstStep(request.stats().completed_steps())
+                }
                 _ => return Ok(driver.next(display.primary_flux.len())),
             }
+        }
+        (Act::Open, Stage::FirstStep(from)) => {
+            if request.stats().completed_steps() <= from {
+                return Ok(true);
+            }
+            return Ok(driver.next(display.primary_flux.len()));
         }
         (act, stage) => unreachable!("{act:?} has no {stage:?}"),
     };

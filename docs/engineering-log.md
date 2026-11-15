@@ -34161,3 +34161,87 @@ the device.
   `preparation`'s slices are where they were that morning: its Supersede
   in 84 and Large in 248 against 90 and 244, the longest 15 and 28 ms
   against 15 and 33, inside `SLICE_BOUND_MS`' 60.
+
+## 2026-11-15 — Lavapipe's shaders compiled once a run, and lifecycle's first act waiting for the first step
+
+- **Why.** The per-push `lifecycle` on lavapipe failed in three of the four
+  pushes since it came (6d2c585, 3a60332, 6b10a41), each time "did not finish
+  in time: cycle 1, Spatial soliton, Frames(60) at Frames(59)": two frames of
+  the act, then none for its 100 s. Studied with the user before anything
+  changed, in the CI container (4 CPUs, 6 GiB, Mesa 25.0.7, LLVM 19.1.7).
+- **Reproduced every time.** Under Rosetta, four runs alike: `Open` 2 s,
+  frames 8 to 9 22 s apart, then no tenth frame until the kernel killed the
+  process at 5.6 GB; with `GALLIVM_PERF=nopt` the tenth came after 484 s and
+  the run failed with CI's words. Natively on arm64 (gdb cannot read a
+  process's registers under Rosetta; Debian's arm64 Mesa is the same
+  25.0.7), 206 and 200 s, and CI's words.
+- **Cause.** Lavapipe compiles a compute shader with LLVM at its first
+  dispatch, on its queue thread, not when its pipeline is made: the stacks
+  had that thread in `CoroSplitPass`, SROA, instruction selection and
+  `MCJIT::emitObject` over one module after another at 2.3 to 4 GB (its
+  compute shaders are coroutines, which `nopt` cannot skip), the render
+  thread waiting in wgpu's `queue_submit` inside `vkQueueSubmit`, and the
+  main thread on the render thread. Every fixture runs under a scratch HOME,
+  so Mesa's shader cache was cold for each. `lifecycle`'s `Open` ends at
+  rest, which needs no step, so its first `Frames(60)` dispatched every
+  step pipeline for the first time and took the compile on alone. The
+  same binary with the cold run's cache: no stall, every act of both
+  cycles, 562 s. The 20 s before it are the field paint's first paint in
+  `block_on_render_pipeline`, behind every compute pipeline on Bevy's one
+  async compute thread (plan.md, Worth checking sometime).
+- **What it cost besides.** The job's 41 fixtures took 9,064 s at 6b10a41,
+  the trivial ones 140 to 160 s each. In the container, cold as CI against
+  one cache filled by the fixtures before: `cavity` 181 and 176 s (first,
+  so cold both times), `events` 202 and 42, `adaptive` 293 and 215,
+  `handoff` 194 and 32.
+- **Changes.**
+  - `scripts/e2e-lavapipe.sh` gives the run one Mesa shader cache,
+    `MESA_SHADER_CACHE_DIR` beside its logs, emptied as it starts; each
+    fixture keeps its scratch HOME. `scripts/e2e-fixture.sh` keeps one under
+    `target/e2e-fixture/` for every run, the mutation runner's two a
+    mutation included. Mesa keys an entry by the shader and the driver, so a
+    mutated shader compiles anew.
+  - `lifecycle`'s first act waits at the first scene's rest for the device
+    to finish a step (`Stage::FirstStep`), on the run's time rather than an
+    act's sixth: what a backend compiles at its first dispatch is the run's
+    to wait for.
+  - Cold, the run still took 601 s against lavapipe's 600 (the later scenes
+    compile their own pipelines at first use, Josephson line's first 60
+    frames 59 s), so `lifecycle` gets `batches`' 1500 inside 1800 there, and
+    its five mutations `FIXTURE_TIMEOUT=1500`; with the cache filled it took
+    309 s.
+- **Verified** in the container on arm64: `lifecycle` alone from an emptied
+  cache passed in 638 s; through `FIXTURE_TIMEOUT=1500
+  scripts/e2e-fixture.sh lifecycle`, as its mutations run it, from cold, in
+  643 s, `Open` 196 s and the first `Frames(60)` 42 s, the cache 7.6 MB
+  after. The job's 41 fixtures with one cache: 2,997 s against the runner's
+  9,064 at 6b10a41 (the container takes `cavity` cold in 165 to 181 s, the
+  runner 140), most 25 to 60 s, `batches` 485, `lifecycle` 298, `edges` 282,
+  `adaptive-slow` 271, the cache 5.4 MB. `observers` failed there for the
+  container's want of FFmpeg, which the job installs; with it, alone, it
+  passed in 200 s.
+- **Also: the count's settle.** The device suite on Metal failed
+  `lifecycle` (144 of 145): the second cycle's ring resonator held 15
+  readback staging buffers to the first's 10, within the bound of 3 per
+  readback, with 10 copies in flight both times; alone it failed once more
+  in two runs, against none in five runs before. The pool shares buffers by
+  size, first free first, and drops one left unused for ten frames; a map
+  that comes late while the run is paused gives each readback a third, and
+  the count, taken 15 frames after the pause once its counts had held still
+  for five, could land inside those ten. The counts now hold still for one
+  frame longer than the pool keeps a buffer (`UNUSED_FRAMES_KEPT`, 11).
+  Whether the first act's wait or 776784a's frames made it come more often
+  was not separated: the cure is the same. Five runs on the M1 Max after
+  passed, every count 2 staging buffers a readback. `staging-never-retired`
+  now mutates the pool's keep test to `usize::MAX` rather than the
+  constant, which the settle reads and would overflow; the same mutation,
+  not run again here.
+- **Docs.** checks.md (lifecycle's first act and its count's settle; the
+  lavapipe job's times), plan.md (the field paint's wait, Worth checking
+  sometime).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  the default scene in the debug profile, release build, the wasm32 and
+  threaded wasm checks, the browser shader compile and the protocol proofs;
+  the device suite on Metal, 144 of 145 with `lifecycle` failing at the
+  ring resonator's staging, and `lifecycle` passing five times after the
+  settle (the fixture changed).

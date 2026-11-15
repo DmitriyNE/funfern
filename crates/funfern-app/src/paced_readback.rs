@@ -63,7 +63,7 @@ use bevy::{
 pub(crate) const IN_FLIGHT_DEPTH: u8 = 3;
 
 /// Frames a staging buffer stays in the pool unused before it is dropped.
-const UNUSED_FRAMES_KEPT: usize = 10;
+pub(crate) const UNUSED_FRAMES_KEPT: usize = 10;
 
 /// A buffer, or a range of one, read back every frame the depth allows. The
 /// count in flight is shared between the main and render worlds: the render

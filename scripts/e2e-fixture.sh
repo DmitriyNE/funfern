@@ -50,7 +50,17 @@ if [[ $(uname -s) == Linux ]]; then
   # read it as failing before its patch. A minute inside the outer limit, so
   # the driver says where it stood before `timeout` would stop it, as
   # scripts/e2e-lavapipe.sh gives it 600 inside its 900.
+  #
+  # Mesa's shader cache is kept under the target directory for every run
+  # here, where the scratch HOME would hold one for this run alone: lavapipe
+  # compiles a compute shader at its first dispatch, which from cold took
+  # about two and a half minutes of each fixture in the CI container
+  # (2026-11-15), and the mutation runner runs a fixture twice for every
+  # mutation. A mutated shader is another shader to the cache, and
+  # compiles anew.
+  cache=$PWD/target/e2e-fixture/mesa-shader-cache
   env HOME="$home" VK_ICD_FILENAMES="$icd" WGPU_BACKEND=vulkan ${environment[@]+"${environment[@]}"} \
+    MESA_SHADER_CACHE_DIR="$cache" \
     FUNFERN_E2E_DEADLINE="${FUNFERN_E2E_DEADLINE:-$((limit - 60))}" \
     timeout "$limit" xvfb-run -a -s "-screen 0 1280x800x24" "$binary" "$@" 2>&1 | tee "$log"
   status=${PIPESTATUS[0]}

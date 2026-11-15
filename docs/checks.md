@@ -200,9 +200,15 @@ under a virtual X server: the job `Device fixtures on software Vulkan` builds
 the fixtures binary and runs `scripts/e2e-lavapipe.sh`, which takes the fixture
 list from the run lines of `scripts/device-suite.sh`, not its driver probe, and
 fails a run that did not report lavapipe's adapter. They read there as on the M1 Max - the cavity Q `6.4e-7` -
-each its own bits across batchings, in 80 to 120 s a fixture on the four-core
-runner, the rejection fixture the longest, under a driver deadline the script
-raises to 600 s for the software device; the Pages deploy waits for the job. Lavapipe flushes subnormals to zero, which is how it
+each its own bits across batchings, under a driver deadline the script
+raises to 600 s for the software device, 1500 s for `batches` and
+`lifecycle`; the Pages deploy waits for the job. The run's fixtures share one
+Mesa shader cache, emptied as it starts: lavapipe compiles a compute shader
+with LLVM at its first dispatch, and with a cache each of its own the trivial
+fixtures took 140 to 160 s on the runner and the 41 of them 9,064 s
+(6b10a41). In the CI container (2026-11-15) the 41 took 2,997 s with one
+cache, most of them 25 to 60 s, `batches` 485 s, `lifecycle` 298 s, `edges`
+282 s and `adaptive-slow` 271 s. Lavapipe flushes subnormals to zero, which is how it
 found the nonlinear inverse's relative convergence tests unreachable near zero.
 The f64 inverse on the CPU had the same flaw for subnormal fluxes, which it
 underflows to rather than flushes: a Kerr or saturable target below f64's
@@ -2248,8 +2254,12 @@ scene's edge at most, and puts each through a pulse, a medium edited, the
 overlays on, a coarser mesh, a full snapshot, Reset, a non-finite fault and
 Run past it, a handoff the device refuses and asked for again, and the
 overlays off; then, adaptation off, back on the scene's own mesh and the
-run paused, it counts once the counts have held still for five frames past
-the readback pool's ten. It counts by the app's own records
+run paused, it counts once 15 frames have passed and the counts have held
+still for 11, one longer than the readback pool keeps a staging buffer
+unused: a map that comes late while the run is paused gives each readback
+a third buffer for ten frames, and held still for five, the second cycle's
+ring resonator read 15 staging buffers to the first's 10 in two of three
+runs on the M1 Max (2026-11-16). It counts by the app's own records
 (`live_resources`), not wgpu's: the shader buffers in the main world and on
 the device, the readbacks and their staging, the snapshot's staging, the
 field paint's buffers, each consumer's bind groups, the pipelines, both
@@ -2267,7 +2277,13 @@ staging buffers, the snapshot's one, the paint's 7, 103 pipelines and two
 worker threads. The study, three cycles on lavapipe, found no leak; Bevy
 keeps each resource in an entity it never despawns, one for every kind of
 resource a world has held, which the entity counts leave out. Two cycles
-take 602 s on lavapipe and 41 s on the M1 Max. Its mutations, on the
+take 638 s on lavapipe from a cold shader cache, 298 s with the run's cache
+filled, and 41 s on the M1 Max. An act may take a sixth of
+the run's time but the first, which waits at the first scene's opening for
+the device's first step on the run's time: lavapipe compiles a compute
+shader at its first dispatch, the step's about 200 s from a cold shader
+cache in the CI container, and until 2026-11-15 the first 60 frames took
+that on alone, past their 100 s in three of four pushes. Its mutations, on the
 device: `readbacks-left-at-a-clear`, `staging-never-retired`,
 `far-field-bind-group-kept`, `committed-generation-kept` and
 `preparation-worker-left-running`.

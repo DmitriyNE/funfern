@@ -1665,6 +1665,13 @@ is next touched.
   in a run started beside a plain rebuild of the app, after it had opened its window and found the device; it passed in
   2 s when rerun alone and in every suite of the day. One occurrence; worth a
   look if it recurs.
+- On lavapipe the field paint's first paint waits about 20 s in
+  `PipelineCache::block_on_render_pipeline` (`field_paint.rs`) for its
+  pipelines, queued behind every canonical compute pipeline on Bevy's one
+  async compute thread (2026-11-15, stacks in the CI container), and the
+  browser's SwiftShader pages wait about six minutes for their first frame.
+  Whether that is the same wait, and whether the paint's pipelines queued
+  first would shorten it, is unmeasured; nothing a GPU shows.
 - `canonical_gpu_cavity_modes --physics te` hung to the suite's limit in all
   three device suite runs between 18:27 and 19:35 local on 2026-11-01, just
   after opening its window, and in no run since. It passed at every commit
