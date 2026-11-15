@@ -1864,10 +1864,12 @@ is next touched.
   87,000 nodes, 90 to 150 at the Fine preset. Slicing it means making
   `compile_gpu_upload` resumable (C8.5, 2026-11-13).
 - And a preparation there gets 4 ms of each frame, the stationary flux's
-  solve 2, so both slow with the frame rate: the double slit's large
-  remesh took 39 to 55 s on the M1 Max against 9 to 17 with the workers,
-  and did not finish in 600 s on lavapipe. A budget that grows while the
-  frames stay short would trade smoothness for it (C8.5, 2026-11-13).
+  solve 2, or half the frame's wait for the GPU where that is more (up to
+  50 ms, 2026-11-15): on a software adapter's slow frames that lends them
+  12 to 25 times their floors, but at 60 frames a second about the floors, so
+  the double slit's large remesh took 39 to 55 s on the M1 Max against 9
+  to 17 with the workers. A budget that grows while the frames stay short
+  would trade smoothness for it (C8.5, 2026-11-13).
 - A dormant field coarsened below the authored mesh fades half as fast as
   on it. In C9's long adaptive run (480 s of strikes, 2026-11-14), after the
   last strike the mesh coarsened from 2772 to 1890 triangles at 61 to 78 s;

@@ -9,6 +9,14 @@
 #
 #   scripts/mutations.sh              every mutation
 #   scripts/mutations.sh band-fill    the ones whose name matches a pattern
+#   MUTATION_SHARD=2/4 scripts/mutations.sh
+#                                     the second of four shards: of the ones
+#                                     matched, in their folders' order, every
+#                                     fourth from the second
+#
+# The nightly runs four shards in parallel: one after another the 143
+# mutations of 2026-11-15 take about nine hours, past a runner's six, and
+# four take 2.1 to 2.5 hours each by the times measured on 2026-11-08 and 14.
 #
 # Each mutation is a folder holding `patch.diff`, applied with `git apply`,
 # and `manifest`, with lines `test: <command>`, `expect: <extended regex the
@@ -20,13 +28,25 @@ set -u
 cd "$(dirname "$0")/.."
 pattern=${1:-}
 limit=${MUTATION_TIMEOUT:-1800}
-matched=0
+shard=${MUTATION_SHARD:-1/1}
+if ! [[ $shard =~ ^([0-9]+)/([0-9]+)$ ]] || ((BASH_REMATCH[1] < 1 || BASH_REMATCH[1] > BASH_REMATCH[2])); then
+  echo "MUTATION_SHARD is k/n with 1 <= k <= n, not '$shard'" >&2
+  exit 2
+fi
+shard_index=$((BASH_REMATCH[1] - 1))
+shard_count=${BASH_REMATCH[2]}
+# Whether the mutation in this folder is one to run: its name matches the
+# pattern, and its place among those that match falls in this shard.
+selected=()
+position=0
 for folder in tests/mutations/*/; do
   name=$(basename "$folder")
-  [[ -z $pattern || $name =~ $pattern ]] && matched=$((matched + 1))
+  [[ -z $pattern || $name =~ $pattern ]] || continue
+  ((position % shard_count == shard_index)) && selected+=("$folder")
+  position=$((position + 1))
 done
-if [[ $matched -eq 0 ]]; then
-  echo "no mutation matches '$pattern'" >&2
+if [[ ${#selected[@]} -eq 0 ]]; then
+  echo "no mutation matches '$pattern' in shard $shard" >&2
   exit 2
 fi
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -42,9 +62,8 @@ run() {
   # The command, bounded, its output to the log.
   perl -e 'alarm shift @ARGV; exec "/bin/bash", "-c", $ARGV[0] or die "$!\n"' "$limit" "$1" >"$2" 2>&1
 }
-for folder in tests/mutations/*/; do
+for folder in "${selected[@]}"; do
   name=$(basename "$folder")
-  [[ -z $pattern || $name =~ $pattern ]] || continue
   manifest="$folder/manifest"
   test=$(field test "$manifest")
   expect=$(field expect "$manifest")
@@ -89,5 +108,5 @@ done
 echo
 printf '%s\n' "${results[@]}"
 echo
-echo "$(( ${#results[@]} - undetected )) of ${#results[@]} detected; logs in $logs"
+echo "$(( ${#results[@]} - undetected )) of ${#results[@]} detected (shard $shard); logs in $logs"
 [[ $undetected -eq 0 ]]

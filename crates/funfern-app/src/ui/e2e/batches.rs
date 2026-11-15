@@ -16,7 +16,9 @@
 //!
 //! The scenes are `FUNFERN_E2E_SCENES`, gallery names separated by `;` or
 //! `all`, and [`SCENES`] where it is not set; those must take every per-step
-//! branch the encoder has between them. A name ending in [`DRIVEN`] is the
+//! branch the encoder has between them. One of [`SCENES`] runs alone where
+//! `FUNFERN_E2E_SCENE` or the page's `e2e-scene=` names it, from one, as the
+//! browser's nightly runs them a page each. A name ending in [`DRIVEN`] is the
 //! scene with its top side set to a driven Dirichlet law, as the inspector's
 //! picker sets it: no gallery scene drives a side beside an outgoing one,
 //! whose trace then holds prescribed nodes. A name may end in `@` and a
@@ -116,9 +118,10 @@ pub(super) struct BatchDriver {
     verdicts: Vec<Result<String, String>>,
     /// When the current scene's first run began.
     started: Instant,
-    /// How long a scene's six runs may take, and when the current scene's
-    /// time is up.
-    per_scene: std::time::Duration,
+    /// When the fixture's time is up, every scene's together, as any other
+    /// fixture's is: the browser's test waits that long for the page's
+    /// verdict, and a deadline per scene could never fire before it gave up
+    /// (2026-11-15, where SwiftShader took 33 minutes for one scene).
     deadline: Instant,
 }
 
@@ -198,21 +201,29 @@ pub(super) fn add(app: &mut App, seconds: Option<u64>) {
         covered: BTreeMap::new(),
         verdicts: Vec::new(),
         started: Instant::now(),
-        per_scene: std::time::Duration::from_secs(seconds.unwrap_or(120)),
-        deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(120)),
+        // The M1 Max runs the five scenes in 53 s.
+        deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(600)),
     })
     .add_systems(EguiPrimaryContextPass, drive_batches.before(frame));
 }
 
-/// The scenes asked for, and whether they are the fixture's own.
+/// The scenes asked for, and whether they are the fixture's own, every one
+/// of them, which must take every branch between them.
 fn scenes() -> Result<(VecDeque<Scene>, bool), String> {
     #[cfg(not(target_arch = "wasm32"))]
     let asked = std::env::var("FUNFERN_E2E_SCENES").ok();
     #[cfg(target_arch = "wasm32")]
     let asked: Option<String> = None;
+    let alone = super::scene_alone(SCENES.len())?;
+    if asked.is_some() && alone.is_some() {
+        return Err("FUNFERN_E2E_SCENES and FUNFERN_E2E_SCENE both name scenes".into());
+    }
     let catalog = crate::topology_examples::catalog();
     let names: Vec<(&str, u64)> = match asked.as_deref() {
-        None => SCENES.to_vec(),
+        None => match alone {
+            Some(scene) => vec![SCENES[scene]],
+            None => SCENES.to_vec(),
+        },
         Some("all") => catalog
             .iter()
             .map(|example| (example.name, BATCH_STEPS))
@@ -249,7 +260,7 @@ fn scenes() -> Result<(VecDeque<Scene>, bool), String> {
                 .ok_or_else(|| format!("no gallery scene named {shipped:?}"))
         })
         .collect::<Result<_, _>>()?;
-    Ok((scenes, asked.is_none()))
+    Ok((scenes, asked.is_none() && alone.is_none()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,7 +347,14 @@ fn drive_batches(
     driver.endpoints.clear();
     driver.schedule = 0;
     driver.started = Instant::now();
-    driver.deadline = driver.started + driver.per_scene;
+    // Past the fixture's time, the scenes still to run fail by name rather
+    // than each finding the deadline gone.
+    if Instant::now() >= driver.deadline && !driver.scenes.is_empty() {
+        let left: Vec<String> = driver.scenes.drain(..).map(|scene| scene.name).collect();
+        let failure = format!("not reached in the fixture's time: {}", left.join(", "));
+        report(&format!("e2e batches: FAIL {failure}"));
+        driver.verdicts.push(Err(failure));
+    }
     if !driver.scenes.is_empty() {
         driver.phase = BatchPhase::Open;
         return;

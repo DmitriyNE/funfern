@@ -1715,7 +1715,7 @@ samples a spatial target length at triangle vertices, edge midpoints, and centro
 coarsens short edges; restores local constrained-Delaunay legality; refines long
 edges; verifies the result; and compacts it. Every phase resumes under the caller's
 work budget. The app gives it a soft 2 ms frame slice. Ordinary topology
-preparation is advanced for 6 ms of wall time per frame rather than a fixed step
+preparation is advanced for 4 ms of wall time per frame rather than a fixed step
 count: its cooperative steps are so fine that 256 steps per frame stretched a
 60 ms single-loop rebuild across more than eight hundred frames, most visibly
 as seconds spent in "Connecting holes".
@@ -1816,6 +1816,12 @@ approaches, and it grows linearly to the Advanced maximum at twice the reach.
 
 The app advances coefficient sampling, indicator, and adaptation jobs in soft 2 ms
 slices, rejects stale mesh/GPU/settings generations, and waits between estimates.
+Each of these floors, the stationary flux's 2 ms and the preparation's 4 ms
+among them, grows with the frame's own wait: a job on the main thread is lent
+half the time the thread waited between the last frame's work and this one's,
+up to 50 ms (`Playground::frame_lends`). Where the GPU sets the pace that time
+was free, and a software adapter's frames, seconds apart with the thread busy
+about 10 ms, then lend the jobs 25 to 12 times their floors.
 Refinement can start
 after one estimate. Coarsening requires two consecutive estimates on the same mesh,
 and consumes at most half of one automatic transaction so refinement retains a

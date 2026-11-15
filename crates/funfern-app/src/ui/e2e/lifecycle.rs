@@ -89,6 +89,7 @@ const HOLDERS: &[&str] = &[
 /// What a run of the driver takes: the scenes, the work each is put
 /// through, how many times over, and the bind group holders the scenes must
 /// make between them.
+#[derive(Clone, Copy)]
 pub(super) struct Plan {
     name: &'static str,
     scenes: &'static [&'static str],
@@ -331,7 +332,7 @@ impl Counted {
 
 #[derive(Resource)]
 pub(super) struct LifecycleDriver {
-    plan: &'static Plan,
+    plan: Plan,
     /// The scene and the act under way, by index.
     cycle: usize,
     scene: usize,
@@ -397,7 +398,25 @@ impl LifecycleDriver {
 
 /// Adds the driver of `plan`, the lifecycle fixture's or the endurance
 /// run's, and the render world's count.
-pub(super) fn add(app: &mut App, plan: &'static Plan, seconds: Option<u64>) {
+pub(super) fn add(app: &mut App, plan: Plan, seconds: Option<u64>) {
+    let plan = match super::scene_alone(plan.scenes.len()) {
+        Ok(None) => plan,
+        // One scene, cycled as the plan cycles it; the holders are the
+        // scenes' between them, which the runs of every scene check.
+        Ok(Some(scene)) => Plan {
+            scenes: &plan.scenes[scene..=scene],
+            holders: &[],
+            ..plan
+        },
+        Err(failure) => {
+            report(&format!("e2e: {failure}"));
+            mark("fail", &failure);
+            #[cfg(not(target_arch = "wasm32"))]
+            std::process::exit(2);
+            #[cfg(target_arch = "wasm32")]
+            return;
+        }
+    };
     mark("running", "");
     report(&format!("e2e build {}", crate::BUILD_ID));
     let count = crate::live_resources::add_render_count(app);

@@ -55,12 +55,19 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // times, as long as four of the handoff-memory pages, and similarity twice.
 // baffle-move runs 512 steps of 33,938 nodes: 22.5 of its 25 minutes isolated
 // on 2026-11-05, and past them served as Pages without the worker pool.
-// batches runs five scenes six times each, on lavapipe about four times as
-// long as cavity-batches, whose page takes 745 s. lifecycle remeshes and
-// adapts five scenes twice, 602 s on lavapipe, where edges took 521 s.
-// preparation's replacing part asks two scenes for the Fine mesh four times
-// each, 71 s on lavapipe with its workers; served without them, a page prepares and
-// takes away a handoff's stationary flux a few milliseconds a frame.
+// batches runs a scene six times, and the nightly one scene a page
+// (`e2e-scene=`, through FUNFERN_E2E_QUERY): Spatial soliton took 1,951 s on
+// SwiftShader on an M1 Max on 2026-11-15 and the Josephson line 617 s, where
+// the five together never finished in the runner's six hours; the double
+// slit runs twice the steps. lifecycle
+// remeshes and adapts a scene twice, also a scene a page: on CI's SwiftShader
+// the soliton's first cycle alone took 73 minutes. preparation's replacing
+// part asks two scenes for the Fine mesh four times each, 71 s on lavapipe
+// with its workers; served without them, a page prepares and takes away a
+// handoff's stationary flux a few milliseconds a frame. edges runs 46 cases,
+// 25.6 minutes on the M1 Max's SwiftShader against the full run's 25, and the
+// clock's three hand the walled cavity over eight times: CI's runner reached
+// step 544 of clock-retimes' 640 at its 25 minutes, the M1 Max 10.
 const runLength = {
   "handoff-memory-running": 2,
   "handoff-memory-running-late": 2,
@@ -71,9 +78,13 @@ const runLength = {
   "far-field": 3,
   "far-field-late": 2,
   "baffle-move": 2,
-  batches: 4,
-  lifecycle: 4,
+  batches: 6,
+  lifecycle: 6,
   preparation: 2,
+  edges: 2,
+  "clock-retimes": 2,
+  "clock-retime-at-rebase": 2,
+  "clock-retime-across-rebase": 2,
 };
 // How the bundle is hosted: `isolated`, the test server sending the headers that
 // isolate the page; `pages`, as GitHub Pages serves the site - no headers, so the
@@ -174,6 +185,9 @@ for (const fixture of fixtures) {
       const root = page.locator("html");
       // The bundle served is the one built from this checkout.
       await expect(root).toHaveAttribute("data-funfern-build", expectedBuildId());
+      // A page that never gives its verdict still says how far it got: its
+      // lines, which are otherwise printed with the verdict, before the
+      // failure (the nightly's `batches` read as silent for 101 minutes).
       const outcome = await Promise.race([
         expect(root)
           .toHaveAttribute("data-funfern-e2e", /^(pass|fail)$/, {
@@ -181,7 +195,13 @@ for (const fixture of fixtures) {
           })
           .then(() => null),
         stopping,
-      ]);
+      ]).catch((error) => {
+        console.log(`${fixture} (${start}): no verdict in ${pageDeadline + 60} s`);
+        for (const line of lines.splice(0)) {
+          console.log(`  ${line}`);
+        }
+        throw error;
+      });
       if (outcome !== null) {
         throw new Error(`the app stopped before its verdict: ${outcome}\n${lines.join("\n")}`);
       }

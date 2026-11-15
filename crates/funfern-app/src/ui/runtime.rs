@@ -32,13 +32,56 @@ use std::sync::{
 
 use super::*;
 
+/// The share of the thread's wait between frames that a cooperative job may
+/// take of the next. Taking it lengthens the wait's work and shortens the
+/// next wait, so where the GPU sets the pace the job settles at a third of
+/// the time the thread had free.
+const IDLE_SHARE: f64 = 0.5;
+
+/// The most a frame lends a cooperative job, so that a wait the GPU did not
+/// set, a hidden page or a stall, lends no frame more. Under the
+/// `preparation` fixture's 60 ms bound on a slice, which on hardware a wait
+/// of a 60 Hz frame, ten milliseconds or so, never brings near.
+const LENT_AT_MOST: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Marks the frame's start: how long the thread waited since the last
+/// frame's work ended.
+pub(crate) fn frame_began(mut state: ResMut<Playground>) {
+    state.frame_idle = state
+        .frame_work_ended
+        .map_or(std::time::Duration::ZERO, |ended| ended.elapsed());
+}
+
+/// Marks the end of the frame's work on this thread.
+pub(crate) fn frame_work_ended(mut state: ResMut<Playground>) {
+    state.frame_work_ended = Some(Instant::now());
+}
+
 impl Playground {
-    /// Wall time a frame lends to topology preparation. The runtime checks the
-    /// deadline between individual work units, including each formula-heavy
-    /// canonical element, so this remains a latency bound rather than only an
-    /// average throughput target.
+    /// Wall time a frame lends to topology preparation at least. The runtime
+    /// checks the deadline between individual work units, including each
+    /// formula-heavy canonical element, so this remains a latency bound
+    /// rather than only an average throughput target.
     pub(super) const PREPARATION_FRAME_BUDGET: std::time::Duration =
         std::time::Duration::from_millis(4);
+    /// Wall time a frame lends at least to the other jobs that run here when
+    /// no worker takes them: a handoff's stationary flux, and the AMR
+    /// estimate and adaptation.
+    pub(super) const COOPERATIVE_FRAME_BUDGET: std::time::Duration =
+        std::time::Duration::from_millis(2);
+
+    /// What this frame lends a cooperative job whose own budget is `floor`:
+    /// that, or [`IDLE_SHARE`] of the time the thread waited before the
+    /// frame began, up to [`LENT_AT_MOST`]. Where the frame waits on the
+    /// GPU, the thread's work takes none of the frame's time. On
+    /// SwiftShader, without the worker pool, a frame kept the main thread
+    /// busy about 10 ms and came seconds after the last, and a handoff's
+    /// stationary flux on 70,000 nodes, about 2,000 frames of its 2 ms, took
+    /// hours (2026-11-15). At 60 frames a second the frame's own wait lends
+    /// about what the floors do.
+    pub(super) fn frame_lends(&self, floor: std::time::Duration) -> std::time::Duration {
+        floor.max(self.frame_idle.mul_f64(IDLE_SHARE).min(LENT_AT_MOST))
+    }
     /// Candidate state can live either in the cooperative runtime runner or in
     /// a background worker. Keep that placement detail out of UI/status policy.
     pub(super) fn preparation_phase(&self) -> Option<TopologyPreparationPhase> {
@@ -183,7 +226,8 @@ impl Playground {
             return;
         }
 
-        if let Some(Ok(_)) = self.runtime.advance_for(Self::PREPARATION_FRAME_BUDGET) {
+        let lent = self.frame_lends(Self::PREPARATION_FRAME_BUDGET);
+        if let Some(Ok(_)) = self.runtime.advance_for(lent) {
             self.handoff_ready = Some(Instant::now());
         }
     }
@@ -1568,6 +1612,45 @@ pub(super) fn pulse_increment(
 mod tests {
     use super::*;
     use crate::canonical_gpu::test_device::{self, TestDevice};
+
+    /// A cooperative job takes its own budget where the thread had no time
+    /// to spare, half the wait where it had, and never more than the most a
+    /// frame lends; the wait is the time from one frame's work ending to the
+    /// next one's start.
+    #[test]
+    fn a_frame_lends_its_floor_or_half_the_wait_before_it() {
+        let ms = std::time::Duration::from_millis;
+        let mut state = Playground::default();
+        let floor = Playground::COOPERATIVE_FRAME_BUDGET;
+        assert_eq!(state.frame_lends(floor), floor, "before any frame");
+        for (waited, lent) in [(0, 2), (3, 2), (10, 5), (40, 20), (100, 50), (60_000, 50)] {
+            state.frame_idle = ms(waited);
+            assert_eq!(
+                state.frame_lends(floor),
+                ms(lent),
+                "after a {waited} ms wait"
+            );
+        }
+        for (waited, lent) in [(6, 4), (10, 5)] {
+            state.frame_idle = ms(waited);
+            assert_eq!(
+                state.frame_lends(Playground::PREPARATION_FRAME_BUDGET),
+                ms(lent),
+                "preparation after a {waited} ms wait"
+            );
+        }
+
+        let mut app = App::new();
+        app.init_resource::<Playground>()
+            .add_systems(First, frame_began)
+            .add_systems(Last, frame_work_ended);
+        app.update();
+        assert_eq!(app.world().resource::<Playground>().frame_idle, ms(0));
+        std::thread::sleep(ms(30));
+        app.update();
+        let waited = app.world().resource::<Playground>().frame_idle;
+        assert!(waited >= ms(30), "waited {waited:?}");
+    }
 
     /// RT-6 of the 2026-10-20 review: a Reset whose zero-state plan fails is
     /// reported, and is not left latched to recompile every frame and zero

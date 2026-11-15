@@ -344,6 +344,11 @@ pub struct Playground {
     /// Wall-clock seconds since the previous frame, which is what the exposures
     /// release against so they behave the same at any frame rate.
     pub(super) frame_delta: f32,
+    /// When the last frame's work on this thread ended, and how long the
+    /// thread then waited before this frame's began: what the cooperative
+    /// jobs may borrow ([`Playground::frame_lends`]).
+    pub(super) frame_work_ended: Option<Instant>,
+    pub(super) frame_idle: std::time::Duration,
     pub(super) material_overlay_job: Option<MaterialOverlayJob>,
     pub(super) material_overlay_snapshot: Option<MaterialOverlaySnapshot>,
     pub(super) material_overlay_error: Option<String>,
@@ -586,6 +591,8 @@ impl Default for Playground {
             field_paint_topology: None,
             exposure_scratch: Vec::new(),
             frame_delta: 0.0,
+            frame_work_ended: None,
+            frame_idle: std::time::Duration::ZERO,
             material_overlay_job: None,
             material_overlay_snapshot: None,
             material_overlay_error: None,

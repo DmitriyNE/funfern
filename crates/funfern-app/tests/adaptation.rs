@@ -2542,17 +2542,18 @@ fn one_experiment_after_another_refines_and_comes_back_down() {
 /// leave an edge past its target, and before the controller remembered the
 /// mesher's refusals it asked every second estimate, 0.67 times a second at
 /// 14 ms of work each, forever; the parametric fiber 0.63 at 32 ms.
-/// Remembered, the source asks 0.07 times a second over its second half as
-/// a borderline edge comes into the candidates, none in the gate's 20 s,
-/// and the fiber none past 10.5 s. Nightly, 30 s and the fiber's 60 s.
+/// Remembered, neither asks over its second half: the source in the gate's
+/// 20 s and nightly in 30 s, the fiber in 60 s.
 ///
 /// AMR-04: with the source's frequency halved at 15 s the mesh refined for
 /// it keeps 450 to 500 candidates the mesher refuses, shifting with the
 /// field, which the refusals remembered never held: 0.58 a second from 21 s
-/// to 45 s. Each refusal in a row now waits twice as long as the last, and
-/// over the second half of 90 s, nightly, it asks 0.07 times a second while
-/// the mesher still makes the few collapses it can, five in four
-/// coarsenings.
+/// to 45 s. Each refusal in a row now waits twice as long as the last. Over
+/// the second half of 90 s, nightly, the mesher still makes three
+/// coarsenings, at 45.8, 62.3 and 65.3 s, and each starts the waits over:
+/// one empty ask after each and two more as the waits double, 0.11 a
+/// second, then none past 68.3 s. Held to 0.2. At the scalar wave's filter
+/// strength, which the harness applied until 2026-11-09, it read 0.07.
 #[test]
 fn a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make() {
     let names: &[&str] = if long_nightly() {
@@ -2563,9 +2564,13 @@ fn a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make() {
     for name in names {
         let (_, duration, looped) = long_run(name, 20.0);
         let rate = empty_rate(&looped.readings, duration);
+        // A coarsening the mesher still makes starts the waits over, so the
+        // halved source asks again after each.
+        let bound = if *name == "source-halved" { 0.2 } else { 0.1 };
         assert!(
-            rate <= 0.1,
-            "{name} asks for an empty coarsening {rate:.2} times a second over its second half"
+            rate <= bound,
+            "{name} asks for an empty coarsening {rate:.2} times a second over its second half, \
+             past {bound}"
         );
         assert_eq!(
             reversals(&second_half(&looped.readings, duration)),

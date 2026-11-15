@@ -250,9 +250,10 @@ impl Playground {
             return;
         }
 
+        let lent = self.frame_lends(Self::COOPERATIVE_FRAME_BUDGET);
         if let Some(job) = &mut self.amr_adaptation_job {
             self.amr_status = job.phase().into();
-            if let Some(result) = frame_slices(grant, || job.advance(64)) {
+            if let Some(result) = frame_slices(grant, lent, || job.advance(64)) {
                 self.amr_adaptation_completed = Some(result);
                 self.amr_adaptation_job = None;
             } else {
@@ -305,7 +306,7 @@ impl Playground {
 
         if let Some(job) = &mut self.amr_indicator_job {
             self.amr_status = job.phase().into();
-            if let Some(result) = frame_slices(grant, || job.advance(64)) {
+            if let Some(result) = frame_slices(grant, lent, || job.advance(64)) {
                 self.amr_indicator_completed = Some(result);
                 self.amr_indicator_job = None;
             } else {
@@ -451,15 +452,19 @@ impl Playground {
     }
 }
 
-/// What `advance` comes to in a frame: slices of work for the frame's 2 ms,
-/// or the `grant` of slices a test lends it.
-fn frame_slices<T>(grant: Option<usize>, mut advance: impl FnMut() -> Option<T>) -> Option<T> {
+/// What `advance` comes to in a frame: slices of work for the time the frame
+/// `lent`, or the `grant` of slices a test lends it.
+fn frame_slices<T>(
+    grant: Option<usize>,
+    lent: std::time::Duration,
+    mut advance: impl FnMut() -> Option<T>,
+) -> Option<T> {
     if let Some(slices) = grant {
         return (0..slices).find_map(|_| advance());
     }
     let started = Instant::now();
     let mut result = None;
-    while result.is_none() && started.elapsed().as_secs_f64() < 0.002 {
+    while result.is_none() && started.elapsed() < lent {
         result = advance();
     }
     result

@@ -55,6 +55,19 @@ pub(super) enum FluxCleanupStage {
     Landed(u64),
 }
 
+impl FluxCleanupStage {
+    /// The stage, without the increment it may hold.
+    pub(super) fn name(&self) -> &'static str {
+        match self {
+            FluxCleanupStage::Due => "due",
+            FluxCleanupStage::Solving => "solving",
+            FluxCleanupStage::Found(_) => "found",
+            FluxCleanupStage::Sent(_) => "sent",
+            FluxCleanupStage::Landed(_) => "landed",
+        }
+    }
+}
+
 impl FluxCleanup {
     /// What a handoff onto `active`, published as `generation`, leaves to
     /// do. A driven generation's flux moves with its runtime and holds no
@@ -207,10 +220,11 @@ impl Playground {
     }
 
     fn finish_flux_cleanup(&mut self) {
+        let lent = self.frame_lends(Self::COOPERATIVE_FRAME_BUDGET);
         if let Some(job) = &mut self.flux_cleanup_job {
             let started = Instant::now();
             let mut result = None;
-            while result.is_none() && started.elapsed().as_secs_f64() < 0.002 {
+            while result.is_none() && started.elapsed() < lent {
                 result = job.advance(64);
             }
             if result.is_some() {

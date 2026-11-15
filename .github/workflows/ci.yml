@@ -809,13 +809,19 @@ jobs:
   # Nightly: the mutations, one deliberate defect each, applied and reverted
   # by scripts/mutations.sh; each must be caught by the test its manifest
   # names, at the check it targets. The device ones run their fixture on
-  # lavapipe through scripts/e2e-fixture.sh.
+  # lavapipe through scripts/e2e-fixture.sh. In four shards, every fourth
+  # mutation each: one after another the 143 of 2026-11-15 take about nine
+  # hours, and the runner stopped them at six every night from 2026-11-09.
   mutations:
-    name: Mutations are detected
+    name: Mutations are detected (${{ matrix.shard }} of 4)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -859,7 +865,9 @@ jobs:
       - name: Build the fixtures binary
         run: cargo build -p funfern-app --release --locked --bin funfern-fixtures
 
-      - name: Run every mutation
+      - name: Run this shard's mutations
+        env:
+          MUTATION_SHARD: ${{ matrix.shard }}/4
         run: scripts/mutations.sh
 
   # Nightly: C9's long runs on the device. PH-01's cavity for 200,000 steps
@@ -1162,16 +1170,18 @@ jobs:
     #   RT-04's `events` and `events-handoff`, the switchable cavity once each,
     #   and RT-05's `rollback` and `rollback-handoff`, the switchable cavity
     #   and the cavity once each;
-    # - batches: RT-02's `batches`, five gallery scenes six times each, 1,920
-    #   steps a scene and the far field's 3,840: on lavapipe about four times
-    #   `cavity-batches`, whose page takes 745 s, so about an hour a page;
+    # - batches-1 to -5: RT-02's `batches`, a gallery scene six times a page,
+    #   the page's `e2e-scene=` naming which: the five on one page never
+    #   finished in the six hours, Spatial soliton alone taking 33 minutes on
+    #   an M1 Max's SwiftShader (2026-11-15);
     # - clock: C8.3's `clock-retimes`, the walled cavity handed over eight
     #   times, and `clock-retime-at-rebase` and `-across-rebase`, kept out of
     #   the state part, which runs close to its limit;
-    # - lifecycle: C8.4's `lifecycle`, five gallery scenes cycled twice,
-    #   remeshed and adapting, 602 s on lavapipe, and C8.5's `preparation`,
-    #   whose replacing part runs on a page, the frames part judging native
-    #   frames alone;
+    # - lifecycle-1 to -5: C8.4's `lifecycle`, a gallery scene cycled twice a
+    #   page, remeshed and adapting: on CI's SwiftShader the soliton's first
+    #   cycle took 73 minutes (2026-11-14);
+    # - preparation: C8.5's `preparation`, whose replacing part runs on a
+    #   page, the frames part judging native frames alone;
     # - state: the rest, but the adaptive loop's `adaptive` and
     #   `adaptive-slow`, which run in no part: their f64 reference follows the
     #   run on a thread of its own natively, and on the page would step inside
@@ -1188,7 +1198,7 @@ jobs:
       fail-fast: false
       matrix:
         hosting: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["isolated", "pages-blocked"]' || '["isolated"]') }}
-        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "memory", "recorders", "far-field", "handoffs", "invariants", "batches", "clock", "lifecycle"]' || '["state"]') }}
+        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "memory", "recorders", "far-field", "handoffs", "invariants", "clock", "preparation", "batches-1", "batches-2", "batches-3", "batches-4", "batches-5", "lifecycle-1", "lifecycle-2", "lifecycle-3", "lifecycle-4", "lifecycle-5"]' || '["state"]') }}
     env:
       FULL: ${{ github.event_name == 'schedule' || inputs.browser == 'full' }}
     steps:
@@ -1262,13 +1272,19 @@ jobs:
         # and the slowest page, cavity-batches' four runs, 745 s.
         env:
           FUNFERN_EXPECT_BUILD: ${{ github.sha }}
-          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'memory' && 'handoff-memory-rebuild,handoff-memory-remesh,handoff-memory-edit,handoff-memory-timestep,handoff-memory-running' || matrix.part == 'recorders' && 'observables,handoff-memory-running-late' || matrix.part == 'far-field' && 'far-field,far-field-late' || matrix.part == 'handoffs' && 'handoff-driven,handoff-driven-pins,handoff-memory-flux,neutral-remesh,baffle-move,separator-mid-run' || matrix.part == 'invariants' && 'observers,superposition,similarity,events,events-handoff,rollback,rollback-handoff' || matrix.part == 'batches' && 'batches' || matrix.part == 'clock' && 'clock-retimes,clock-retime-at-rebase,clock-retime-across-rebase' || matrix.part == 'lifecycle' && 'lifecycle,preparation' || '' }}
+          FUNFERN_E2E_FIXTURES: ${{ env.FULL != 'true' && 'cavity' || matrix.part == 'memory' && 'handoff-memory-rebuild,handoff-memory-remesh,handoff-memory-edit,handoff-memory-timestep,handoff-memory-running' || matrix.part == 'recorders' && 'observables,handoff-memory-running-late' || matrix.part == 'far-field' && 'far-field,far-field-late' || matrix.part == 'handoffs' && 'handoff-driven,handoff-driven-pins,handoff-memory-flux,neutral-remesh,baffle-move,separator-mid-run' || matrix.part == 'invariants' && 'observers,superposition,similarity,events,events-handoff,rollback,rollback-handoff' || startsWith(matrix.part, 'batches-') && 'batches' || matrix.part == 'clock' && 'clock-retimes,clock-retime-at-rebase,clock-retime-across-rebase' || startsWith(matrix.part, 'lifecycle-') && 'lifecycle' || matrix.part == 'preparation' && 'preparation' || '' }}
           FUNFERN_E2E_EXCLUDE: ${{ env.FULL == 'true' && matrix.part == 'state' && 'observables,far-field,far-field-late,handoff-memory-running-late,handoff-driven,handoff-driven-pins,handoff-memory-flux,neutral-remesh,baffle-move,separator-mid-run,observers,superposition,similarity,handoff-memory-rebuild,handoff-memory-remesh,handoff-memory-edit,handoff-memory-timestep,handoff-memory-running,batches,events,events-handoff,rollback,rollback-handoff,clock-retimes,clock-retime-at-rebase,clock-retime-across-rebase,lifecycle,preparation,adaptive,adaptive-slow' || '' }}
           FUNFERN_E2E_DEADLINE: ${{ env.FULL != 'true' && '600' || '1500' }}
           FUNFERN_E2E_HOSTING: ${{ matrix.hosting }}
           FUNFERN_TEST_ISOLATED: ${{ matrix.hosting == 'isolated' && '1' || '0' }}
           FUNFERN_EXPECT_BROWSER_WORKER: ${{ matrix.hosting == 'isolated' && 'active' || 'unavailable' }}
-        run: npm run test:e2e:swiftshader
+          PART: ${{ matrix.part }}
+        # A part named for a scene runs that one of its fixture's scenes alone.
+        run: |
+          case "$PART" in
+            batches-* | lifecycle-*) export FUNFERN_E2E_QUERY="e2e-scene=${PART##*-}" ;;
+          esac
+          npm run test:e2e:swiftshader
 
   deploy:
     name: Deploy GitHub Pages

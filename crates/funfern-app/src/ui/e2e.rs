@@ -123,11 +123,11 @@ pub(crate) fn add(app: &mut App) {
         return;
     }
     if name == "lifecycle" {
-        lifecycle::add(app, &lifecycle::LIFECYCLE, seconds);
+        lifecycle::add(app, lifecycle::LIFECYCLE, seconds);
         return;
     }
     if name == "endurance" {
-        lifecycle::add(app, &lifecycle::ENDURANCE, seconds);
+        lifecycle::add(app, lifecycle::ENDURANCE, seconds);
         return;
     }
     if name == "preparation" {
@@ -1826,9 +1826,19 @@ fn drive(
     };
     let run = match advanced {
         Some(run) => run,
+        // And where a handoff's stationary flux stood, which a page without
+        // its workers found and sent on its own thread for hours (2026-11-15).
         None if Instant::now() >= driver.deadline => Err(format!(
-            "did not finish in time, at {}",
-            driver.phase.name()
+            "did not finish in time, at {}{}",
+            driver.phase.name(),
+            state.flux_cleanup.as_ref().map_or(String::new(), |cleanup| format!(
+                "; the stationary flux of generation {} {}, the device at {}, full readbacks {} of {}",
+                cleanup.generation,
+                cleanup.stage.name(),
+                request.generation(),
+                display.full_readbacks,
+                display.readbacks
+            ))
         )),
         None => return,
     };
@@ -5029,7 +5039,8 @@ fn wall_errors(
 /// of b, and of r where the medium keeps one, each within the fixture's
 /// tolerance; where the generation has a wall, its pole states coefficient by
 /// coefficient and in the memory they represent within [`WALL_TOLERANCE`],
-/// their energy within the tolerance, and the last carry's own share and
+/// their energy within the tolerance or twice their own error, whichever is
+/// larger, and the last carry's own share and
 /// residual within their bounds; the device's clock at the time the
 /// reference has reached; and, where the fixture acted, the device far from
 /// the run without its actions, or, for a rebuild that changed nothing,
@@ -5045,7 +5056,7 @@ fn compare(
     let expected = &reference.state;
     let (q, b, r) = field_errors(reference, display, None)?;
     let mut summary = format!("Q {q:.3e}, b {b:.3e}, r {r:.3e} after {endpoint} steps");
-    let mut worst = worse(worse(q, b), r);
+    let worst = worse(worse(q, b), r);
     if let Some(wall) = wall_errors(reference, display)? {
         summary.push_str(&format!(
             "; wall z {:.3e}, memory {:.3e}, energy {:.3e} of {:.3e}",
@@ -5056,7 +5067,17 @@ fn compare(
                 "{summary}: the pole states stand from the reference's beyond {WALL_TOLERANCE:.0e}"
             ));
         }
-        worst = worse(worst, wall.energy);
+        // The wall's energy is its states' quadratic form, so its relative
+        // error reaches twice theirs: held to the fixture's tolerance alone,
+        // `handoff-memory-running-late` failed once at 5.8e-6 with its states
+        // 7.4e-6 and 1.4e-5 off, which they may be (2026-11-13, SwiftShader).
+        let energy_bound = tolerance.max(2.0 * worse(wall.z, wall.memory));
+        if !within(wall.energy, energy_bound) {
+            return Err(format!(
+                "{summary}: the wall's energy stands beyond {energy_bound:.1e}, the \
+                 fixture's tolerance or twice its states' error"
+            ));
+        }
         if let Some(carry) = reference.carry {
             let change = (carry.target_energy - carry.source_energy) / carry.source_energy;
             summary.push_str(&format!(
@@ -5218,28 +5239,49 @@ fn hash(words: &[u32]) -> u64 {
 /// `FUNFERN_E2E` and `FUNFERN_E2E_DEADLINE` natively, `?e2e=` and
 /// `e2e-deadline=` in the page's address.
 fn requested() -> Option<(String, Option<u64>)> {
+    Some((
+        setting("FUNFERN_E2E", "e2e")?,
+        setting("FUNFERN_E2E_DEADLINE", "e2e-deadline").and_then(|s| s.parse().ok()),
+    ))
+}
+
+/// One of the fixtures' settings: the environment variable `variable`
+/// natively, `key=` in the page's address in the browser.
+fn setting(variable: &str, key: &str) -> Option<String> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let name = std::env::var("FUNFERN_E2E").ok()?;
-        let seconds = std::env::var("FUNFERN_E2E_DEADLINE")
-            .ok()
-            .and_then(|seconds| seconds.parse().ok());
-        Some((name, seconds))
+        let _ = key;
+        std::env::var(variable).ok()
     }
     #[cfg(target_arch = "wasm32")]
     {
+        let _ = variable;
         let search = web_sys::window()?.location().search().ok()?;
-        let value = |key: &str| {
-            search
-                .trim_start_matches('?')
-                .split('&')
-                .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
-                .map(str::to_owned)
-        };
-        Some((
-            value("e2e")?,
-            value("e2e-deadline").and_then(|s| s.parse().ok()),
-        ))
+        search
+            .trim_start_matches('?')
+            .split('&')
+            .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
+            .map(str::to_owned)
+    }
+}
+
+/// Which of a fixture's own `count` scenes to run alone, by index, where
+/// `FUNFERN_E2E_SCENE` natively or `e2e-scene=` on the page names one,
+/// counting from one: the browser's nightly runs `batches` and `lifecycle` a
+/// scene a page, each page a cell of its own, where on SwiftShader one of
+/// their scenes takes half an hour to an hour and their five took past the
+/// runner's six (2026-11-15). What the scenes must take between them, the
+/// branches and the bind group holders, is the host's to decide and is
+/// checked where every scene runs, natively.
+pub(super) fn scene_alone(count: usize) -> Result<Option<usize>, String> {
+    let Some(asked) = setting("FUNFERN_E2E_SCENE", "e2e-scene") else {
+        return Ok(None);
+    };
+    match asked.trim().parse::<usize>() {
+        Ok(scene) if (1..=count).contains(&scene) => Ok(Some(scene - 1)),
+        _ => Err(format!(
+            "the scene to run alone is one of 1 to {count}, not {asked:?}"
+        )),
     }
 }
 

@@ -34068,3 +34068,96 @@ the device.
   the wasm32 and threaded wasm checks, the browser shader compile and the
   protocol proofs; no shader or device change, so no device suite beyond
   the `preparation` fixture above, which passed.
+
+## 2026-11-15 — The nightly fitted to its runners, and slow frames' waits lent to the main thread
+
+- **Why.** The nightly had been red every night but one since 2026-10-26.
+  Studied with the user before anything changed: three groups, none a
+  defect of the solver or the device.
+- **Adaptation, long runs** (red from 2026-11-10). `source-halved` asked for
+  an empty coarsening 0.11 times a second over its second half against
+  AMR-04's 0.1. Bisected to 4491600, which filtered the harness at the
+  device's strength, 1.0, where it had the scalar wave's 1.5; with 1.5 put
+  back the run is 58757c4's to the transaction (0.0667), so the 0.07 of the
+  doc was measured under the wrong filter. At 1.0 the controller does as
+  designed: one empty ask after each of three coarsenings, the backoff
+  starting over, and the doubled waits, then nothing from 68 s to 90 s.
+  4491600's "AMR-01 to 04 hold" was the gate's length alone. The bound for
+  `source-halved` is now 0.2 with the reason beside it; `source` and the
+  fiber keep 0.1, and read 0 over their 30 and 60 s. `coarsening-refusals-forgotten`
+  reads 0.67 on the gate's `source`, and before the backoff the halved source
+  read 0.58: both well past 0.2.
+- **Mutations** (stopped at six hours from 2026-11-09): 143 now, 98 on
+  2026-11-08, run one after another took 5.3 h then and would take about
+  nine. `scripts/mutations.sh` takes `MUTATION_SHARD=k/n`, every n-th of
+  the matched from the k-th, and the nightly runs four shards: 2.1 to 2.5
+  h each by the times of 2026-11-08 and 14 (120 of 143 measured). The six
+  `batches` mutations run it with `FIXTURE_TIMEOUT=1500`: its deadline is
+  now the fixture's (below), and on the mutation runner it took 8 to 9.5
+  minutes against the script's default 600 s.
+- **Browser fixtures on SwiftShader.** Run again on Chrome 157's
+  SwiftShader on the M1 Max: `cavity` 6.8 min (CI 4 to 7), `clock-retimes`
+  passed in 10.4 (CI reached step 544 of 640 at its 25), `edges` in 25.6
+  against its 25, `lifecycle` four scenes of its first cycle in 40 minutes
+  (CI's acts 3 to 10 times slower: remeshing and adaptation beside
+  SwiftShader on four cores), `batches`' Spatial soliton 1,951 s and
+  Josephson line 617 s, the same bits in all six schedules, each schedule
+  about four minutes whatever its batch. Slow, not stuck:
+  - The spec printed a page's lines only with its verdict, so a page that
+    never gave one said nothing: `batches` read as silent for 101 minutes.
+    It prints them before the failure now.
+  - `batches` took its deadline as each scene's, which the browser's
+    test, waiting the page's, could never see fire. Its deadline is the
+    fixture's now, 600 s by default (53 s on the M1 Max); the scenes past
+    it fail by name. Lavapipe gives it 1500 inside 1800 (540 to 886 s on
+    the runner, past its 900 once).
+  - A page runs one of `batches`' or `lifecycle`'s own scenes alone where
+    `e2e-scene=` names it (`FUNFERN_E2E_SCENE` natively), and the nightly
+    runs each a scene a cell: `batches-1` to `-5`, `lifecycle-1` to `-5`,
+    and `preparation` a part of its own. What the scenes take between them,
+    the encoder's branches and the bind group holders, is decided on the
+    host, the same on every backend, and still held where every scene runs
+    on one page: the device suite, and lavapipe on every push.
+  - Run lengths: `edges` and the clock's three 2, `batches` 6 (a scene; the
+    double slit runs twice the steps), `lifecycle` 6 (a scene twice; CI's
+    soliton took 73 minutes for its first cycle).
+  - `handoff-memory-running-late` failed once (2026-11-13) on its wall's
+    energy, 5.8e-6 against the fixture's 5e-6, with the states it is the
+    quadratic form of 7.4e-6 and 1.4e-5 off, which `WALL_TOLERANCE` lets
+    them be. The energy is now held to the tolerance or twice its states'
+    error. `observers` (the vector overlay read nothing back) and
+    `handoff-memory-remesh` (its deadline) failed once each on a slow
+    page; watched.
+- **Slow frames lend their wait.** Served without the worker pool,
+  `neutral-remesh` and `separator-mid-run` (from 2163630, which made them
+  wait for the handoff's stationary flux), `preparation`'s Supersede and
+  `lifecycle`'s edits ran out of time: the cleanup's solve, the AMR jobs
+  and preparation ran on the main thread 2, 2 and 4 ms a frame, and on
+  SwiftShader a frame keeps that thread busy about 10 ms and comes seconds
+  after the last. The solve at 70,000 nodes needs about 2,000 of its
+  slices (natively 0.46 s at 22,000 nodes, 1.31 s at 44,000, about N^1.5),
+  some 40 s at 60 frames a second, hours there; and estimates wait for it,
+  so a storage-blocked browser on a slow GPU adapted that much later. A
+  frame now lends each job half the time the thread waited since the last
+  frame's work ended, up to 50 ms, where that is more than its floor
+  (`Playground::frame_lends`, `frame_began` in `First`,
+  `frame_work_ended` in `Last`): where the GPU sets the pace the job
+  settles at a third of the thread's free time, and at 60 frames a second
+  it gets about its floor. A fixture's deadline now says where a handoff's
+  stationary flux stood. Served storage-blocked from Chrome 157's SwiftShader
+  on the M1 Max, on both of each's pages: `neutral-remesh` held in 11 minutes a page
+  where it ran out of its 25 before, and `preparation` in 12 to 13, its
+  Supersede done in 148 to 159 s, the longest slice 54 ms. `batches`' and `lifecycle`'s
+  second scenes alone held in 16 and 14 minutes, about six minutes of each the
+  wait for the page's first frame. plan.md's item on the cooperative
+  budgets keeps what is left: at 60 frames a second the double slit's
+  remesh without workers still takes 39 to 55 s.
+- **Docs.** checks.md (the shards), architecture.md (the lent time, and
+  preparation's 4 ms where it said 6), plan.md, the CI's comments.
+- **Gate:** fmt, clippy with warnings denied, the wasm clippy, workspace
+  tests (release), the default scene in the debug profile, release build,
+  the wasm32 and threaded wasm checks, the browser shader compile, the
+  protocol proofs, and the device suite on Metal, 145 of 145. Natively
+  `preparation`'s slices are where they were that morning: its Supersede
+  in 84 and Large in 248 against 90 and 244, the longest 15 and 28 ms
+  against 15 and 33, inside `SLICE_BOUND_MS`' 60.

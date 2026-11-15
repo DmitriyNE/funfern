@@ -1862,8 +1862,10 @@ held: 0.58 empty transactions a second. Each refusal in a row now waits twice
 as many estimates as the last, from two to 32; the app's
 `each_refusal_in_a_row_waits_twice_as_long` holds the rule, and
 `a_settled_mesh_stops_asking_for_a_coarsening_it_cannot_make` runs the case,
-`source-halved`, for 90 s nightly, under AMR-03's bound of 0.1 a second
-(0.07). Its mutations are `adapted-request-clears-an-edits-failure`,
+`source-halved`, for 90 s nightly, under a bound of its own, 0.2 a second
+(0.11: each of the three coarsenings the mesher still makes starts the waits
+over; 0.07 under the scalar wave's filter strength, which the harness applied
+until 2026-11-09). Its mutations are `adapted-request-clears-an-edits-failure`,
 `adapted-history-outlives-its-mesh`, `coarsening-never-backs-off`,
 `model-adaptation-clears-an-edits-failure` and
 `model-adaptation-asks-for-the-document`. Dropping the model's "not while
@@ -2320,10 +2322,11 @@ catch it and the pattern its failure must match; the script applies each,
 runs the test before and after, requires the failure the manifest names, and
 reverts. A mutation that does not build, fails elsewhere, times out, or whose
 test does not pass before the patch is "not detected". Not in the gate, since
-each rebuilds the tree; the nightly runs all of them on Linux, the device
-ones on lavapipe through `scripts/e2e-fixture.sh`, which runs one fixture on
-this machine's GPU otherwise. `scripts/mutations.sh wall` runs the ones whose
-names match. That every patch still applies to the tree, and every manifest
+each rebuilds the tree; the nightly runs all of them on Linux, in four
+shards side by side (`MUTATION_SHARD=k/4`, every fourth from the k-th), the
+device ones on lavapipe through `scripts/e2e-fixture.sh`, which runs one
+fixture on this machine's GPU otherwise. `scripts/mutations.sh wall` runs
+the ones whose names match. That every patch still applies to the tree, and every manifest
 names its test, failure, needs and purpose, is held in the gate by
 `crates/funfern-app/tests/mutations.rs`, so a patch the code has moved past
 fails the day it moves rather than at the next nightly.

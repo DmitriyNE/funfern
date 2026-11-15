@@ -84,6 +84,10 @@ fn run_app(build: Build) -> AppExit {
         })
         .add_systems(Update, stopped::announce)
         .add_systems(EguiPrimaryContextPass, ui::frame)
+        // What the thread waited between frames, which the cooperative jobs
+        // borrow from (`Playground::frame_lends`).
+        .add_systems(First, ui::frame_began)
+        .add_systems(Last, ui::frame_work_ended)
         // The autosave's debounce yields to a close, an exit, a quit and a
         // page that leaves (`ui::session`).
         .add_systems(Last, ui::autosave_at_exit.after(bevy::window::ExitSystems));
