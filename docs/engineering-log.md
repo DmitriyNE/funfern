@@ -34035,3 +34035,36 @@ the device.
   against its 100 (waiting on a handoff's stationary flux, main-thread
   time); with the bound, the four PH-03 entries and `preparation` passed
   rerun alone. `canonical_gpu_cavity_drift` 268 s there.
+
+## 2026-11-15 — The field paint's edges sorted rather than mapped
+
+- **Why.** C8.5 traced 11 to 32 ms of main-thread time at 87,000 nodes to
+  the frame the viewport first draws a new mesh, most of it the field
+  paint's topology: an ordered map gathering the mesh's unique edges and
+  flagging the boundary's. Left under Worth checking sometime; fixed with
+  the user.
+- **The fix.** `field_paint_edges` (`ui/paint.rs`): each triangle's edges
+  and each boundary edge one `u64` key, the lesser vertex above the greater
+  above the boundary flag, sorted and merged with the flags or'ed. That is
+  the map's order and its flags, a boundary edge no triangle has included,
+  so the buffer the device gets is the same to the byte. Vertex indices
+  below 2³¹, asserted in debug builds.
+- **Measured.** The double slit at the frames part's edge 0.025 (88,087
+  nodes, 29,126 triangles, 44,044 edges), release, on the host, 40 rounds
+  in rotated order: the map 7.4 ms median, the keys 1.1, a sort of (pair,
+  flag) tuples 3.5; the rest of the topology 0.2 ms. The `preparation`
+  fixture natively, once: the upload's worst frame in a Large preparation
+  read 12.2 and 11.7 ms on the double slit, 6.5 and 5.5 on the plasma
+  mirror (workers, main thread), against 17.6 to 20.0 and 11.0 to 13.1 in
+  the three suites before.
+- **Test.** `field_paint_edges_are_the_ordered_maps_to_the_byte`, the map
+  kept as the reference: every gallery scene meshed as the app meshes it
+  (45, in parallel, 0.6 s), and one of them given a boundary edge no
+  triangle has, a boundary edge again the other way round, no boundary
+  edges, and nothing.
+- **Docs.** plan.md's item closed; the campaign plan's C8.5 note.
+- **Gate:** fmt, clippy with warnings denied, the wasm clippy, workspace
+  tests (release), the default scene in the debug profile, release build,
+  the wasm32 and threaded wasm checks, the browser shader compile and the
+  protocol proofs; no shader or device change, so no device suite beyond
+  the `preparation` fixture above, which passed.

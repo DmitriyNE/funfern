@@ -1654,7 +1654,7 @@ mutation, in this order:
   hardware adapter. Under Worth checking sometime: the static host's
   remaining one-shot steps, its inline pack and its frame-rate-bound
   throughput, and the field paint's topology rebuilt on the main thread for
-  each new mesh.
+  each new mesh (its edges since sorted rather than mapped, 2026-11-15).
 - **C9, long runs:** 5.3's gaps, an adaptive run among them. Landed on
   2026-11-14. The f64 study ran the cavity 5,000 s in three skins under
   either integrator, filtered and not, PH-16's uniform swings 2,000 s,

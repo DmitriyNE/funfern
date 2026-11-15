@@ -1868,10 +1868,6 @@ is next touched.
   remesh took 39 to 55 s on the M1 Max against 9 to 17 with the workers,
   and did not finish in 600 s on lavapipe. A budget that grows while the
   frames stay short would trade smoothness for it (C8.5, 2026-11-13).
-- The viewport builds the field paint's topology on the main thread the
-  first frame it draws a new mesh: 11 to 32 ms of one frame at 87,000
-  nodes, most of it an ordered map of the 44,000 edges, which sorting would
-  take to about 3 ms (C8.5, 2026-11-13).
 - A dormant field coarsened below the authored mesh fades half as fast as
   on it. In C9's long adaptive run (480 s of strikes, 2026-11-14), after the
   last strike the mesh coarsened from 2772 to 1890 triangles at 61 to 78 s;

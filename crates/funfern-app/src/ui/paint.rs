@@ -13,7 +13,6 @@ use crate::wave_gpu::{VectorOverlayDisplay, WaveDisplay};
 use bevy::prelude::*;
 use bevy_egui::egui::{self, Color32, Pos2, Rect, Stroke};
 use funfern_core::*;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::*;
@@ -223,31 +222,7 @@ impl Playground {
                         ]
                     })
                     .collect::<Vec<_>>();
-                let mut edge_kinds = BTreeMap::<[usize; 2], bool>::new();
-                for triangle in &mesh.triangles {
-                    for [a, b] in [
-                        [triangle.vertices[0], triangle.vertices[1]],
-                        [triangle.vertices[1], triangle.vertices[2]],
-                        [triangle.vertices[2], triangle.vertices[0]],
-                    ] {
-                        edge_kinds.entry([a.min(b), a.max(b)]).or_insert(false);
-                    }
-                }
-                for edge in &mesh.boundary_edges {
-                    let [a, b] = edge.vertices;
-                    edge_kinds.insert([a.min(b), a.max(b)], true);
-                }
-                let edges = edge_kinds
-                    .into_iter()
-                    .map(|([a, b], boundary)| {
-                        let a = mesh.vertices[a].point;
-                        let b = mesh.vertices[b].point;
-                        FieldPaintEdge {
-                            endpoints: [a.x as f32, a.y as f32, b.x as f32, b.y as f32],
-                            boundary: u32::from(boundary),
-                        }
-                    })
-                    .collect::<Vec<_>>();
+                let edges = field_paint_edges(mesh);
                 let replacement = Arc::new(FieldPaintTopology {
                     mesh_revision: active.mesh.mesh_revision,
                     positions: active
@@ -1706,11 +1681,156 @@ fn low_pass_advance(state: &mut VectorFilterState, input: Point2, a: f64) {
     state.output = stages[VECTOR_LOW_PASS_STAGES - 1];
 }
 
+/// `mesh`'s edges for the field paint, each once, in the order of their
+/// vertex pairs, an edge flagged when one of the mesh's boundary edges is it.
+/// The viewport builds them on the main thread the first frame it draws a new
+/// mesh. Each edge is one key, its pair above its flag, sorted and merged: at
+/// 88,000 nodes an ordered map of the 44,000 edges took 7.4 ms of that frame,
+/// these keys 1.2.
+fn field_paint_edges(mesh: &TriMesh) -> Vec<FieldPaintEdge> {
+    debug_assert!(mesh.vertices.len() <= 1 << 31);
+    let key = |a: usize, b: usize, boundary: bool| {
+        ((a.min(b) as u64) << 33) | ((a.max(b) as u64) << 1) | u64::from(boundary)
+    };
+    let mut keys = Vec::with_capacity(3 * mesh.triangles.len() + mesh.boundary_edges.len());
+    for triangle in &mesh.triangles {
+        let [a, b, c] = triangle.vertices;
+        keys.extend([key(a, b, false), key(b, c, false), key(c, a, false)]);
+    }
+    for edge in &mesh.boundary_edges {
+        let [a, b] = edge.vertices;
+        keys.push(key(a, b, true));
+    }
+    keys.sort_unstable();
+    keys.dedup_by(|later, kept| {
+        let same = *later >> 1 == *kept >> 1;
+        if same {
+            *kept |= *later & 1;
+        }
+        same
+    });
+    keys.into_iter()
+        .map(|key| {
+            let a = mesh.vertices[(key >> 33) as usize].point;
+            let b = mesh.vertices[((key >> 1) & 0xFFFF_FFFF) as usize].point;
+            FieldPaintEdge {
+                endpoints: [a.x as f32, a.y as f32, b.x as f32, b.y as f32],
+                boundary: (key & 1) as u32,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::document::VectorOverlay;
     use crate::topology_editor::TopologyEditor;
+
+    /// The field paint's edges, sorted, are to the byte the ones the ordered
+    /// map they were gathered in gave, on every gallery scene's mesh as the
+    /// app meshes it, and on one of them given a boundary edge no triangle
+    /// has, a boundary edge listed again the other way round, no boundary
+    /// edges, and nothing at all.
+    #[test]
+    fn field_paint_edges_are_the_ordered_maps_to_the_byte() {
+        fn by_map(mesh: &TriMesh) -> Vec<FieldPaintEdge> {
+            let mut kinds = BTreeMap::<[usize; 2], bool>::new();
+            for triangle in &mesh.triangles {
+                for [a, b] in [
+                    [triangle.vertices[0], triangle.vertices[1]],
+                    [triangle.vertices[1], triangle.vertices[2]],
+                    [triangle.vertices[2], triangle.vertices[0]],
+                ] {
+                    kinds.entry([a.min(b), a.max(b)]).or_insert(false);
+                }
+            }
+            for edge in &mesh.boundary_edges {
+                let [a, b] = edge.vertices;
+                kinds.insert([a.min(b), a.max(b)], true);
+            }
+            kinds
+                .into_iter()
+                .map(|([a, b], boundary)| {
+                    let a = mesh.vertices[a].point;
+                    let b = mesh.vertices[b].point;
+                    FieldPaintEdge {
+                        endpoints: [a.x as f32, a.y as f32, b.x as f32, b.y as f32],
+                        boundary: u32::from(boundary),
+                    }
+                })
+                .collect()
+        }
+        let check = |name: &str, mesh: &TriMesh| {
+            let sorted = field_paint_edges(mesh);
+            let mapped = by_map(mesh);
+            assert_eq!(sorted.len(), mapped.len(), "{name}");
+            assert!(
+                bytemuck::cast_slice::<_, u8>(&sorted) == bytemuck::cast_slice::<_, u8>(&mapped),
+                "{name}: the edges differ"
+            );
+            sorted.iter().filter(|edge| edge.boundary == 1).count()
+        };
+        let meshes = std::thread::scope(|scope| {
+            crate::topology_examples::catalog()
+                .iter()
+                .map(|example| {
+                    scope.spawn(|| {
+                        let scene = &example.document.model.accepted;
+                        let edge = example.document.presentation.mesh_edge;
+                        let domain = scene.geometry.domain;
+                        let options = MeshingOptions {
+                            target_edge_length: edge,
+                            curve_tolerance: (edge * 0.02).min(5e-4),
+                            ..MeshingOptions::default()
+                        }
+                        .sized_for_area(domain.width() * domain.height());
+                        let meshed = funfern_core::test_scenes::meshed(scene, 1, options);
+                        (example.name, meshed.unwrap().mesh)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for (name, mesh) in &meshes {
+            assert!(check(name, mesh) > 0, "{name}: no boundary edge flagged");
+        }
+
+        let (name, mesh) = &meshes[0];
+        let triangle_edges = mesh
+            .triangles
+            .iter()
+            .flat_map(|triangle| {
+                let [a, b, c] = triangle.vertices;
+                [[a, b], [b, c], [c, a]].map(|[a, b]| [a.min(b), a.max(b)])
+            })
+            .collect::<BTreeSet<_>>();
+        let apart = (1..mesh.vertices.len())
+            .find(|&b| !triangle_edges.contains(&[0, b]))
+            .unwrap();
+        let mut stray = mesh.clone();
+        stray.boundary_edges.push(BoundaryEdge {
+            vertices: [apart, 0],
+            ..stray.boundary_edges[0]
+        });
+        let flagged = check(name, mesh);
+        assert_eq!(check("a stray boundary edge", &stray), flagged + 1);
+        let mut twice = mesh.clone();
+        let [a, b] = twice.boundary_edges[0].vertices;
+        twice.boundary_edges.push(BoundaryEdge {
+            vertices: [b, a],
+            ..twice.boundary_edges[0]
+        });
+        assert_eq!(check("a boundary edge twice", &twice), flagged);
+        let mut bare = mesh.clone();
+        bare.boundary_edges.clear();
+        assert_eq!(check("no boundary edges", &bare), 0);
+        bare.triangles.clear();
+        assert!(field_paint_edges(&bare).is_empty());
+        assert_eq!(check("nothing", &bare), 0);
+    }
 
     /// The arrows stand within √2 of the spacing asked for at every zoom.
     #[test]
