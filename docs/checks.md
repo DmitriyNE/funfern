@@ -330,7 +330,10 @@ alone, isolated - a smoke check that the shipped bundle starts in a browser,
 compiles its shaders through Tint and draws through the compositor - with the
 deploy waiting on it; nightly at 03:17 UTC, and when the workflow is
 dispatched with `browser: full`, every fixture, isolated and with service
-workers refused, the two in parallel and the other jobs skipped.
+workers refused, the two in parallel and the other jobs skipped. Dispatched
+with `nightly` set (`gh workflow run "CI and Pages" -f nightly=true`), the
+workflow runs every job the schedule runs, the browser's full set among them,
+in place of the per-push ones, so a fix need not wait for 03:17.
 
 A lost device or any other fatal console message fails a fixture at once
 rather than at its deadline.

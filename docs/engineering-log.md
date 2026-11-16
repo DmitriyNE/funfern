@@ -34299,3 +34299,22 @@ the device.
   the default scene in the debug profile, release build, the wasm32 and
   threaded wasm checks, the browser shader compile and the protocol proofs.
   Documents and a comment only; no device run.
+
+## 2026-11-16 — The nightly, dispatched by hand
+
+- **Why.** The nightly's jobs ran on the schedule alone: a dispatched run
+  took the per-push jobs, with the browser's full set at most, so a fix to a
+  nightly job waited for the next 03:17 run, which GitHub has started
+  between 10:38 and 11:10 UTC of late. Asked for by the user.
+- **Change.** `ci.yml`'s dispatch takes a `nightly` choice. Set, every job
+  gated on the schedule runs (the sixteen nightly jobs and the browser's
+  full set), and the per-push jobs and the deploy do not, as on the
+  schedule: `gh workflow run "CI and Pages" -f nightly=true`. Unset, a
+  dispatch runs as before.
+- **Checked:** the workflow parses, and each job's condition reads as
+  intended (each listed from the parsed file); the first dispatched run is
+  the check of the rest.
+- **Docs.** checks.md, the browser job's paragraph.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  the default scene in the debug profile, release build, the wasm32 and
+  threaded wasm checks, the browser shader compile and the protocol proofs.

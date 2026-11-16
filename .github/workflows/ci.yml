@@ -6,11 +6,16 @@ on:
   pull_request:
   # Nightly: the browser fixtures in full on SwiftShader, the long physics
   # and adaptation runs, the full invariants and wall sweep, the device long
-  # runs on lavapipe, and the mutations in four shards.
+  # runs on lavapipe, and the mutations in four shards. A manual run with
+  # `nightly` set runs the same, when a fix should not wait for the schedule.
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
+      nightly:
+        description: "Run the nightly's jobs, as the schedule does, in place of the per-push ones"
+        type: boolean
+        default: false
       browser:
         description: "Browser fixtures on SwiftShader: the cavity alone, or every fixture isolated and with service workers refused"
         type: choice
@@ -38,7 +43,7 @@ env:
 jobs:
   native:
     name: Check and test
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && !inputs.nightly
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -125,7 +130,7 @@ jobs:
   # the gate (crates/funfern-app/tests/wall_sweep.rs).
   wall-sweep:
     name: Wall sweep, every scene
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -179,7 +184,7 @@ jobs:
   # a set of each (crates/funfern-app/tests/invariants.rs).
   invariants:
     name: Invariants, every scene
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -228,7 +233,7 @@ jobs:
   # (crates/funfern-app/tests/adaptation.rs).
   adaptation-long-runs:
     name: Adaptation, long runs
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -281,7 +286,7 @@ jobs:
   # planar_reflection_converges_to_its_law_at_three_angles).
   planar-reflection:
     name: Planar reflection, three angles
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
@@ -329,7 +334,7 @@ jobs:
   # outgoing_circles_converge_to_their_law).
   outgoing-circle:
     name: Outgoing circle, PH-06
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
@@ -381,7 +386,7 @@ jobs:
   # crates/funfern-core/src/canonical_temporal.rs, long_run_*).
   energy-long-runs:
     name: Energy over long runs, PH-05, PH-17 and C9
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
@@ -433,7 +438,7 @@ jobs:
   # (topology_examples.rs, absorbing_holes_converge_to_their_law).
   absorbing-hole:
     name: Absorbing hole, PH-07
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
@@ -480,7 +485,7 @@ jobs:
   # Max, the two side by side (topology_examples.rs, transient_*).
   transient-walls:
     name: Transient walls, PH-09
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
@@ -527,7 +532,7 @@ jobs:
   # planar_interfaces_converge_to_fresnel).
   fresnel-interfaces:
     name: Fresnel interfaces, PH-11
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
@@ -574,7 +579,7 @@ jobs:
   # (topology_examples.rs, cylinders_converge_to_the_partial_waves).
   cylinder-scattering:
     name: Cylinder scattering, PH-12
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
@@ -628,7 +633,7 @@ jobs:
   # (topology_examples.rs, thin_gaps_converge_to_their_springs).
   thin-gap-interfaces:
     name: Thin gaps, PH-13
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
@@ -675,7 +680,7 @@ jobs:
   # an M1 Max (topology_examples.rs, temporal_interfaces_converge_to_the_modal_law).
   temporal-interfaces:
     name: Temporal interfaces, PH-14
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
@@ -722,7 +727,7 @@ jobs:
   # minutes on an M1 Max (topology_examples.rs, modulated_media_converge_to_floquet).
   modulated-media:
     name: Modulated media, PH-15
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
@@ -766,7 +771,7 @@ jobs:
 
   manufactured-solutions:
     name: Manufactured solutions, PH-19
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
@@ -816,7 +821,7 @@ jobs:
   # hours, and the runner stopped them at six every night from 2026-11-09.
   mutations:
     name: Mutations are detected (${{ matrix.shard }} of 4)
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -882,7 +887,7 @@ jobs:
   # times, each count what the one before held (src/ui/e2e/lifecycle.rs).
   device-long-runs:
     name: Device long runs on software Vulkan
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'schedule' || inputs.nightly
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -949,7 +954,7 @@ jobs:
 
   web:
     name: Browser bundle
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && !inputs.nightly
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1045,7 +1050,7 @@ jobs:
 
   kani:
     name: Protocol proofs
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && !inputs.nightly
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1066,7 +1071,7 @@ jobs:
 
   device:
     name: Device fixtures on software Vulkan
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && !inputs.nightly
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -1199,10 +1204,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        hosting: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["isolated", "pages-blocked"]' || '["isolated"]') }}
-        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.browser == 'full') && '["state", "memory", "recorders", "far-field", "handoffs", "invariants", "clock", "preparation", "batches-1", "batches-2", "batches-3", "batches-4", "batches-5", "lifecycle-1", "lifecycle-2", "lifecycle-3", "lifecycle-4", "lifecycle-5"]' || '["state"]') }}
+        hosting: ${{ fromJSON((github.event_name == 'schedule' || inputs.nightly || inputs.browser == 'full') && '["isolated", "pages-blocked"]' || '["isolated"]') }}
+        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.nightly || inputs.browser == 'full') && '["state", "memory", "recorders", "far-field", "handoffs", "invariants", "clock", "preparation", "batches-1", "batches-2", "batches-3", "batches-4", "batches-5", "lifecycle-1", "lifecycle-2", "lifecycle-3", "lifecycle-4", "lifecycle-5"]' || '["state"]') }}
     env:
-      FULL: ${{ github.event_name == 'schedule' || inputs.browser == 'full' }}
+      FULL: ${{ github.event_name == 'schedule' || inputs.nightly || inputs.browser == 'full' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -1290,7 +1295,7 @@ jobs:
 
   deploy:
     name: Deploy GitHub Pages
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'schedule'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'schedule' && !inputs.nightly
     # The protocol's decisions are the app's own code, so a proof that fails
     # holds the deploy as a failing test does, and so does a fixture that
     # fails on the second backend or in the browser.
