@@ -2190,7 +2190,12 @@ for 400 steps within 1e-5, where it failed at step 140; a source at 1e30
 failing its first step with code 4, its accepted books finite; and a pulse
 sent behind a latched failure the host has not read refused with the
 latch's code, the field the reference's without it. On lavapipe these
-took 305 s. The f32 range the study found, held by nothing: the device
+took 305 s. The fixture's deadline is its run's, and a case may take a
+sixth of it, 120 s at least, the first the run's whole time: until
+2026-11-16 it was each case's, and the browser's nightly, holding the page
+to it whole, saw a page go silent at its 30th case, about 100 s each on
+CI's SwiftShader. Past the run's end the run stops and says how many cases
+were left. The f32 range the study found, held by nothing: the device
 refuses pulses of 1e20 and more, and fails the first step of saturable
 media driven at 1e19, where the f64 reference takes both; below a field
 of about 1e-34 nonlinear mass laws lose their relative digits (3e-3 at a
@@ -2329,7 +2334,10 @@ under 100 ms of main-thread time and every slice of the cooperative runner's
 under 60 ms; on a software adapter, and on a page, it is left out. On the
 M1 Max the worst frame read 37.5 ms, once 73, and the runner's longest
 slice 31 ms, where before C8.5 an upload's frame took up to 128 ms and the
-runner's slices up to 446. The replacing part takes 70 s on
+runner's slices up to 446. An act may take a third of the run's time,
+600 s at least: served without its workers on CI's SwiftShader the double
+slit opened in 119 s, and Supersede ran past the fixed 600 s of before
+(2026-11-16). The replacing part takes 70 s on
 lavapipe; both parts 160 s on the M1 Max, where at a load of about 8
 its worst frame took 51 ms and the runner's longest slice 45. On the host,
 `a_driven_mediums_laws_are_sampled_across_units`, and the stepped build in

@@ -32,6 +32,15 @@ use funfern_core::{
 /// Seconds a case may take, where the fixture's deadline does not say.
 const CASE_SECONDS: u64 = 120;
 
+/// The share of the run's time a case may take, where the fixture's deadline
+/// gives the run's, and never less than [`CASE_SECONDS`]. The first case has
+/// the run's time: it meets the backend's first compile of the step's shaders.
+/// The deadline was a case's until 2026-11-16, while the browser's nightly
+/// held the page to it whole, so a page past it said nothing: on CI's
+/// SwiftShader the 46 cases take about 100 s each, and the page went silent
+/// at the 30th.
+const CASE_SHARE: u32 = 6;
+
 /// Seconds to wait for a snapshot or a handoff before the case says so.
 const WAIT_SECONDS: u64 = 30;
 
@@ -48,6 +57,9 @@ pub(super) struct EdgeDriver {
     base: u64,
     mirror: Option<Mirror>,
     per_case: std::time::Duration,
+    /// When the run must have finished, where the fixture's deadline says.
+    run_deadline: Option<Instant>,
+    /// When the current case must have finished.
     deadline: Instant,
     ran: usize,
     /// What went wrong with the driver itself, as opposed to what a case
@@ -240,18 +252,35 @@ pub(super) fn add(app: &mut App, seconds: Option<u64>) {
         crate::BUILD_ID,
         cases.len()
     ));
-    let per_case = std::time::Duration::from_secs(seconds.unwrap_or(CASE_SECONDS));
-    app.insert_resource(EdgeDriver {
+    let least = std::time::Duration::from_secs(CASE_SECONDS);
+    let run = seconds.map(std::time::Duration::from_secs);
+    let mut driver = EdgeDriver {
         cases: cases.into(),
         phase: EdgePhase::Open,
         base: 0,
         mirror: None,
-        per_case,
-        deadline: Instant::now() + per_case,
+        per_case: run.map_or(least, |run| (run / CASE_SHARE).max(least)),
+        run_deadline: run.map(|run| Instant::now() + run),
+        deadline: Instant::now(),
         ran: 0,
         broken: Vec::new(),
-    })
-    .add_systems(EguiPrimaryContextPass, drive_edges.before(frame));
+    };
+    driver.deadline = driver.case_deadline();
+    app.insert_resource(driver)
+        .add_systems(EguiPrimaryContextPass, drive_edges.before(frame));
+}
+
+impl EdgeDriver {
+    /// When the current case must have finished: its share of the run, the
+    /// first case the run's whole time, and never past the run's end.
+    fn case_deadline(&self) -> Instant {
+        let case = Instant::now() + self.per_case;
+        match self.run_deadline {
+            Some(run) if self.ran == 0 => run,
+            Some(run) => case.min(run),
+            None => case,
+        }
+    }
 }
 
 /// The box as the cases open it: no grid filter, which the reference would
@@ -1208,7 +1237,16 @@ fn drive_edges(
     report(&line);
     driver.ran += 1;
     state.e2e_steps.limit = Some(0);
-    driver.deadline = Instant::now() + driver.per_case;
+    // Past the run's end the run ends here, saying how far it came, rather
+    // than stopping every case left one frame each.
+    if driver.run_deadline.is_some_and(|run| Instant::now() >= run) && !driver.cases.is_empty() {
+        let left = driver.cases.len();
+        driver
+            .broken
+            .push(format!("the run's time ran out with {left} cases left"));
+        driver.cases.clear();
+    }
+    driver.deadline = driver.case_deadline();
     if !driver.cases.is_empty() {
         driver.phase = EdgePhase::Open;
         return;
@@ -1244,7 +1282,7 @@ fn advance(
             }
             let document = driver.cases.front()?.document.clone();
             // A case's time runs from its opening, the app's start up aside.
-            driver.deadline = Instant::now() + driver.per_case;
+            driver.deadline = driver.case_deadline();
             *FRESH_CLOCK.lock().unwrap() = driver.cases.front()?.clock;
             state.e2e_steps.limit = Some(0);
             state.e2e_steps.batch = None;

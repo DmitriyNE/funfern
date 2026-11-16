@@ -34318,3 +34318,55 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   the default scene in the debug profile, release build, the wasm32 and
   threaded wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-16 — Edges' deadline its run's, preparation's acts a share of it, and a mutation's message
+
+- **Why.** The first nightly after 776784a and 74f350b (43859818762, on
+  de9053c) passed every physics job, the invariants, the wall sweep, the
+  adaptation, energy and device long runs, and three mutation shards, and
+  failed four browser pages and a shard:
+  - `edges`, in the state part, on both hostings (and on 2026-11-15): the
+    page read "running" to Playwright's 3,060 s. The driver held each case
+    to the fixture's deadline, which the browser's test holds the whole
+    page to, so the page could never fail by itself; CI's SwiftShader takes
+    about 100 s a case, and it stood at the 30th and 29th of 46.
+  - `preparation`, served without the worker pool: "did not finish in time:
+    Double slit, Supersede at Rest", past the act's fixed 600 s, the scene
+    opened in 119 s.
+  - `batches`' double slit, both hostings, after 5 and 3 of its 6
+    schedules: studied next.
+  - Shard 2, 34 of 36: `late-source-copy-unguarded` failed for another
+    reason, and `dormant-carry-keeps-its-totals`'s test passes with its
+    patch, here too: studied next.
+- **Changes.**
+  - `edges`: the fixture's deadline is its run's; a case may take a sixth
+    of it, 120 s at least, and the first case the run's whole time (the
+    backend's first compile). Past the run's end the run stops, saying how
+    many cases were left. The nightly gives it a browser part of its own,
+    `edges`, at 125 minutes, and `scripts/e2e-lavapipe.sh` the 1500 s
+    `batches` and `lifecycle` have. Natively without a deadline a case has
+    its 120 s, as before.
+  - `preparation`: an act may take a third of the run's time, 600 s at
+    least; the browser's page 4,500 s.
+  - `late-source-copy-unguarded`: since 2163630 and 329ad15 the host's
+    counters catch the late copy before the display shows it ("the host's
+    counters read [Readbacks { caught_up: false, control: true }], which the
+    copies that arrived do not account for"); the manifest expects that.
+- **Verified.**
+  - On arm64 lavapipe: `edges` with a 120 s run failed at 157 s, "1 cases
+    run; broke on 127 nodes: stopped: did not finish in time, running; the
+    run's time ran out with 45 cases left"; as CI runs them, `edges` passed
+    in 482 s from a cold shader cache and `preparation` in 75 s.
+  - On the M1 Max's SwiftShader: `edges` on a 750 s page failed by itself at
+    12.6 minutes, 12 cases run and 34 left, where it had said nothing;
+    `preparation` served without workers passed in 35 minutes, Supersede
+    145 s (148 on 2026-11-15) but its Small acts 113 to 142 s where they had
+    taken 24 to 72, nothing on their path changed: unexplained.
+  - On Metal: `edges` 172 s, 46 cases; `preparation` 138 s.
+  - `late-source-copy-unguarded` applied by hand: its test fails with the
+    new message; the gate's manifest check passes.
+- **Docs.** checks.md (edges' deadline, preparation's acts).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  the default scene in the debug profile, release build, the wasm32 and
+  threaded wasm checks, the browser shader compile and the protocol proofs;
+  the two changed fixtures on Metal, not the whole device suite.

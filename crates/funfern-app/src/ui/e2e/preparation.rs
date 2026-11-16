@@ -111,8 +111,13 @@ const FRAMES_WORK: &[Act] = &[
     Act::Runner(Runner::Workers),
 ];
 
-/// What one act may take.
+/// What one act may take at least, and the share of the run's time it may
+/// take where that is more. The act's 600 s were fixed until 2026-11-16, when
+/// CI's SwiftShader, served without the worker pool, opened the double slit
+/// in 119 s and ran past them in Supersede, which took about 150 s on the
+/// M1 Max's.
 const ACT_SECONDS: u64 = 600;
+const ACT_SHARE: u32 = 3;
 
 #[derive(Clone, Copy, Debug)]
 enum Stage {
@@ -169,6 +174,8 @@ pub(super) struct PreparationDriver {
     /// adapter. Unknown until the first frame.
     judged: Option<bool>,
     act_started: Instant,
+    /// What one act may take.
+    act_time: std::time::Duration,
     act_deadline: Instant,
     deadline: Instant,
     done: bool,
@@ -201,7 +208,7 @@ impl PreparationDriver {
     fn next(&mut self) -> bool {
         self.stage = Stage::Take;
         self.act_started = Instant::now();
-        self.act_deadline = self.act_started + std::time::Duration::from_secs(ACT_SECONDS);
+        self.act_deadline = self.act_started + self.act_time;
         self.discarded = 0;
         self.stale_ready = false;
         self.asked.clear();
@@ -219,6 +226,8 @@ impl PreparationDriver {
 pub(super) fn add(app: &mut App, seconds: Option<u64>) {
     mark("running", "");
     report(&format!("e2e build {}", crate::BUILD_ID));
+    let run_time = std::time::Duration::from_secs(seconds.unwrap_or(3600));
+    let act_time = (run_time / ACT_SHARE).max(std::time::Duration::from_secs(ACT_SECONDS));
     app.insert_resource(FrameTimes::default())
         .insert_resource(PreparationDriver {
             work: Vec::new(),
@@ -229,8 +238,9 @@ pub(super) fn add(app: &mut App, seconds: Option<u64>) {
             runner: Runner::Workers,
             judged: None,
             act_started: Instant::now(),
-            act_deadline: Instant::now() + std::time::Duration::from_secs(ACT_SECONDS),
-            deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(3600)),
+            act_time,
+            act_deadline: Instant::now() + act_time,
+            deadline: Instant::now() + run_time,
             done: false,
             active_revision: 0,
             discarded: 0,

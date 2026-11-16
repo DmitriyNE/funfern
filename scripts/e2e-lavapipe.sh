@@ -66,10 +66,12 @@ for fixture in "${fixtures[@]}"; do
   # deadline is its five scenes', which took 540 to 886 s on the runner from
   # 2026-11-12 to 15, and past the 900 once: 1500 inside 1800. lifecycle's
   # too: from a cold shader cache its first step took 200 s in the CI
-  # container and its two cycles 638 s, 298 s with the cache filled.
+  # container and its two cycles 638 s, 298 s with the cache filled. And
+  # edges', its run's since 2026-11-16 rather than each case's: 254 s on the
+  # runner with the cache filled.
   deadline=600
   outer=900
-  if [[ $fixture == batches || $fixture == lifecycle ]]; then
+  if [[ $fixture == batches || $fixture == lifecycle || $fixture == edges ]]; then
     deadline=1500
     outer=1800
   fi

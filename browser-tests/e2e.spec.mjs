@@ -64,8 +64,12 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // the soliton's first cycle alone took 73 minutes. preparation's replacing
 // part asks two scenes for the Fine mesh four times each, 71 s on lavapipe
 // with its workers; served without them, a page prepares and takes away a
-// handoff's stationary flux a few milliseconds a frame. edges runs 46 cases,
-// 25.6 minutes on the M1 Max's SwiftShader against the full run's 25, and the
+// handoff's stationary flux a few milliseconds a frame; on 2026-11-16 CI's
+// opened the double slit in 119 s, and an act may take a third of the run.
+// edges runs 46 cases,
+// 25.6 minutes on the M1 Max's SwiftShader and about 100 s a case on CI's,
+// where the page went silent at the 30th of its 50 minutes on 2026-11-16: a
+// page of its own, the deadline its run's, 125 minutes. And the
 // clock's three hand the walled cavity over eight times: CI's runner reached
 // step 544 of clock-retimes' 640 at its 25 minutes, the M1 Max 10.
 const runLength = {
@@ -80,8 +84,8 @@ const runLength = {
   "baffle-move": 2,
   batches: 6,
   lifecycle: 6,
-  preparation: 2,
-  edges: 2,
+  preparation: 3,
+  edges: 5,
   "clock-retimes": 2,
   "clock-retime-at-rebase": 2,
   "clock-retime-across-rebase": 2,
