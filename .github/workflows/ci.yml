@@ -4,7 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Nightly, the browser fixtures in full on SwiftShader, and nothing else.
+  # Nightly: the browser fixtures in full on SwiftShader, the long physics
+  # and adaptation runs, the full invariants and wall sweep, the device long
+  # runs on lavapipe, and the mutations in four shards.
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:

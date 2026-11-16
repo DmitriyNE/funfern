@@ -25,8 +25,10 @@ after building them with the real `HOME`; run one by hand the same way, or the
 toolchain is re-fetched into the scratch one. Every binary it runs is
 hard-linked into the run's log directory first and run from there, so a build
 beside the suite cannot change what it runs, and the linked app is checked to
-carry the fixture driver before the fixtures start. Nothing runs them in CI,
-which has no GPU.
+carry the fixture driver before the fixtures start. CI, which has no GPU,
+runs one of them, `canonical_gpu_cavity_drift`, nightly on lavapipe, and the
+device examples a mutation names run there before and after its patch; the
+rest run here alone.
 
 The examples drive the device request directly. The app's own end-to-end
 fixtures (`src/ui/e2e.rs`) run the app as it ships through the
@@ -1001,15 +1003,15 @@ interpolation.
   first return reaches the contour only after the read: two periods of
   time-averaged intensity, relative to its peak.
   - **Gate:** `a_line_sources_far_field_reads_flat` holds the source alone
-    flat within 5e-2 at an edge of 0.2 (2.3e-2).
+    flat within 5e-2 at an edge of 0.2 (2.4e-2).
   - **Nightly** (`far_fields_meet_a_line_sources_patterns`, in PH-12's
     job), at an edge of 0.15:
 
     | Case | Bound | Read |
     |---|---|---|
-    | Alone | 2e-2 | 1.1e-2 |
-    | Beside a hole | 1e-2 | 4.5e-3 |
-    | Beside a cylinder of index √2 | 1e-2 | 4.6e-3 |
+    | Alone | 2e-2 | 1.2e-2 |
+    | Beside a hole | 1e-2 | 4.2e-3 |
+    | Beside a cylinder of index √2 | 1e-2 | 3.7e-3 |
 
     The cylinder of index 2 rings in the resonance PH-12 switched on over
     20 s, and is left out.
@@ -1184,7 +1186,8 @@ writes it. The three read alike to the digit: the semidiscrete frequency
 falls 139 to 674 times over two halvings to 1.9e-7 at worst, the phase
 starts within 7.6e-4 of its closed form, the four modes together stand 2.0e-5
 from it in L2 at edge 0.04 with the constant's total flux held to 3e-15,
-and each integrator misses the semidiscrete frequency by its own law. The
+and each integrator's miss of the semidiscrete frequency is printed against
+its own law, the spread over integrators and steps, 1e-8, held (VER-49). The
 mutation `tm-orientation-flipped` starts TM's modes at −θ. The
 complementary flux, `B⊥` in TM and `D⊥` in TE, stands 9.0e-4, 1.1e-4 and
 1.6e-5 from its closed form there, PH-02's field reconstruction in each
@@ -1196,7 +1199,7 @@ halvings, its coefficient `|ε|/(k h)⁴` within 25% in every direction;
 the same modes in a medium of axis ratio 2 and 4, which is the isotropic
 medium on the mesher's elements stretched twofold and fourfold, still
 fourth order but ten and 175 times the dispersion along the stretch; each
-integrator's law to 0.1% up to its stability limit; and the group velocity
+integrator's law printed up to its stability limit; and the group velocity
 from three wavenumbers along a direction, fourth order to 1.1e-6. The
 mutation `lumping-midpoints-to-vertices` drops the dispersion to second
 order. Edits the field
@@ -1223,7 +1226,7 @@ law `Q = m M g(u) u` - half of `Q u` on a linear row - a volume source puts
 its nodal rate times the field in, a harmonic source's rate being the
 integral of its signal - and integrated by the trapezoid over the run's own
 states, never read from the solver's lanes or compiled rates. In each skin
-fourteen configurations - electric, magnetic and spatially rising loss, a
+fifteen configurations - electric, magnetic and spatially rising loss, a
 driven loss, constant loss in a Kerr medium, a pump in a Kerr medium, a pump on either row, a time
 crystal, a travelling modulation, a volume source, a thin gap, all of them
 together, and van der Pol either side of its threshold - run three seconds
@@ -1503,7 +1506,9 @@ within `5.7e-7` of the reference's, its frequency within `2.9e-8`, the f32
 floor, held to 1e-7; that floor lies under the frequency's own error on
 every mesh, so the device shows the element's fourth order in space to the
 finest, (2,3) at 2.6e-5, 2.9e-6 and 1.8e-7, and leapfrog's second order in
-time, successive differences falling 4.001 times. 45 to 90 s a model.
+time, successive differences falling 4.001 times. 45 to 90 s a model when
+measured; it waits on a readback at every sample, and under a heavy load
+from other work it has taken 200 to 583 s and run past the suite's 600 s.
 
 `canonical_gpu_cavity_drift` is C9's long run on the device: the same box
 on edge 0.08, (1,0) and half of (2,3), 200,000 steps of the fourth-order

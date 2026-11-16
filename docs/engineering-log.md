@@ -34245,3 +34245,57 @@ the device.
   the device suite on Metal, 144 of 145 with `lifecycle` failing at the
   ring resonator's staging, and `lifecycle` passing five times after the
   settle (the fixture changed).
+
+## 2026-11-16 — The testing campaign audited against its definition of done
+
+- **Why.** C9 closed the campaign plan's list, and with the user the
+  campaign was read against its definition of done (section 8) and the 11
+  October plan fixture by fixture before anything else began.
+- **How.** Five readers, one a slice (A0 and A1, A2 and A3, milestone B,
+  milestone C, the rules and infrastructure), each item marked done, done
+  differently with its record, deferred with its record, or open; every
+  gap then read again in the code. One claim fell: the ledger's prescribed
+  and filter lanes are held by unit tests in `canonical_wave` and
+  `canonical_temporal`, not in PH-17's sweep. Another was the log's silence,
+  not a gap: the nightly of 2026-11-08 read 98 of 98 mutations detected,
+  the A0 six among them, in its job log; from 2026-11-09 to 15 the job ran
+  out of its six hours, so the 46 mutations since were judged on their
+  landing day alone.
+- **What it found.** Every fixture landed or changed course with its
+  reason. Not recorded until now:
+  - PH-01's and PH-03's device halves run in the local Metal suite alone,
+    and PH-03, the A0.1 sweep and the A0.2 regression scenes have no
+    mutation; since the core twin went, the band fill is caught by a
+    synthetic unit test alone.
+  - IV-11 has no device half, and PH-18's far field was never held against
+    an array of sources.
+  - Two levels, not three, in A3 (its 0.07 mesh runs unheld), PH-09,
+    PH-16 and PH-18's part 1; PH-19's temporal convergence is a study.
+  - Sweeps are `#[ignore]` studies, not scripts under `experiments/`; the
+    edge-case sweeps run in no CI job; no failure artifacts beyond the
+    fixtures' printed lines and `interleaved`'s trace, and CI keeps none;
+    no separate reference check script and no limiting cases; references
+    integrated in the test from the law (PH-14 to 16, C9) beyond rule 7's
+    closed forms; the platform matrix never decided.
+  - `switch-thrown-twice` still accepts a bare `beyond` or `refused`, and
+    the gate lives outside the repository.
+  - About 25 passages calling finished work planned or carrying old
+    figures, and `docs/plan.md`'s campaign item stopping at C5.
+- **Recorded.** The campaign plan's new section 10: the definition of done
+  stage by stage, the deviations, kept or declined (the browser fixture
+  beyond the cavity at every push, the reports and plots, the edge-case
+  sweeps as studies, two-level fixtures but A3), and nine follow-ups:
+  the gate as a script, mutation verdicts as they land and CI keeping
+  failed runs' logs, `switch-thrown-twice`'s pattern, A3's third mesh, the
+  nightly's fuzzing, PH-01's and PH-03's device halves on lavapipe, mutations
+  for PH-03 and the A0.1 sweep, IV-11's device half and the far field's
+  array. The stale passages are corrected in the campaign plan,
+  `docs/checks.md` (the cavity modes' integrator laws, printed since
+  VER-49; the far field's figures since part 5; PH-17's fifteen
+  configurations; what CI runs of the device examples), the header of
+  `ci.yml`, and `docs/plan.md`, whose campaign item now runs to C9 and is
+  ticked when the follow-ups land.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  the default scene in the debug profile, release build, the wasm32 and
+  threaded wasm checks, the browser shader compile and the protocol proofs.
+  Documents and a comment only; no device run.

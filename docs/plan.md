@@ -1283,12 +1283,14 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   tests feed the solvers and mutations that prove the gate bites, then the
   architecture's own physics (independent b, boundary memory through handoff),
   then cavity modes and planar reflection, each a single three-level test
-  with its reference computed offline; the 11 October fixture list follows
+  with its reference computed offline (or a closed form in the test, rule 7
+  as amended on 2026-10-13); the 11 October fixture list follows
   under those rules. Plan: `docs/spikes/funfern-testing-campaign-plan.md`
   (2026-10-12). A0.1, the wall sweep, landed on 2026-10-12
   (`docs/engineering-log.md`): `crates/funfern-app/tests/wall_sweep.rs` over
   the gallery through the app's own path and a core twin over the `Scene`
-  path, with the two findings below, both fixed the same day. A0.2, the
+  path (removed on 2026-10-26 with the `Scene` path itself), with the two
+  findings below, both fixed the same day. A0.2, the
   regression scenes that prepare, landed the same day:
   `tests/fixtures/scenes-regressions` with the 12 October autosave first,
   and `tests/regression_scenes.rs` over it, the frozen scenes and the
@@ -1343,7 +1345,25 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   split/merge reversal, followed the same day, which completes stage C5: a
   box split and merged back sixteen times keeps its field, and its
   second-order walls gain up to 3.2e-4 of its energy where the split meets
-  them (Worth checking sometime).
+  them (Worth checking sometime). The rest of milestone C was planned on
+  2026-11-03 (section 6l). C6, adaptation on the CPU: AMR-01, the adaptive
+  loop closed (2026-11-04), AMR-02, the estimator's index under refinement,
+  AMR-03, long adaptation, and AMR-04, edits during adaptation (2026-11-05),
+  and the `adaptive` and `adaptive-slow` fixtures on the device. C7, the
+  runtime on the device: RT-03, late completions (2026-11-06), RT-02,
+  batching, and RT-04, event ordering (2026-11-07), RT-05, failure and
+  rollback (2026-11-08), and RT-01, seeded actions on the host and on the
+  device, the `interleaved` fixture (2026-11-09 and 10). C8, robustness:
+  the edge cases on the CPU (2026-11-11) and on the device, the `edges`
+  gate, RT-06, the clock's rebases and retimes, and RT-07 with 5.4, the
+  `lifecycle` fixture's counts (2026-11-12), and RT-08, preparation
+  scheduling (2026-11-13). C9, long runs, closed it (2026-11-14 and 15),
+  with the device's force cache rebuilt from the flux. The campaign was audited
+  against its definition of done on 2026-11-16 (section 10 of the plan):
+  every fixture landed or was changed with a reason, and the follow-ups
+  listed there are left, a few checks of the device's convergence in CI,
+  three mutations, IV-11's device half and the far field's array among them.
+  This item is ticked when they land.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the

@@ -160,7 +160,8 @@ mutation of A0.4.
 
 **Done on 2026-10-12** (`docs/engineering-log.md`): 40 scenes, 12,042
 mandatory and 1,600 supplementary cases, 113 s on ten threads at the Coarse
-preset, the five arrays of one obstacle in the nightly at 0.16 and 0.2; the
+preset, the five arrays of one obstacle in the nightly at 0.16 and 0.2
+(0.25 since 2026-10-26, VER-2); the
 refusals at a corner and at a shared node predicted from the draft and from
 the compiled plan rather than from the assembly; the adjacency reduced to
 one pair of spans per pair of curves, which an array would otherwise turn
@@ -170,7 +171,11 @@ separated, carried in the sweep's `KNOWN` table until the mesher fix the
 same day emptied it (the log), and a Dirichlet refusal the assembly made
 after acceptance, which validation makes since the same day; both are
 ticked under Maintenance in `docs/plan.md`. The core twin fails with the
-band fill of 1bc6d82 reinstated.
+band fill of 1bc6d82 reinstated. The twin went with the `Scene` path on
+2026-10-26 (43b49ba), and since 2026-10-31 the band fill's mutation is
+caught by `zeros_between_pieces_leave_the_solve_unchanged` alone, a
+synthetic chain and ring; no real scene in the sweep catches it now
+(section 10).
 
 ### A0.2 Regression scenes that prepare
 
@@ -236,7 +241,11 @@ with the four-step detection rule, `scripts/e2e-fixture.sh` for the device
 ones on either platform, the six mutations under `tests/mutations/`, each
 detected as its manifest names, and the nightly `mutations` job. Two of the
 six catch at an earlier check than first intended, and the manifests name
-the check that fires.
+the check that fires: the clock reset is caught by
+`canonical_gpu_temporal_handoff` alone and the doubled switch by the
+`switch` fixture alone, neither by the `handoff` fixture or the protocol
+proofs the table names. The nightly of 2026-11-08 read all six detected on
+Linux, among 98 of 98 (section 10).
 
 ### A0.5 The device suite keeps its own binary
 
@@ -308,7 +317,8 @@ generation, never a phase reset. An e2e fixture, `handoff-memory`, beside
 `handoff`.
 
 **Done on 2026-10-13** (`docs/engineering-log.md`): five fixtures,
-`handoff-memory-rebuild`, `-remesh`, `-edit`, `-timestep` and `-running`, on
+`handoff-memory-rebuild`, `-remesh`, `-edit`, `-timestep` and `-running`
+(and since, `-flux` and `-running-late`), on
 the cavity with a second-order wall and a driven side, the carry read at the
 handoff itself and the run read at the endpoint, the clock on every fixture,
 `CanonicalWaveState` given the time origin the reference needs, and the
@@ -345,6 +355,11 @@ mutation `tm-orientation-flipped`. **Device half done the same day**: the
 example `canonical_gpu_cavity_modes`, one suite entry per physics model; the
 device follows the f64 frequency to its f32 floor of 3e-8, which lies under
 every mesh's error, so its spatial convergence shows to the finest mesh.
+Since VER-49 (2026-10-25) the integrators' time laws, the fourth-order
+step's among them, are printed rather than held; the spread over three
+steps and two integrators is held instead, and on the device the
+fourth-order step's law lies under the f32 floor. The device half runs in
+the local Metal suite alone (section 10).
 
 **PH-02, plane-wave propagation and dispersion.** Left out of this plan when
 it was written, though the 11 October plan gives it P0; added on
@@ -426,25 +441,30 @@ three levels, references offline, sweeps as scripts under `experiments/`
 with their reports in `docs/spikes/`.
 
 - **B, physical subsystems:** PH-05 wall passivity across material laws
-  and PH-17 energy accounting, together as stage B1 (section 6a)
-  (PH-06 and PH-07 moved to stage A3), PH-08 rectangular radiation as a one-off experiment
+  and PH-17 energy accounting, together as stage B1 (done on 2026-10-15,
+  section 6a) (PH-06 and PH-07 moved to stage A3), PH-08 rectangular radiation as a one-off experiment
   rather than a regression test, since no nonlocal operator is planned
   (done on 2026-10-17, `funfern-rectangular-radiation.md`),
-  PH-09 the walls' transient response (section 6b), PH-11 Fresnel (done
+  PH-09 the walls' transient response (done on 2026-10-15, section 6b),
+  PH-11 Fresnel (done
   on 2026-10-17, section 6c),
   PH-12 cylinder scattering (done on 2026-10-17, section 6d), PH-13 thin
   gaps (done on 2026-10-17, section 6e), PH-14 temporal interfaces (done on
   2026-10-18, section 6f), PH-15 modulated materials (done on 2026-10-18,
   section 6g), PH-16 nonlinear laws (done on 2026-10-18, section 6h), PH-18
-  probes and observables (section 6i), with
-  PH-12's far field, PH-19 manufactured solutions.
+  probes and observables (done on 2026-10-18 and 19, section 6i), with
+  PH-12's far field, PH-19 manufactured solutions (done on 2026-11-06).
+  Milestone B was audited on 2026-11-16 (section 10).
 - **C, invariants and stress:** IV-01 to IV-13, AMR-01 to AMR-04, RT-01 to
   RT-08, the numerical edge cases, long runs and resource lifecycle. The
   metamorphic tests and the real-device fuzzing need none of the reference
   machinery and can start whenever a stage leaves room. The P1 invariants,
   IV-01 to IV-05 and IV-08 to IV-12, were planned on 2026-10-31
   (section 6j), the P2 invariants, IV-06, IV-07 and IV-13, on 2026-11-02
-  (section 6k), the rest on 2026-11-03 (section 6l).
+  (section 6k), the rest on 2026-11-03 (section 6l). The P1 invariants
+  were done from 2026-10-31 to 11-02, the P2 on 2026-11-02 and 03, C6 to
+  C9 from 2026-11-04 to 15; milestone C was audited on 2026-11-16
+  (section 10).
 
 ## 6a. Stage B1: energy accounting and wall passivity
 
@@ -465,7 +485,7 @@ energy change, which the device books and the CPU did not, comes through a
 CPU handoff built for it (cf9ec40). Then a device half and the long runs.
 
 **PH-17 done on 2026-10-15** (`docs/engineering-log.md`): thirteen
-configurations in each skin, the matched loss's closed-form decay, the
+configurations in each skin (fifteen now), the matched loss's closed-form decay, the
 conservative rows and the remesh row, in the gate. It found a pumped
 complementary row with its own loss booking its pump work at first order
 (fixed in 3d561a9); its mutations `loss-lanes-crossed`,
@@ -626,7 +646,8 @@ a well and over the barrier, a saturable mass and a lossy Kerr mass beside
 Klein-Gordon, and van der Pol's cycle from both sides. Klein-Gordon's cutoff
 adds exactly to a box mode. On the CPU the step that carries a field past
 its bound is refused, the one in which the ODE crosses it. All in the gate,
-no nightly; the mutation `sine-gordon-force-linearized`. Saturable
+no nightly (C9 added a long run to `energy-long-runs`); the mutation
+`sine-gordon-force-linearized`. Saturable
 absorption stays gated (C), so its bleaching is not tested. The planned
 3.1 rad parts the nodes, the uniform swing beside the separatrix being
 unstable to the box's modes, so that case swings to 2.9. CPU against GPU
@@ -670,11 +691,13 @@ line source's pattern 9.9% off flat. Its contour frames paired the gradient
 with a rate half a step older, and centring them on their step fixed it, in
 the shader and the twin. The twin now meets a line source's
 pattern alone and beside PH-12's cylinders within 1.1e-2, in the gate and
-nightly. The fixture `far-field` holds the device's records to it, and the
+nightly (since part 5, 2.4e-2 alone at the gate's coarser edge against 5e-2,
+and 1.2e-2, 4.2e-3 and 3.7e-3 in the nightly). The array of sources part 3
+planned was never written (section 10). The fixture `far-field` holds the device's records to it, and the
 browser nightly's recorders part runs it. The mutation
 `far-field-frame-at-step-end`.
 
-**Part 4 on 2026-10-18:** the stamps.
+**Part 4 done on 2026-10-18:** the stamps.
 - **The point rate's half step:** documented, not changed.
 - **The recorders' single-f32 stamps:** 1.2e-4 s after an hour, 2e-3 s after
   ten. The point, line and area records now carry two parts, which the host
@@ -692,6 +715,16 @@ browser nightly's recorders part runs it. The mutation
 
   The mutations `clock-origin-summed-in-f32`,
   `handoff-candidate-packed-at-zero` and `far-field-stamps-summed-in-f32`.
+
+**Part 5 done on 2026-10-18:** the far field's times in two parts, every
+difference taken part by part, and its ring keyed to its own count, carried
+through a handoff with its frames (`docs/engineering-log.md`).
+
+**Part 6 done on 2026-10-19:** recorders that miss no step. Lavapipe's
+`observables` started a trace late in 3 of 14 runs: the step went on while
+a recorder's pipeline was still compiling. The frame's steps now wait for a
+time-series recorder bound to the running generation; no mutation, by
+record.
 
 ## 6j. Milestone C: the P1 invariants
 
@@ -728,7 +761,8 @@ Four stages, a commit per invariant:
   static half, both fields read at common points, the difference required
   to fall with the mesh at the scheme's rate from an f64 study's numbers.
 - **C3, the remesh family on the CPU and the device:** IV-10, IV-11,
-  IV-12 and IV-08 edited mid-run.
+  IV-12 and IV-08 edited mid-run. IV-11 has its CPU half only (section
+  10).
 - **C4, the device:** an `observers` fixture for IV-05, and IV-01 within
   f32.
 
@@ -1548,7 +1582,9 @@ mutation, in this order:
   contrast up to 1e6 and the box at axis ratios up to 1e6, holes down to
   1e-6 off a wall and off each other, 216 combinations of empty resources,
   and sums that cancel; `manufactured` gained contrasted, stretched and
-  narrow-gap cases. The study found the cleanup's solve for a handoff's
+  narrow-gap cases. These sweeps are studies (`#[ignore]`), run by hand and
+  by no CI job; what they found is held in the gate case by case (section
+  10). The study found the cleanup's solve for a handoff's
   stationary flux running out of iterations on anisotropic media (axis
   ratio 16 at edge 0.05) and on graded meshes, and calling it a non-finite
   state; with the user it is allowed four times the node count, names its
@@ -1583,7 +1619,7 @@ mutation, in this order:
   cut to the cube root a focusing Kerr term sets; the step whose books would
   overflow fails; the latch refuses the event by its own serial; plans and
   events past the workgroups are refused, with the split over two
-  dimensions under Worth checking sometime. The gate's 22 cases run in the
+  dimensions under Worth checking sometime. The gate's 22 cases (46 since C8.3) run in the
   device suite. Passed on to C8.3: a source carrier's phase over a clock
   epoch of 256 s passes 1e6 at about 620 Hz, where the device's sine is
   9e-8 off and from where it loses digits (5e-7 to 1e8, 3e-4 by 1e10;
@@ -1693,6 +1729,7 @@ mutation, in this order:
   mutations and the long sweeps. The device suite on Metal stays a local run
   before any commit that touches shaders, the device path or the outgoing
   basis.
+- **What was built** of this section, and what was not, is in section 10.
 - **Failure artifacts.** A failed fixture writes the authored scene, the
   accepted mesh hash, the event timeline, the generation and step history,
   the reference and measured observables and the violated bound under
@@ -1734,3 +1771,93 @@ A0.1, the configuration sweep, presented as an engagement plan before any
 edit: the generator's selection rule, where the sweep lives, its assertions
 and its run time at edge 0.2, with the band fill of 1bc6d82 as its first
 mutation.
+
+**Done on 2026-10-12** (section 3).
+
+## 10. Closeout
+
+**Audited on 2026-11-16**, after C9: section 8 and the 11 October plan
+read fixture by fixture against the tests, the manifests, `ci.yml` and the
+engineering log, every gap read again in the code. Every fixture landed, or
+changed course with its reason in its own section; what follows is what
+the sections did not say.
+
+**The definition of done:**
+- **A0: met.** The sweep and the regression scenes run in the gate, the
+  audit's list is closed (the far field and the estimators through PH-18),
+  the suite keeps its binary, and the nightly of 2026-11-08 read the six
+  mutations detected on Linux among 98 of 98. Since the core twin went
+  (2026-10-26) the band fill is caught by a synthetic unit test alone, and
+  neither the sweep nor the regression scenes have a mutation of their own.
+- **A1: met.** PH-03's device half (`canonical_gpu_complementary_mode`)
+  runs in the local Metal suite alone and has no mutation; PH-10's seven
+  `handoff-memory` fixtures run on lavapipe at every push.
+- **A2: met on the CPU, in the gate.** PH-01's device convergence
+  (`canonical_gpu_cavity_modes`) runs in the local Metal suite alone. The
+  integrators' time laws are printed since VER-49, their spread held.
+  PH-04's convergence runs nightly.
+- **A3: met, at two levels.** The convergence above the floor holds 0.1
+  against 0.05; the 0.07 mesh runs unheld, and the time step's share is
+  taken out by extrapolating from `dt` and `dt/2`, not by a sweep.
+- **B1: met.** The ledger's prescribed and filter lanes are held by unit
+  tests in `canonical_wave` and `canonical_temporal`, not in PH-17's sweep,
+  whose scenes pin no node. The device's books across a remesh run in the
+  local Metal suite.
+- **B: met,** but for PH-18's far field against an array of sources,
+  planned in part 3 and never written. PH-08's exports are ignored tests no
+  job runs; its report stands as of 2026-10-17.
+- **C: met,** but for IV-11's device half, planned with C3 and never
+  written. RT-03 is held on the host with a test device, and on the real
+  one only through `interleaved` and `preparation`. AMR-02's bound is held
+  for a ring and a packet in the box; the 11 October plan's sweep over
+  driven media, interfaces and walls is the `temporal_amr_calibration`
+  example, which prints.
+
+**Deviations not stated before:**
+- **Rule 5, three levels:** two, not three, in A3 (meshes), PH-09 (steps,
+  refined with the mesh), PH-16 (steps) and PH-18's part 1 (edges);
+  PH-19's temporal convergence is an ignored study. Kept as they are, but
+  A3, whose third mesh already runs.
+- **Rule 7, references:** PH-14's and PH-15's monodromies and PH-16's and
+  C9's Runge-Kutta are integrated in the test, written from the law and
+  never the solver's integrator, as each section says; that is the rule
+  from now on. There is no separate check script: each generator checks its
+  identities before it writes (`tests/physics/references/README.md`), and
+  none checks the limiting cases section 6.4 of the 11 October plan asked
+  for.
+- **Section 6, sweeps:** they are `#[ignore]` studies, reported in the log
+  and `docs/checks.md`, not scripts under `experiments/`; PH-08 alone is a
+  script. The 5.2 edge-case sweeps stay studies run by hand: what they
+  found is held case by case, in `edge_cases` and the `edges` gate.
+- **Section 7, failure artifacts:** not built. A fixture prints its
+  measures against their bounds, its endpoint and mesh hashes and, when an
+  event fails, the timeline; `interleaved` writes its trace to
+  `target/interleaved-<seed>.log`, and the property tests keep their shrunk
+  sequences under `proptest-regressions/`. CI keeps none of it yet.
+- **The 11 October plan's schedule (section 8):** one browser fixture
+  beyond the cavity at every push was not adopted, the full set running
+  nightly; the extended fuzzing is a follow-up below; the machine-readable
+  reports and convergence plots are declined.
+- **Platforms (its sections 5.5 and 8.3):** Metal in the local suite
+  before any device commit, lavapipe and SwiftShader in CI, Chrome on
+  Metal and Safari by hand; no hardware Vulkan.
+- **Mutations:** 143, 86 on the CPU and 57 on the device; every category
+  has one but PH-03 and the A0.1 and A0.2 sweeps. From 2026-11-09 to 15
+  the nightly's job ran out of its six hours, so the 46 added since
+  2026-11-08 were judged on their landing day alone; it runs in four
+  shards since 776784a.
+
+**Follow-ups, agreed on 2026-11-16:**
+1. The gate as a script in the repository.
+2. `scripts/mutations.sh` reporting each verdict as it lands, and CI
+   keeping the fixtures' and mutations' logs of a failed run.
+3. `switch-thrown-twice` failing by its own message alone (its pattern
+   still takes a bare `beyond` or `refused`), run again.
+4. A3's third mesh held.
+5. The nightly's fuzzing: `interleaved` seeds 4 to 12 on lavapipe, and the
+   property tests at more cases.
+6. PH-01's and PH-03's device halves in the nightly on lavapipe, once timed
+   there.
+7. Mutations for PH-03, its independent `b` zeroed, and for the A0.1 sweep.
+8. IV-11's device half.
+9. PH-18's far field against an array of sources.
