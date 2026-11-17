@@ -144,11 +144,27 @@ const expectedAdapter =
   process.env.FUNFERN_EXPECT_ADAPTER ??
   (process.env.FUNFERN_WEBGPU === "swiftshader" ? "swiftshader" : "");
 
+// Seconds past a page's deadline its verdict may take: the driver reads its
+// deadline between frames, and a frame of a batched schedule on CI's
+// SwiftShader outlasted the minute this was until 2026-11-16, so a page past
+// its time said nothing.
+const grace = 900;
+// Which starts a page on Pages takes: `cold`, `warm` or both, the default. The
+// nightly runs the two as jobs of their own, since for its longest fixtures
+// the two together outlast a job: lifecycle's ring resonator passed cold and
+// ran out of its time warm (2026-11-16). A warm start alone takes the cold
+// one's hosting path but not its run, leaving the cold page once its fixture
+// has begun.
+const starts = process.env.FUNFERN_E2E_START ?? "both";
+if (!["cold", "warm", "both"].includes(starts)) {
+  throw new Error(`FUNFERN_E2E_START is cold, warm or both, not ${starts}`);
+}
+
 for (const fixture of fixtures) {
   test(`${fixture} holds in the browser`, async ({ page }) => {
     const pageDeadline = deadline * (runLength[fixture] ?? 1);
     // A start on Pages runs the fixture twice, cold and warm.
-    test.setTimeout((viaPages ? 2 : 1) * (pageDeadline + 90) * 1000);
+    test.setTimeout((viaPages && starts === "both" ? 2 : 1) * (pageDeadline + grace + 90) * 1000);
     const fatal = [];
     const lines = [];
     // A lost device or a render error stops the app before the driver can
@@ -195,12 +211,12 @@ for (const fixture of fixtures) {
       const outcome = await Promise.race([
         expect(root)
           .toHaveAttribute("data-funfern-e2e", /^(pass|fail)$/, {
-            timeout: (pageDeadline + 60) * 1000,
+            timeout: (pageDeadline + grace) * 1000,
           })
           .then(() => null),
         stopping,
       ]).catch((error) => {
-        console.log(`${fixture} (${start}): no verdict in ${pageDeadline + 60} s`);
+        console.log(`${fixture} (${start}): no verdict in ${pageDeadline + grace} s`);
         for (const line of lines.splice(0)) {
           console.log(`  ${line}`);
         }
@@ -261,8 +277,17 @@ for (const fixture of fixtures) {
     // Pages the reload once the service worker controls the page; refused,
     // the reload marked `isolation=off` and then the same-document one that
     // gives the address back without the marker. A warm start takes one.
-    await holds("cold", { isolated: 1, pages: 2, "pages-blocked": 3 }[hosting]);
-    if (viaPages) {
+    if (viaPages && starts === "warm") {
+      await expect(page.locator("html")).toHaveAttribute("data-funfern-e2e", "running", {
+        timeout: 600 * 1000,
+      });
+      await expect
+        .poll(() => new URL(page.url()).searchParams.has("isolation"), { timeout: 60 * 1000 })
+        .toBe(false);
+    } else {
+      await holds("cold", { isolated: 1, pages: 2, "pages-blocked": 3 }[hosting]);
+    }
+    if (viaPages && starts !== "cold") {
       navigations = 0;
       await page.reload();
       await holds("warm", 1);

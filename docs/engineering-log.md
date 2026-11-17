@@ -34370,3 +34370,68 @@ the device.
   the default scene in the debug profile, release build, the wasm32 and
   threaded wasm checks, the browser shader compile and the protocol proofs;
   the two changed fixtures on Metal, not the whole device suite.
+
+## 2026-11-17 — A page's grace for its verdict, Pages' starts apart, the double slit over two pages, and the dormant mark held
+
+- **Why.** The rest of the nightly of 2026-11-16 (43859818762), studied
+  with the user before anything changed:
+  - **`batches`' double slit** stood silent at 9,060 s, after 5 of its 6
+    schedules isolated and 3 served without the pool, about 30 and 48
+    minutes a schedule. Its deadline is its run's, but the driver reads it
+    between frames, and a batched frame on CI's SwiftShader outlasted the
+    minute the browser's test allowed past it.
+  - **`lifecycle`'s ring resonator, served without the pool,** passed cold
+    in 1.8 hours and ran out of its time warm ("did not finish in time:
+    cycle 2, Ring resonator, RefusedHandoff at Rest"), adapting further
+    (17,517 nodes to 14,447): Pages' two starts ran in one cell, two
+    deadlines of 9,000 s in 340 minutes.
+  - **`dormant-carry-keeps-its-totals`:** bisected over 7f66840..a7fc0d5 in
+    a scratch worktree, its target the slow ring's test missed it from
+    4491600 on (the reach restoring however few elements, and the harness
+    filtering at the device's strength), and caught it at 58757c4. At HEAD
+    the slow ring still coarsens while dormant, from 4.6 s, and with the
+    patch every dormant handoff moves the energy as without it (-1.55e-2 to
+    -1.57e-2, 7.38e-4 to 8.19e-4, the rest alike): the run has no leftover
+    for the totals to spoil, most likely since the reach's change. The
+    app's `a_dormant_adaptation_carries_without_its_totals` holds the
+    runtime's half; nothing held the controller's mark the patch changes.
+- **Changes.**
+  - The browser's test gives a page 15 minutes past its deadline for its
+    verdict, where it gave one.
+  - `FUNFERN_E2E_START` (`cold`, `warm`, both by default) picks Pages'
+    starts; a warm start alone leaves the cold page once its fixture has
+    begun and reloads. The nightly runs the pages-blocked hosting's cold and
+    warm in cells of their own.
+  - `batches` runs some of its six schedules where `FUNFERN_E2E_SCHEDULES`
+    or the page's `e2e-schedules=` names them by index, the first always
+    with them; the nightly's `batches-5a` runs 1, 7 and 32 a frame, and
+    `batches-5b` 1, 64 and both bursts.
+  - `a_dormant_estimate_marks_its_adaptation_dormant`
+    (`tests/adaptation.rs`): the packet's first estimate, live and marked
+    dormant, each decided by a fresh controller, must mark its adaptation
+    so and not otherwise. The mutation now names it.
+- **Verified.**
+  - On Metal: `batches` whole, 5 scenes the same bits in 72 s; the double
+    slit's two pages, 3 and 4 schedules the same bits, 48 s each; an index
+    of 9 refused at once.
+  - On arm64 lavapipe: the two pages, 291 and 280 s, the same bits.
+  - On the M1 Max's SwiftShader: `batches` on a 240 s page gave its verdict
+    at 6.4 minutes, its first frame having outlasted the old minute ("did
+    not finish in time, at installing its generation"); the cavity served
+    without the pool passed cold alone and warm alone, its navigations
+    held.
+  - The mutation by hand: its new test fails with "an estimate dormant true
+    marked its adaptation dormant false"; the gate's manifest check passes.
+- **Also seen** in the first nightly dispatched by hand (43932857774, on
+  a7fc0d5, still running): `edges` passed in its own parts and
+  `late-source-copy-unguarded` was detected; new, `preparation` served
+  without the pool ran past an act of 1,500 s in Supersede (145 s on the
+  M1 Max), `observers` read no vector overlay back at its endpoint, and
+  `adapted-handoff-left-uncleaned`'s fixture failed before its patch on
+  lavapipe, CI keeping no log. To be studied.
+- **Docs.** checks.md (the browser job's starts and grace, `batches`'
+  schedules, AMR-01's dormant mutation).
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  the default scene in the debug profile, release build, the wasm32 and
+  threaded wasm checks, the browser shader compile and the protocol proofs;
+  `batches` on Metal, not the whole device suite.

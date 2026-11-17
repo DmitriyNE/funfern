@@ -23,6 +23,12 @@
 //! picker sets it: no gallery scene drives a side beside an outgoing one,
 //! whose trace then holds prescribed nodes. A name may end in `@` and a
 //! number of steps to run in place of [`BATCH_STEPS`].
+//!
+//! `FUNFERN_E2E_SCHEDULES` or the page's `e2e-schedules=` runs some of
+//! [`SCHEDULES`], by their indices from zero, the first always among them as
+//! the one the others are read against: the browser's nightly runs the
+//! double slit's six over two pages, which one page held past its time on
+//! CI's SwiftShader (2026-11-16).
 
 use super::*;
 use crate::wave_gpu::{
@@ -103,7 +109,10 @@ pub(super) struct BatchDriver {
     /// Whether the scenes are the fixture's own, which must cover every
     /// branch.
     own_scenes: bool,
-    /// The current run's schedule, by its index in [`SCHEDULES`].
+    /// The schedules each scene runs under, the first the one the others
+    /// are read against.
+    schedules: Vec<Schedule>,
+    /// The current run's schedule, by its index in `schedules`.
     schedule: usize,
     phase: BatchPhase,
     /// The current scene's finished runs.
@@ -178,8 +187,9 @@ struct Endpoint {
 
 /// Adds the batching fixture's driver.
 pub(super) fn add(app: &mut App, seconds: Option<u64>) {
-    let (scenes, own_scenes) = match scenes() {
-        Ok(scenes) => scenes,
+    let asked = scenes().and_then(|scenes| Ok((scenes, schedules()?)));
+    let ((scenes, own_scenes), schedules) = match asked {
+        Ok(asked) => asked,
         Err(failure) => {
             report(&format!("e2e: {failure}"));
             mark("fail", &failure);
@@ -194,6 +204,7 @@ pub(super) fn add(app: &mut App, seconds: Option<u64>) {
     app.insert_resource(BatchDriver {
         scenes,
         own_scenes,
+        schedules,
         schedule: 0,
         phase: BatchPhase::Open,
         endpoints: Vec::new(),
@@ -205,6 +216,30 @@ pub(super) fn add(app: &mut App, seconds: Option<u64>) {
         deadline: Instant::now() + std::time::Duration::from_secs(seconds.unwrap_or(600)),
     })
     .add_systems(EguiPrimaryContextPass, drive_batches.before(frame));
+}
+
+/// The schedules asked for: every one of [`SCHEDULES`], or those
+/// `FUNFERN_E2E_SCHEDULES` or the page's `e2e-schedules=` names by index,
+/// comma-separated, in their order there, the first with them.
+fn schedules() -> Result<Vec<Schedule>, String> {
+    let Some(asked) = super::setting("FUNFERN_E2E_SCHEDULES", "e2e-schedules") else {
+        return Ok(SCHEDULES.to_vec());
+    };
+    let mut indices = vec![0];
+    for index in asked.split(',') {
+        match index.trim().parse::<usize>() {
+            Ok(index) if index < SCHEDULES.len() => indices.push(index),
+            _ => {
+                return Err(format!(
+                    "the schedules to run are indices of 0 to {}, not {asked:?}",
+                    SCHEDULES.len() - 1
+                ));
+            }
+        }
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    Ok(indices.into_iter().map(|index| SCHEDULES[index]).collect())
 }
 
 /// The scenes asked for, and whether they are the fixture's own, every one
@@ -300,7 +335,7 @@ fn drive_batches(
         .scenes
         .front()
         .map_or_else(String::new, |scene| scene.name.clone());
-    let schedule = SCHEDULES[driver.schedule];
+    let schedule = driver.schedules[driver.schedule];
     let verdict = match run {
         Ok(endpoint) => {
             report(&format!(
@@ -319,7 +354,7 @@ fn drive_batches(
                 }
             }
             driver.endpoints.push(endpoint);
-            if driver.schedule + 1 < SCHEDULES.len() {
+            if driver.schedule + 1 < driver.schedules.len() {
                 driver.schedule += 1;
                 driver.phase = BatchPhase::Open;
                 return;
@@ -331,7 +366,7 @@ fn drive_batches(
                 .iter()
                 .map(|(name, records)| format!(", {name} {records} records"))
                 .collect();
-            same_bits(&driver.endpoints)
+            same_bits(&driver.schedules, &driver.endpoints)
                 .map(|held| format!("{scene}: {nodes} nodes{records}, {seconds:.1} s, {held}"))
                 .map_err(|failure| format!("{scene}: {failure}"))
         }
@@ -383,7 +418,7 @@ fn drive_batches(
         format!(
             "{} scenes, {} schedules each, the same bits",
             driver.verdicts.len(),
-            SCHEDULES.len()
+            driver.schedules.len()
         )
     } else {
         failures.join("; ")
@@ -439,7 +474,7 @@ fn advance(
         Res<FarFieldDisplay>,
     ),
 ) -> Option<Result<Endpoint, String>> {
-    let schedule = SCHEDULES[driver.schedule];
+    let schedule = driver.schedules[driver.schedule];
     match std::mem::replace(&mut driver.phase, BatchPhase::Done) {
         BatchPhase::Open => {
             if !state.startup_done {
@@ -731,12 +766,12 @@ fn ring_readbacks(
 }
 
 /// Whether every run ended on the first's bits, part by part.
-fn same_bits(endpoints: &[Endpoint]) -> Result<String, String> {
+fn same_bits(schedules: &[Schedule], endpoints: &[Endpoint]) -> Result<String, String> {
     let [first, ..] = endpoints else {
         return Err("no run finished".to_owned());
     };
     let mut parted = Vec::new();
-    for (schedule, endpoint) in SCHEDULES.iter().zip(endpoints).skip(1) {
+    for (schedule, endpoint) in schedules.iter().zip(endpoints).skip(1) {
         if endpoint.branches != first.branches {
             parted.push(format!("{schedule} took other branches"));
         }
@@ -775,6 +810,6 @@ fn same_bits(endpoints: &[Endpoint]) -> Result<String, String> {
             first.branches.join(", ")
         ))
     } else {
-        Err(format!("against {}: {}", SCHEDULES[0], parted.join("; ")))
+        Err(format!("against {}: {}", schedules[0], parted.join("; ")))
     }
 }

@@ -333,7 +333,12 @@ dispatched with `browser: full`, every fixture, isolated and with service
 workers refused, the two in parallel and the other jobs skipped. Dispatched
 with `nightly` set (`gh workflow run "CI and Pages" -f nightly=true`), the
 workflow runs every job the schedule runs, the browser's full set among them,
-in place of the per-push ones, so a fix need not wait for 03:17.
+in place of the per-push ones, so a fix need not wait for 03:17. Served
+without the pool, a page starts cold and warm in jobs of their own: the warm
+job leaves its cold page once the fixture has begun, and reloads. A page has
+15 minutes past its deadline to give its verdict, since the driver reads its
+deadline between frames and a batched frame on CI's SwiftShader outlasted
+the minute it had until 2026-11-16.
 
 A lost device or any other fatal console message fails a fixture at once
 rather than at its deadline.
@@ -1775,8 +1780,12 @@ speed is never refined for its error. The one planned, refining whatever the
 error reads against the target, is equivalent in the loop: the transaction it
 starts applies the limits' field, which asks for nothing, and the mesh does
 not change. `dormant-carry-keeps-its-totals` has the slow ring's dormant
-coarsening restore its leftover's totals, and the handoff that refuses it
-fails the ring at a tenth of the speed.
+coarsening restore its leftover's totals, and the handoff that refused it
+failed the ring at a tenth of the speed until the reach's change of
+2026-11-09 left that run no leftover to spoil; since 2026-11-16
+`a_dormant_estimate_marks_its_adaptation_dormant` catches it, an adaptation
+a dormant estimate asks for marked dormant and one a live estimate asks for
+not.
 
 AMR-02, the estimator's calibration, has its study
 (`study_the_estimators_calibration`, ignored): the broad pulse, the ring and
@@ -2030,7 +2039,12 @@ the same bits in all six. Its mutations are `accounting-staged-once-a-frame`,
 `fence-never-binds` on the device, and `encode-cap-lifted` on the host. A
 fence counting against the readback's completed steps rather than the
 queue's retired ones is no mutation here: on the M1 Max the app's frames
-still never meet it.
+still never meet it. `FUNFERN_E2E_SCHEDULES` or the page's `e2e-schedules=`
+runs some of the six by index, the first always with them as the one the
+others are read against: the browser's nightly runs the double slit's six
+over two pages, 1, 7 and 32 a frame on one and 1, 64 and both bursts on the
+other, since on CI's SwiftShader each took about half an hour, 48 minutes
+served without the pool, and one page ran past its time (2026-11-16).
 
 RT-04, event ordering, is held on the device by `events` and
 `events-handoff`. The render world records each event it encodes, its

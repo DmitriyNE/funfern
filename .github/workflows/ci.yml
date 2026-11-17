@@ -1144,7 +1144,7 @@ jobs:
         run: scripts/e2e-lavapipe.sh
 
   browser:
-    name: Browser fixtures on SwiftShader (${{ matrix.hosting }}${{ matrix.part != 'state' && format(', {0}', matrix.part) || '' }})
+    name: Browser fixtures on SwiftShader (${{ matrix.hosting }}${{ matrix.part != 'state' && format(', {0}', matrix.part) || '' }}${{ matrix.start == 'warm' && ', warm' || '' }})
     # The app's end-to-end fixtures in Chromium on its bundled software WebGPU:
     # the shipped bundle with its fixtures, started in a browser that compiles
     # its shaders through Tint and draws them through its compositor. Every
@@ -1177,10 +1177,13 @@ jobs:
     #   RT-04's `events` and `events-handoff`, the switchable cavity once each,
     #   and RT-05's `rollback` and `rollback-handoff`, the switchable cavity
     #   and the cavity once each;
-    # - batches-1 to -5: RT-02's `batches`, a gallery scene six times a page,
-    #   the page's `e2e-scene=` naming which: the five on one page never
-    #   finished in the six hours, Spatial soliton alone taking 33 minutes on
-    #   an M1 Max's SwiftShader (2026-11-15);
+    # - batches-1 to -4, -5a and -5b: RT-02's `batches`, a gallery scene six
+    #   times a page, the page's `e2e-scene=` naming which: the five on one
+    #   page never finished in the six hours, Spatial soliton alone taking 33
+    #   minutes on an M1 Max's SwiftShader (2026-11-15). The double slit's
+    #   six, about half an hour each on CI's (48 minutes served without the
+    #   pool), go over two pages by `e2e-schedules=`, the first schedule on
+    #   both (2026-11-16);
     # - clock: C8.3's `clock-retimes`, the walled cavity handed over eight
     #   times, and `clock-retime-at-rebase` and `-across-rebase`, kept out of
     #   the state part, which runs close to its limit;
@@ -1195,6 +1198,9 @@ jobs:
     #   its frames, setting the pace it is there to judge. RT-01's
     #   `interleaved-<seed>` runs are left out for the same reason, by the
     #   spec itself.
+    # Served without the worker pool, a page starts cold and warm in cells of
+    # their own (`start`): lifecycle's ring resonator took 1.8 hours cold and
+    # ran out of its time warm in one cell (2026-11-16).
     # A cell that runs long fails at 340 minutes, before the runner's own
     # cancel, so it reports which page it stood at.
     timeout-minutes: 340
@@ -1205,7 +1211,11 @@ jobs:
       fail-fast: false
       matrix:
         hosting: ${{ fromJSON((github.event_name == 'schedule' || inputs.nightly || inputs.browser == 'full') && '["isolated", "pages-blocked"]' || '["isolated"]') }}
-        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.nightly || inputs.browser == 'full') && '["state", "edges", "memory", "recorders", "far-field", "handoffs", "invariants", "clock", "preparation", "batches-1", "batches-2", "batches-3", "batches-4", "batches-5", "lifecycle-1", "lifecycle-2", "lifecycle-3", "lifecycle-4", "lifecycle-5"]' || '["state"]') }}
+        part: ${{ fromJSON((github.event_name == 'schedule' || inputs.nightly || inputs.browser == 'full') && '["state", "edges", "memory", "recorders", "far-field", "handoffs", "invariants", "clock", "preparation", "batches-1", "batches-2", "batches-3", "batches-4", "batches-5a", "batches-5b", "lifecycle-1", "lifecycle-2", "lifecycle-3", "lifecycle-4", "lifecycle-5"]' || '["state"]') }}
+        start: ${{ fromJSON((github.event_name == 'schedule' || inputs.nightly || inputs.browser == 'full') && '["cold", "warm"]' || '["cold"]') }}
+        exclude:
+          - hosting: isolated
+            start: warm
     env:
       FULL: ${{ github.event_name == 'schedule' || inputs.nightly || inputs.browser == 'full' }}
     steps:
@@ -1286,9 +1296,12 @@ jobs:
           FUNFERN_TEST_ISOLATED: ${{ matrix.hosting == 'isolated' && '1' || '0' }}
           FUNFERN_EXPECT_BROWSER_WORKER: ${{ matrix.hosting == 'isolated' && 'active' || 'unavailable' }}
           PART: ${{ matrix.part }}
+          FUNFERN_E2E_START: ${{ matrix.hosting == 'isolated' && 'cold' || matrix.start }}
         # A part named for a scene runs that one of its fixture's scenes alone.
         run: |
           case "$PART" in
+            batches-5a) export FUNFERN_E2E_QUERY="e2e-scene=5&e2e-schedules=1,2" ;;
+            batches-5b) export FUNFERN_E2E_QUERY="e2e-scene=5&e2e-schedules=3,4,5" ;;
             batches-* | lifecycle-*) export FUNFERN_E2E_QUERY="e2e-scene=${PART##*-}" ;;
           esac
           npm run test:e2e:swiftshader

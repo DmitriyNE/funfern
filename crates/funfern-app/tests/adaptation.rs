@@ -1230,6 +1230,54 @@ fn first_refinement(document: &TopologyDocument, time_step: f64) -> Result<Refin
     Ok((coarse, refined, maps))
 }
 
+/// An adaptation a dormant estimate asks for is marked dormant, so that its
+/// handoff carries a leftover without the component totals, and one a live
+/// estimate asks for is not; `a_dormant_adaptation_carries_without_its_totals`
+/// holds the runtime's half. The slow ring's carry was refused without the
+/// mark until the reach's change of 2026-11-09 (4491600) left that run no
+/// leftover for the totals to spoil: with and without it the run's dormant
+/// handoffs read alike (2026-11-16).
+#[test]
+fn a_dormant_estimate_marks_its_adaptation_dormant() {
+    let document = box_document(PhysicsModel::Mechanical).unwrap();
+    let settings = document.presentation.adaptation;
+    let (_, mut runtime, coarse) = prepare(&document).unwrap();
+    let time_step = 0.4 * coarse.recommended_time_step();
+    let mut run = started(&coarse, time_step, Start::Packet).unwrap();
+    let previous = run.clone();
+    run.step(&coarse).unwrap();
+    let mut estimating = AdaptationController::default();
+    estimating.published(&coarse);
+    let live = estimated(
+        &mut estimating,
+        &coarse,
+        &run,
+        &previous,
+        &document.presentation,
+    )
+    .unwrap();
+    assert!(
+        !live.report.dormant,
+        "the packet's first estimate reads dormant"
+    );
+    let mut dormant = live.clone();
+    dormant.report.dormant = true;
+    for (result, marked) in [(&live, false), (&dormant, true)] {
+        let mut controller = AdaptationController::default();
+        controller.published(&coarse);
+        let step = controller.decide(result, &coarse, settings, &mut runtime);
+        assert!(
+            matches!(step, AdaptationStep::Adapt(_)),
+            "the packet's first estimate did not adapt"
+        );
+        assert_eq!(
+            controller.dormant_transaction, marked,
+            "an estimate dormant {} marked its adaptation dormant {}",
+            result.report.dormant, controller.dormant_transaction
+        );
+    }
+}
+
 /// How long AMR-01's cases run: at full speed past two coarsenings after
 /// the field has gone, at the slower ones until quiet regions have grown
 /// past the authored mesh.
