@@ -34494,3 +34494,36 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   the default scene in the debug profile, release build, the wasm32 and
   threaded wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-17 — The gate in the repository, and the closeout's small follow-ups
+
+- **Why.** Follow-ups 1 to 5 of the testing campaign's closeout (campaign
+  plan, section 10), agreed with the user on 2026-11-16; 2 landed in
+  9592902.
+- **The gate as a script.** `scripts/gate.sh` runs every check a commit
+  passes, stopping at the first that fails and naming it, each step's
+  output under `target/gate/`: fmt, clippy natively and for the browser,
+  the workspace's tests in release, the default scene in debug, the
+  release build, the wasm32 and threaded checks, the shaders in Chrome and
+  the protocol's proofs. The README's checks say so. Until now it lived in
+  a session's scratch script, and was lost with it more than once.
+- **`switch-thrown-twice`** expects its own two messages, "waiting for the
+  device to take the action" or "too near to tell the action took", where
+  it also took a bare "beyond" or "refused". With its patch the `switch`
+  fixture failed the first way on Metal and on arm64 lavapipe, and passed
+  without it on both.
+- **A3's third mesh.** At kR 10, orders 0 to 2, the error must fall at each
+  of edges 0.1, 0.07 and 0.05 by more than a tenth, beside the fivefold
+  from 0.1 to 0.05 it already held. The rates are not one order, so none is
+  held (rule 5): from the nightly of 2026-11-16 the hole fell 1.24 to 1.50
+  times and then 5.9 to 10.6, the outgoing wall 3.9 to 4.9 and then 1.8 to
+  3.2 as it nears its time step's share. Run here both pass, 1,663 and
+  2,712 s, their figures CI's to the digit.
+- **The nightly's fuzzing.** The invariants job runs every machine under
+  `ui::sequences` at 2,000 cases (23 tests, 22 s at 32 cases and 51 s at
+  200 on the M1 Max); the device long runs add RT-01's `interleaved` seeds
+  4 to 12, 492 s together on arm64 lavapipe in the CI container, the first
+  199 s from a cold shader cache, each passing.
+- **Docs.** checks.md (the seeds and the sweep nightly), the campaign
+  plan's section 10, the README's checks.
+- **Gate:** `scripts/gate.sh`, its first run.

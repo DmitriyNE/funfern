@@ -1861,3 +1861,12 @@ the sections did not say.
 7. Mutations for PH-03, its independent `b` zeroed, and for the A0.1 sweep.
 8. IV-11's device half.
 9. PH-18's far field against an array of sources.
+
+**Follow-ups 1 to 5 done** on 2026-11-17 (`docs/engineering-log.md`):
+`scripts/gate.sh`; the mutations' verdicts as they land and failed runs'
+logs kept (9592902); `switch-thrown-twice` by its two messages, which Metal
+and lavapipe both give; A3's error falling at each of its three meshes, by
+more than a tenth, its rates not one order (the hole 1.24 to 1.50 times and
+then 5.9 to 10.6, the outgoing wall 3.9 to 4.9 and then 1.8 to 3.2); and
+the nightly's `interleaved` seeds 4 to 12 and generated sequences at 2,000
+cases. Follow-ups 6 to 9 are studies, each to be planned with the user.

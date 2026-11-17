@@ -410,7 +410,9 @@ The Materials panel is also driven by generated sequences of its own actions
 selection moves, Undo and Redo, a physics switch and New, in orders nobody
 wrote down, checked against a shadow of the history and a post-condition per
 action. The gate runs a few dozen sequences; `PROPTEST_CASES=2000 cargo test -p
-funfern-app --release --lib material_edits_in_any_order` runs a sweep. A
+funfern-app --release --lib material_edits_in_any_order` runs a sweep, and the
+nightly runs every machine under `ui::sequences` so (51 s at 200 cases on the
+M1 Max, 2026-11-17). A
 failure is shrunk to the shortest sequence that still fails, printed, and its
 seed written under `crates/funfern-app/proptest-regressions`, which is checked
 in so the case is replayed first everywhere. A seed names its sequence only
@@ -1951,7 +1953,8 @@ more of the played one on its fixed scene, found no defect.
 
 RT-01's device half is `interleaved` (`ui/e2e/interleaved.rs`), one seed a
 run: `interleaved-<seed>`, twelve in the device suite and the first three on
-lavapipe in every pull request. It opens the runtime machines' scene, the
+lavapipe in every pull request, the other nine nightly (492 s together on
+arm64 lavapipe in the CI container, 2026-11-17). It opens the runtime machines' scene, the
 disc's medium switchable or linear by the seed, adaptation on in about half,
 and fires 48 actions drawn from the seed through the app's handlers, none to
 34 frames apart, while the run goes on as the app paces it: material edits,

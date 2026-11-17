@@ -10406,7 +10406,12 @@ mod tests {
     /// under the error lies at the method's floor, a few parts in a
     /// million, on the coarsest mesh already, and order 4 and up come near
     /// it at kR 10, the hole's falling 2.9 and 3.2 times to 3.7e-5 and
-    /// 1.6e-5. The fit within 5e-4,
+    /// 1.6e-5. There, too, the error falls at each of the three meshes, by
+    /// more than a tenth: not at one rate, so no order is held (rule 5).
+    /// The hole fell 1.24 to 1.50 times from 0.1 to 0.07 and 5.9 to 10.6
+    /// from 0.07 to 0.05, the outgoing wall 3.9 to 4.9 and then 1.8 to 3.2
+    /// as it nears its time step's share (the nightly of 2026-11-16). The
+    /// fit within 5e-4,
     /// measured 3.6e-4 at worst. And every hole passive, `|B/A| < 1`, the
     /// power flowing into it.
     fn hold_circular(results: &[CircularResult]) {
@@ -10448,6 +10453,17 @@ mod tests {
                     "{case}: E_discretization {} at 0.1, {} at 0.05",
                     coarse.error,
                     result.error
+                );
+            }
+            if result.kr == 10.0 && result.m <= 2 && result.edge == 0.07 {
+                let at = |edge: f64| same.clone().find(|other| other.edge == edge).unwrap();
+                let (coarse, fine) = (at(0.1), at(0.05));
+                assert!(
+                    coarse.error / result.error > 1.1 && result.error / fine.error > 1.1,
+                    "{case}: E_discretization {} at 0.1, {} at 0.07 and {} at 0.05",
+                    coarse.error,
+                    result.error,
+                    fine.error
                 );
             }
         }

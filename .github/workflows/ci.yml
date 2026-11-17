@@ -225,6 +225,15 @@ jobs:
           FUNFERN_INVARIANTS_ALL: 1
         run: cargo test --release -p funfern-app --test invariants --locked -- --nocapture
 
+      # The generated sequences of actions at 2,000 cases each, where the gate
+      # runs a few dozen: 23 tests, 51 s at 200 cases on the M1 Max
+      # (2026-11-17). A failure prints its shrunk sequence and seed.
+      - name: The generated sequences, at length
+        if: success() || failure()
+        env:
+          PROPTEST_CASES: 2000
+        run: cargo test --release -p funfern-app --lib --locked ui::sequences
+
   # Nightly: AMR-03's long adaptive runs at full length beside the fine
   # and the coarse run: eight experiments struck one after another, the
   # packet in the reflecting box, the driven source and the parametric
@@ -962,6 +971,18 @@ jobs:
         env:
           FIXTURE_TIMEOUT: 5400
         run: scripts/e2e-fixture.sh endurance
+
+      # RT-01's seeds past the third, which every push leaves out: 492 s
+      # together on arm64 lavapipe in the CI container, the first 199 s from
+      # a cold shader cache (2026-11-17).
+      - name: RT-01's seeds 4 to 12
+        if: success() || failure()
+        run: |
+          failed=0
+          for seed in $(seq 4 12); do
+            scripts/e2e-fixture.sh "interleaved-$seed" || failed=1
+          done
+          exit $failed
 
   web:
     name: Browser bundle

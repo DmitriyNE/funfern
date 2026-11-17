@@ -305,13 +305,22 @@ Pushes to `main` are checked and automatically deployed through GitHub Actions.
 
 ### Checks
 
-The normal checks are:
+The gate, which every commit passes, is one command:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo test --workspace --release --locked
-cargo build --release -p funfern-app --locked
+scripts/gate.sh
+```
+
+It runs, stopping at the first that fails: `cargo fmt`, clippy with warnings
+denied natively and for the browser, the workspace's tests in release, the
+default scene in the debug profile, the release build, the wasm32 check and
+the threaded one (nightly Rust, `browser-threads`), every shader compiled by
+Chrome's WebGPU (`npm run test:shaders`, which needs a hardware adapter), and
+the protocol's Kani proofs. Each step's output is kept under `target/gate/`.
+`scripts/device-suite.sh` joins it when shaders, the device path or the
+fixtures change. The browser bundle builds with:
+
+```sh
 scripts/trunk build --release --locked
 ```
 
