@@ -34435,3 +34435,28 @@ the device.
   the default scene in the debug profile, release build, the wasm32 and
   threaded wasm checks, the browser shader compile and the protocol proofs;
   `batches` on Metal, not the whole device suite.
+
+## 2026-11-17 — CI keeps failed runs' logs, mutations report as they land, and preparation says what it waits for
+
+- **Why.** The first nightly dispatched by hand (43932857774, on a7fc0d5)
+  failed `adapted-handoff-left-uncleaned` with "the test does not pass
+  before the patch", and CI kept nothing to read why: `mutations.sh`
+  printed its table only at the end and the runs' logs stayed on the
+  runner. Its `preparation`, served without the pool, ran out of time in
+  Supersede at Rest and could not say on what. Agreed with the user as the
+  closeout's follow-up 2 (campaign plan, section 10).
+- **Changes.**
+  - `scripts/mutations.sh` prints each verdict as it lands, and for one not
+    detected the last 20 lines of its runs before and after the patch.
+  - The nightly's mutation shards and the lavapipe fixtures job upload
+    their logs as artifacts when they fail, kept 14 days.
+  - `short_of_rest` names the first of `at_rest`'s conditions that does not
+    hold; `preparation`, out of time at Rest, says it.
+- **Studied.** `scripts/e2e-fixture.sh adaptive` from an emptied shader
+  cache on arm64 lavapipe, as a mutation runs it: passed three times, 283
+  and 293 s for the fixture's runs after the first, which took 664 s with
+  the wrapper's build; warm 140 s. Under its 540 s, so the failure on CI
+  waits for its log.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  the default scene in the debug profile, release build, the wasm32 and
+  threaded wasm checks, the browser shader compile and the protocol proofs.

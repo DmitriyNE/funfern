@@ -877,6 +877,17 @@ jobs:
           MUTATION_SHARD: ${{ matrix.shard }}/4
         run: scripts/mutations.sh
 
+      # A failed shard keeps each mutation's runs, before and after its
+      # patch: on 2026-11-16 a fixture that failed before its patch left
+      # nothing to read but its verdict.
+      - name: Keep the mutations' logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutations-${{ matrix.shard }}-logs
+          path: target/mutations/
+          retention-days: 14
+
   # Nightly: C9's long runs on the device. PH-01's cavity for 200,000 steps
   # on lavapipe against f64, mechanical with the grid filter and without,
   # and TM: the clock, each mode's phase and amplitude, the stationary flux,
@@ -1142,6 +1153,14 @@ jobs:
         # it found the nonlinear inverse's convergence tests unreachable near
         # zero, where the Metal device never noticed.
         run: scripts/e2e-lavapipe.sh
+
+      - name: Keep the fixtures' logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lavapipe-fixture-logs
+          path: target/e2e-lavapipe/*.log
+          retention-days: 14
 
   browser:
     name: Browser fixtures on SwiftShader (${{ matrix.hosting }}${{ matrix.part != 'state' && format(', {0}', matrix.part) || '' }}${{ matrix.start == 'warm' && ', warm' || '' }})

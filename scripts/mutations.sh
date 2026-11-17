@@ -104,6 +104,18 @@ for folder in "${selected[@]}"; do
   fi
   [[ $verdict == detected* ]] || undetected=$((undetected + 1))
   results+=("$(printf '%-48s %s' "$name" "$verdict")")
+  # Each verdict as it lands, so a run cut short still says how far it came,
+  # and what an undetected one's runs last said, since the job's output may
+  # be all that is kept of them.
+  printf '  %s\n' "$verdict"
+  if [[ $verdict != detected* ]]; then
+    for log in "$logs/$name-before.log" "$logs/$name-after.log"; do
+      if [[ -s $log ]]; then
+        echo "  --- $(basename "$log"), its last lines:"
+        tail -20 "$log" | sed 's/^/    /'
+      fi
+    done
+  fi
 done
 echo
 printf '%s\n' "${results[@]}"

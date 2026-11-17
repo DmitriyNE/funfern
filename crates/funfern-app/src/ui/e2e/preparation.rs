@@ -323,10 +323,15 @@ fn drive_preparation(
     let verdict = match outcome {
         Ok(true) if now < driver.act_deadline && now < driver.deadline => return,
         Ok(true) => Err(format!(
-            "did not finish in time: {}, {:?} at {:?}",
+            "did not finish in time: {}, {:?} at {:?}{}",
             SCENES[driver.scene],
             driver.act(),
-            driver.stage
+            driver.stage,
+            match driver.stage {
+                Stage::Rest => lifecycle::short_of_rest(&state, &request, &display)
+                    .map_or_else(String::new, |what| format!(", waiting for {what}")),
+                _ => String::new(),
+            }
         )),
         Ok(false) if driver.findings.is_empty() => Ok(format!("{} scenes", SCENES.len())),
         Ok(false) => Err(driver.findings.join("; ")),

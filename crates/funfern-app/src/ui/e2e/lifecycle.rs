@@ -564,16 +564,33 @@ pub(super) fn at_rest(
     request: &CanonicalGpuRequest,
     display: &CanonicalGpuDisplay,
 ) -> bool {
-    waiting(state, request).is_none()
-        && !state.request_is_due()
-        && !state.coordinator.remesh_requested
-        && state.runtime.active().is_some_and(|active| {
-            active.bundle.token.document_revision == state.editor.revision
-                && *active.bundle.authored == state.editor.document.model.accepted
-        })
-        && request.ready()
-        && request.generation() != 0
-        && display.generation == request.generation()
+    short_of_rest(state, request, display).is_none()
+}
+
+/// What keeps the app from [`at_rest`], the first that does, for a driver
+/// that runs out of time there to say.
+pub(super) fn short_of_rest(
+    state: &Playground,
+    request: &CanonicalGpuRequest,
+    display: &CanonicalGpuDisplay,
+) -> Option<&'static str> {
+    if let Some(waits) = waiting(state, request) {
+        return Some(waits);
+    }
+    let runs_the_document = state.runtime.active().is_some_and(|active| {
+        active.bundle.token.document_revision == state.editor.revision
+            && *active.bundle.authored == state.editor.document.model.accepted
+    });
+    [
+        ("a request due", state.request_is_due()),
+        ("a remesh asked for", state.coordinator.remesh_requested),
+        ("the document's revision to run", !runs_the_document),
+        ("the device to be ready", !request.ready()),
+        ("a first generation", request.generation() == 0),
+        ("the display", display.generation != request.generation()),
+    ]
+    .into_iter()
+    .find_map(|(what, holds)| holds.then_some(what))
 }
 
 /// Takes the current act a frame further: `Ok(false)` once every cycle is
