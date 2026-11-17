@@ -61,11 +61,14 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // the five together never finished in the runner's six hours; the double
 // slit runs twice the steps. lifecycle
 // remeshes and adapts a scene twice, also a scene a page: on CI's SwiftShader
-// the soliton's first cycle alone took 73 minutes. preparation's replacing
+// the soliton's first cycle alone took 73 minutes, and served without the pool
+// the self-sustained emitter's 80 (2026-11-17), its two past 9,000 s. preparation's replacing
 // part asks two scenes for the Fine mesh four times each, 71 s on lavapipe
 // with its workers; served without them, a page prepares and takes away a
 // handoff's stationary flux a few milliseconds a frame; on 2026-11-16 CI's
-// opened the double slit in 119 s, and an act may take a third of the run.
+// opened the double slit in 119 s, and an act may take a third of the run;
+// on the 17th its Supersede ran past 1,500 s there, where the M1 Max's took
+// 470 s with its page's CPU throttled four times.
 // edges runs 46 cases,
 // 25.6 minutes on the M1 Max's SwiftShader and about 100 s a case on CI's,
 // where the page went silent at the 30th of its 50 minutes on 2026-11-16: a
@@ -83,8 +86,8 @@ const runLength = {
   "far-field-late": 2,
   "baffle-move": 2,
   batches: 6,
-  lifecycle: 6,
-  preparation: 3,
+  lifecycle: 10,
+  preparation: 6,
   edges: 5,
   "clock-retimes": 2,
   "clock-retime-at-rebase": 2,

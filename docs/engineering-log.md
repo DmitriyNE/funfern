@@ -34460,3 +34460,37 @@ the device.
 - **Gate:** fmt, clippy with warnings denied, workspace tests (release),
   the default scene in the debug profile, release build, the wasm32 and
   threaded wasm checks, the browser shader compile and the protocol proofs.
+
+## 2026-11-17 — The nightly's slowest pages given the time CI takes
+
+- **Why.** The first nightly dispatched by hand (43932857774, on a7fc0d5)
+  ended with 51 jobs passing and 6 failing; studied with the user:
+  - **`lifecycle`'s self-sustained emitter, served without the pool,** ran
+    out of its run's 9,000 s in its second cycle ("Frames(60) at
+    Frames(4)"): the first took 4,817 s and its count 424, the second kept
+    the pace. Slow, not stuck.
+  - **`observers`, isolated:** "the vector overlay read nothing back". The
+    endpoint waits a minute for the overlay's first readback, which waits
+    for its pipeline (2026-11-07); on that runner SwiftShader had not
+    compiled it by then.
+  - **`preparation`, served without the pool,** ran past an act's 1,500 s
+    in Supersede, at Rest. Not reproduced: on the M1 Max's SwiftShader with
+    the page's CPU throttled four times through the DevTools protocol, the
+    Supersede took 470 s (145 unthrottled) and the fixture passed in 21
+    minutes. Since 9592902 a run out of time at Rest says what it waits
+    for.
+  - The two remaining failures were fixed in 0730843 (the double slit over
+    two pages, the dormant mark held); `adapted-handoff-left-uncleaned`'s
+    fixture, which failed before its patch, passed three times cold on
+    arm64 lavapipe as a mutation runs it, and waits for the log CI now
+    keeps.
+- **Changes.** The browser's `lifecycle` page has ten times the deadline
+  (15,000 s on CI), which one start's cell holds since Pages' starts run
+  apart; `preparation`'s six (9,000 s, an act 3,000); and the observed
+  run's endpoint waits ten minutes for the overlay's first readback.
+- **Verified.** `observers` on Metal, 56 s, the overlay 144 samples. The
+  rest is lengths, judged by the next nightly; not run on lavapipe or
+  SwiftShader.
+- **Gate:** fmt, clippy with warnings denied, workspace tests (release),
+  the default scene in the debug profile, release build, the wasm32 and
+  threaded wasm checks, the browser shader compile and the protocol proofs.

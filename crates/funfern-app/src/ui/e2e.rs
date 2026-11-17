@@ -2440,8 +2440,10 @@ const PAUSE_AT: u64 = 96;
 const PAUSE_FOR: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How long the observed run's endpoint waits for the vector overlay's first
-/// readback before it reads the overlay as having taken nothing.
-const OVERLAY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// readback before it reads the overlay as having taken nothing. A minute
+/// until 2026-11-17, when CI's SwiftShader had not compiled the overlay's
+/// pipeline by its end; a wait costs nothing once the readback lands.
+const OVERLAY_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// The step the observed run's recording stops and its window is resized
 /// and zoomed at, once it has reached it running, the window's new logical
