@@ -1302,6 +1302,17 @@ fn judge(driver: &AdaptiveDriver, followed: &Followed) -> Result<String, String>
     if !within(followed.drift, CLOCK_TOLERANCE) {
         return fail(format!("the clock drifts beyond {CLOCK_TOLERANCE:.0e}"));
     }
+    // The mesh's bound before the reference's reading of every estimate: a
+    // mesh past it runs slower than the reference can follow, and the
+    // reference falling behind would otherwise name the run's failure for
+    // it, as a handoff left uncleaned grew the mesh to 37,686 triangles
+    // (2026-11-17).
+    let (share, handoff) = driver.fixture.loop_bounds();
+    if peak as f64 > share * FINE_TRIANGLES as f64 {
+        return fail(format!(
+            "the mesh passed {share} of the fine one's {FINE_TRIANGLES}"
+        ));
+    }
     if unanswered > 0 {
         return fail("the reference did not read an estimate the app took".into());
     }
@@ -1323,12 +1334,6 @@ fn judge(driver: &AdaptiveDriver, followed: &Followed) -> Result<String, String>
             return fail("no quiet region grew past the authored mesh".into());
         }
         _ => {}
-    }
-    let (share, handoff) = driver.fixture.loop_bounds();
-    if peak as f64 > share * FINE_TRIANGLES as f64 {
-        return fail(format!(
-            "the mesh passed {share} of the fine one's {FINE_TRIANGLES}"
-        ));
     }
     if !refined_after_dormancy.is_empty() {
         return fail(format!(

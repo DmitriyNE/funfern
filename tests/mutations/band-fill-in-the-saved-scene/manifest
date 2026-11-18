@@ -1,0 +1,4 @@
+about: the band fill of 1bc6d82 again, which refused the user's scene of 2026-10-12, the first of A0.2's regression scenes, as it did that day
+test: cargo test --release -p funfern-app --test regression_scenes
+expect: 2026-10-12-one-sided-arms-beside-a-line.json: .*not positive semidefinite
+needs: cpu

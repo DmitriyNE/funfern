@@ -1870,3 +1870,16 @@ more than a tenth, its rates not one order (the hole 1.24 to 1.50 times and
 then 5.9 to 10.6, the outgoing wall 3.9 to 4.9 and then 1.8 to 3.2); and
 the nightly's `interleaved` seeds 4 to 12 and generated sequences at 2,000
 cases. Follow-ups 6 to 9 are studies, each to be planned with the user.
+
+**Follow-ups 6, 7 and 9 done** on 2026-11-18 (`docs/engineering-log.md`):
+PH-03's four variants run nightly on lavapipe, 22 to 27 s each; PH-01's
+stay in the local suite, since on lavapipe each model ran past 90 minutes
+without finishing. Mutations: `band-fill-in-the-sweep` (A0.1, 104 cases
+not prepared), `band-fill-in-the-saved-scene` (A0.2, the scene of
+2026-10-12 refused), `complementary-carried-as-zero` (PH-03's carry outside
+its budget) and `device-carry-drops-b` (`neutral-remesh`, the device's carry
+of b, which PH-03's example, carrying on the host, never takes). PH-18's
+array of sources cannot be authored, the document holding one point source
+(`topology_editor.rs`); the double slit's far field, two coherent apertures,
+is held at its zeros and side lobes instead. Follow-up 8, IV-11's device
+half, is next.

@@ -1505,7 +1505,12 @@ at half the edge; within it the flux's first moment is kept to 1.6e-7 and
 nothing crosses the baffle. With `--remesh` the device steps the carried
 state and stays within `5.2e-7` of the reference. The end-to-end fixture the
 plan named is not built: the driver acts through the app's handlers alone,
-and the app has no tool that authors a complementary flux.
+and the app has no tool that authors a complementary flux. The nightly runs
+all four on lavapipe, 22 to 27 s each (2026-11-17). Its mutation,
+`complementary-carried-as-zero`, returns a carry's complementary flux as
+nothing: the carry at 0.08 then stands outside its budget, which no longer
+falls. The example carries on the host; the device's own carry of b is held
+by `neutral-remesh` (`device-carry-drops-b`).
 
 `canonical_gpu_cavity_modes` is PH-01's device half, `--physics mechanical`,
 `tm` or `te`: the 2 × 1.4 box of `box_modes_in_*`, (1,2) and (2,3) under the
@@ -1520,6 +1525,8 @@ finest, (2,3) at 2.6e-5, 2.9e-6 and 1.8e-7, and leapfrog's second order in
 time, successive differences falling 4.001 times. 45 to 90 s a model when
 measured; it waits on a readback at every sample, and under a heavy load
 from other work it has taken 200 to 583 s and run past the suite's 600 s.
+It runs in the local suite alone: on lavapipe each model ran past 90 minutes
+without finishing (2026-11-17).
 
 `canonical_gpu_cavity_drift` is C9's long run on the device: the same box
 on edge 0.08, (1,0) and half of (2,3), 200,000 steps of the fourth-order
@@ -1583,6 +1590,8 @@ slider's coarsest. `FUNFERN_WALL_SWEEP=<name>`
 runs one scene with its report, `FUNFERN_WALL_SWEEP_ALL=1` every scene,
 `FUNFERN_WALL_SWEEP_EDGE=<edge>` another edge, and
 `FUNFERN_WALL_SWEEP_PLAN=1` prints the case counts without preparing.
+Its mutation, `band-fill-in-the-sweep`, is the band fill of 1bc6d82 again,
+under which 104 cases do not prepare.
 
 `cargo test --release -p funfern-app --test regression_scenes -- --nocapture`
 is stage A0.2: every scene under `tests/fixtures/scenes-regressions`, one per
@@ -1592,7 +1601,9 @@ the document's own mesh edge, the prepared outgoing basis read back against
 its operator and the regression scenes prepared twice, bit for bit; every
 fixed generation's device plan is packed both ways, through the production
 packer and the one the packer's own tests use, and the two must agree. It
-runs in the gate, about a second on ten threads.
+runs in the gate, about a second on ten threads. Its mutation,
+`band-fill-in-the-saved-scene`, is the same band fill, under which the
+scene of 2026-10-12 is refused as it was that day.
 
 `cargo test --release -p funfern-app --test invariants -- --nocapture`
 holds milestone C's invariants (sections 6j and 6k of the campaign plan). IV-03,
@@ -1639,8 +1650,9 @@ come through within 1e-12 of its magnitude; a rebuild must give the field
 back within 1e-12, and a remesh's must read at the common points within one
 halving's move of the original. 6 cases in the gate in about 4 s, 18 in the
 nightly; its mutation is `component-share-over-source-support`. Its device
-half is the `neutral-remesh` fixture, whose mutation is
-`device-correction-of-the-first-component`. IV-11, repeated remeshing: the
+half is the `neutral-remesh` fixture, whose mutations are
+`device-correction-of-the-first-component` and `device-carry-drops-b`, the
+device's carry writing b as nothing. IV-11, repeated remeshing: the
 same box, its outer walls reflecting too, runs at the finer mesh's time step
 and is remeshed to 0.7 of its edge and back K times on the way. Each part's
 total must come through every handoff within 1e-12. At the end, on the mesh

@@ -1,0 +1,4 @@
+about: a remesh's carry of the complementary flux returns nothing, so PH-03's independent b, a complementary mode, is lost at its carry rather than kept within the carry's budget
+test: scripts/e2e-fixture.sh --example canonical_gpu_complementary_mode --remesh
+expect: the carry at edge [0-9.]+ is not within its budget
+needs: device

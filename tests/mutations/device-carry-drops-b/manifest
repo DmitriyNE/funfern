@@ -1,0 +1,4 @@
+about: the device's runtime transfer writes the carried complementary flux as zero, so a remesh hands the device a state without its b, which PH-03's example, carrying on the host, never sees
+test: scripts/e2e-fixture.sh neutral-remesh
+expect: b 1\.000e0: the device.s handed state stands from the reference.s beyond
+needs: device

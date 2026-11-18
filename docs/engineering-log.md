@@ -34527,3 +34527,58 @@ the device.
 - **Docs.** checks.md (the seeds and the sweep nightly), the campaign
   plan's section 10, the README's checks.
 - **Gate:** `scripts/gate.sh`, its first run.
+
+## 2026-11-18 — A page's parameters decoded, adaptive's verdicts reordered, four mutations, and PH-03 nightly
+
+- **Why.** The nightly of 2026-11-17 (44079345693, on 4e9afba) passed 73
+  jobs, among them every page that had failed the day before but one, and
+  failed 6; and follow-ups 6, 7 and 9 of the campaign's closeout were
+  studied. Both with the user before anything changed.
+- **The double slit over two pages, served without the pool,** failed in all
+  four cells at once: "the schedules to run are indices of 0 to 5, not
+  \"1%2C2\"". The page's own reload, marking the address `isolation=off`,
+  hands its query back escaped, and the driver read the values raw; the
+  split was checked on the cavity alone, which takes no list. `setting`
+  decodes a value now. On the M1 Max's SwiftShader the Josephson line's
+  page with `e2e-schedules=1,2`, reloaded as `1%2C2`, ran its three
+  schedules to the same bits.
+- **`handoff-memory-remesh`'s warm start** ran out of its 1,500 s, its cold
+  start passing: the memory part's four fixtures without a length of their
+  own have twice the deadline in the browser.
+- **`adapted-handoff-left-uncleaned`** was caught, now that its log is kept
+  (9592902), by the wrong check: the mesh grew to 37,686 triangles, past
+  0.35 of the fine one's 45,203, but the f64 reference fell behind it and
+  "the reference did not read an estimate the app took" came first.
+  `adaptive` judges its mesh's bound before the reference's reading of
+  every estimate. On arm64 lavapipe the mutation now fails "the mesh passed
+  0.35 of the fine one's 45203", and `estimate-reads-unaligned-readbacks`
+  still its own message, as on Metal. On Metal the first is not caught at
+  all: the mesh does not run away there; the nightly judges it on lavapipe.
+- **PH-03 and PH-01 on lavapipe** (follow-up 6). In the CI container PH-03's
+  four variants passed in 22 to 27 s each; the nightly's device long runs
+  run them. PH-01's three models each ran 90 minutes and ended "the device
+  timed out or failed", against 45 to 90 s on Metal: they stay in the local
+  suite, the cause unstudied.
+- **Mutations** (follow-up 7), each failing its target with its own
+  message, by hand:
+  - `band-fill-in-the-sweep`: 1bc6d82's band fill against A0.1's sweep, 104
+    cases not prepared;
+  - `band-fill-in-the-saved-scene`: the same against A0.2's regression
+    scenes, the scene of 2026-10-12 refused, "the outgoing tangential
+    operator is not positive semidefinite";
+  - `complementary-carried-as-zero`: the host's carry of the complementary
+    flux returns nothing, and PH-03's `--remesh` fails "the carry at edge
+    0.08 is not within its budget" on lavapipe;
+  - `device-carry-drops-b`: the device's runtime transfer writes b as
+    nothing. PH-03's example carries on the host and passed with it in all
+    four variants; `neutral-remesh` fails "at the handoff Q 4.439e-7, b
+    1.000e0: the device's handed state stands from the reference's beyond
+    5e-6", and `remesh` at its endpoint.
+- **PH-18's array of sources** (follow-up 9) cannot be authored: the
+  document holds one point source. The double slit's far field, two
+  coherent apertures, is held at its zeros and side lobes; recorded in the
+  campaign plan's section 10.
+- **Docs.** checks.md (PH-03 nightly and its mutation, PH-01 local, the
+  sweep's, the regression scenes' and `neutral-remesh`'s mutations), the
+  campaign plan's section 10.
+- **Gate:** `scripts/gate.sh`.

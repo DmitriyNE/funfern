@@ -1,0 +1,15 @@
+diff --git a/crates/funfern-core/src/trace_eigen.rs b/crates/funfern-core/src/trace_eigen.rs
+index ac6e107..9ed4782 100644
+--- a/crates/funfern-core/src/trace_eigen.rs
++++ b/crates/funfern-core/src/trace_eigen.rs
+@@ -688,10 +688,6 @@ impl BandedEigenJob {
+             }
+         }
+         for &(row, column, value) in &self.entries {
+-            if owner[row as usize] != owner[column as usize] {
+-                debug_assert_eq!(value, 0.0, "a nonzero entry between pieces");
+-                continue;
+-            }
+             let component = &mut self.components[owner[row as usize]];
+             let (r, c) = (position[row as usize], position[column as usize]);
+             component.band.place(r, c, value)?;

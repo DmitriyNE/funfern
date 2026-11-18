@@ -5259,11 +5259,18 @@ fn setting(variable: &str, key: &str) -> Option<String> {
     {
         let _ = variable;
         let search = web_sys::window()?.location().search().ok()?;
+        // A reload may give the address back with its values escaped:
+        // served without the worker pool, the page's own reload turned
+        // `e2e-schedules=1,2` into `1%2C2` (2026-11-17).
         search
             .trim_start_matches('?')
             .split('&')
             .find_map(|pair| pair.strip_prefix(key)?.strip_prefix('='))
-            .map(str::to_owned)
+            .map(|value| {
+                js_sys::decode_uri_component(value)
+                    .map(String::from)
+                    .unwrap_or_else(|_| value.to_owned())
+            })
     }
 }
 

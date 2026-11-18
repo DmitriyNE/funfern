@@ -1,0 +1,10 @@
+--- a/crates/funfern-core/src/canonical_transfer.rs
++++ b/crates/funfern-core/src/canonical_transfer.rs
+@@ -1566,6 +1566,7 @@
+         if values.iter().any(|value| !value.finite()) {
+             return Err(WaveError::InvalidState);
+         }
++        let values = vec![Point2::default(); values.len()];
+         Ok((
+             values,
+             CanonicalTransferReport {

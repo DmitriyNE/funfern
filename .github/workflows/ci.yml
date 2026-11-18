@@ -972,6 +972,18 @@ jobs:
           FIXTURE_TIMEOUT: 5400
         run: scripts/e2e-fixture.sh endurance
 
+      # PH-03's device half, the complementary mode kept and carried: 22 to
+      # 27 s a run on arm64 lavapipe (2026-11-17). PH-01's cavity modes stay in
+      # the local device suite: on lavapipe each model ran past 90 minutes.
+      - name: PH-03, the complementary mode
+        if: success() || failure()
+        run: |
+          failed=0
+          for args in "" "--baffle" "--remesh" "--baffle --remesh"; do
+            scripts/e2e-fixture.sh --example canonical_gpu_complementary_mode $args || failed=1
+          done
+          exit $failed
+
       # RT-01's seeds past the third, which every push leaves out: 492 s
       # together on arm64 lavapipe in the CI container, the first 199 s from
       # a cold shader cache (2026-11-17).

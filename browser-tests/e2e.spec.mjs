@@ -76,6 +76,12 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // clock's three hand the walled cavity over eight times: CI's runner reached
 // step 544 of clock-retimes' 640 at its 25 minutes, the M1 Max 10.
 const runLength = {
+  // Served without the pool, handoff-memory-remesh's warm start ran out of
+  // its 1,500 s on CI where its cold start passed (2026-11-17).
+  "handoff-memory-rebuild": 2,
+  "handoff-memory-remesh": 2,
+  "handoff-memory-edit": 2,
+  "handoff-memory-timestep": 2,
   "handoff-memory-running": 2,
   "handoff-memory-running-late": 2,
   observables: 6,

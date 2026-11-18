@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/canonical_transfer.wgsl
++++ b/crates/funfern-app/src/canonical_transfer.wgsl
+@@ -224,7 +224,7 @@
+             value += old_b(first + column) * packed_transfer_float(base + 1u, row + column);
+         }
+     }
+-    set_candidate_b(target_index, value);
++    set_candidate_b(target_index, vec2<f32>(0.0));
+     if !finite_vec2(value) {
+         reject(STATUS_NON_FINITE);
+     }

@@ -1,0 +1,4 @@
+about: the band fill of 1bc6d82 again, an entry between two pieces of the trace written at the other piece's position, which A0.1's sweep of every wall law on every side of the gallery must refuse to prepare where it erases a diagonal
+test: cargo test --release -p funfern-app --test wall_sweep
+expect: [0-9]+ cases did not prepare
+needs: cpu
