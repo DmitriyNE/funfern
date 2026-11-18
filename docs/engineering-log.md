@@ -34582,3 +34582,33 @@ the device.
   sweep's, the regression scenes' and `neutral-remesh`'s mutations), the
   campaign plan's section 10.
 - **Gate:** `scripts/gate.sh`.
+
+## 2026-11-18 — IV-11 on the device, and the testing campaign's closeout complete
+
+- **Why.** Follow-up 8 of the campaign's closeout (campaign plan, section
+  10), agreed with the user: IV-11, repeated remeshing, had its CPU half
+  alone, where C3 planned the device halves as suite entries.
+- **The fixture.** `repeated-remesh`: `neutral-remesh`'s parted cavity,
+  struck in each of its three parts, remeshed to edge 0.028 and back to its
+  own 0.04 four times, at steps 32 to 256, each handoff held until the device
+  has taken it (`Action::Coarser`, the slider set back, its mesh the scene's
+  recorded one). At every handoff the device's handed state is read against
+  the reference's and each part's total through it; the endpoint at 320
+  against the reference that took the same eight handoffs.
+- **Measured.** On the M1 Max, 79 s: the handed state 2.3e-7 at the first
+  handoff to 8.3e-7 at the last against 5e-6, growing a little a trip; the
+  parts within 2.9e-8 to 4.7e-7 of their magnitudes; the endpoint Q 1.06e-6
+  and b 1.41e-6. On arm64 lavapipe, 75 s after `neutral-remesh`: the same to
+  two digits, the parts within 5.5e-7, the endpoint 1.10e-6 and 1.40e-6.
+- **Where it runs.** The device suite, lavapipe at every push (from the
+  suite's run lines), and the browser nightly's handoffs part.
+- **Mutation.** None of its own: its handoffs are `neutral-remesh`'s,
+  which `device-correction-of-the-first-component` and
+  `device-carry-drops-b` prove, and IV-11's CPU half has
+  `complementary-evaluated-not-projected`.
+- **The closeout complete.** With this every follow-up of 2026-11-16 has
+  landed; `docs/plan.md`'s testing campaign is ticked.
+- **Docs.** checks.md (IV-11's device half), the campaign plan's section
+  10, plan.md.
+- **Gate:** `scripts/gate.sh`; the fixture on Metal and lavapipe, not the
+  whole device suite.

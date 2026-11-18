@@ -166,6 +166,7 @@ pub(crate) fn add(app: &mut App) {
         "handoff-driven-pins" => (Fixture::HandoffDrivenPins, vec![None]),
         "remesh" => (Fixture::Remesh, vec![None]),
         "neutral-remesh" => (Fixture::NeutralRemesh, vec![None]),
+        "repeated-remesh" => (Fixture::RepeatedRemesh, vec![None]),
         "baffle-move" => (Fixture::BaffleMove, vec![None]),
         "separator-mid-run" => (Fixture::SeparatorMidRun, vec![None]),
         "observers" => (Fixture::Observers, vec![None, None]),
@@ -296,6 +297,14 @@ enum Fixture {
     /// which an agreement with the reference would not show where both carried
     /// alike.
     NeutralRemesh,
+    /// IV-11 of the testing campaign on the device: `NeutralRemesh`'s parted
+    /// cavity, struck in each of its three parts, remeshed to the finer edge
+    /// and back four times, at steps 32 to 256, each handoff held until the
+    /// device has taken it. The device's handed state is read against the
+    /// reference's at every handoff and each part's total through every one,
+    /// and the endpoint at 320 against the reference that took the same
+    /// eight handoffs: what one carry leaves, eight must not let grow.
+    RepeatedRemesh,
     /// IV-12 of the testing campaign on the device: the cavity at edge 0.04
     /// with a free-ended reflecting baffle, an arc across its middle, struck
     /// below it and run until the pulse has come back off it, then the baffle
@@ -595,6 +604,9 @@ enum Action {
     Edit,
     /// The mesh's target edge set finer, as its preset or slider does.
     Remesh,
+    /// The mesh's target edge set back to the document's own, as the slider
+    /// does: the mesh the scene was built on, again.
+    Coarser,
     /// Remesh pressed, which builds the mesh again at the edge it has.
     Rebuild,
     /// The simulation speed halved, as its slider does, which shortens the
@@ -634,6 +646,19 @@ impl Fixture {
                 (&[(128, Action::Edit)], 256)
             }
             Fixture::Remesh | Fixture::NeutralRemesh => (&[(128, Action::Remesh)], 256),
+            Fixture::RepeatedRemesh => (
+                &[
+                    (32, Action::Remesh),
+                    (64, Action::Coarser),
+                    (96, Action::Remesh),
+                    (128, Action::Coarser),
+                    (160, Action::Remesh),
+                    (192, Action::Coarser),
+                    (224, Action::Remesh),
+                    (256, Action::Coarser),
+                ],
+                320,
+            ),
             Fixture::BaffleMove => (&[(BAFFLE_MOVE_STEP, Action::Move)], BAFFLE_MOVE_STEP + 128),
             // The pulse's front reaches the wall near step 150, and the wall
             // holds memory for the rest of the run.
@@ -730,6 +755,7 @@ impl Fixture {
             self,
             Fixture::HandoffDrivenPins
                 | Fixture::NeutralRemesh
+                | Fixture::RepeatedRemesh
                 | Fixture::BaffleMove
                 | Fixture::SeparatorMidRun
         )
@@ -738,7 +764,7 @@ impl Fixture {
     /// Whether each part's total is read off the device's own state before
     /// the remesh and at the handoff.
     fn counts_the_parts(self) -> bool {
-        matches!(self, Fixture::NeutralRemesh)
+        matches!(self, Fixture::NeutralRemesh | Fixture::RepeatedRemesh)
     }
 
     /// Whether the jump across the baffle is read off the device's own state
@@ -784,7 +810,7 @@ impl Fixture {
     /// one in each part of the parted cavity, which a pulse does not leave.
     fn pulses_at(self, domain: DomainRect) -> Vec<Point2> {
         match self {
-            Fixture::NeutralRemesh => vec![
+            Fixture::NeutralRemesh | Fixture::RepeatedRemesh => vec![
                 Point2::new(0.0, -0.6),
                 Point2::new(0.7, 0.0),
                 PARTED_ISLAND.0,
@@ -814,7 +840,7 @@ impl Fixture {
     /// The edge a remesh sets, and the mesh it must build.
     fn finer(self) -> (f64, &'static str) {
         match self {
-            Fixture::NeutralRemesh => (0.028, FINER_PARTED_MESH),
+            Fixture::NeutralRemesh | Fixture::RepeatedRemesh => (0.028, FINER_PARTED_MESH),
             _ => (0.06, FINER_CAVITY_MESH),
         }
     }
@@ -860,7 +886,7 @@ impl Fixture {
             }
             Fixture::Observables => CHANNEL_MESH,
             Fixture::FarField | Fixture::FarFieldLate => HOLE_MESH,
-            Fixture::NeutralRemesh => PARTED_MESH,
+            Fixture::NeutralRemesh | Fixture::RepeatedRemesh => PARTED_MESH,
             Fixture::BaffleMove => BAFFLED_MESH,
             Fixture::SeparatorMidRun => SEPARATED_MESH,
             _ => CAVITY_MESH,
@@ -876,7 +902,7 @@ impl Fixture {
             | Fixture::Remesh
             | Fixture::DeviceLoss => (cavity_document(), None),
             Fixture::Rejection => (rejection_document(), None),
-            Fixture::NeutralRemesh => (parted_document(), None),
+            Fixture::NeutralRemesh | Fixture::RepeatedRemesh => (parted_document(), None),
             Fixture::BaffleMove => (baffled_document(), None),
             Fixture::SeparatorMidRun => (separated_document(), None),
             Fixture::Observers => (observers_document(), None),
@@ -3494,6 +3520,10 @@ fn advance(
                 Action::Remesh => {
                     state.editor.document.presentation.mesh_edge = driver.fixture.finer().0;
                 }
+                Action::Coarser => {
+                    state.editor.document.presentation.mesh_edge =
+                        driver.fixture.document().0.presentation.mesh_edge;
+                }
                 Action::Rebuild => state.coordinator.remesh_requested = true,
                 Action::Move => {
                     if let Err(error) = move_the_baffle(&mut state.editor) {
@@ -3573,6 +3603,7 @@ fn advance(
                 }
                 Action::Edit
                 | Action::Remesh
+                | Action::Coarser
                 | Action::Rebuild
                 | Action::Timestep
                 | Action::Retime
@@ -3702,6 +3733,7 @@ fn advance(
                 }
                 Action::Edit
                 | Action::Remesh
+                | Action::Coarser
                 | Action::Rebuild
                 | Action::Timestep
                 | Action::Retime
@@ -3719,7 +3751,7 @@ fn advance(
                     // the same scene builds the same mesh to the bit.
                     let recorded = match action {
                         Action::Remesh => Some(driver.fixture.finer().1),
-                        Action::Rebuild => Some(driver.fixture.mesh()),
+                        Action::Coarser | Action::Rebuild => Some(driver.fixture.mesh()),
                         _ => None,
                     };
                     if let Some(recorded) = recorded
@@ -3730,7 +3762,7 @@ fn advance(
                     // A move, and a curve drawn or deleted, mesh the ground
                     // they change again, its nodes as many or not.
                     if !matches!(action, Action::Move | Action::Draw | Action::Delete)
-                        && matches!(action, Action::Remesh) == (from == to)
+                        && matches!(action, Action::Remesh | Action::Coarser) == (from == to)
                     {
                         return Some(Err(format!(
                             "the {action:?} went from {from} nodes to {to}"

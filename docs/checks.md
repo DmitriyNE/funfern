@@ -1664,7 +1664,15 @@ never rise. The gate runs one and eight round trips and twelve still ones
 at the default edge in about 3 s, the nightly up to sixteen at the default
 edge and half it. Its mutation is `complementary-evaluated-not-projected`,
 which the core's `a_rough_field_carried_back_and_forth_never_gains_energy`
-catches too. IV-12, baffle sides: the default box with a free-ended
+catches too. Its device half is the `repeated-remesh` fixture (2026-11-18):
+`neutral-remesh`'s parted cavity remeshed to 0.028 and back four times, at
+steps 32 to 256, each handoff held until the device has taken it, its handed
+state read against the reference's and each part's total through every one,
+and the endpoint at 320 against the reference that took the same eight
+handoffs. On the M1 Max the handed state stood 2.3e-7 to 8.3e-7 from the
+reference's, growing a little a trip, the parts within 4.7e-7 and the
+endpoint 1.1e-6, in 79 s; on arm64 lavapipe the same to two digits, in 75 s.
+The handoffs are `neutral-remesh`'s, whose mutations prove them. IV-12, baffle sides: the default box with a free-ended
 reflecting baffle, an arc across its middle, is struck below it and run
 until the pulse has come back off it, then remeshed at 0.7 and 1.4 times its
 edge or its baffle moved up or down by half an edge to two edges, and

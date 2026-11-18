@@ -1278,7 +1278,7 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   junction from the same crossing, so they agree: a circle dragged across
   another along three lines went from 140 refused positions in 6,000 to 28,
   all where the circles touch inside (2026-10-29).
-- [ ] Testing campaign, structure first: configuration sweeps at the
+- [x] Testing campaign, structure first: configuration sweeps at the
   preparation layer, regression scenes that prepare, an audit of what the
   tests feed the solvers and mutations that prove the gate bites, then the
   architecture's own physics (independent b, boundary memory through handoff),
@@ -1363,7 +1363,8 @@ Time-domain FEM-BEM coupling is not planned for the initial implementation.
   every fixture landed or was changed with a reason, and the follow-ups
   listed there are left, a few checks of the device's convergence in CI,
   three mutations, IV-11's device half and the far field's array among them.
-  This item is ticked when they land.
+  They landed by 2026-11-18, the array recorded as covered by the double
+  slit's far field.
 - [x] Spike: recover the transverse field a point probe reads from its
   neighbours' samples, measured before anything is built. The reading is the
   quadratic through its element's own six samples, 0.4% to 1.8% of the

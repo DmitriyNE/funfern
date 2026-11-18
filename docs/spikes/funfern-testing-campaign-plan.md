@@ -1883,3 +1883,9 @@ array of sources cannot be authored, the document holding one point source
 (`topology_editor.rs`); the double slit's far field, two coherent apertures,
 is held at its zeros and side lobes instead. Follow-up 8, IV-11's device
 half, is next.
+
+**Follow-up 8 done** on 2026-11-18: IV-11's device half, the
+`repeated-remesh` fixture, `neutral-remesh`'s parted cavity remeshed to the
+finer edge and back four times, held against the reference at every handoff
+and at the end; in the device suite, on lavapipe at every push, and in the
+browser's handoffs part. Every follow-up of the closeout has landed.
