@@ -102,10 +102,14 @@ impl AdaptiveFixture {
     /// loses 1.5% on the CPU too, and on the device peaks at 14,330
     /// triangles on lavapipe, which estimates more often per simulated
     /// second than a device at the speed ceiling, and loses up to 2.5% on
-    /// Metal (2026-11-09). Neither may gain energy.
+    /// Metal (2026-11-09). Neither may gain energy. The narrower ring may
+    /// hold 0.45 of the fine mesh, 20,341 triangles: held to 0.35, 15,821,
+    /// it peaked at 16,343 on CI's lavapipe with 83 estimates (2026-11-18),
+    /// and at 14,323 to 15,345 in ten runs on arm64 lavapipe with 61 to 69,
+    /// 5,808 on Metal. A handoff left uncleaned takes it to 37,686.
     fn loop_bounds(self) -> (f64, [f64; 2]) {
         match self {
-            AdaptiveFixture::Full => (0.35, [-3.0e-2, 1.0e-6]),
+            AdaptiveFixture::Full => (0.45, [-3.0e-2, 1.0e-6]),
             AdaptiveFixture::Slow => (0.25, [-1.0e-2, 1.0e-5]),
         }
     }

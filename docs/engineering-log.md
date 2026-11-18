@@ -34612,3 +34612,28 @@ the device.
   10, plan.md.
 - **Gate:** `scripts/gate.sh`; the fixture on Metal and lavapipe, not the
   whole device suite.
+
+## 2026-11-18 — Adaptive's mesh bound from its spread, and batches' pages longer
+
+- **Why.** Two failures after the closeout, studied with the user: the
+  per-push lavapipe job on d3ec418 failed `adaptive`, no defect in it, "the
+  mesh passed 0.35 of the fine one's 45203", its peak 16,343 triangles
+  against 15,821; and the nightly dispatched by hand on 933b990
+  (44245082635, 78 jobs passing) failed the double slit's second page,
+  served without the pool, cold: "at once, unfenced: did not finish in
+  time", at its 9,000 s, where its warm start passed in 1.8 hours.
+- **The bound.** It was set on 2026-11-09 from one lavapipe peak, 14,330,
+  ten per cent under it. Ten runs on arm64 lavapipe peaked at 15,330 to
+  15,345 and once 14,323, with 61 to 69 estimates; CI's runner estimated 83
+  times and peaked at 16,343, and on 2026-11-17 at 10,895; Metal at 5,808. A
+  device estimating more often per simulated second refines more, as the
+  fixture's doc already said. The narrower ring may hold 0.45 of the fine
+  mesh, 20,341 triangles; `adapted-handoff-left-uncleaned`, whose mesh
+  reaches 37,686, expects "the mesh passed 0.45 of the fine one".
+- **The double slit's pages** have 8 times the deadline in the browser,
+  12,000 s, which one start's cell holds.
+- **The device suite on Metal** at d3ec418, the first whole run since
+  2026-11-16: 146 of 146, `repeated-remesh` among them
+  (`target/device-suite/20261118-111710`).
+- **Docs.** checks.md (adaptive's bound).
+- **Gate:** `scripts/gate.sh`.

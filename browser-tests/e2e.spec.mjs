@@ -59,7 +59,9 @@ const deadline = Number(process.env.FUNFERN_E2E_DEADLINE ?? 120);
 // (`e2e-scene=`, through FUNFERN_E2E_QUERY): Spatial soliton took 1,951 s on
 // SwiftShader on an M1 Max on 2026-11-15 and the Josephson line 617 s, where
 // the five together never finished in the runner's six hours; the double
-// slit runs twice the steps. lifecycle
+// slit runs twice the steps; served without the pool its second page, cold,
+// ran past 9,000 s in its last schedule where warm it took 1.8 hours
+// (2026-11-18). lifecycle
 // remeshes and adapts a scene twice, also a scene a page: on CI's SwiftShader
 // the soliton's first cycle alone took 73 minutes, and served without the pool
 // the self-sustained emitter's 80 (2026-11-17), its two past 9,000 s. preparation's replacing
@@ -91,7 +93,7 @@ const runLength = {
   "far-field": 3,
   "far-field-late": 2,
   "baffle-move": 2,
-  batches: 6,
+  batches: 8,
   lifecycle: 10,
   preparation: 6,
   edges: 5,

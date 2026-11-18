@@ -2155,11 +2155,13 @@ on a 64 by 64 lattice every eight steps, may never stand at twice 1% of its
 largest mean density on an element past 1.25 authored edges: the reach
 holds elements by their own average density, the lattice reads points, and
 at the floor itself the two part (1.00 to 1.03 of it, in 3 slow runs of 10).
-`adaptive` must refine past 1.3 authored meshes and stay under 0.35 of the
+`adaptive` must refine past 1.3 authored meshes and stay under 0.45 of the
 fine one, and no handoff while the field holds its floor may gain energy or
 lose more than 3%: the narrower ring is past AMR-01's bounds on the CPU too
 (7,828 triangles, a handoff losing 1.5%, dormant at 6.8 s), and peaks at
-13,300 to 14,330 triangles on lavapipe, 5,809 on Metal. `adaptive-slow`
+13,300 to 16,343 triangles on lavapipe, the more the more often the device
+estimates per simulated second, 5,809 on Metal. Its bound was 0.35, 15,821
+triangles, until CI's lavapipe passed it with 83 estimates (2026-11-18). `adaptive-slow`
 keeps AMR-01's quarter and 1%, may gain 1e-5 at a coarsening just above the
 floor (3.3e-6 the most), and must go dormant (4.3 s) and come down to four
 fifths of its peak (0.42) with quiet regions past the authored size. The
