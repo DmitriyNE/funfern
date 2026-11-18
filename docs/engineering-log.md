@@ -34637,3 +34637,16 @@ the device.
   (`target/device-suite/20261118-111710`).
 - **Docs.** checks.md (adaptive's bound).
 - **Gate:** `scripts/gate.sh`.
+
+## 2026-11-18 — repeated-remesh given its time in the browser
+
+- **Why.** The scheduled nightly on d3ec418 (44298872141) passed 77 jobs and
+  failed the handoffs part served without the pool, cold and warm, on
+  `repeated-remesh` alone, its first browser run: "did not finish in time,
+  at running to the next stop; the stationary flux of generation 8 solving"
+  (9 warm), at the default 1,500 s. Without the pool each of its eight
+  handoffs prepares a mesh and solves its stationary flux on the main
+  thread, about 170 s apiece on CI's SwiftShader; isolated it passed, and
+  the part's other seven fixtures passed both ways. Agreed with the user.
+- **Change.** Its page has three times the deadline, 4,500 s.
+- **Gate:** `scripts/gate.sh`; judged by the next nightly.

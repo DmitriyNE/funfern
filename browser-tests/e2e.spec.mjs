@@ -85,6 +85,10 @@ const runLength = {
   "handoff-memory-edit": 2,
   "handoff-memory-timestep": 2,
   "handoff-memory-running": 2,
+  // Eight handoffs, each a preparation and a stationary flux solved on the
+  // main thread where the page has no pool: served so on CI's SwiftShader it
+  // reached its eighth generation of nine in 1,500 s (2026-11-18).
+  "repeated-remesh": 3,
   "handoff-memory-running-late": 2,
   observables: 6,
   observers: 2,
