@@ -34677,3 +34677,18 @@ the device.
   next one tells.
 - **Docs.** checks.md (adaptive-slow's gain).
 - **Gate:** `scripts/gate.sh`.
+
+## 2026-11-19 — The gate leaves the machine usable
+
+- **Why.** The user: each run of the gate made the machine almost unusable.
+  Cargo built on every core, the test harness ran a test a core, and the
+  tests' own pools (the wall sweep, the regression scenes, the integration
+  tests' `in_parallel` and seven of the library's studies) took every core
+  besides, through `available_parallelism`.
+- **Change.** `scripts/gate.sh` takes one core fewer than the machine has,
+  or `GATE_JOBS`, for `CARGO_BUILD_JOBS`, `RUST_TEST_THREADS` and the new
+  `FUNFERN_TEST_WORKERS`, which every test pool reads before
+  `available_parallelism`; and it renices itself by 10, which every step
+  inherits. Outside the gate the pools take every core, as before.
+- **Docs.** The README's checks.
+- **Gate:** `scripts/gate.sh`, its first run so.

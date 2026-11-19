@@ -272,12 +272,20 @@ pub fn prepare_with(
     Ok((editor, runtime, prepared))
 }
 
+/// Threads a test's own pool may take: `FUNFERN_TEST_WORKERS` where it is
+/// set, as `scripts/gate.sh` sets it to leave the machine a core, or every
+/// core.
+pub fn test_workers() -> usize {
+    std::env::var("FUNFERN_TEST_WORKERS")
+        .ok()
+        .and_then(|workers| workers.parse::<usize>().ok())
+        .filter(|&workers| workers > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |count| count.get()))
+}
+
 /// `work` done on every item on all threads, the results in the items' order.
 pub fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let workers = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(4)
-        .min(items.len().max(1));
+    let workers = test_workers().min(items.len().max(1));
     let work = &work;
     std::thread::scope(|scope| {
         let handles = (0..workers)

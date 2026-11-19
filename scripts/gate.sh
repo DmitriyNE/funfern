@@ -11,6 +11,16 @@ cd "$(dirname "$0")/.." || exit 1
 logs=target/gate
 mkdir -p "$logs"
 
+# The gate leaves the machine usable while it runs: a core free, for cargo's
+# jobs, the test harness and the tests' own pools (`FUNFERN_TEST_WORKERS`),
+# and the whole run at a lower priority, which every step inherits.
+# GATE_JOBS sets the count.
+cores=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
+jobs=${GATE_JOBS:-$((cores > 1 ? cores - 1 : 1))}
+export CARGO_BUILD_JOBS=$jobs RUST_TEST_THREADS=$jobs FUNFERN_TEST_WORKERS=$jobs
+renice -n 10 -p $$ >/dev/null 2>&1 || true
+echo "the gate on $jobs of $cores cores, at a lower priority"
+
 step() {
   local name=$1
   shift

@@ -752,9 +752,13 @@ fn every_wall_law_on_every_side_of_every_gallery_scene_prepares() {
     if only.is_none() && !all {
         eprintln!("omitted until the nightly: {}", NIGHTLY_ONLY.join(", "));
     }
-    let workers = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(4)
+    // `FUNFERN_TEST_WORKERS` where it is set, as `scripts/gate.sh` sets it
+    // to leave the machine a core, or every core.
+    let workers = std::env::var("FUNFERN_TEST_WORKERS")
+        .ok()
+        .and_then(|workers| workers.parse::<usize>().ok())
+        .filter(|&workers| workers > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |count| count.get()))
         .min(selected.len());
     let started = Instant::now();
     let reports = std::thread::scope(|scope| {

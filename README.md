@@ -317,6 +317,9 @@ default scene in the debug profile, the release build, the wasm32 check and
 the threaded one (nightly Rust, `browser-threads`), every shader compiled by
 Chrome's WebGPU (`npm run test:shaders`, which needs a hardware adapter), and
 the protocol's Kani proofs. Each step's output is kept under `target/gate/`.
+It leaves the machine a core, for cargo's jobs, the test harness and the
+tests' own pools (`FUNFERN_TEST_WORKERS`), and runs at a lower priority;
+`GATE_JOBS` sets how many cores it takes.
 `scripts/device-suite.sh` joins it when shaders, the device path or the
 fixtures change. The browser bundle builds with:
 

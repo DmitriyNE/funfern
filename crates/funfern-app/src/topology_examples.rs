@@ -4827,6 +4827,17 @@ fn plasma_delay_with(repeat: f64) -> TopologyDocument {
 mod tests {
     use super::*;
 
+    /// Threads a test's own pool may take: `FUNFERN_TEST_WORKERS` where it is
+    /// set, as `scripts/gate.sh` sets it to leave the machine a core, or every
+    /// core.
+    fn test_workers() -> usize {
+        std::env::var("FUNFERN_TEST_WORKERS")
+            .ok()
+            .and_then(|workers| workers.parse::<usize>().ok())
+            .filter(|&workers| workers > 0)
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |count| count.get()))
+    }
+
     /// Every region of every gallery scene is named, but the background,
     /// which a scene names only when it is one piece among others, and no
     /// two regions of a scene share a name: the Materials panel lists them
@@ -10303,7 +10314,7 @@ mod tests {
     fn in_parallel<T: Sync, R: Send>(tasks: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
         let next = std::sync::atomic::AtomicUsize::new(0);
         let results = std::sync::Mutex::new((0..tasks.len()).map(|_| None).collect::<Vec<_>>());
-        let threads = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let threads = test_workers();
         std::thread::scope(|scope| {
             for _ in 0..threads.min(tasks.len()) {
                 scope.spawn(|| {
@@ -12042,7 +12053,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let workers = test_workers();
         let readings = std::sync::Mutex::new(Vec::new());
         std::thread::scope(|scope| {
             for _ in 0..workers.min(runs.len()) {
@@ -16161,7 +16172,7 @@ mod tests {
             runs.retain(|run| file(run).contains(&only));
         }
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let workers = test_workers();
         std::thread::scope(|scope| {
             for _ in 0..workers {
                 scope.spawn(|| {
@@ -17693,7 +17704,7 @@ mod tests {
     /// each case's errors at each level.
     fn fresnel_levels(cases: &[FresnelCase], levels: &[(f64, f64)]) -> Vec<Vec<FresnelErrors>> {
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let workers = test_workers();
         let jobs = cases.len() * levels.len();
         let results = std::sync::Mutex::new(vec![None; jobs]);
         std::thread::scope(|scope| {
@@ -18418,7 +18429,7 @@ mod tests {
     /// order.
     fn scattering_runs(jobs: &[(&ScatteringCase, ScatteringLevel)]) -> Vec<ScatteringReading> {
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let workers = test_workers();
         let results = std::sync::Mutex::new(vec![None; jobs.len()]);
         std::thread::scope(|scope| {
             for _ in 0..workers {
@@ -19411,7 +19422,7 @@ mod tests {
     /// side, and reads each against its ODE.
     fn temporal_readings(cases: &[TemporalCase], edge: f64, fraction: f64) -> Vec<TemporalReading> {
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let workers = test_workers();
         let results = std::sync::Mutex::new(vec![None; cases.len()]);
         std::thread::scope(|scope| {
             for _ in 0..workers {
@@ -20060,7 +20071,7 @@ mod tests {
         stretch: u32,
     ) -> Vec<ModulatedReading> {
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let workers = std::thread::available_parallelism().map_or(4, |count| count.get());
+        let workers = test_workers();
         let results = std::sync::Mutex::new(vec![None; cases.len()]);
         std::thread::scope(|scope| {
             for _ in 0..workers {

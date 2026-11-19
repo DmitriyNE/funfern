@@ -334,9 +334,13 @@ fn every_regression_frozen_and_gallery_scene_prepares_at_its_own_edge() {
         scenes.iter().any(|scene| scene.regression),
         "no regression scene; the first is the autosave of 12 October"
     );
-    let workers = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(4)
+    // `FUNFERN_TEST_WORKERS` where it is set, as `scripts/gate.sh` sets it
+    // to leave the machine a core, or every core.
+    let workers = std::env::var("FUNFERN_TEST_WORKERS")
+        .ok()
+        .and_then(|workers| workers.parse::<usize>().ok())
+        .filter(|&workers| workers > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |count| count.get()))
         .min(scenes.len());
     let started = Instant::now();
     let outcomes = std::thread::scope(|scope| {
