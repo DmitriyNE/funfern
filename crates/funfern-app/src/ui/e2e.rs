@@ -1299,6 +1299,12 @@ struct Observing {
     /// When the endpoint began waiting for the vector overlay's first
     /// readback.
     overlay_wait: Option<Instant>,
+    /// What the overlay pass was last asked for: the generation, the
+    /// overlay's revision, and whether its buffers stand. An overlay that
+    /// read nothing back says these beside what its display last took: on
+    /// 2026-11-18 a page served without the pool read nothing in ten
+    /// minutes.
+    overlay_asked: (u64, u64, bool),
     /// How long the recording ran and, natively, the frame slots it asked
     /// for, once stopped.
     recorded: Option<(std::time::Duration, Option<u64>)>,
@@ -1829,10 +1835,16 @@ fn drive(
     stopped: Option<Res<crate::stopped::RenderStopped>>,
     mut lose: ResMut<LoseDevice>,
     mut exit: MessageWriter<AppExit>,
+    wave: Res<crate::wave_gpu::WaveGpuRequest>,
 ) {
     if matches!(driver.phase, Phase::Done) {
         return;
     }
+    driver.observing.overlay_asked = (
+        wave.generation(),
+        wave.vector_overlay_revision(),
+        wave.vector_overlay.is_some(),
+    );
     let fixture = driver.fixture;
     let context = contexts.ctx_mut().ok().cloned();
     let followed = follow_events(&mut driver, &mut state, &request);
@@ -2648,7 +2660,17 @@ fn observed(
     generation: u64,
 ) -> Result<String, String> {
     if overlay.generation != generation || overlay.samples.is_empty() || overlay.readbacks == 0 {
-        return Err("the vector overlay read nothing back".into());
+        let (asked_generation, asked_revision, standing) = observing.overlay_asked;
+        return Err(format!(
+            "the vector overlay read nothing back: its display at generation {} revision {}, \
+             {} samples after {} readbacks; the run at generation {generation}, the overlay \
+             asked of generation {asked_generation} revision {asked_revision}, its buffers {}",
+            overlay.generation,
+            overlay.revision,
+            overlay.samples.len(),
+            overlay.readbacks,
+            if standing { "standing" } else { "none" }
+        ));
     }
     let Some(level) = state
         .field_exposure

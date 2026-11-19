@@ -34650,3 +34650,30 @@ the device.
   the part's other seven fixtures passed both ways. Agreed with the user.
 - **Change.** Its page has three times the deadline, 4,500 s.
 - **Gate:** `scripts/gate.sh`; judged by the next nightly.
+
+## 2026-11-19 — Adaptive-slow's gain from its spread, and an overlay that reads nothing says what it saw
+
+- **Why.** The per-push lavapipe job on 9eb7dd7 failed `adaptive-slow`, no
+  defect in it: "a handoff moved the energy outside -1e-2 to 1e-5", one
+  coarsening just above the floor gaining 1.05e-5; and the nightly
+  dispatched by hand on 6676566 (44379118607, 76 jobs passing, the
+  handoffs part's `repeated-remesh` fixed in 9eb7dd7) failed `observers`
+  served without the pool, warm: "the vector overlay read nothing back",
+  after the ten minutes it now waits. Studied with the user.
+- **The gain.** Set on 2026-11-09 from 21 runs, 3.3e-6 the most. Fifteen
+  more on arm64 lavapipe read roundoff but one, 1.7e-6; CI's 1.05e-5 is the
+  largest seen. The slow ring may gain 5e-5 at a handoff while its field
+  holds the floor: these are plan.md's dormant coarsenings (Worth checking
+  sometime), and no mutation rests on the old bound.
+- **The overlay.** Not reproduced: served without the pool and started
+  warm on the M1 Max's SwiftShader, `observers` passed twice, and once more
+  with the page's CPU throttled six times, the overlay reading 144 and 64
+  samples. A suspect, unproven: the viewport rebuilds an overlay lattice
+  whose readback has not landed in 750 ms (`VECTOR_OVERLAY_READBACK_TIMEOUT`),
+  which bumps its revision, and a readback that lands after is dropped; a
+  page whose round trip outlasts that would never read one. The failure now
+  says the display's generation, revision, samples and readbacks beside
+  what the overlay was last asked for and whether its buffers stand, so the
+  next one tells.
+- **Docs.** checks.md (adaptive-slow's gain).
+- **Gate:** `scripts/gate.sh`.

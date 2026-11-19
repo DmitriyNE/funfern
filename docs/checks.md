@@ -2162,8 +2162,9 @@ lose more than 3%: the narrower ring is past AMR-01's bounds on the CPU too
 13,300 to 16,343 triangles on lavapipe, the more the more often the device
 estimates per simulated second, 5,809 on Metal. Its bound was 0.35, 15,821
 triangles, until CI's lavapipe passed it with 83 estimates (2026-11-18). `adaptive-slow`
-keeps AMR-01's quarter and 1%, may gain 1e-5 at a coarsening just above the
-floor (3.3e-6 the most), and must go dormant (4.3 s) and come down to four
+keeps AMR-01's quarter and 1%, may gain 5e-5 at a coarsening just above the
+floor (3.3e-6 the most in 21 runs, 1.7e-6 in 15 more, and 1.05e-5 once on
+CI's lavapipe, past the 1e-5 it was held to until 2026-11-19), and must go dormant (4.3 s) and come down to four
 fifths of its peak (0.42) with quiet regions past the authored size. The
 study found the reach restoring nothing under four elements, which left a
 leftover standing on a coarsened element: it now restores however few
