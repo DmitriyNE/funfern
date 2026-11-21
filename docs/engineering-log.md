@@ -34692,3 +34692,19 @@ the device.
   inherits. Outside the gate the pools take every core, as before.
 - **Docs.** The README's checks.
 - **Gate:** `scripts/gate.sh`, its first run so.
+
+## 2026-11-21 — neutral-remesh given twice its time in the browser
+
+- **Why.** The nightly dispatched by hand on 79df4a7 (44491822841) came out
+  green once six cells were run again: they had failed installing
+  Chromium's packages while Ubuntu's Azure mirror refused connections
+  (12:01 to 12:35 UTC), before any fixture ran. The scheduled nightly on
+  56e4ade (44518527098) passed 78 jobs and failed one: the handoffs part
+  served without the pool, warm, on `neutral-remesh` alone, "did not finish
+  in time, at running to the next stop; the stationary flux of generation
+  2 landed", at the default 1,500 s, where its cold start and the nights
+  before passed; the part's `repeated-remesh` passed at its 4,500 s. Its one
+  handoff solves its stationary flux on the main thread there, as the
+  memory part's fixtures do. Agreed with the user.
+- **Change.** Its page has twice the deadline, 3,000 s.
+- **Gate:** `scripts/gate.sh`; judged by the next nightly.

@@ -89,6 +89,10 @@ const runLength = {
   // main thread where the page has no pool: served so on CI's SwiftShader it
   // reached its eighth generation of nine in 1,500 s (2026-11-18).
   "repeated-remesh": 3,
+  // One handoff whose stationary flux is solved on the main thread without
+  // the pool: its warm start ran out of 1,500 s on CI's SwiftShader once,
+  // passing on the nights before (2026-11-20).
+  "neutral-remesh": 2,
   "handoff-memory-running-late": 2,
   observables: 6,
   observers: 2,
