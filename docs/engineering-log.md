@@ -34708,3 +34708,24 @@ the device.
   memory part's fixtures do. Agreed with the user.
 - **Change.** Its page has twice the deadline, 3,000 s.
 - **Gate:** `scripts/gate.sh`; judged by the next nightly.
+
+## 2026-11-21 — Adaptive judges its estimates' agreement before their completeness
+
+- **Why.** The scheduled nightly on 56e4ade (44731090428) passed 78 jobs and
+  failed mutation shard 1 at 36 of 37: `estimate-reads-unaligned-readbacks`
+  "failed for another reason". From the logs CI keeps: with its patch
+  `adaptive` left one estimate unanswered, its estimates parting from the
+  reference's by 7.3e-2, and "the reference did not read an estimate the app
+  took" came before the agreement it expects; two days earlier in the CI
+  container it failed by the agreement. As for the mesh's bound
+  (2026-11-18), the generic check stood before the specific one. Agreed with
+  the user.
+- **Change.** `adaptive` judges the device against the reference, the
+  clock, the mesh's bound and the estimates' agreement, and the reference's
+  reading of every estimate last.
+- **Verified** on arm64 lavapipe: `adaptive` passes; with its patch
+  `estimate-reads-unaligned-readbacks` fails "the app's estimates of the
+  device's copies part from the reference's beyond 1e-4", and
+  `adapted-handoff-left-uncleaned` "the mesh passed 0.45 of the fine one's
+  45203".
+- **Gate:** `scripts/gate.sh`.

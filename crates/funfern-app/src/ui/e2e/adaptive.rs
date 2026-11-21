@@ -1319,14 +1319,18 @@ fn judge(driver: &AdaptiveDriver, followed: &Followed) -> Result<String, String>
             "the mesh passed {share} of the fine one's {FINE_TRIANGLES}"
         ));
     }
-    if unanswered > 0 {
-        return fail("the reference did not read an estimate the app took".into());
-    }
+    // The estimates' agreement before the reference's reading of every one,
+    // for the same reason: estimates read from misaligned copies left one
+    // unanswered and parted by 7.3e-2, and the generic check named the run's
+    // failure where the specific one should (2026-11-20).
     if !within(agreement, ESTIMATE_AGREEMENT) || !decided_apart.is_empty() {
         return fail(format!(
             "the app's estimates of the device's copies part from the reference's beyond \
              {ESTIMATE_AGREEMENT:.0e}, or decide otherwise"
         ));
+    }
+    if unanswered > 0 {
+        return fail("the reference did not read an estimate the app took".into());
     }
     match driver.fixture {
         AdaptiveFixture::Full
