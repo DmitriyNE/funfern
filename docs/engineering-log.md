@@ -34729,3 +34729,36 @@ the device.
   `adapted-handoff-left-uncleaned` "the mesh passed 0.45 of the fine one's
   45203".
 - **Gate:** `scripts/gate.sh`.
+
+## 2026-11-24 — The vector overlay waits for its readback in frames
+
+- **Why.** The nightly dispatched by hand on aa1e9a5 (44935212106) passed
+  78 jobs and failed `observers` served without the pool, warm, now saying
+  why (79df4a7): "the vector overlay read nothing back: its display at
+  generation 0 revision 0, 0 samples after 0 readbacks; the run at
+  generation 2, the overlay asked of generation 2 revision 1409, its
+  buffers standing". The suspect of 2026-11-19, proven: the view replaces
+  an overlay lattice whose readback has not landed in 750 ms
+  (`VECTOR_OVERLAY_READBACK_TIMEOUT`), a retry meant for a copy lost in
+  resource churn, and on that page no round trip finished in 750 ms, so
+  every lattice was replaced before its copy landed and the copy dropped as
+  stale: 1,409 lattices, about 17.6 minutes at one each 750 ms, the run and
+  its ten minutes' wait. A defect of the app, not the fixture: on a device
+  that slow the overlay never draws. Not reproduced on the M1 Max's
+  SwiftShader, three times, once with the page's CPU throttled six times.
+  Agreed with the user.
+- **Change.** The wait is counted in frames,
+  `VECTOR_OVERLAY_READBACK_FRAMES`, 30, ten times the paced readback's
+  depth: a fast device retries a lost copy about as soon as before, half a
+  second at 60 frames a second, and a slow one waits its round trip.
+- **Test.** `a_slow_frame_does_not_give_up_on_the_overlays_readback`
+  (host): a lattice submitted, a frame of 0.8 s and 28 more without its
+  copy must leave it in flight, and the thirtieth retry it. With the
+  overlay giving up after one frame it fails "a slow frame gave up on the
+  lattice in flight": the mutation `overlay-gives-up-at-once`.
+- **Verified.** `observers` on Metal, 48 s, the overlay 144 samples; on the
+  M1 Max's SwiftShader served without the pool, warm, 8 minutes, the
+  overlay 64 samples; lavapipe by the push's run; the served page that
+  failed by the next nightly.
+- **Docs.** checks.md (the observed run's overlay).
+- **Gate:** `scripts/gate.sh`.

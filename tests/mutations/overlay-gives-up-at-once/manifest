@@ -1,0 +1,4 @@
+about: the vector overlay gives up on a lattice whose readback has not landed after one frame, so on a device whose round trip outlasts that every lattice is replaced before its copy arrives and the overlay reads nothing, as the 750 ms it waited did on a slow CI page
+test: cargo test --release -p funfern-app --lib -- ui::viewport::tests::a_slow_frame_does_not_give_up_on_the_overlays_readback
+expect: a slow frame gave up on the lattice in flight
+needs: cpu

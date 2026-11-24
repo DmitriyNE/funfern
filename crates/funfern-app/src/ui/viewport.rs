@@ -7,7 +7,6 @@ use crate::topology_editor::TopologyAcceptance;
 use crate::topology_runtime::PreparedTopology;
 use crate::topology_viewport::SampledTopologyGeometry;
 use crate::wave_gpu::{VectorOverlayDisplay, WaveDisplay, WaveGpuRequest};
-use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::storage::ShaderBuffer;
 use bevy_egui::egui::{self, Color32, Pos2, Rect, Sense, Stroke};
@@ -273,11 +272,14 @@ impl Playground {
         if self.vector_overlay_failed.as_ref() == Some(&key) {
             return;
         }
+        if let Some(layout) = self.vector_overlay_layout.as_mut() {
+            layout.frames_waited = layout.frames_waited.saturating_add(1);
+        }
         // Keep at most one GPU lattice replacement in flight. Replacing its
         // readback every camera frame can otherwise starve the overlay until
         // pan/zoom stops. The last completed world-space lattice is still
         // reprojected by `draw_solution` while this one catches up. Ownership
-        // and a deadline matter: a dropped/superseded readback must not leave
+        // and a deadline in frames matter: a dropped/superseded readback must not leave
         // the coalescer waiting forever (reset used to be the only escape).
         let current_complete = self
             .vector_overlay_layout
@@ -298,7 +300,7 @@ impl Playground {
                     recorders.vector_overlay_revision(),
                     recorders.vector_overlay.is_some(),
                 )
-                && layout.submitted_at.elapsed() < VECTOR_OVERLAY_READBACK_TIMEOUT
+                && layout.frames_waited < VECTOR_OVERLAY_READBACK_FRAMES
         }) {
             return;
         }
@@ -329,7 +331,7 @@ impl Playground {
                     key,
                     revision: recorders.vector_overlay_revision(),
                     points,
-                    submitted_at: Instant::now(),
+                    frames_waited: 0,
                 });
             }
             // Only a defect fails the upload: it lights the diagnostics
@@ -388,6 +390,58 @@ mod tests {
         state.message = "read".into();
         refresh(&mut state);
         assert_eq!(state.message, "read", "the same lattice is not built again");
+    }
+
+    /// Reported by CI on 2026-11-22: a page whose frames outlasted the 750 ms
+    /// the overlay waited for its readback replaced every lattice before its
+    /// copy landed, 1,409 times in one run, and read nothing. A slow frame
+    /// does not give up on the lattice in flight; thirty frames without its
+    /// copy do.
+    #[test]
+    fn a_slow_frame_does_not_give_up_on_the_overlays_readback() {
+        let mut world = World::new();
+        world.init_resource::<Assets<ShaderBuffer>>();
+        let mut recorders = WaveGpuRequest::default();
+        recorders.adopt_canonical_generation(1);
+        let display = VectorOverlayDisplay::default();
+        let mut state = crate::ui::test_support::with_baffles(&[]);
+        let active = crate::ui::test_support::activate(&mut state);
+        state.editor.document.presentation.vector_overlay = VectorOverlay::RelativeEnergyFlow;
+        state.viewport_rect = crate::ui::test_support::viewport();
+        let mut refresh = |state: &mut Playground, recorders: &mut WaveGpuRequest| {
+            world.resource_scope(|world, mut assets: Mut<Assets<ShaderBuffer>>| {
+                let mut queue = bevy::ecs::world::CommandQueue::default();
+                let mut commands = Commands::new(&mut queue, world);
+                state.refresh_vector_overlay(
+                    recorders,
+                    &display,
+                    &mut assets,
+                    &mut commands,
+                    Some((&active, RecorderSource::Fixed(&active.canonical_operator))),
+                    1,
+                );
+            });
+        };
+        refresh(&mut state, &mut recorders);
+        let submitted = recorders.vector_overlay_revision();
+        assert!(
+            submitted > 0 && recorders.vector_overlay.is_some(),
+            "the first frame submits a lattice"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        for _ in 1..VECTOR_OVERLAY_READBACK_FRAMES {
+            refresh(&mut state, &mut recorders);
+        }
+        assert_eq!(
+            recorders.vector_overlay_revision(),
+            submitted,
+            "a slow frame gave up on the lattice in flight"
+        );
+        refresh(&mut state, &mut recorders);
+        assert!(
+            recorders.vector_overlay_revision() > submitted,
+            "thirty frames without its copy did not try again"
+        );
     }
 
     /// Both axes step upwards from the lower bound. The vertical one used to

@@ -600,7 +600,8 @@ struct VectorOverlayLayout {
     key: VectorOverlayLayoutKey,
     revision: u64,
     points: Vec<VectorOverlayLayoutPoint>,
-    submitted_at: Instant,
+    /// The frames its readback has been waited for.
+    frames_waited: u32,
 }
 
 impl VectorOverlayLayout {

@@ -169,9 +169,12 @@ pub(super) const VECTOR_DC_REJECTION_RATE: f64 = 0.5;
 pub(super) const VECTOR_LOW_PASS_STAGES: usize = 3;
 /// A vector sampling revision is tiny and normally completes within a few
 /// display frames. If its readback disappears during rapid resource churn,
-/// retry instead of allowing the one-in-flight coalescer to deadlock.
-pub(super) const VECTOR_OVERLAY_READBACK_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_millis(750);
+/// retry instead of allowing the one-in-flight coalescer to deadlock. Counted
+/// in frames, ten times the paced readback's depth, not in time: the 750 ms
+/// it was until 2026-11-24 outlasted no round trip on a page whose frames
+/// took longer, where every lattice was replaced before its copy landed and
+/// the overlay read nothing, rebuilt 1,409 times in one CI run.
+pub(super) const VECTOR_OVERLAY_READBACK_FRAMES: u32 = 30;
 /// The longest arrow below this global visibility is less than about a tenth
 /// of a pixel even at the coarsest supported density. Avoiding the draw also
 /// avoids assigning a visible direction to near-zero floating-point residue.

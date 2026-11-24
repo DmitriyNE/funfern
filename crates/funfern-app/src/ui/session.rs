@@ -901,7 +901,7 @@ mod tests {
             },
             revision: 1,
             points: vec![],
-            submitted_at: Instant::now(),
+            frames_waited: 0,
         };
         state.vector_overlay_layout = Some(layout());
         state.vector_overlay_previous_layout = Some(layout());

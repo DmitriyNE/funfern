@@ -1,0 +1,11 @@
+--- a/crates/funfern-app/src/ui/viewport.rs
++++ b/crates/funfern-app/src/ui/viewport.rs
+@@ -300,7 +300,7 @@
+                     recorders.vector_overlay_revision(),
+                     recorders.vector_overlay.is_some(),
+                 )
+-                && layout.frames_waited < VECTOR_OVERLAY_READBACK_FRAMES
++                && layout.frames_waited < 1
+         }) {
+             return;
+         }

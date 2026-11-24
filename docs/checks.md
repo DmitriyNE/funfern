@@ -133,7 +133,13 @@ steps asked for before it, which on a slow device go on completing into it,
 and through it the app asks for none and the device does none past them; the
 endpoint waits up to ten minutes for the overlay's first readback, whose
 pipeline a slow device may not have compiled by then (a minute until
-2026-11-17, past which CI's SwiftShader once had not). Natively and in Chrome the endpoint is the same bits, one hash on
+2026-11-17, past which CI's SwiftShader once had not). The view retries an
+overlay lattice whose readback has not landed after 30 frames: it waited
+750 ms until 2026-11-24, which on CI's SwiftShader served without the pool
+no round trip finished in, so every lattice was replaced before its copy
+landed, 1,409 times in one run, and the overlay read nothing. The host's
+`a_slow_frame_does_not_give_up_on_the_overlays_readback` holds it through a
+0.8 s frame and to its retry, its mutation `overlay-gives-up-at-once`. Natively and in Chrome the endpoint is the same bits, one hash on
 both. `superposition`, IV-01 on the device, runs the `handoff-memory`
 cavity, its bottom side a second-order outgoing wall and its top driven, to
 step 384 four times: struck at two points and driven, struck at the first
