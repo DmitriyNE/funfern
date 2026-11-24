@@ -1531,8 +1531,14 @@ finest, (2,3) at 2.6e-5, 2.9e-6 and 1.8e-7, and leapfrog's second order in
 time, successive differences falling 4.001 times. 45 to 90 s a model when
 measured; it waits on a readback at every sample, and under a heavy load
 from other work it has taken 200 to 583 s and run past the suite's 600 s.
-It runs in the local suite alone: on lavapipe each model ran past 90 minutes
-without finishing (2026-11-17).
+On lavapipe each model ran past 90 minutes without finishing (2026-11-17):
+it waited for its full snapshot to be the latest copy, and the live stream's
+copy of the same held step landed after it every time, so it asked for
+101,537 snapshots and took 3 samples in 20 minutes. It waits for
+`holds_snapshot_at`, the snapshot and the primary lanes at the target step,
+and on arm64 lavapipe each model now takes 41 to 45 s, the device within
+1.2e-7 of f64 and showing the same orders as on Metal; the nightly runs the
+three there. `canonical_gpu_cavity_drift` waits the same way.
 
 `canonical_gpu_cavity_drift` is C9's long run on the device: the same box
 on edge 0.08, (1,0) and half of (2,3), 200,000 steps of the fourth-order

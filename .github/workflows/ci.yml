@@ -972,9 +972,20 @@ jobs:
           FIXTURE_TIMEOUT: 5400
         run: scripts/e2e-fixture.sh endurance
 
+      # PH-01's device half, the cavity's modes converging in space and time
+      # in each skin: 41 to 45 s a model on arm64 lavapipe once it waited for
+      # a snapshot at its step rather than for the latest copy (2026-11-24).
+      - name: PH-01, the cavity's modes
+        if: success() || failure()
+        run: |
+          failed=0
+          for physics in mechanical tm te; do
+            scripts/e2e-fixture.sh --example canonical_gpu_cavity_modes --physics $physics || failed=1
+          done
+          exit $failed
+
       # PH-03's device half, the complementary mode kept and carried: 22 to
-      # 27 s a run on arm64 lavapipe (2026-11-17). PH-01's cavity modes stay in
-      # the local device suite: on lavapipe each model ran past 90 minutes.
+      # 27 s a run on arm64 lavapipe (2026-11-17).
       - name: PH-03, the complementary mode
         if: success() || failure()
         run: |

@@ -34762,3 +34762,34 @@ the device.
   failed by the next nightly.
 - **Docs.** checks.md (the observed run's overlay).
 - **Gate:** `scripts/gate.sh`.
+
+## 2026-11-24 — PH-01 on lavapipe: a snapshot at its step, not the latest copy
+
+- **Why.** On lavapipe PH-01's device half (`canonical_gpu_cavity_modes`)
+  ran each model past 90 minutes without finishing (2026-11-17), so it
+  stayed in the local suite; the user asked for the cause, studied before
+  anything changed.
+- **Found.** Instrumented in the CI container, one model on arm64 lavapipe
+  for 20 minutes: the first stride waited 171 s for the step's shaders to
+  compile, and then the device stood held at each target step while the
+  example asked for full snapshots, 101,537 of them, about 500 a second.
+  Every one arrived; none was taken, the example asking it to be the latest
+  copy (`full_readback_at == readbacks`), and the live stream's copy of the
+  same held step landed after it in the same frame each time. Three samples
+  of 38 in 20 minutes. Metal's frames line up, and never showed it.
+  `canonical_gpu_cavity_drift` (C9) waits the same way and passed nightly
+  because its few samples lined up often enough.
+- **Change.** `CanonicalGpuDisplay::holds_snapshot_at(step)`: the latest full
+  snapshot was taken at the step and the primary lanes are of it, whichever
+  copy brought them. Both examples wait for it. The host's
+  `a_snapshot_is_held_while_the_field_is_of_its_step`: a snapshot at 90
+  then a live copy of 90 holds it, though the snapshot is no longer the
+  latest copy; a live copy of 96 lets go.
+- **Verified.** On arm64 lavapipe the three models took 41, 45 and 43 s, the
+  device within 1.2e-7 of f64 at edge 0.04, the spatial orders as on Metal
+  (mode 2 at 2.05e-5, 1.74e-7, 2.5e-8) and leapfrog's 4.001; the drift
+  example 524 s, every demand held. On Metal 29 to 30 s a model and the
+  drift 371 s. The nightly's device long runs run PH-01's three models
+  beside PH-03's.
+- **Docs.** checks.md (PH-01's device half), the campaign plan's section 10.
+- **Gate:** `scripts/gate.sh`; the cavity entries of the device suite.

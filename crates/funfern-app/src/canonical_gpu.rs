@@ -6269,6 +6269,19 @@ impl CanonicalGpuDisplay {
         self.raw_state_completed_steps
     }
 
+    /// Whether the latest full snapshot was taken at `step` and the primary
+    /// lanes are of that step, whichever copy brought them: a later live copy
+    /// of a device held at the step carries the same field. A reader that
+    /// asks the snapshot to be the latest copy (`full_readback_at ==
+    /// readbacks`) can wait forever where the live stream's copies land after
+    /// each snapshot in the same frame: on lavapipe PH-01's device half asked
+    /// for 101,537 snapshots and took 3 samples in 20 minutes (2026-11-24).
+    pub fn holds_snapshot_at(&self, step: u64) -> bool {
+        self.full_readbacks > 0
+            && self.raw_state_completed_steps == step
+            && self.raw_primary_step == step
+    }
+
     /// The simulated time of the latest full snapshot: the clock's, moved
     /// back by the steps the clock has run past it. Coefficients a full
     /// snapshot is read through are evaluated here, not at the clock, which a
@@ -9833,6 +9846,83 @@ mod tests {
                 "the picture went back to an older step"
             );
         }
+    }
+
+    /// Reported on 2026-11-24: PH-01's device half waited for its snapshot to
+    /// be the latest copy, and on lavapipe the live stream's copy of the same
+    /// held step always landed after it. A snapshot at a step is held while
+    /// the primary lanes are of that step, whichever copy brought them, and
+    /// not once a copy of a later step has.
+    #[test]
+    fn a_snapshot_is_held_while_the_field_is_of_its_step() {
+        let nodes = 3_u32;
+        let tag = |full: bool| CanonicalStateReadback {
+            generation: 1,
+            node_count: nodes,
+            sample_count: 0,
+            state_count: nodes + 1,
+            material_runtime_count: 0,
+            integrated_count: 0,
+            full,
+        };
+        let copy = |value: f32, step: f32| {
+            let mut words = vec![
+                GpuCanonicalStateWord {
+                    values: Vec4::new(value, 0.0, 0.0, 0.0),
+                };
+                nodes as usize
+            ];
+            words.push(GpuCanonicalStateWord {
+                values: Vec4::new(SNAPSHOT_METADATA_MAGIC, 0.0, step, 0.0),
+            });
+            words
+        };
+        let request = CanonicalGpuRequest {
+            generation: 1,
+            ..Default::default()
+        };
+        let mut display = CanonicalGpuDisplay {
+            generation: 1,
+            ..Default::default()
+        };
+        assert!(!display.holds_snapshot_at(0), "no snapshot yet");
+        apply_canonical_state(
+            &tag(true),
+            copy(1.0, 90.0),
+            &request,
+            &mut display,
+            CanonicalStateCopy::Snapshot,
+        );
+        assert!(display.holds_snapshot_at(90));
+        // The live stream's copy of the same held step, after the snapshot.
+        apply_canonical_state(
+            &tag(false),
+            copy(1.0, 90.0),
+            &request,
+            &mut display,
+            CanonicalStateCopy::Live,
+        );
+        assert_ne!(display.full_readback_at, display.readbacks);
+        assert!(
+            display.holds_snapshot_at(90),
+            "a live copy of the snapshot's own step let go of it"
+        );
+        // A copy of a later step.
+        apply_canonical_state(
+            &tag(false),
+            copy(2.0, 96.0),
+            &request,
+            &mut display,
+            CanonicalStateCopy::Live,
+        );
+        assert!(
+            !display.holds_snapshot_at(90),
+            "a later field was read as the snapshot's"
+        );
+        assert!(
+            !display.holds_snapshot_at(96),
+            "a live copy was read as a snapshot"
+        );
     }
 
     /// Reported: a picture could paint the wrong lane. A live copy held both

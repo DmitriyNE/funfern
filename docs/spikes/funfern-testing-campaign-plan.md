@@ -1889,3 +1889,9 @@ half, is next.
 finer edge and back four times, held against the reference at every handoff
 and at the end; in the device suite, on lavapipe at every push, and in the
 browser's handoffs part. Every follow-up of the closeout has landed.
+
+**PH-01's device half on lavapipe** (2026-11-24): what kept it local was the
+example's wait, which asked its full snapshot to be the latest copy and on
+lavapipe never got it; waiting for a snapshot at its step, its three models
+take 41 to 45 s there, and the nightly runs them beside PH-03's.
+

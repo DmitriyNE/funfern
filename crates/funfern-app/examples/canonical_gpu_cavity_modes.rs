@@ -449,9 +449,7 @@ fn drive(
         return;
     }
     if display.generation != request.generation()
-        || display.full_readbacks == 0
-        || display.full_readback_at != display.readbacks
-        || display.full_snapshot_completed_steps() != target
+        || !display.holds_snapshot_at(target)
         || display.primary_flux.len() != study.runs[current].weights.len()
     {
         request.request_full_state_readback();
