@@ -34860,3 +34860,25 @@ the device.
   "detected (cpu)".
 - **Docs.** checks.md (the mutation runner).
 - **Gate:** `scripts/gate.sh`.
+
+## 2026-11-25 — The browser cells share one bundle
+
+- **Why.** Reported from a review: every browser cell built the same
+  commit's fixtures bundle before its runtime selection of fixtures and
+  hosting. Measured on nightly 45559970686 (f0c819b): the 60 cells spent
+  349.0 runner-minutes in "Build the browser bundle of the fixtures binary",
+  4.4 to 7.2 minutes a cell, and another 18.4 installing the threaded
+  toolchain and Trunk and restoring the web cache. A cell's hosting, part
+  and start are settings its page reads at run time (the server serves
+  `dist-e2e` as built), so each built the same bundle.
+- **Change.** A `browser-bundle` job builds it once, with the steps the
+  cells ran, and keeps `dist-e2e` as the `browser-fixtures-bundle`
+  artifact for 7 days, so a failed cell rerun the next day still finds it.
+  The `browser` cells need it, fetch it (`download-artifact@v8`, which
+  fails on a digest mismatch) and run Playwright as before. About 365
+  runner-minutes a nightly back, and each cell about six more of its 340
+  minutes for its fixtures; cells start about two minutes later, after the
+  bundle job. On a push the one cell is not the longest job.
+- **Docs.** checks.md (the `browser` job).
+- **Gate:** `scripts/gate.sh`; the push run's bundle job and browser cell,
+  a rerun of that cell alone, and a dispatched nightly.

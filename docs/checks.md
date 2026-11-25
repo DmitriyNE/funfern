@@ -340,8 +340,10 @@ dispatched with `browser: full`, every fixture, isolated and with service
 workers refused, the two in parallel and the other jobs skipped. Dispatched
 with `nightly` set (`gh workflow run "CI and Pages" -f nightly=true`), the
 workflow runs every job the schedule runs, the browser's full set among them,
-in place of the per-push ones, so a fix need not wait for 03:17. Served
-without the pool, a page starts cold and warm in jobs of their own: the warm
+in place of the per-push ones, so a fix need not wait for 03:17. Every
+browser job serves the one bundle the `browser-bundle` job builds for the
+commit and keeps as an artifact for a week, which until 2026-11-25 each of
+the nightly's 60 jobs built for itself. Served without the pool, a page starts cold and warm in jobs of their own: the warm
 job leaves its cold page once the fixture has begun, and reloads. A page has
 15 minutes past its deadline to give its verdict, since the driver reads its
 deadline between frames and a batched frame on CI's SwiftShader outlasted
