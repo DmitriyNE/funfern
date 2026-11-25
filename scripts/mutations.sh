@@ -4,8 +4,9 @@
 # the test to fail for the reason the manifest expects. A mutation counts as
 # detected only when the tree builds with it, the named test runs to the check
 # it targets and fails there with output matching the manifest's pattern. A
-# compile error, a panic elsewhere, a missing device, a timeout, or the test
-# not passing before the patch each count as "not detected" and fail the run.
+# compile error, a panic elsewhere, a missing device, a timeout, a run ended
+# by a signal, or the test not passing before the patch each count as "not
+# detected" and fail the run.
 #
 #   scripts/mutations.sh              every mutation
 #   scripts/mutations.sh band-fill    the ones whose name matches a pattern
@@ -21,8 +22,10 @@
 # Each mutation is a folder holding `patch.diff`, applied with `git apply`,
 # and `manifest`, with lines `test: <command>`, `expect: <extended regex the
 # failing output must match>`, `needs: cpu|device` and `about: <one line>`.
-# A run past MUTATION_TIMEOUT seconds (default 1800) is stopped. The tree
-# must be clean to start, and is left clean. Exits 1 if any mutation is not
+# A run past MUTATION_TIMEOUT seconds (default 1800) is stopped, with every
+# process it started, and is not detected whatever it printed: it may have
+# printed the failure on its way to a hang. The tree must be clean to start,
+# and is left clean. Exits 1 if any mutation is not
 # detected, and 2 if no mutation matches the pattern.
 set -u
 cd "$(dirname "$0")/.."
@@ -58,9 +61,42 @@ mkdir -p "$logs"
 results=()
 undetected=0
 field() { sed -n "s/^$1: //p" "$2" | head -1; }
+# The command, its output to the log, in a process group of its own. Past the
+# limit the group is stopped, TERM and ten seconds on KILL, a line in the log
+# says so, and the status is 124; otherwise the status is the command's own,
+# 128 and the signal's number when a signal ended it. Until 2026-11-25 an
+# alarm stopped the command's own process alone, so a test binary hung under
+# cargo ran on beside the next mutations, and the verdict read the output
+# alone, so a run that printed its failure and then hung counted as detected.
 run() {
-  # The command, bounded, its output to the log.
-  perl -e 'alarm shift @ARGV; exec "/bin/bash", "-c", $ARGV[0] or die "$!\n"' "$limit" "$1" >"$2" 2>&1
+  perl -MPOSIX=WNOHANG -e '
+    my ($limit, $command) = @ARGV;
+    my $pid = fork() // die "fork: $!\n";
+    if ($pid == 0) {
+      setpgrp(0, 0);
+      exec "/bin/bash", "-c", $command or die "exec: $!\n";
+    }
+    setpgrp($pid, $pid);
+    # Stopping the runner stops the group too.
+    $SIG{$_} = sub { kill "KILL", -$pid; exit 130 } for qw(INT TERM HUP);
+    my $deadline = time + $limit;
+    while (waitpid($pid, WNOHANG) == 0) {
+      if (time >= $deadline) {
+        kill "TERM", -$pid;
+        for (1 .. 100) {
+          waitpid($pid, WNOHANG);
+          last unless kill 0, -$pid;
+          select undef, undef, undef, 0.1;
+        }
+        kill "KILL", -$pid;
+        waitpid($pid, 0);
+        print "\nmutations.sh: stopped after $limit s, with every process it started\n";
+        exit 124;
+      }
+      select undef, undef, undef, 0.2;
+    }
+    exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+  ' "$limit" "$1" >"$2" 2>&1
 }
 for folder in "${selected[@]}"; do
   name=$(basename "$folder")
@@ -71,9 +107,11 @@ for folder in "${selected[@]}"; do
   about=$(field about "$manifest")
   printf '%s: %s\n' "$name" "$about"
   verdict=""
-  if run "$test" "$logs/$name-before.log"; then
-    :
-  else
+  run "$test" "$logs/$name-before.log"
+  status=$?
+  if ((status == 124)); then
+    verdict="not detected: the test timed out before the patch"
+  elif ((status != 0)); then
     verdict="not detected: the test does not pass before the patch"
   fi
   if [[ -z $verdict ]]; then
@@ -82,12 +120,21 @@ for folder in "${selected[@]}"; do
     fi
   fi
   if [[ -z $verdict ]]; then
-    if run "$test" "$logs/$name-after.log"; then
+    # How the run ended comes before what it printed. 124 is also what
+    # scripts/e2e-fixture.sh returns when its own `timeout` stops a fixture;
+    # the log's last line says which.
+    run "$test" "$logs/$name-after.log"
+    status=$?
+    if ((status == 0)); then
       verdict="not detected: the test still passes"
+    elif ((status == 124)); then
+      verdict="not detected: timed out"
+    elif ((status > 128)); then
+      verdict="not detected: ended by signal $((status - 128))"
     elif grep -qE "error(\[E[0-9]+\])?: " "$logs/$name-after.log" && grep -q "could not compile" "$logs/$name-after.log"; then
       verdict="not detected: the mutated tree does not build"
     elif [[ $(stat -c %s "$logs/$name-after.log" 2>/dev/null || stat -f %z "$logs/$name-after.log") -eq 0 ]]; then
-      verdict="not detected: no output (a timeout, or no device)"
+      verdict="not detected: no output (no device, perhaps)"
     elif grep -qE -- "$expect" "$logs/$name-after.log"; then
       verdict="detected ($needs)"
     else

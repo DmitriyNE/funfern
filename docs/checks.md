@@ -2405,8 +2405,10 @@ the time-driven operator, sampled a thousand sites a step, is the one
 holds a deliberate defect as a patch and a manifest naming the test that must
 catch it and the pattern its failure must match; the script applies each,
 runs the test before and after, requires the failure the manifest names, and
-reverts. A mutation that does not build, fails elsewhere, times out, or whose
-test does not pass before the patch is "not detected". Not in the gate, since
+reverts. A mutation that does not build, fails elsewhere, times out (whatever
+it printed first), is ended by a signal, or whose test does not pass before
+the patch is "not detected"; a run that times out is stopped with every
+process it started. Not in the gate, since
 each rebuilds the tree; the nightly runs all of them on Linux, in four
 shards side by side (`MUTATION_SHARD=k/4`, every fourth from the k-th), the
 device ones on lavapipe through `scripts/e2e-fixture.sh`, which runs one
@@ -2414,7 +2416,10 @@ fixture on this machine's GPU otherwise. `scripts/mutations.sh wall` runs
 the ones whose names match. That every patch still applies to the tree, and every manifest
 names its test, failure, needs and purpose, is held in the gate by
 `crates/funfern-app/tests/mutations.rs`, so a patch the code has moved past
-fails the day it moves rather than at the next nightly.
+fails the day it moves rather than at the next nightly; the same file runs
+the runner on a throwaway repository, one mutation caught and one that
+prints its failure and then hangs, which must read as timed out and leave
+nothing running.
 
 Which hardware each check has been run on, and when, is recorded in the
 engineering log rather than here.

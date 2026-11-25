@@ -34831,3 +34831,32 @@ the device.
   the browser, which the change leaves alone.
 - **Docs.** plan.md (the browser's first frame).
 - **Gate:** `scripts/gate.sh`.
+
+## 2026-11-25 — The mutation runner counts a timed-out mutant as not detected
+
+- **Why.** Reported from a review with a reproduction: a mutant whose test
+  printed the expected failure and then hung was stopped by
+  `MUTATION_TIMEOUT=1`, and `scripts/mutations.sh` reported "1 of 1
+  detected" and exited 0, against its own promise that a timeout is not
+  detected. Reproduced here as reported. The verdict read the output alone,
+  a timeout counting only when nothing was printed. The reproduction found a
+  second defect: the alarm stopped the command's own process alone, and the
+  hung child ran on after the runner returned; under cargo a hung test
+  binary would run beside the shard's next mutations.
+- **Change.** Each run is in a process group of its own; past the limit the
+  group gets TERM and, ten seconds on, KILL, the log a line saying so, and
+  the status is 124. The verdict reads how the run ended before what it
+  printed: 124 is "not detected: timed out" (also what
+  `scripts/e2e-fixture.sh` returns when its own `timeout` fires; the log's
+  last line tells which), a signal is "not detected: ended by signal N",
+  and a timeout before the patch is named as one. No manifest expects a
+  signal, and no profile aborts on a panic, so no detection is expected to
+  change.
+- **Held by** `the_runner_counts_a_timed_out_mutation_as_not_detected`
+  (`crates/funfern-app/tests/mutations.rs`, in the gate and CI's tests):
+  the runner copied into a throwaway repository with two mutations, one
+  caught and the reproduction, its hang a process it started. It passes in
+  about 3 s, and fails on the old runner, which read the reproduction as
+  "detected (cpu)".
+- **Docs.** checks.md (the mutation runner).
+- **Gate:** `scripts/gate.sh`.

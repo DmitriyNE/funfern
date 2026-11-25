@@ -79,3 +79,114 @@ fn every_mutation_manifest_names_its_test_and_failure() {
         }
     }
 }
+
+/// The runner itself, on a throwaway repository of two mutations: one its
+/// test catches, and one whose test prints the failure it is meant to find,
+/// then hangs in a process it started. Until 2026-11-25 the runner read the
+/// output alone and counted the second as detected, and its timeout stopped
+/// the test's own process alone, leaving the hung one running.
+#[cfg(unix)]
+#[test]
+fn the_runner_counts_a_timed_out_mutation_as_not_detected() {
+    // Removed when the test ends, and the hung process with it should an
+    // older runner have left it running.
+    struct Scratch(PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if let Ok(hung) = std::fs::read_to_string(self.0.join("hung.pid")) {
+                let _ = Command::new("kill")
+                    .args(["-9", hung.trim()])
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let scratch = Scratch(
+        std::env::temp_dir().join(format!("funfern-mutation-runner-{}", std::process::id())),
+    );
+    let root = &scratch.0;
+    let _ = std::fs::remove_dir_all(root);
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::copy(
+        repository().join("scripts/mutations.sh"),
+        root.join("scripts/mutations.sh"),
+    )
+    .unwrap();
+    let git = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(root)
+        .status()
+        .expect("git runs");
+    assert!(git.success());
+    // Both raise a flag the test looks for; the second, finding it, starts
+    // a process that outlives the limit and records its id.
+    let patch = "diff --git a/flag b/flag\nnew file mode 100644\nindex 0000000..d00491f\n\
+                 --- /dev/null\n+++ b/flag\n@@ -0,0 +1 @@\n+1\n";
+    let cases = [
+        (
+            "a-caught",
+            "if [ -f flag ]; then echo \"assertion failed: the flag is up\"; exit 1; fi",
+        ),
+        (
+            "b-hangs",
+            "if [ -f flag ]; then echo \"assertion failed: the flag is up\"; \
+             sleep 300 & echo $! > hung.pid; wait; fi",
+        ),
+    ];
+    for (name, test) in cases {
+        let folder = root.join("tests/mutations").join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("patch.diff"), patch).unwrap();
+        std::fs::write(
+            folder.join("manifest"),
+            format!(
+                "test: {test}\nexpect: assertion failed: the flag is up\nneeds: cpu\nabout: {name}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let run = Command::new("bash")
+        .arg("scripts/mutations.sh")
+        .current_dir(root)
+        .env("MUTATION_TIMEOUT", "2")
+        .env_remove("MUTATION_SHARD")
+        .output()
+        .expect("bash runs");
+    let report = String::from_utf8_lossy(&run.stdout);
+    let verdict = |name: &str| {
+        report
+            .lines()
+            .rev()
+            .find(|line| line.starts_with(name))
+            .map(|line| line[name.len()..].trim().to_owned())
+            .unwrap_or_default()
+    };
+    assert_eq!(verdict("a-caught"), "detected (cpu)", "{report}");
+    assert_eq!(verdict("b-hangs"), "not detected: timed out", "{report}");
+    assert_eq!(run.status.code(), Some(1), "{report}");
+
+    let hung = std::fs::read_to_string(root.join("hung.pid")).expect("the hung test ran");
+    let alive = || {
+        Command::new("kill")
+            .args(["-0", hung.trim()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("kill runs")
+            .success()
+    };
+    // Gone by the time the runner moved on; a moment for the system to reap
+    // what the stopped group left.
+    let gone = (0..50).any(|_| {
+        let gone = !alive();
+        if !gone {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        gone
+    });
+    assert!(
+        gone,
+        "the hung test's process {} outlived the runner",
+        hung.trim()
+    );
+}
