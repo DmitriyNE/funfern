@@ -34793,3 +34793,41 @@ the device.
   beside PH-03's.
 - **Docs.** checks.md (PH-01's device half), the campaign plan's section 10.
 - **Gate:** `scripts/gate.sh`; the cavity entries of the device suite.
+
+## 2026-11-25 — Pipelines made on four threads, and the browser's first frame measured
+
+- **Why.** The CI-only first-frame waits of plan.md's Worth checking
+  sometime, studied with the user: lavapipe's field paint waiting about
+  20 s at its first paint, and SwiftShader pages about six minutes for
+  their first frame.
+- **SwiftShader.** Every compute pipeline the app's WGSL declares, timed in
+  Chrome with `createComputePipelineAsync`: 91 in 10.7 s on the M1 Max's
+  GPU, 391 s on SwiftShader, which is the first frame; a persistent
+  profile did not cache them. `kick_first` and `kick_second` took 103 and
+  101 s; compiled without the nonlinear Newton path a kick took 5.6 s (by a
+  literal or by a parameter alike), and as three pipelines, the plain kick
+  and the two nonlinear paths, 48 s against the one's 104. Compiling the
+  nonlinear kick only when a nonlinear medium appears was declined by the
+  user, the wait moving into a run; splitting each kick into two dispatches
+  (about 110 s a page, all at load) is CI time only and left in plan.md.
+- **lavapipe.** A warm `cavity` in the CI container, frames over 2 s
+  reported: one frame of 21.5 s (20.7 cold) in a 30 s fixture, the paint's
+  `block_on_render_pipeline` behind the app's ~95 pipelines, which Bevy
+  creates on its async compute pool, one thread on four cores. At 1, 2 and
+  4 threads the longest frame read 21.6 to 22.2, 8.8 to 10.5 and 2.3 to
+  4.8 s, the fixture 30 to 32, 19 to 21 and 17 to 18 s.
+- **Change.** Natively off macOS (`pipeline_task_pools`), the async compute
+  pool has four threads, and the compute pool, which runs the app's
+  systems, the threads Bevy's defaults gave it; macOS and the browser
+  create pipelines as they are queued and keep Bevy's pools. The host's
+  `pipelines_get_four_threads_and_the_systems_keep_theirs` holds the sizes
+  on 1 to 16 cores against Bevy's defaults worked by hand.
+- **Verified** on arm64 lavapipe: warm `cavity` 15 and 18 s, its longest
+  frame 3.0 and 4.5 s; `events`, `handoff`, `interleaved-1` and
+  `preparation` as before; `lifecycle` 423 s against 606 without the
+  change, its first `Open` 14 s against 84. One run of the list read
+  `lifecycle` at 3,136 s, past the script's own 1,800 s limit, which no
+  rerun gave: unexplained, most likely the VM paused. Not on Metal or in
+  the browser, which the change leaves alone.
+- **Docs.** plan.md (the browser's first frame).
+- **Gate:** `scripts/gate.sh`.

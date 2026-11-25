@@ -1686,13 +1686,21 @@ is next touched.
   in a run started beside a plain rebuild of the app, after it had opened its window and found the device; it passed in
   2 s when rerun alone and in every suite of the day. One occurrence; worth a
   look if it recurs.
-- On lavapipe the field paint's first paint waits about 20 s in
-  `PipelineCache::block_on_render_pipeline` (`field_paint.rs`) for its
-  pipelines, queued behind every canonical compute pipeline on Bevy's one
-  async compute thread (2026-11-15, stacks in the CI container), and the
-  browser's SwiftShader pages wait about six minutes for their first frame.
-  Whether that is the same wait, and whether the paint's pipelines queued
-  first would shorten it, is unmeasured; nothing a GPU shows.
+- The browser's SwiftShader pages wait about six and a half minutes for
+  their first frame: every page compiles the app's 91 compute pipelines at
+  load, 391 s on CI's software adapter against 10.7 s on the M1 Max's GPU,
+  and Chrome's disk cache does not keep SwiftShader's compiles, even in a
+  persistent profile. `kick_first` and `kick_second` take 205 s of it: with
+  the nonlinear Newton path compiled out a kick takes 5.6 s, and the same
+  code as three pipelines (the plain kick, the nonlinear and the
+  trapezoid-nonlinear paths) 48 s against the one's 104 (2026-11-25). Each
+  kick split into a dispatch over every node and one over the nonlinear
+  nodes would save about 110 s a page, all still compiled at load;
+  compiling the nonlinear kick only when a nonlinear medium first appears
+  was declined, since it moves the wait into a run. CI time only. The
+  lavapipe half of this (the field paint's first paint waiting 20 s behind
+  the pipelines on Bevy's one async compute thread) was fixed by giving that
+  pool four threads.
 - `canonical_gpu_cavity_modes --physics te` hung to the suite's limit in all
   three device suite runs between 18:27 and 19:35 local on 2026-11-01, just
   after opening its window, and in no run since. It passed at every commit

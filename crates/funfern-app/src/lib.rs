@@ -54,12 +54,46 @@ pub enum Build {
     Fixtures,
 }
 
+/// Bevy's task pools on `cores`, the async compute pool given four threads.
+/// Natively, but on macOS, Bevy creates every queued render and compute
+/// pipeline on that pool, a quarter of the cores by default: one thread on
+/// CI's four-core runner, where lavapipe took 22 s to create the app's ~95
+/// pipelines before the field paint's first frame, against 2 to 5 s on four
+/// (2026-11-25). The compute pool, which runs the app's systems, keeps the
+/// threads Bevy would have given it, and the extra ones idle once the
+/// pipelines are made. macOS and the browser create a pipeline as it is
+/// queued, and keep Bevy's pools.
+#[cfg_attr(any(target_arch = "wasm32", target_os = "macos"), allow(dead_code))]
+fn pipeline_task_pools(cores: usize) -> bevy::app::TaskPoolOptions {
+    // Bevy's share of the cores at `percent`, rounded as its plugin rounds.
+    let share = |percent: f32| {
+        let proportion = cores as f32 * percent;
+        let whole = proportion as usize;
+        if proportion - whole as f32 >= 0.5 {
+            whole + 1
+        } else {
+            whole
+        }
+    };
+    let io = share(0.25).min(cores).clamp(1, 4);
+    let remaining = cores.saturating_sub(io);
+    let async_compute = share(0.25).min(remaining).clamp(1, 4);
+    let compute = share(1.0)
+        .min(remaining.saturating_sub(async_compute))
+        .max(1);
+    let mut options = bevy::app::TaskPoolOptions::default();
+    options.async_compute.min_threads = 4;
+    options.async_compute.max_threads = 4;
+    options.compute.min_threads = compute;
+    options
+}
+
 /// Runs the app; answers how it exited, which the native build makes its
 /// process's status: an end-to-end fixture's verdict, or a render error Bevy
 /// quit on.
 fn run_app(build: Build) -> AppExit {
     let mut app = App::new();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+    let plugins = DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "funfern · wave playground".into(),
             canvas: Some("#funfern".into()),
@@ -68,7 +102,14 @@ fn run_app(build: Build) -> AppExit {
             ..default()
         }),
         ..default()
-    }));
+    });
+    #[cfg(not(any(target_arch = "wasm32", target_os = "macos")))]
+    let plugins = plugins.set(bevy::app::TaskPoolPlugin {
+        task_pool_options: pipeline_task_pools(
+            std::thread::available_parallelism().map_or(1, |cores| cores.get()),
+        ),
+    });
+    app.add_plugins(plugins);
     #[cfg(all(target_arch = "wasm32", feature = "browser-threads"))]
     record_worker_aborts();
     app.add_plugins(EguiPlugin::default())
@@ -239,4 +280,28 @@ async fn shared_memory_growth_visible() -> bool {
 pub fn browser_main(build: Build) {
     set_browser_build_id();
     run_app(build);
+}
+
+#[cfg(test)]
+mod task_pool_tests {
+    use super::pipeline_task_pools;
+
+    /// The async compute pool takes four threads on any machine, and the
+    /// compute pool the threads Bevy's defaults give it: 25% to I/O and to
+    /// async compute, rounded and within 1 to 4 each, the rest to compute.
+    #[test]
+    fn pipelines_get_four_threads_and_the_systems_keep_theirs() {
+        for (cores, compute) in [(1, 1), (2, 1), (4, 2), (10, 4), (16, 8)] {
+            let options = pipeline_task_pools(cores);
+            assert_eq!(
+                (
+                    options.async_compute.min_threads,
+                    options.async_compute.max_threads
+                ),
+                (4, 4),
+                "{cores} cores"
+            );
+            assert_eq!(options.compute.min_threads, compute, "{cores} cores");
+        }
+    }
 }
