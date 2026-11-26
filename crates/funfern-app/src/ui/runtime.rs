@@ -38,15 +38,19 @@ use super::*;
 /// the time the thread had free.
 const IDLE_SHARE: f64 = 0.5;
 
-/// The most a frame lends a cooperative job, so that a wait the GPU did not
-/// set, a hidden page or a stall, lends no frame more. Under the
-/// `preparation` fixture's 60 ms bound on a slice, which on hardware a wait
-/// of a 60 Hz frame, ten milliseconds or so, never brings near.
-const LENT_AT_MOST: std::time::Duration = std::time::Duration::from_millis(50);
+/// The most a frame lends a cooperative job. A wait the GPU did not set, a
+/// hidden page or a stall, lends no more than the frame before it waited
+/// ([`Playground::frame_lends`]), so this bounds a steady pace alone. It was
+/// 50 ms until 2026-11-27, which on CI's SwiftShader without the worker
+/// pool, its frames 16 to 33 s apart, held a handoff's stationary flux, about
+/// 4 s of solving, to 20 minutes and more: `preparation` ran out of its act's
+/// time in Supersede. At 500 ms that solve takes some eight frames.
+const LENT_AT_MOST: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Marks the frame's start: how long the thread waited since the last
-/// frame's work ended.
+/// frame's work ended, and kept, how long it waited before that.
 pub(crate) fn frame_began(mut state: ResMut<Playground>) {
+    state.previous_frame_idle = state.frame_idle;
     state.frame_idle = state
         .frame_work_ended
         .map_or(std::time::Duration::ZERO, |ended| ended.elapsed());
@@ -72,15 +76,18 @@ impl Playground {
 
     /// What this frame lends a cooperative job whose own budget is `floor`:
     /// that, or [`IDLE_SHARE`] of the time the thread waited before the
-    /// frame began, up to [`LENT_AT_MOST`]. Where the frame waits on the
-    /// GPU, the thread's work takes none of the frame's time. On
-    /// SwiftShader, without the worker pool, a frame kept the main thread
-    /// busy about 10 ms and came seconds after the last, and a handoff's
-    /// stationary flux on 70,000 nodes, about 2,000 frames of its 2 ms, took
-    /// hours (2026-11-15). At 60 frames a second the frame's own wait lends
-    /// about what the floors do.
+    /// frame began or before the last one, whichever is shorter, up to
+    /// [`LENT_AT_MOST`]. Where the frames wait on the GPU, the thread's work
+    /// takes none of their time. On SwiftShader, without the worker pool, a
+    /// frame kept the main thread busy about 10 ms and came seconds after the
+    /// last, and a handoff's stationary flux on 70,000 nodes, about 2,000
+    /// frames of its 2 ms, took hours (2026-11-15). The shorter of two waits
+    /// is a pace the frames keep: one long wait after a short one, a hidden
+    /// page or a stall, lends what the short one did. At 60 frames a second
+    /// the waits lend about what the floors do.
     pub(super) fn frame_lends(&self, floor: std::time::Duration) -> std::time::Duration {
-        floor.max(self.frame_idle.mul_f64(IDLE_SHARE).min(LENT_AT_MOST))
+        let steady = self.frame_idle.min(self.previous_frame_idle);
+        floor.max(steady.mul_f64(IDLE_SHARE).min(LENT_AT_MOST))
     }
     /// Candidate state can live either in the cooperative runtime runner or in
     /// a background worker. Keep that placement detail out of UI/status policy.
@@ -1616,27 +1623,50 @@ mod tests {
     /// A cooperative job takes its own budget where the thread had no time
     /// to spare, half the wait where it had, and never more than the most a
     /// frame lends; the wait is the time from one frame's work ending to the
-    /// next one's start.
+    /// next one's start, the shorter of the frame's and the last one's.
     #[test]
     fn a_frame_lends_its_floor_or_half_the_wait_before_it() {
         let ms = std::time::Duration::from_millis;
         let mut state = Playground::default();
         let floor = Playground::COOPERATIVE_FRAME_BUDGET;
         assert_eq!(state.frame_lends(floor), floor, "before any frame");
-        for (waited, lent) in [(0, 2), (3, 2), (10, 5), (40, 20), (100, 50), (60_000, 50)] {
+        // A steady pace: 60 Hz, a slower adapter, and CI's SwiftShader
+        // without the pool, its frames 16 to 33 s apart (2026-11-26).
+        for (waited, lent) in [
+            (0, 2),
+            (3, 2),
+            (10, 5),
+            (40, 20),
+            (100, 50),
+            (1_000, 500),
+            (18_000, 500),
+        ] {
+            state.previous_frame_idle = ms(waited);
             state.frame_idle = ms(waited);
             assert_eq!(
                 state.frame_lends(floor),
                 ms(lent),
-                "after a {waited} ms wait"
+                "after two {waited} ms waits"
+            );
+        }
+        // One long wait, a hidden page or a stall, either side of a frame at
+        // 60 Hz, lends what the short wait does.
+        for (previous, waited) in [(10, 60_000), (60_000, 10)] {
+            state.previous_frame_idle = ms(previous);
+            state.frame_idle = ms(waited);
+            assert_eq!(
+                state.frame_lends(floor),
+                ms(5),
+                "after {previous} and {waited} ms waits"
             );
         }
         for (waited, lent) in [(6, 4), (10, 5)] {
+            state.previous_frame_idle = ms(waited);
             state.frame_idle = ms(waited);
             assert_eq!(
                 state.frame_lends(Playground::PREPARATION_FRAME_BUDGET),
                 ms(lent),
-                "preparation after a {waited} ms wait"
+                "preparation after two {waited} ms waits"
             );
         }
 
@@ -1650,6 +1680,12 @@ mod tests {
         app.update();
         let waited = app.world().resource::<Playground>().frame_idle;
         assert!(waited >= ms(30), "waited {waited:?}");
+        app.update();
+        let state = app.world().resource::<Playground>();
+        assert_eq!(
+            state.previous_frame_idle, waited,
+            "the last frame's wait kept"
+        );
     }
 
     /// RT-6 of the 2026-10-20 review: a Reset whose zero-state plan fails is

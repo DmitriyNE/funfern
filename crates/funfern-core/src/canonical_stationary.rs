@@ -160,6 +160,11 @@ impl CanonicalStationaryFluxJob {
         self.limit
     }
 
+    /// The iterations the solve has taken.
+    pub fn iterations(&self) -> usize {
+        self.iterations
+    }
+
     pub fn advance(&mut self, budget: usize) -> Option<Result<CanonicalStationaryFlux, WaveError>> {
         for _ in 0..budget.max(1) {
             match self.step() {

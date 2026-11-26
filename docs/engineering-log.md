@@ -34917,3 +34917,53 @@ the device.
   and answered a frame or two later, e.g. "flux maintenance 1 in flight,
   encoded [1], answered 0", then settled; the fixture passed.
 - **Gate:** `scripts/gate.sh`.
+
+## 2026-11-27 — A steady slow pace lends the main thread's jobs up to 500 ms a frame
+
+- **Why.** The study of the 2026-11-25 nightly's `preparation` failure
+  (Double slit, Supersede at Rest, "waiting for a live event" at 3,000 s),
+  with the rest report of eb955d7, on a study branch running the page
+  served without the pool on CI's SwiftShader, cold and warm, its acts given
+  1,200 s: in 45789522563 and 45796028125, 14 of 16 runs failed in
+  Supersede, "waiting for a handoff's stationary flux", the device stepping
+  throughout, as 11 of the 12 cells 45778349395 finished before it was
+  cancelled had. Not a hang. The cleanup's solve, run on the main
+  thread where no worker takes it, needs about 1,300 conjugate-gradient
+  iterations on the double slit's 34,173 nodes, about 3 ms each there, some
+  4 s; the frames came 16 to 33 s apart, the thread idle all but a few ms
+  of that, and each lent the solve 50 ms, `LENT_AT_MOST` (2026-11-15, set
+  on the M1 Max's SwiftShader, whose frames come a second or two apart), so
+  it took about 17 iterations a frame and 20 to 25 minutes. The nightly's
+  failure is most likely the same, caught once the cleanup had sent its
+  event. The acts' 1,200 s were too little for this setup on their own, a
+  choice of the study's; the reports are what show the solve starved. The
+  cleanup's first wait, for the generation's full readback and any
+  estimate ahead of it, took up to ten minutes there too.
+- **Change.** `Playground::frame_lends` lends half the shorter of the waits
+  before this frame and the last (`previous_frame_idle`, kept by
+  `frame_began`), up to 500 ms: a pace the frames keep lends, a single long
+  wait after a short one, a hidden page or a stall, lends what the short
+  one did, less than the 50 ms it lent before. At 60 frames a second the
+  waits lend about the floors, as before. The cooperative preparation, the
+  AMR estimate and adaptation and the stationary flux's solve all borrow
+  through it. `a_frame_lends_its_floor_or_half_the_wait_before_it` holds a
+  steady pace to 2 to 500 ms and a single long wait to 5 ms. The rest
+  report keeps the study's fields: the cleanup's stage and its solve's
+  phase and iterations (`CanonicalStationaryFluxJob::iterations`), what the
+  thread waited and the frame lends, the full readbacks, and the frames in
+  each five-minute report.
+- **Verified.** The study branch with the change, the same six cells and
+  1,200 s acts: six of six passed, the double slit's Supersede in 383 to
+  518 s against 1,066 in the one run of 45796028125 that finished it, its next Small in 267 to 276 against 395, Plasma mirror's Supersede
+  in 28 to 35 against 53, the other acts within a few seconds; the solve
+  in 10 to 15 frames, its slices at most about 510 ms; the page in 19 to
+  25 minutes. Natively on Metal `preparation`'s both parts passed, its
+  longest slice 36.2 ms under the 60 ms bound and its busiest frame
+  27.9 ms. The study branch is deleted.
+- **Docs.** architecture.md (the lent time), plan.md (the cooperative
+  budgets).
+- **Gate:** `scripts/gate.sh` to its shader step, which found no npm: the
+  session's PATH had lost node with a re-login, and the Nix store's
+  node 24.21.0 it had used was gone. The shader step and the protocol
+  proofs then ran as the gate runs them, on the same tree, with nvm's
+  node 23.1.0.

@@ -1817,11 +1817,13 @@ approaches, and it grows linearly to the Advanced maximum at twice the reach.
 The app advances coefficient sampling, indicator, and adaptation jobs in soft 2 ms
 slices, rejects stale mesh/GPU/settings generations, and waits between estimates.
 Each of these floors, the stationary flux's 2 ms and the preparation's 4 ms
-among them, grows with the frame's own wait: a job on the main thread is lent
-half the time the thread waited between the last frame's work and this one's,
-up to 50 ms (`Playground::frame_lends`). Where the GPU sets the pace that time
-was free, and a software adapter's frames, seconds apart with the thread busy
-about 10 ms, then lend the jobs 25 to 12 times their floors.
+among them, grows with the frames' own waits: a job on the main thread is lent
+half the time the thread waited between one frame's work and the next one's,
+the shorter of the last two such waits, up to 500 ms (`Playground::frame_lends`).
+Where the GPU sets the pace that time was free, and a software adapter's frames,
+seconds apart with the thread busy about 10 ms, then lend the jobs up to 250
+times their floors; a single long wait, a hidden page or a stall, lends what the
+frame before it did.
 Refinement can start
 after one estimate. Coarsening requires two consecutive estimates on the same mesh,
 and consumes at most half of one automatic transaction so refinement retains a

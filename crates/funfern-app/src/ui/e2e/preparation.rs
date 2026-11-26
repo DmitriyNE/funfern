@@ -180,6 +180,8 @@ pub(super) struct PreparationDriver {
     act_started: Instant,
     /// When the act last said where it stands at Rest, or began.
     wait_reported: Instant,
+    /// Frames since then.
+    frames_since_report: u64,
     /// What one act may take.
     act_time: std::time::Duration,
     act_deadline: Instant,
@@ -215,6 +217,7 @@ impl PreparationDriver {
         self.stage = Stage::Take;
         self.act_started = Instant::now();
         self.wait_reported = self.act_started;
+        self.frames_since_report = 0;
         self.act_deadline = self.act_started + self.act_time;
         self.discarded = 0;
         self.stale_ready = false;
@@ -246,6 +249,7 @@ pub(super) fn add(app: &mut App, seconds: Option<u64>) {
             judged: None,
             act_started: Instant::now(),
             wait_reported: Instant::now(),
+            frames_since_report: 0,
             act_time,
             act_deadline: Instant::now() + act_time,
             deadline: Instant::now() + run_time,
@@ -330,11 +334,15 @@ fn drive_preparation(
     let now = Instant::now();
     let verdict = match outcome {
         Ok(true) if now < driver.act_deadline && now < driver.deadline => {
+            driver.frames_since_report += 1;
             if matches!(driver.stage, Stage::Rest) && now >= driver.wait_reported + WAIT_REPORT {
+                let period = (now - driver.wait_reported).as_secs_f64();
+                let frames = driver.frames_since_report;
                 driver.wait_reported = now;
+                driver.frames_since_report = 0;
                 if let Some(stands) = lifecycle::rest_report(&state, &request, &display) {
                     report(&format!(
-                        "e2e preparation: {}, {:?} at Rest {} s in, waiting for {stands}",
+                        "e2e preparation: {}, {:?} at Rest {} s in, {frames} frames in {period:.0} s, waiting for {stands}",
                         SCENES[driver.scene],
                         driver.act(),
                         (now - driver.act_started).as_secs(),

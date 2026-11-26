@@ -595,11 +595,15 @@ pub(super) fn short_of_rest(
 
 /// What keeps the app from rest and where the device stands, for a driver
 /// held short of rest to say: the device's steps and the control readbacks
-/// that answer events, and for a live event, the event, the serials the
-/// render world encoded this generation and the one the device answered.
-/// The preparation fixture's double slit waited about 50 minutes on a live
-/// event served without the worker pool on CI's SwiftShader (2026-11-25),
-/// and could say no more than that.
+/// that answer events; a handoff's stationary flux, its stage and its
+/// solve's iterations; what the thread waited before the frame and what the
+/// frame lends a cooperative job; the full readbacks; and for a live event,
+/// the event, the serials the render world encoded this generation and the
+/// one the device answered. The preparation fixture's double slit waited
+/// about 50 minutes on a live event served without the worker pool on CI's
+/// SwiftShader (2026-11-25), and could say no more than that; with this it
+/// said the stationary flux's solve was starved, about 17 of its 1,300
+/// iterations a frame, the frames 16 to 33 s apart (2026-11-26).
 pub(super) fn rest_report(
     state: &Playground,
     request: &CanonicalGpuRequest,
@@ -618,6 +622,32 @@ pub(super) fn rest_report(
         request.revision(),
         display.controls,
     );
+    if let Some(cleanup) = &state.flux_cleanup {
+        report.push_str(&format!(
+            "; flux cleanup {} for generation {}",
+            cleanup.stage.name(),
+            cleanup.generation
+        ));
+        if let Some(job) = &state.flux_cleanup_job {
+            report.push_str(&format!(
+                " ({}, iteration {} of {} at most)",
+                job.phase(),
+                job.iterations(),
+                job.limit()
+            ));
+        }
+    }
+    report.push_str(&format!(
+        "; the thread idle {} ms before this frame, which lends {} ms",
+        state.frame_idle.as_millis(),
+        state
+            .frame_lends(Playground::COOPERATIVE_FRAME_BUDGET)
+            .as_millis()
+    ));
+    report.push_str(&format!(
+        "; {} full readbacks, the latest copy {} (the last full {})",
+        display.full_readbacks, display.readbacks, display.full_readback_at
+    ));
     if let Some((serial, kind)) = request.live_event_in_flight() {
         let encoded = stats
             .encoded_events()
