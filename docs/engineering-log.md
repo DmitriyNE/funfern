@@ -34882,3 +34882,38 @@ the device.
 - **Docs.** checks.md (the `browser` job).
 - **Gate:** `scripts/gate.sh`; the push run's bundle job and browser cell,
   a rerun of that cell alone, and a dispatched nightly.
+
+## 2026-11-26 — A preparation act held at Rest says where the device stands
+
+- **Why.** The scheduled nightly 45620682239 (f0c819b, 2026-11-25) failed
+  `preparation` served without the pool, warm: "did not finish in time:
+  Double slit, Supersede at Rest, waiting for a live event", about 50
+  minutes into an act that takes about 150 s on the M1 Max's SwiftShader
+  and has 3,000 s here. The same cell passed in the nightlies before and
+  after. Studied with the user. On 2026-11-16 the same act failed past its
+  then-fixed 600 s, read as slowness and given a third of the run's time;
+  most likely the same hang.
+- **Read.** The live event there is the flux maintenance that takes away a
+  handoff's stationary flux. The host encodes a live event once, in the
+  first frame whose live-event bind group carries the request's revision,
+  and settles it when the control readback, copied every frame three deep,
+  reports its serial; `commit_event` writes that serial back whether it
+  accepts the event or refuses it under a latched failure, and the runtime
+  begins no upload while one is in flight. Nothing in that path waits on
+  wall time, and no state was found in which the event stays in flight for
+  good. So the hang is one of: never encoded, encoded in commands that did
+  not run, or answered and never read.
+- **Change.** `lifecycle::rest_report` says what keeps the app from rest,
+  the device's steps asked, completed and retired, the generation and
+  revision, the control readbacks counted, and for a live event its kind
+  and serial, the serials the render world encoded this generation and the
+  one the device answered, with its refusal. `preparation` reports it every
+  five minutes an act waits at Rest, and in its failure, so the next one
+  says which of the three it was. `CanonicalGpuRequest::live_event_in_flight`
+  names the event; `a_pulse_or_switch_waits_for_a_busy_generation` holds it
+  to a pulse and a Switch.
+- **Seen** natively on Metal with the period at zero for one run (since
+  restored): every flux maintenance encoded two frames after it was queued
+  and answered a frame or two later, e.g. "flux maintenance 1 in flight,
+  encoded [1], answered 0", then settled; the fixture passed.
+- **Gate:** `scripts/gate.sh`.

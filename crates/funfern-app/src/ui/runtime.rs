@@ -2259,6 +2259,11 @@ mod tests {
         state.place_pulse(Point2::new(-0.1, 0.1));
         frame(&mut state, &mut request, false);
         assert!(request.live_event_pending());
+        // What a fixture held at rest names (`lifecycle::rest_report`).
+        assert_eq!(
+            request.live_event_in_flight().map(|(_, kind)| kind),
+            Some("pulse")
+        );
         assert_eq!(
             state.coordinator.pending_pulses.len(),
             1,
@@ -2301,6 +2306,10 @@ mod tests {
             Some(&true)
         );
         assert!(request.live_event_pending());
+        assert_eq!(
+            request.live_event_in_flight().map(|(_, kind)| kind),
+            Some("temporal switch")
+        );
     }
 
     /// UI-11 of the 2026-10-20 review: `fire_times` leads a fire that takes

@@ -593,6 +593,47 @@ pub(super) fn short_of_rest(
     .find_map(|(what, holds)| holds.then_some(what))
 }
 
+/// What keeps the app from rest and where the device stands, for a driver
+/// held short of rest to say: the device's steps and the control readbacks
+/// that answer events, and for a live event, the event, the serials the
+/// render world encoded this generation and the one the device answered.
+/// The preparation fixture's double slit waited about 50 minutes on a live
+/// event served without the worker pool on CI's SwiftShader (2026-11-25),
+/// and could say no more than that.
+pub(super) fn rest_report(
+    state: &Playground,
+    request: &CanonicalGpuRequest,
+    display: &CanonicalGpuDisplay,
+) -> Option<String> {
+    let what = short_of_rest(state, request, display)?;
+    let stats = request.stats();
+    let mut report = format!(
+        "{what}; steps {} of {} asked, {} retired; generation {} (shown {}), revision {}; \
+         {} control readbacks",
+        stats.completed_steps(),
+        request.requested_steps(),
+        stats.retired_steps(),
+        request.generation(),
+        display.generation,
+        request.revision(),
+        display.controls,
+    );
+    if let Some((serial, kind)) = request.live_event_in_flight() {
+        let encoded = stats
+            .encoded_events()
+            .iter()
+            .map(|event| event.serial.to_string())
+            .collect::<Vec<_>>();
+        report.push_str(&format!(
+            "; {kind} {serial} in flight, encoded [{}], answered {} (refusal {})",
+            encoded.join(", "),
+            stats.processed_event(),
+            stats.event_rejection(),
+        ));
+    }
+    Some(report)
+}
+
 /// Takes the current act a frame further: `Ok(false)` once every cycle is
 /// done.
 #[allow(clippy::too_many_arguments)]

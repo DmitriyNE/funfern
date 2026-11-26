@@ -109,6 +109,23 @@ const EVENT_SOURCE_WEIGHT_PATCH: u32 = 6;
 const EVENT_TEMPORAL_SWITCH: u32 = 7;
 const EVENT_TEMPORAL_LAW_PATCH: u32 = 8;
 const EVENT_FLUX_MAINTENANCE: u32 = 9;
+
+/// An event kind's name, for a fixture's diagnostics.
+pub(crate) fn event_kind_name(kind: u32) -> &'static str {
+    match kind {
+        EVENT_NONE => "no event",
+        EVENT_PRIMARY_PULSE => "pulse",
+        EVENT_GRID_FILTER => "grid filter",
+        EVENT_LINEAR_LAW_PATCH => "law patch",
+        EVENT_MAINTENANCE => "maintenance",
+        EVENT_SOURCE_PATCH => "source patch",
+        EVENT_SOURCE_WEIGHT_PATCH => "source weight patch",
+        EVENT_TEMPORAL_SWITCH => "temporal switch",
+        EVENT_TEMPORAL_LAW_PATCH => "temporal law patch",
+        EVENT_FLUX_MAINTENANCE => "flux maintenance",
+        _ => "unknown event",
+    }
+}
 const RESIDENT_FILTER_DISPATCHES: u64 = 7;
 const RESIDENT_FILTER_ACCOUNTING_DISPATCHES: u64 = 1;
 const TRANSFER_LAYOUT_VERSION: u32 = 5;
@@ -5344,6 +5361,14 @@ impl CanonicalGpuRequest {
 
     pub fn live_event_pending(&self) -> bool {
         self.live_event.is_some()
+    }
+
+    /// The live event in flight, its serial and its kind's name, for a
+    /// fixture that waits on it to say which.
+    pub(crate) fn live_event_in_flight(&self) -> Option<(u32, &'static str)> {
+        self.live_event
+            .as_ref()
+            .map(|event| (event.serial, event_kind_name(event.kind)))
     }
 
     /// Enables the resident paired Q,b grid filter. Unlike authored live

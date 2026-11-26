@@ -119,6 +119,10 @@ const FRAMES_WORK: &[Act] = &[
 const ACT_SECONDS: u64 = 600;
 const ACT_SHARE: u32 = 3;
 
+/// How often an act held at Rest says where it stands, so that one that runs
+/// out of time there has said whether the device moved meanwhile.
+const WAIT_REPORT: std::time::Duration = std::time::Duration::from_secs(300);
+
 #[derive(Clone, Copy, Debug)]
 enum Stage {
     Take,
@@ -174,6 +178,8 @@ pub(super) struct PreparationDriver {
     /// adapter. Unknown until the first frame.
     judged: Option<bool>,
     act_started: Instant,
+    /// When the act last said where it stands at Rest, or began.
+    wait_reported: Instant,
     /// What one act may take.
     act_time: std::time::Duration,
     act_deadline: Instant,
@@ -208,6 +214,7 @@ impl PreparationDriver {
     fn next(&mut self) -> bool {
         self.stage = Stage::Take;
         self.act_started = Instant::now();
+        self.wait_reported = self.act_started;
         self.act_deadline = self.act_started + self.act_time;
         self.discarded = 0;
         self.stale_ready = false;
@@ -238,6 +245,7 @@ pub(super) fn add(app: &mut App, seconds: Option<u64>) {
             runner: Runner::Workers,
             judged: None,
             act_started: Instant::now(),
+            wait_reported: Instant::now(),
             act_time,
             act_deadline: Instant::now() + act_time,
             deadline: Instant::now() + run_time,
@@ -321,15 +329,28 @@ fn drive_preparation(
     let outcome = advance(&mut driver, &mut state, &request, &display, &mut times);
     let now = Instant::now();
     let verdict = match outcome {
-        Ok(true) if now < driver.act_deadline && now < driver.deadline => return,
+        Ok(true) if now < driver.act_deadline && now < driver.deadline => {
+            if matches!(driver.stage, Stage::Rest) && now >= driver.wait_reported + WAIT_REPORT {
+                driver.wait_reported = now;
+                if let Some(stands) = lifecycle::rest_report(&state, &request, &display) {
+                    report(&format!(
+                        "e2e preparation: {}, {:?} at Rest {} s in, waiting for {stands}",
+                        SCENES[driver.scene],
+                        driver.act(),
+                        (now - driver.act_started).as_secs(),
+                    ));
+                }
+            }
+            return;
+        }
         Ok(true) => Err(format!(
             "did not finish in time: {}, {:?} at {:?}{}",
             SCENES[driver.scene],
             driver.act(),
             driver.stage,
             match driver.stage {
-                Stage::Rest => lifecycle::short_of_rest(&state, &request, &display)
-                    .map_or_else(String::new, |what| format!(", waiting for {what}")),
+                Stage::Rest => lifecycle::rest_report(&state, &request, &display)
+                    .map_or_else(String::new, |stands| format!(", waiting for {stands}")),
                 _ => String::new(),
             }
         )),
