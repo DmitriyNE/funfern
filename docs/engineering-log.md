@@ -34967,3 +34967,46 @@ the device.
   node 24.21.0 it had used was gone. The shader step and the protocol
   proofs then ran as the gate runs them, on the same tree, with nvm's
   node 23.1.0.
+
+## 2026-11-28 — lifecycle's Fault act waits for the run paused with its notice
+
+- **Why.** The nightly dispatched on 6236d90 (45896645759) failed two of
+  `lifecycle`'s parts served without the pool, the Spatial soliton's and
+  the Ring resonator's, each out of its 2,500 s in Fault at Failing: the
+  act arms a failure on the running generation and waited for the device
+  to report it latched and the host to pause for it. A rerun of both
+  passed. Studied with the user on a branch, every part three times as the
+  nightly runs it (45952817901), with a report of where a long act stands:
+  14 of 15 passed, and the one that failed stood paused from the act's
+  start, no failure latched, nothing paused for, no upload, the last
+  handoff accepted.
+- **Cause.** `refresh_runtime` pauses for a failure (`supervise_solver_fault`:
+  `solver_fault`, the run paused, the "Simulation paused" notice) and then,
+  in the same call, begins an upload whose pack waits for the device to
+  catch up; a failed run counts as caught up, and the upload clears the
+  latch to hand off from the last accepted step ("a corrective edit on a
+  paused, failed run"). An adaptation packed in the frames between arming
+  and the failure's readback did that, and the act, reading the latch once
+  a frame, never saw it. Without the pool adaptation on CI's SwiftShader
+  used to take far longer than those frames; since 6236d90 it does not.
+  The app behaves as meant: the run stays paused, the notice stays up until
+  OK, and the handoff is from the accepted state the failure never touched.
+- **Change.** The Fault act waits for the run paused and one more
+  "Simulation paused" notice than when it armed the fault, which must name
+  the failure code armed; a pause for another fails the act. `lifecycle`
+  keeps the study's report: every five minutes an act runs, and in its
+  timeout, what keeps the app from rest, the failure latched and paused
+  for, an upload or handoff in flight, an adaptation, whether the run runs,
+  and the running generation beside the fault's.
+  `a_failure_read_as_a_pack_waits_pauses_the_run_and_the_handoff_clears_it`
+  (the generated sequences) holds the race on the host: an edit's pack
+  waiting, the run failing, one frame paused, notified, unlatched and
+  handing off.
+- **Verified.** The branch with the change (46063408902): 15 of 15 passed,
+  the Fault acts in 14 to 251 s. `lifecycle` natively on Metal: 5 scenes, 2
+  cycles, every count held, 92 s. The nightly's rerun of the four jobs
+  45896645759 failed (attempt 2) passed, the wall sweep's failure having
+  been packages.microsoft.com refusing apt (403) and mutation shard 1's an
+  `adaptive` run whose last estimate, at the run's end, its reference had
+  not read, which the rerun did not repeat. The study branch is deleted.
+- **Gate:** `scripts/gate.sh`, nvm's node 23.1.0 on the PATH.

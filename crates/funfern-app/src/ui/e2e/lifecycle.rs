@@ -155,6 +155,9 @@ const STILL_FRAMES: u32 = crate::paced_readback::UNUSED_FRAMES_KEPT as u32 + 1;
 const ACT_SHARE: u32 = 6;
 const SLOW_ACT_SECONDS: f64 = 10.0;
 
+/// How often an act that runs long says where it stands.
+const WAIT_REPORT: std::time::Duration = std::time::Duration::from_secs(300);
+
 #[derive(Clone, Copy, Debug)]
 enum Act {
     /// The scene, as the gallery opens it.
@@ -363,6 +366,12 @@ pub(super) struct LifecycleDriver {
     /// The last counts read while settling, to see them hold still.
     last: Option<(MainCounts, RenderCounts)>,
     act_started: Instant,
+    /// When the act last said where it stands, or began.
+    wait_reported: Instant,
+    /// The generation the last fault was armed in, and the "Simulation
+    /// paused" notices up as it was.
+    fault_generation: Option<u64>,
+    paused_notices: usize,
     act_time: std::time::Duration,
     act_deadline: Instant,
     deadline: Instant,
@@ -393,6 +402,7 @@ impl LifecycleDriver {
         }
         self.stage = Stage::Take;
         self.act_started = Instant::now();
+        self.wait_reported = self.act_started;
         self.act_deadline = self.act_started + self.act_time;
         self.act += 1;
         if self.act < self.plan.work.len() {
@@ -450,6 +460,9 @@ pub(super) fn add(app: &mut App, plan: Plan, seconds: Option<u64>) {
         seen: Seen::default(),
         last: None,
         act_started: Instant::now(),
+        wait_reported: Instant::now(),
+        fault_generation: None,
+        paused_notices: 0,
         act_time,
         // The first act waits for the device's first step.
         act_deadline: deadline,
@@ -503,13 +516,29 @@ fn drive_lifecycle(
     );
     let now = Instant::now();
     let verdict = match outcome {
-        Ok(true) if now < driver.act_deadline && now < driver.deadline => return,
+        Ok(true) if now < driver.act_deadline && now < driver.deadline => {
+            if now >= driver.wait_reported + WAIT_REPORT {
+                driver.wait_reported = now;
+                report(&format!(
+                    "e2e {}: cycle {}, {}, {:?} at {:?} {} s in, {}",
+                    driver.plan.name,
+                    driver.cycle,
+                    driver.scene(),
+                    driver.act(),
+                    driver.stage,
+                    (now - driver.act_started).as_secs(),
+                    stands(&driver, &state, &request, &display),
+                ));
+            }
+            return;
+        }
         Ok(true) => Err(format!(
-            "did not finish in time: cycle {}, {}, {:?} at {:?}",
+            "did not finish in time: cycle {}, {}, {:?} at {:?}, {}",
             driver.cycle,
             driver.scene(),
             driver.act(),
-            driver.stage
+            driver.stage,
+            stands(&driver, &state, &request, &display),
         )),
         Ok(false) => judge(&driver),
         Err(failure) => Err(failure),
@@ -664,6 +693,51 @@ pub(super) fn rest_report(
     Some(report)
 }
 
+/// The notice a run's failure raises as it pauses.
+const PAUSED_NOTICE: &str = "Simulation paused";
+
+/// The "Simulation paused" notices up.
+fn paused_notices(state: &Playground) -> usize {
+    state
+        .notices
+        .iter()
+        .filter(|notice| notice.title == PAUSED_NOTICE)
+        .count()
+}
+
+/// Where an act held long stands: what keeps the app from rest, and a fault's
+/// course, the failure the device reports, what the host paused for, an
+/// upload or a handoff in flight, an adaptation, whether the run runs, and
+/// the generation running and the one the fault was armed in. Two of the
+/// nightly's `lifecycle` parts served without the pool ran out of their
+/// 2,500 s in Fault at Failing (2026-11-27); with this, a study's run said it
+/// stood paused with no failure latched, an adaptation's handoff having
+/// cleared the latch in the frame that paused it.
+fn stands(
+    driver: &LifecycleDriver,
+    state: &Playground,
+    request: &CanonicalGpuRequest,
+    display: &CanonicalGpuDisplay,
+) -> String {
+    format!(
+        "waiting for {}; failure {} (paused for {:?}), upload {}, handoff {:?}, adapting {}, \
+         running {}, generation {}, the fault armed in generation {:?}",
+        rest_report(state, request, display).unwrap_or_else(|| "nothing".into()),
+        request.stats().failure(),
+        state.coordinator.solver_fault,
+        if state.coordinator.uploading.is_some() {
+            "in flight"
+        } else {
+            "none"
+        },
+        request.handoff_outcome(),
+        state.adaptation_in_flight(),
+        state.wave_running,
+        request.generation(),
+        driver.fault_generation,
+    )
+}
+
 /// Takes the current act a frame further: `Ok(false)` once every cycle is
 /// done.
 #[allow(clippy::too_many_arguments)]
@@ -772,11 +846,34 @@ fn advance(
                     nodes as u32 / 2,
                 )
                 .map_err(|error| format!("the fault was not armed: {error}"))?;
+            driver.fault_generation = Some(request.generation());
+            driver.paused_notices = paused_notices(state);
             Stage::Failing
         }
+        // The fault is seen once the run pauses for it and says so in a
+        // notice held until OK. The latch is no witness: an adaptation's
+        // upload packed and waiting hands off from the last accepted step in
+        // the frame the host pauses, and clears the latch with it, so the run
+        // was paused for a failure no frame saw latched. Served without the
+        // pool on CI's SwiftShader, two of the nightly's ten parts waited out
+        // their 2,500 s so (2026-11-27), once adaptation there was no longer
+        // starved (6236d90).
         (Act::Fault, Stage::Failing) => {
-            if !(request.failed() && state.coordinator.solver_fault.is_some()) {
+            if state.wave_running || paused_notices(state) <= driver.paused_notices {
                 return Ok(true);
+            }
+            let code = format!(
+                "(failure code {})",
+                crate::canonical_gpu::CANONICAL_FAILURE_NON_FINITE
+            );
+            if !state
+                .notices
+                .iter()
+                .rev()
+                .find(|notice| notice.title == PAUSED_NOTICE)
+                .is_some_and(|notice| notice.text.contains(&code))
+            {
+                return Err(format!("the run paused for another failure than {code}"));
             }
             // The notice's OK, and Run.
             state.notices.clear();

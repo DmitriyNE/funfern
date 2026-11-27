@@ -1474,6 +1474,52 @@ fn a_fault_while_a_handoff_waits_withdraws_it() {
     session.quiesce();
 }
 
+/// Found by a study of the `lifecycle` fixture (2026-11-27): a failure read
+/// in the frame an edit's pack waits for the device to catch up pauses the
+/// run and raises its notice, and then, a failed run being caught up, the
+/// pack's upload hands off from the last accepted step in the same frame and
+/// clears the latch. The run stays paused and the notice up, which is what
+/// the fixture's Fault act waits on; the latch no frame saw is not.
+#[test]
+fn a_failure_read_as_a_pack_waits_pauses_the_run_and_the_handoff_clears_it() {
+    let mut session = Session::start();
+    session.quiesce();
+    for act in [
+        Act::Nudge(2),
+        Act::Validate,
+        Act::Frame(None),
+        Act::Pack(true),
+    ] {
+        session.step(&act);
+    }
+    assert!(
+        session.state.coordinator.gpu_upload_preparation.is_some()
+            && session.state.coordinator.uploading.is_none(),
+        "the pack waits for the device"
+    );
+    session.step(&Act::Fault);
+    session.step(&Act::Frame(Some(0)));
+    assert!(!session.state.wave_running, "the fault pauses the run");
+    assert!(
+        session
+            .state
+            .notices
+            .iter()
+            .any(|notice| notice.title == "Simulation paused"),
+        "and says so"
+    );
+    assert!(
+        !session.request.failed() && session.state.coordinator.solver_fault.is_none(),
+        "the upload cleared the latch in the frame that paused for it"
+    );
+    assert!(
+        session.state.coordinator.uploading.is_some(),
+        "the edit hands off"
+    );
+    session.step(&Act::Run(true));
+    session.quiesce();
+}
+
 /// RT-9 of the 2026-10-20 review: Reset while an edit's pack waited for the
 /// device kept the pack, made against the run Reset discarded, and its
 /// handoff carried that run's clock origin into the reset one, so every
