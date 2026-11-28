@@ -136,6 +136,18 @@ const DURATION: f64 = 8.0;
 /// AMR-01's fine reference.
 const FINE_TRIANGLES: usize = 45_203;
 
+/// The most stationary flux the reference may hold at the endpoint, over the
+/// flux's energy. The endpoint waits for the last cleanup to land, and the
+/// reference takes away its own part at each cleanup the device took, so
+/// what is left is the solve's tolerance: 1.0e-11 to 5.0e-11 for `adaptive`
+/// and 4.6e-13 to 1.4e-12 for `adaptive-slow` over 18 runs each on CI's
+/// lavapipe (2026-11-28). A handoff left uncleaned left 0.74 to 0.89 in 18
+/// runs, which the mesh's bound caught only as the mesh grew, and four times
+/// did not, once in a nightly and three times in the study: where read, the
+/// mesh peaked at 18,020 to 19,019 triangles, under the 20,341 bound, where
+/// the plain run peaks at up to 17,383.
+const STATIONARY_LEFT: f64 = 1.0e-6;
+
 /// Cells across the lattice the field's whereabouts are read at, about two
 /// to the smallest element allowed, as AMR-01 reads them.
 const LATTICE: usize = 64;
@@ -298,6 +310,9 @@ struct Followed {
     handoffs: Vec<Carry>,
     endpoint: [f64; 3],
     end_time: f64,
+    /// The stationary part of the reference's flux at the endpoint, over the
+    /// flux's energy; none for a driven generation, which holds none.
+    stationary_left: Option<f64>,
     /// A study's: at each of the truth's times, the fine run's norm on the
     /// lattice and the adapted and the coarse run's errors against it.
     truth: Vec<Truthful>,
@@ -431,6 +446,10 @@ pub(super) struct AdaptiveDriver {
     estimated: Option<(u64, u64)>,
     analyzed: Option<u64>,
     estimates: Vec<Estimate>,
+    /// Whether the endpoint has gone to the reference, and the estimates the
+    /// app began after: of the run's end, which the run is judged up to.
+    ended: bool,
+    past_end: usize,
     /// The estimate the transaction under way came from: its time and cycle.
     adapting: Option<(f64, f64)>,
     unchanged: usize,
@@ -498,6 +517,8 @@ pub(super) fn add(app: &mut App, fixture: AdaptiveFixture, seconds: Option<u64>)
         candidate: None,
         controller: None,
         estimated: None,
+        ended: false,
+        past_end: 0,
         analyzed: None,
         estimates: Vec::new(),
         adapting: None,
@@ -730,6 +751,7 @@ fn advance(
                 .as_mut()
                 .expect("following since the install")
                 .tell(Note::End(snapshot));
+            driver.ended = true;
             driver.stage = Stage::Awaiting;
             None
         }
@@ -847,7 +869,15 @@ fn follow(
         && driver.estimated != Some((source.gpu_generation, source.accepted_step))
     {
         driver.estimated = Some((source.gpu_generation, source.accepted_step));
-        if source.gpu_generation == driver.generation {
+        // The endpoint's snapshot is a full readback, which the app's own
+        // adaptation may estimate too. Seen a frame later, once the endpoint
+        // has gone to the reference, that estimate was asked of it after
+        // its end and left unanswered: three runs failed so, or failed
+        // their mutation for another reason (2026-11-17, 20 and 26). A flag,
+        // not the stage: `drive` holds the stage out while it runs.
+        if driver.ended {
+            driver.past_end += 1;
+        } else if source.gpu_generation == driver.generation {
             // The controller as the frame that started the estimate left
             // it, which took the energy of that frame's snapshot first, but
             // for the time of the last estimate, which the estimate moves.
@@ -1150,8 +1180,9 @@ fn judge(driver: &AdaptiveDriver, followed: &Followed) -> Result<String, String>
         "Q {:.3e}, b {:.3e}, z {:.3e} at {:.3} s; over {} snapshots ({} passed) the worst over \
          the most each held Q {:.3e} at {:.3} s, b {:.3e} at {:.3} s, z {:.3e} at {:.3} s, and \
          over {} while the field held, against itself, Q {:.3e} at {:.3} s, b {:.3e} at {:.3} s, \
-         z {:.3e} at {:.3} s; clock {:.1e}; {} estimates ({} dormant, {} dropped, {} unanswered), \
-         agreeing within {agreement:.2e}{}; {} triangles authored, peak {peak}, end {last}; \
+         z {:.3e} at {:.3} s; clock {:.1e}; {} estimates ({} dormant, {} dropped, {} unanswered, \
+         {} past the end), agreeing within {agreement:.2e}{}; stationary flux left {}; {} \
+         triangles authored, peak {peak}, end {last}; \
          dormant from {}; {} handoffs, {} made nothing, lag over cycle at most {late:.2}; \
          handoff energy {:.2e} to {:.2e} over {} while held; field on coarser elements, from \
          twice the floor, at \
@@ -1181,11 +1212,17 @@ fn judge(driver: &AdaptiveDriver, followed: &Followed) -> Result<String, String>
         dormant_estimates,
         dropped,
         unanswered,
+        driver.past_end,
         if decided_apart.is_empty() {
             String::new()
         } else {
             format!(", deciding apart at {}", decided_apart.join("; "))
         },
+        followed
+            .stationary_left
+            .map_or("none, driven".to_owned(), |left| format!(
+                "{left:.2e} of the flux's energy"
+            )),
         driver.authored_triangles,
         dormant_at.map_or("never".to_owned(), |time| format!("{time:.3} s")),
         driver.generations.len() - 1,
@@ -1307,6 +1344,16 @@ fn judge(driver: &AdaptiveDriver, followed: &Followed) -> Result<String, String>
     }
     if !within(followed.drift, CLOCK_TOLERANCE) {
         return fail(format!("the clock drifts beyond {CLOCK_TOLERANCE:.0e}"));
+    }
+    // The stationary flux a handoff left, before the mesh's bound: the
+    // cause before the growth it may or may not bring.
+    if let Some(left) = followed.stationary_left
+        && !within(left, STATIONARY_LEFT)
+    {
+        return fail(format!(
+            "a handoff's stationary flux was left: {left:.2e} of the flux's energy at the \
+             endpoint, past {STATIONARY_LEFT:.0e}"
+        ));
     }
     // The mesh's bound before the reference's reading of every estimate: a
     // mesh past it runs slower than the reference can follow, and the
@@ -1683,6 +1730,7 @@ impl Follower {
                 let errors = track.compare(&snapshot)?;
                 track.followed.endpoint = errors;
                 track.followed.end_time = track.reference.state.time();
+                track.followed.stationary_left = track.stationary_left()?;
                 track.read_truth(true)?;
                 Ok(Some(Heard::Ended(Box::new(track.followed.clone()))))
             }
@@ -1859,6 +1907,29 @@ impl Track {
             self.followed.exposed_at = self.reference.state.time();
         }
         Ok(())
+    }
+
+    /// The stationary part of the reference's flux, over the flux's energy:
+    /// at the endpoint, every handoff's taken away, the solve's tolerance or
+    /// a part under the app's floor. A driven generation's flux holds none.
+    fn stationary_left(&self) -> Result<Option<f64>, String> {
+        let State::Fixed(state) = &self.reference.state else {
+            return Ok(None);
+        };
+        let operator = &self.reference.active.canonical_operator;
+        let mut job =
+            CanonicalStationaryFluxJob::new(operator.clone(), state.complementary_flux().to_vec())
+                .map_err(|error| error.to_string())?;
+        let found = loop {
+            if let Some(found) = job.advance(1 << 16) {
+                break found.map_err(|error| error.to_string())?;
+            }
+        };
+        Ok(Some(if found.flux_energy > 0.0 {
+            found.energy / found.flux_energy
+        } else {
+            0.0
+        }))
     }
 
     /// Takes away the stationary flux the device did, read off the

@@ -35010,3 +35010,53 @@ the device.
   `adaptive` run whose last estimate, at the run's end, its reference had
   not read, which the rerun did not repeat. The study branch is deleted.
 - **Gate:** `scripts/gate.sh`, nvm's node 23.1.0 on the PATH.
+
+## 2026-11-28 — adaptive bounds the stationary flux it ends with, and counts an estimate past its end apart
+
+- **Why.** The adaptive fixture had two intermittent failures, studied with
+  the user. A scan of the CI logs since 2026-11-14 (27 push runs' lavapipe
+  jobs, 94 nightly mutation shards):
+  - `adapted-handoff-left-uncleaned` was detected 20 times and missed 3,
+    the last on 2026-11-26 as "the test still passes": the mutant's mesh
+    peaked at 19,008 triangles, under the 0.45 bound's 20,341, where
+    unmutated runs on CI's lavapipe peak at 9,874 to 17,383. The fixture
+    caught a handoff left uncleaned only through the mesh it grows.
+  - "the reference did not read an estimate the app took" three times
+    (2026-11-17 and 20 as mutants' "failed for another reason", 2026-11-26
+    as a run before its patch), each time the app's last estimate at the
+    endpoint, 8.001 to 8.002 s.
+- **Cause of the second.** The endpoint's snapshot is a full readback,
+  which the app's adaptation may estimate too. The fixture sends the
+  reference the endpoint in the frame the snapshot lands and sees the
+  app's estimate of it a frame later; asked of the reference after its
+  end, it went unanswered. The first try at this keyed on the driver's
+  stage, which `drive` holds out (`Done`) while it runs, so it never took;
+  the study run after it still read four endpoint estimates unanswered.
+- **Change.**
+  - An estimate the app begins once the endpoint has gone to the reference
+    (a flag set as it goes) is of the run's end and counted apart, "past
+    the end", not asked of the reference.
+  - At the endpoint, which waits for the last cleanup to land, the
+    reference solves for the stationary part of its own flux, the
+    reference having taken away its own part at each cleanup the device
+    took, and it must be under 1e-6 of the flux's energy
+    (`STATIONARY_LEFT`), checked before the mesh's bound so that the cause
+    is named before the growth it may or may not bring. The summary reads
+    it. `adapted-handoff-left-uncleaned` now expects "a handoff's stationary
+    flux was left".
+- **Measured** on a study branch, `adaptive` plain and under each of its two
+  mutations and `adaptive-slow`, three cells of three runs each on CI's
+  lavapipe as the mutation shards run them, twice (46114415242, then the
+  change in 46116999750): the stationary flux left read 1.0e-11 to 5.0e-11
+  of the flux's energy for `adaptive` and 4.6e-13 to 1.4e-12 for
+  `adaptive-slow` in 18 runs each, and 0.74 to 0.89 with a handoff left
+  uncleaned in 18; `estimate-reads-unaligned-readbacks` left a plain run's
+  and was caught by the estimates' agreement in 18 of 18. With the change,
+  the plain runs passed 18 of 18, four of them counting an estimate past
+  the end and none unanswered, and the uncleaned mutant failed 9 of 9 on
+  the new check, two of them at 18,020 and 19,019 triangles under the
+  mesh's bound. A first study run (46112081422) lost its readings to its
+  own workflow, which stopped a cell at its first failing run. The study
+  branch is deleted.
+- **Docs.** checks.md (the adaptive loop's checks).
+- **Gate:** `scripts/gate.sh`, nvm's node 23.1.0 on the PATH.

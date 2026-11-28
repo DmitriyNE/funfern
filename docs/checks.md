@@ -2163,7 +2163,13 @@ of themselves while the field holds 1% of its peak energy (2.4e-6 and
 1.2e-5 the most measured; the wall's memory, read against itself, reads
 5.9e-5 as it first gathers). Every estimate the app takes of the device's
 copy must read within 1e-4 of the reference's of its own state and decide
-the same (4.2e-6 the most). Each mesh must land within the cycle its estimate's reach
+the same (4.2e-6 the most); one the app takes of the endpoint's snapshot
+after the endpoint has gone to the reference is of the run's end and is
+counted apart. At the endpoint, which waits for the last cleanup to land,
+the stationary part of the reference's flux must be under 1e-6 of the
+flux's energy: the solve's tolerance, 1.0e-11 to 5.0e-11 for `adaptive`
+and 4.6e-13 to 1.4e-12 for `adaptive-slow` on CI's lavapipe, where a
+handoff left uncleaned leaves 0.74 to 0.89 (2026-11-28). Each mesh must land within the cycle its estimate's reach
 was drawn for (0.46 of it on Metal, 0.24 on lavapipe), and the field, read
 on a 64 by 64 lattice every eight steps, may never stand at twice 1% of its
 largest mean density on an element past 1.25 authored edges: the reach
